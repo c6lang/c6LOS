@@ -105,7 +105,7 @@
 |---|---|---|---|
 | M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 | 完成（计数/换算 host PASS；向下取整，待改向上） |
 | M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 未开始（当前线性扫描） |
-| M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS） |
+| M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS；S3 实测一次 100 tick 于第 100 tick 命中） |
 | M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 未开始 |
 | M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 | 完成（`port_virtual_tick` + `os_sched_tick` 虚拟推进） |
 
@@ -151,6 +151,11 @@
 | M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 |
 
 **M5 验收**：`make check-host API=both` 双份全绿；LiteOS 风格 demo 可跑。
+
+- **S3 上 IPC/内存池冒烟（2026-11）**：`tests/t_s3_ipc.c6` 在真板依次跑
+  sem/mutex/event/queue/membox/heap 的非阻塞路径，串口输出 17 行
+  `PASS: ...` + `ALL PASS: ipc`。用于确认 c6→C99→Xtensa 下结构体布局、
+  指针队列与堆对齐没有 32 位目标特有的问题。
 
 ---
 
