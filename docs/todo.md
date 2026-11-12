@@ -50,6 +50,8 @@
   （DRAM + IRAM），待复测。
 - 当前：旧镜像使 ROM 在 `ets_main.c` 死循环并每 ~300ms 被 TG0WDT 复位，
   USB 反复重枚举、`/dev/ttyACM0` 消失；需按住 BOOT 再复位进入下载模式后重烧。
+  已加 `tools/flash-s3.sh`：等待端口稳定后自动重试烧写；恢复步骤见
+  `docs/porting-esp32s3.md`「USB 下载模式恢复」。
 - host 参考机冒烟已通过：`c6 --emit-llvm` → `clang/lld` + `libtcc1` + `port/sim`，
   输出 `c6os host smoke` / `PASS`（`make check-host`）。
 - `kprintf` host 断言 PASS（`%d/%u/%x/%X/%s/%c/%p`、宽度/补零）。c6 的 `va_arg`

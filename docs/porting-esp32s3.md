@@ -221,3 +221,16 @@ esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq
 | 无 qemu-system-xtensa | 只能真板 | L1–L3 覆盖逻辑 |
 | FPU 帧 | 必须保存 16 个 f 寄存器 | M1 实现并做浮点任务切换测试 |
 | PSRAM | 8MB 未初始化 | M8 可选；首版不用 |
+
+## USB 下载模式恢复（2026-11 实测）
+
+板子跑飞后 USB 会反复重枚举，`/dev/ttyACM0` 时有时无，主机报
+`can't set config #1, error -71`。此时软件无法把它拉回下载模式，需要人工：
+
+1. 按住 **BOOT**（丝印 `BOOT`/`IO0`/`0`，接 GPIO0）不放；
+2. 点一下 **RESET**（丝印 `RST`/`EN`/`RESET`），或保持按住 BOOT 重新插 USB；
+3. 松开 BOOT；此时 `lsusb` 稳定出现 `303a:1001`，`/dev/ttyACM0` 不再消失；
+4. `tools/flash-s3.sh build/s3/c6os.bin` 自动等待端口并烧写。
+
+若板上没有按键：找 `IO0` 与 `EN` 两个测试点/排针，把 IO0 短接到 GND，
+点一下 EN 到 GND，再松开 IO0。`esptool chip-id` 能返回 MAC 即已进入下载模式。
