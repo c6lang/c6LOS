@@ -1,0 +1,45 @@
+#include "los/los_sem.h"
+#include "c6os/port.h"
+#include "c6os/tick.h"
+#include "los/los_tick.h"
+
+int main(void) {
+    UINT32 h = 0;
+
+    if (LOS_SemCreate(1, &h) != LOS_OK) {
+        return 1;
+    }
+    if (h != 1u) {
+        return 2;
+    }
+    if (LOS_SemPend(h, 0) != LOS_OK) {
+        return 3;
+    }
+    if (LOS_SemPost(h) != LOS_OK) {
+        return 4;
+    }
+    if (LOS_SemPend(h, 0) != LOS_OK) {
+        return 5;
+    }
+    if (LOS_SemDelete(h) != LOS_OK) {
+        return 6;
+    }
+    if (LOS_SemPend(h, 0) != LOS_ERRNO_SEM_INVALID) {
+        return 7;
+    }
+    if (LOS_SemCreate(1, &h) != LOS_OK || h != 1u) {
+        return 8;
+    }
+    if (LOS_SemDelete(h) != LOS_OK) {
+        return 9;
+    }
+    os_tick_advance(5);
+    if (LOS_TickCountGet() != 5u) {
+        return 10;
+    }
+    if (LOS_TickCountGetHz() != 100u) {
+        return 11;
+    }
+    port_puts("PASS: LOS_Sem/LOS_Tick\n");
+    return 0;
+}

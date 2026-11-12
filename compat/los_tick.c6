@@ -1,0 +1,10 @@
+#include "los/los_tick.h"
+#include "c6os/tick.h"
+
+UINT64 LOS_TickCountGet(void) {
+    return os_tick_get();
+}
+
+UINT32 LOS_TickCountGetHz(void) {
+    return os_tick_hz();
+}

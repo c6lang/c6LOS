@@ -1,0 +1,78 @@
+#include "los/los_sem.h"
+#include "c6os/sem.h"
+
+#define LOS_SEM_MAX 8u
+
+static OsSem g_sems[LOS_SEM_MAX] = {0};
+static u8 g_used[LOS_SEM_MAX] = {0};
+
+static OsSem *sem_get(UINT32 handle) {
+    if (handle == 0u || handle > LOS_SEM_MAX) {
+        return 0;
+    }
+    if (g_used[handle - 1u] == 0u) {
+        return 0;
+    }
+    return &g_sems[handle - 1u];
+}
+
+UINT32 LOS_SemCreate(UINT16 count, UINT32 *handle) {
+    u32 i = 0;
+
+    if (handle == 0) {
+        return LOS_ERRNO_SEM_INVALID;
+    }
+    while (i < LOS_SEM_MAX) {
+        if (g_used[i] == 0u) {
+            if (os_sem_init(&g_sems[i], (u32)count, 0xFFFFu) != 0) {
+                return LOS_ERRNO_SEM_NO_MEMORY;
+            }
+            g_used[i] = 1u;
+            *handle = i + 1u;
+            return LOS_OK;
+        }
+        i++;
+    }
+    return LOS_ERRNO_SEM_NO_MEMORY;
+}
+
+UINT32 LOS_SemDelete(UINT32 handle) {
+    OsSem *s = sem_get(handle);
+
+    if (s == 0) {
+        return LOS_ERRNO_SEM_INVALID;
+    }
+    g_used[handle - 1u] = 0u;
+    s->magic = 0;
+    s->count = 0;
+    return LOS_OK;
+}
+
+UINT32 LOS_SemPend(UINT32 handle, UINT32 timeout) {
+    OsSem *s = sem_get(handle);
+    int r = 0;
+
+    if (s == 0) {
+        return LOS_ERRNO_SEM_INVALID;
+    }
+    r = os_sem_pend(s, (u32)timeout);
+    if (r == 0) {
+        return LOS_OK;
+    }
+    if (r == -2) {
+        return LOS_ERRNO_SEM_TIMEOUT;
+    }
+    return LOS_ERRNO_SEM_INVALID;
+}
+
+UINT32 LOS_SemPost(UINT32 handle) {
+    OsSem *s = sem_get(handle);
+
+    if (s == 0) {
+        return LOS_ERRNO_SEM_INVALID;
+    }
+    if (os_sem_post(s) != 0) {
+        return LOS_ERRNO_SEM_INVALID;
+    }
+    return LOS_OK;
+}

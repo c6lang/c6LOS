@@ -73,6 +73,8 @@
   一次性定时器只命中一次。
 - M3-1/M3-3 host PASS：3 个等待者（prio 1/2/3）按优先级唤醒，顺序 `BCA`；
   `os_task_boost/restore` 在 prio 5↔1 间切换正确。
+- M5 兼容层 host PASS：`LOS_SemCreate/Pend/Post/Delete` 走 `OsSem`，句柄 1..8，
+  删除后 pend 返回 `LOS_ERRNO_SEM_INVALID`；`LOS_TickCountGet/Hz` 与 `os_tick_*` 一致。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
