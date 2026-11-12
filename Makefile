@@ -139,11 +139,11 @@ $(BUILDH)/t_sched.ll: tests/t_sched.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
-$(BUILDH)/t_sched: $(BUILDH)/t_sched.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
+$(BUILDH)/t_sched: $(BUILDH)/t_sched.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
 		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
 		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_sched.ll $(BUILDH)/task.ll \
-		$(BUILDH)/tick.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
@@ -151,11 +151,11 @@ $(BUILDH)/t_task.ll: tests/t_task.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
-$(BUILDH)/t_task: $(BUILDH)/t_task.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
+$(BUILDH)/t_task: $(BUILDH)/t_task.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
 		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
 		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_task.ll $(BUILDH)/task.ll \
-		$(BUILDH)/tick.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
@@ -172,11 +172,11 @@ $(BUILDH)/t_ipc.ll: tests/t_ipc.c6
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
 $(BUILDH)/t_ipc: $(BUILDH)/t_ipc.ll $(BUILDH)/sem.ll $(BUILDH)/mutex.ll \
-		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_ipc.ll $(BUILDH)/sem.ll \
-		$(BUILDH)/mutex.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/mutex.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
 		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
 		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
@@ -189,10 +189,10 @@ $(BUILDH)/t_event.ll: tests/t_event.c6
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
 $(BUILDH)/t_event: $(BUILDH)/t_event.ll $(BUILDH)/event.ll $(BUILDH)/task.ll \
-		$(BUILDH)/tick.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_event.ll $(BUILDH)/event.ll \
-		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
@@ -205,10 +205,10 @@ $(BUILDH)/t_queue.ll: tests/t_queue.c6
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
 $(BUILDH)/t_queue: $(BUILDH)/t_queue.ll $(BUILDH)/queue.ll $(BUILDH)/task.ll \
-		$(BUILDH)/tick.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_queue.ll $(BUILDH)/queue.ll \
-		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
@@ -245,7 +245,7 @@ $(BUILDH)/t_timer.ll: tests/t_timer.c6
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
 $(BUILDH)/t_timer: $(BUILDH)/t_timer.ll $(BUILDH)/timer.ll $(BUILDH)/task.ll \
-		$(BUILDH)/tick.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_timer.ll $(BUILDH)/timer.ll \
 		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/panic.ll \
