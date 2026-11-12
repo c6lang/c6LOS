@@ -55,6 +55,7 @@
 - `kprintf` host 断言 PASS（`%d/%u/%x/%X/%s/%c/%p`、宽度/补零）。c6 的 `va_arg`
   在 LLVM IR 路径输出错位，故格式化实现移到 `rt/kprintf.c`（C），c6 侧保留
   `kputc/kputs`；目标侧同一份 C 交 xtensa-gcc。
+- tick 计数/换算 host PASS（`os_tick_get/advance`、100Hz、`ms<->ticks`）。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 

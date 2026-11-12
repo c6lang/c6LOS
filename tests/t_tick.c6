@@ -1,0 +1,26 @@
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+int main(void) {
+    if (os_tick_get() != 0) {
+        return 1;
+    }
+    os_tick_advance(3);
+    if (os_tick_get() != 3) {
+        return 2;
+    }
+    if (os_ms_to_ticks(100) != 10) {
+        return 3;
+    }
+    if (os_ticks_to_ms(10) != 100) {
+        return 4;
+    }
+    if (os_ms_to_ticks(1500) != 150) {
+        return 5;
+    }
+    if (os_tick_hz() != 100) {
+        return 6;
+    }
+    port_puts("PASS: tick\n");
+    return 0;
+}

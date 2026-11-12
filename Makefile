@@ -115,10 +115,23 @@ $(BUILDH)/t_panic: $(BUILDH)/t_panic.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic
+$(BUILDH)/tick.ll: kernel/tick.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_tick.ll: tests/t_tick.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_tick: $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
+	./$(BUILDH)/t_tick
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"
