@@ -120,7 +120,7 @@
 | M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 完成（pend/post/超时 + 3 等待者按优先级唤醒 host PASS） |
 | M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 完成（递归 + 所有权移交 host PASS；`port_in_isr` 下 block/delay panic，`t_isr` PASS） |
 | M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 完成（`t_pi_chain`：L(5) 持 M1→M(3) 持 M2 等 M1→H(1) 等 M2，L 依次被抬到 3/1，`PASS: PI chain`） |
-| M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
+| M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear + `LOS_WAITMODE_CLR` 读后清，`t_los_event_clr` 验证读走 0x1 后只剩 0x4） |
 | M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 完成（`t_race` 10^5 轮 pend/post/tick 竞争：成功+超时=100000、坏返回 0、任务数归零，`PASS: wait race`） |
 
 **M3 验收**：反转对照组（无 PI vs 有 PI）延迟差 ≥5×；超时路径无泄漏。
@@ -527,3 +527,7 @@
 - **S3 IRQ 嵌套用例（待上电）**：`t_s3_irqnest` 任务里 `port_irq_save()` 后忙等
   5000 万次（>1s），要求 tick 冻结；`port_irq_restore()` 后 `os_task_delay(2)`
   要求 tick 恢复前进。镜像 build/s3in 已构建。
+
+- **M3-4 读后清（host PASS）**：`LOS_EventRead` 支持 `LOS_WAITMODE_CLR`，
+  读到 bits 后 `os_event_clear(e,bits)`；`t_los_event_clr` 写 0x5，读 0x1 后
+  再读 0x1 超时、读 0x4 成功，输出 `PASS: event clear`。

@@ -1,0 +1,31 @@
+#include "los/los_event.h"
+#include "c6os/port.h"
+
+int main(void) {
+    UINT32 id = 0;
+    UINT32 r = 0;
+
+    if (LOS_EventInit(&id) != LOS_OK) {
+        return 1;
+    }
+    if (LOS_EventWrite(id, 0x5u) != LOS_OK) {
+        return 2;
+    }
+    r = LOS_EventRead(id, 0x1u, LOS_WAITMODE_OR | LOS_WAITMODE_CLR, 0u);
+    if (r != 0x1u) {
+        port_puts("FAIL: event read\n");
+        return 3;
+    }
+    r = LOS_EventRead(id, 0x1u, LOS_WAITMODE_OR, 0u);
+    if (r != LOS_ERRNO_EVENT_TIMEOUT) {
+        port_puts("FAIL: event clear\n");
+        return 4;
+    }
+    r = LOS_EventRead(id, 0x4u, LOS_WAITMODE_OR, 0u);
+    if (r != 0x4u) {
+        port_puts("FAIL: event keep\n");
+        return 5;
+    }
+    port_puts("PASS: event clear\n");
+    return 0;
+}

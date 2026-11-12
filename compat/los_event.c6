@@ -80,5 +80,8 @@ UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout) {
     if (bits == 0u) {
         return LOS_ERRNO_EVENT_TIMEOUT;
     }
+    if (((u32)mode & LOS_WAITMODE_CLR) != 0u) {
+        (void)os_event_clear(e, bits);
+    }
     return bits;
 }

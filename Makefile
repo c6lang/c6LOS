@@ -502,6 +502,20 @@ $(BUILDH)/t_consistency: $(BUILDH)/t_consistency.ll $(BUILDH)/sem.ll $(BUILDH)/q
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
+$(BUILDH)/t_los_event_clr.ll: tests/t_los_event_clr.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_los_event_clr: $(BUILDH)/t_los_event_clr.ll $(BUILDH)/los_event.ll \
+		$(BUILDH)/event.ll $(BUILDH)/task.ll $(BUILDH)/timeout.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_los_event_clr.ll \
+		$(BUILDH)/los_event.ll $(BUILDH)/event.ll $(BUILDH)/task.ll \
+		$(BUILDH)/timeout.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
+		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
+		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
 $(BUILDH)/t_los_err.ll: tests/t_los_err.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
@@ -720,7 +734,7 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_preempt_sim
 	./$(BUILDH)/t_irq_nest
 	./$(BUILDH)/t_prio32
-	./$(BUILDH)/t_consistency
+	./$(BUILDH)/t_consistency $(BUILDH)/t_los_event_clr
 	./$(BUILDH)/t_gfx
 	./$(BUILDH)/t_panel
 	./$(BUILDH)/t_dash
