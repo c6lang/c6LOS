@@ -16,7 +16,8 @@
 
 ## 状态
 
-**设计阶段**。施工前先读：
+**实现阶段**：M0–M5 核心与 M6 Hwi/ISR 安全、M8-5 上板手册已完成；
+M7 屏/仪表盘进行中。施工前先读：
 
 | 文档 | 内容 |
 |---|---|
@@ -26,6 +27,7 @@
 | [docs/porting-esp32s3.md](docs/porting-esp32s3.md) | S3 启动/镜像/控制台/时钟/中断/双核/屏、上板阶梯 |
 | [docs/testing.md](docs/testing.md) | 四层验证矩阵、确定性测试、验收门禁 |
 | [docs/todo.md](docs/todo.md) | 任务板（M0–M8、依赖、验收、状态） |
+| [docs/board-s3.md](docs/board-s3.md) | 真板烧写/串口/中断/故障排查（实测流程） |
 
 ## 已知硬件（实测）
 
@@ -46,13 +48,11 @@ Screen:    1.85″（SPI；面板 IC/引脚待核对）
 
 ```sh
 make toolchain-info     # C6_ROOT / 编译器提交 / xtensa-esp-elf-gcc / esptool 检测
-make check-host         # host 单测（内核逻辑，虚拟时钟）
-make check-rv32         # qemu-riscv32：ILP32 代码生成 + 内核逻辑
-make check-bare         # qemu-system-x86_64：真抢占、ISR 上下文切换
+make check-host         # host 单测（38 项，虚拟时钟/异步抢占）
+make check-all          # check-host + x86-64 裸机 + qemu-riscv32 构建
 make s3                 # ESP32-S3 镜像（build/s3/c6os.bin）
-make s3-info            # 上板信息核对清单（屏型号/引脚/PSRAM/分区）
-make flash              # esptool 烧写（USB-Serial/JTAG，ROM 下载模式）
-make backup-flash       # 烧写前备份原厂 16MB flash
+make flash              # esptool 烧写（要求已有原厂备份）
+make backup-flash       # 烧写前备份 16MB flash（原厂备份已丢失，需重下官方固件）
 ```
 
 工具链依赖：`C6_ROOT` 指向 c6 源码树（默认 `../superc`）、`xtensa-esp-elf-gcc` 16.x、
