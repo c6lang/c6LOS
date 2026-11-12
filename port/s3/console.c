@@ -7,6 +7,9 @@
 
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/tick.h"
+
+extern void os_sched_tick(void);
 
 /* 诊断：RTC_CNTL STORE0..7 在复位后保留，esptool read-mem 0x60008050 可读。 */
 static void s3_mark(u32 idx, u32 v)
@@ -66,9 +69,24 @@ void port_delay_ms(u32 ms)
     }
 }
 
+static u32 g_last_ccount = 0u;
+
+static u32 s3_ccount(void)
+{
+    u32 v = 0u;
+    __asm__ __volatile__("rsr %0, ccount" : "=r"(v));
+    return v;
+}
+
 void port_idle(void)
 {
-    __asm__ __volatile__("waiti 0");
+    u32 now = s3_ccount();
+
+    /* 240MHz / 100Hz = 2,400,000 cycles/tick；无就绪任务时用 CCOUNT 轮询补 tick。 */
+    if ((u32)(now - g_last_ccount) >= 2400000u) {
+        g_last_ccount += 2400000u;
+        os_sched_tick();
+    }
 }
 
 void port_init(void)
@@ -76,6 +94,7 @@ void port_init(void)
     volatile u32 i;
 
     s3_mark(0u, 0x1111u);
+    g_last_ccount = s3_ccount();
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);

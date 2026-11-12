@@ -11,7 +11,7 @@ PORT    ?= /dev/ttyACM0
 
 BUILD   := build/s3
 S3_MAIN ?= kernel/os.c6
-S3_EXTRA_C6 ?=
+S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6
 S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(S3_EXTRA_C6)
 S3_NAMES := $(notdir $(S3_C6))
 S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))

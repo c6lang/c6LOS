@@ -239,3 +239,14 @@
   任务入口重启（表现为 `order[]` 越界 `StoreProhibited`）。
 - S3 测试镜像构建：
   `make BUILD=build/s3test S3_MAIN=tests/t_s3_sched.c6 S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6" s3`
+
+- **c6 C99 后端指针加载修复（2026-11）**：`t != 0` 在 32 位目标上恒真。根因是
+  `tcc/c99-gen.c:load()` 对 `VT_LLONG` 一律发出 `*(long long *)slot`，而指针局部槽
+  只写 4 字节，高半是脏的；c6 跑在 64 位主机上又按 `PTR_SIZE==8` 把指针比较升成
+  64 位。修复：当 `sv->sym` 是 `VT_PTR`/`VT_FUNC` 时改用
+  `(long long)(unsigned long)*(void **)slot`（按目标指针宽度加载）。
+  superc 仓库提交 `a8d010a`；`make c99test` 103/103 通过；S3 上 `os_timer_tick`
+  恢复原来的 `t && active && expire` 写法后不再误入空指针分支。
+- S3 tick 现状：`port_idle` 用 `CCOUNT` 每 2.4M 周期补一次 `os_sched_tick`，
+  串口能看到 tick 标记，但约 24 次后停住；下一步用 CCOUNT 直接测量 S3 实际
+  CPU 频率并检查 `os_sched_tick`/`os_timer_tick` 在该点的状态。

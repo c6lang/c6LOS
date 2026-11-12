@@ -1,0 +1,22 @@
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+#include "c6os/log.h"
+
+void os_main(void) {
+    u32 t0 = 0;
+    u32 i = 0;
+
+    port_puts("s3 tick test\n");
+    t0 = os_tick_get();
+    while ((os_tick_get() - t0) < 100u) {
+        port_idle();
+        i++;
+    }
+    kprintf("elapsed=%u\n", os_tick_get() - t0);
+    if ((os_tick_get() - t0) >= 99u && (os_tick_get() - t0) <= 101u) {
+        port_puts("PASS: tick\n");
+    } else {
+        port_puts("FAIL: tick\n");
+    }
+}
