@@ -9,7 +9,7 @@
 | 层 | 跑什么 | 能证明什么 | 不能证明什么 |
 |---|---|---|---|
 | L1 host | 内核逻辑单测（虚拟时钟） | 状态机、链表、错误码、API 语义 | 抢占、真实中断、栈切换 |
-| L2 rv32 (qemu-riscv32) | 同一套逻辑 + ILP32 ABI | 32 位指针/`u64`/结构体布局 | 抢占（无系统态中断） |
+| L2 rv32 (qemu-riscv32 或 risc6) | 同一套逻辑 + ILP32 ABI | 32 位指针/`u64`/结构体布局 | 抢占（risc6 可在指令边界注入机器定时器中断，qemu user-mode 不行） |
 | L3 x86-64 裸机 (qemu-system) | 真抢占、ISR、上下文切换、嵌套中断 | 调度器与 port 的交互 | Xtensa 特有行为 |
 | L4 ESP32-S3 真板 | 启动、控制台、tick、调度、屏、长稳 | 目标机全部行为 | —— |
 
@@ -72,6 +72,23 @@ make check-rv32
 - 端口提供 `_start`、`ecall` 退出、`mret`/`mtvec` 最小陷阱（只验证 ABI，不验证抢占）。
 - 覆盖：`abi32.c6` + 逻辑用例；输出与 L1 相同断言集。
 - 已验证基线：`rv32: c6 kernel core says hello`，rc=0。
+
+### 4.1 换用 risc6 跑同一批 ELF
+
+```sh
+make rv32 rv32-sched rv32-tick     # 与 qemu 用的是同一批产物
+make run-rv32-emu                  # = ~/risc6/build/risc6 build/rv32/hello
+make run-rv32-emu-sched
+```
+
+- `RISC6=/path/to/risc6` 可换路径；输出与退出码与 `qemu-riscv32` 逐字节一致
+  （已核对 `hello`、`sched/sched`、`tick/sched`）。
+- 比 qemu 多出的能力：`--bare` / ELF 内 `.risc6_bare` 段 → 机器态陷阱、`mret`、
+  指令边界注入 MTIP（每 `RISC6_SLICE`=50000 条指令一次），可验证真抢占；
+  `--stats` 给每条指令类别计数，`--time` 给 Minsn/s。
+- 已知偏差见 `~/risc6/docs/design.md` §5.4：非对齐访问放行、`time` 由指令数
+  换算（×64）、`brk` 固定窗口、单核 `lr/sc`、`fence` 为 nop、
+  未知系统调用返回 `-ENOSYS` 并打印一次诊断。
 
 ---
 

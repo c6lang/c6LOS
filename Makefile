@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick rv32 run-rv32 rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -533,6 +533,14 @@ rv32: $(RV32)/hello
 run-rv32: rv32
 	qemu-riscv32 $(RV32)/hello
 
+# risc6 模拟器（~/risc6）：RV32 用户态 + 指令边界注入 MTIP，无需 qemu
+RISC6 ?= $(HOME)/risc6/build/risc6
+run-rv32-emu: rv32
+	$(RISC6) $(RV32)/hello
+
+run-rv32-emu-sched: rv32-sched
+	$(RISC6) $(RV32S_DIR)/sched
+
 $(RV32)/hello_x86.ll: $(RV32_MAIN)
 	@mkdir -p $(RV32)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
@@ -552,7 +560,12 @@ $(RV32)/console.o: port/rv32/console.c
 	@mkdir -p $(RV32)
 	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
 
-$(RV32)/hello: $(RV32)/start.o $(RV32)/console.o $(RV32)/hello.o
+# hello 不链接调度器，console.o 里 port_idle 引用的 os_sched_tick 由弱符号补齐
+$(RV32)/stub.o: port/rv32/stub.c
+	@mkdir -p $(RV32)
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32)/hello: $(RV32)/start.o $(RV32)/console.o $(RV32)/hello.o $(RV32)/stub.o
 	clang $(RV32CFLAGS) -fuse-ld=lld -static -o $@ $^
 
 
