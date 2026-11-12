@@ -1,0 +1,56 @@
+#include "c6os/types.h"
+#include "c6os/tick.h"
+#include "c6os/timer.h"
+#include "c6os/port.h"
+
+static u32 g_fired = 0;
+static OsTimer g_t = {0};
+
+void put_u32(u32 v) {
+    char buf[12] = {0};
+    u32 n = 0;
+
+    if (v == 0u) {
+        port_putc((int)48);
+        return;
+    }
+    while (v > 0u && n < 12u) {
+        buf[n] = (char)(48 + (v % 10u));
+        v = v / 10u;
+        n++;
+    }
+    while (n > 0u) {
+        n--;
+        port_putc((int)buf[n]);
+    }
+}
+
+static void cb(void *arg) {
+    g_fired = (u32)os_tick_get();
+}
+
+void os_main(void) {
+    u32 t0 = 0;
+
+    port_puts("s3 timer test\n");
+    if (os_timer_init(&g_t, 100u, 0, cb, 0) != 0) {
+        port_puts("FAIL: init\n");
+        return;
+    }
+    t0 = (u32)os_tick_get();
+    if (os_timer_start(&g_t) != 0) {
+        port_puts("FAIL: start\n");
+        return;
+    }
+    while (g_fired == 0u && ((u32)os_tick_get() - t0) < 300u) {
+        port_idle();
+    }
+    port_puts("fired at ");
+    put_u32(g_fired - t0);
+    port_putc(10);
+    if (g_fired != 0u && (g_fired - t0) >= 99u && (g_fired - t0) <= 101u) {
+        port_puts("PASS: timer\n");
+    } else {
+        port_puts("FAIL: timer\n");
+    }
+}
