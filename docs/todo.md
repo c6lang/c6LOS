@@ -148,7 +148,7 @@
 | M5-1 `include/los/*.h` | 类型/宏/原型与 LiteOS-M 对齐 | 用 LiteOS 示例头可编译 |
 | M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 | 完成（Task/Sem/Mux/Event/Queue/Membox/Mem/Swtmr 均有 host PASS：`t_los`/`t_los2`/`t_los3`/`t_los4`） |
 | M5-3 错误码映射 | `OS_*` → `LOS_*` | 映射表 100% 覆盖 | 完成（`t_los_err`：Sem 非法句柄/超时/重复删除、Task 空参/非法优先级/非法 ID、Queue 非法句柄，全部命中 `LOS_ERRNO_*`） |
-| M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 |
+| M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 | 完成（`t_consistency` 对 Sem/Queue 分别跑原生与 LOS 两路：post→pend、超时失败、put/read 值与字节一致，输出 `PASS: native/LOS consistency`） |
 
 **M5 验收**：`make check-host API=both` 双份全绿；LiteOS 风格 demo 可跑。
 
@@ -406,3 +406,7 @@
 - **M8-5 上板文档**：新增 `docs/board-s3.md`，记录本板实测的下载模式、`--before usb-reset`
   / `--after hard-reset`、115200 raw 串口、VECBASE/PMS/PS.UM、TIMG0 看门狗、陷阱分流，
   以及“原厂备份丢失、回滚需整片官方固件”的风险。
+
+- **M5-4 原生/LOS 一致性（host PASS）**：`t_consistency` 同一段断言分别走
+  `os_sem_*`/`os_queue_*` 与 `LOS_Sem*`/`LOS_Queue*`，比较返回码、超时失败、
+  指针出队和 4 字节值（0x1234 小端 34 12）一致。

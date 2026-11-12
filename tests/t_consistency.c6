@@ -1,0 +1,63 @@
+#include "c6os/sem.h"
+#include "c6os/queue.h"
+#include "c6os/port.h"
+#include "los/los_sem.h"
+#include "los/los_queue.h"
+
+int main(void) {
+    OsSem ns = {0};
+    void *nst[4] = {0};
+    OsQueue nq = {0};
+    UINT32 ls = 0;
+    UINT32 lq = 0;
+    UINT32 v = 0;
+    UINT32 out = 0;
+    void *item = (void *)0x1234;
+    void *got = 0;
+    UINT8 b[4] = {0};
+    UINT8 rb[4] = {0};
+
+    if (os_sem_init(&ns, 0u, 0xFFu) != 0) {
+        return 1;
+    }
+    if (LOS_SemCreate(0u, &ls) != LOS_OK) {
+        return 2;
+    }
+    if (os_sem_post(&ns) != 0 || LOS_SemPost(ls) != LOS_OK) {
+        return 3;
+    }
+    if (os_sem_pend(&ns, 0u) != 0 || LOS_SemPend(ls, 0u) != LOS_OK) {
+        return 4;
+    }
+    if (os_sem_pend(&ns, 0u) == 0 || LOS_SemPend(ls, 0u) == LOS_OK) {
+        return 5;
+    }
+
+    if (os_queue_init(&nq, nst, 4u) != 0) {
+        return 6;
+    }
+    if (LOS_QueueCreate("q", 4u, &lq, 0u, 4u) != LOS_OK) {
+        return 7;
+    }
+    if (os_queue_put(&nq, item, 0u) != 0) {
+        return 8;
+    }
+    v = 0x1234u;
+    if (LOS_QueueWrite(lq, &v, 4u, 0u) != LOS_OK) {
+        return 9;
+    }
+    got = os_queue_get(&nq, 0u);
+    if (got != item) {
+        return 10;
+    }
+    if (LOS_QueueRead(lq, rb, 4u, 0u) != LOS_OK) {
+        return 11;
+    }
+    if (rb[0] != 0x34u || rb[1] != 0x12u) {
+        return 12;
+    }
+    (void)b;
+    (void)out;
+    port_puts("PASS: native/LOS consistency\n");
+    return 0;
+}

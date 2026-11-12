@@ -1,0 +1,73 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+#define STRESS_N 60000u
+
+static u32 g_runs = 0;
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+static void worker(void *arg) {
+    g_runs++;
+}
+
+static void driver(void *arg) {
+    u32 i = 0;
+
+    while (i < STRESS_N) {
+        int id = os_task_create("w", worker, 0, 2u, 4096u);
+
+        if (id <= 0) {
+            port_puts("FAIL: create at ");
+            put_u32(i);
+            port_puts("\n");
+            return;
+        }
+        os_task_delay(1u);
+        if (os_task_get((u32)id) != 0) {
+            (void)os_task_delete((u32)id);
+        }
+        if ((i % 10000u) == 9999u) {
+            port_puts("step ");
+            put_u32(i + 1u);
+            port_puts(" runs=");
+            put_u32(g_runs);
+            port_puts("\n");
+        }
+        i++;
+    }
+    if (g_runs == STRESS_N && os_task_count() == 0u) {
+        port_puts("PASS: s3 stress\n");
+    } else {
+        port_puts("FAIL: s3 stress\n");
+    }
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 stress test\n");
+    if (os_task_create("d", driver, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create driver\n");
+        return;
+    }
+    os_task_start();
+}
