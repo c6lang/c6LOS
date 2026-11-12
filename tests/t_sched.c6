@@ -1,0 +1,47 @@
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+
+static void ta(void *arg) {
+    order[n] = 'A';
+    n++;
+    os_task_yield();
+    order[n] = 'a';
+    n++;
+}
+
+static void tb(void *arg) {
+    order[n] = 'B';
+    n++;
+    os_task_yield();
+    order[n] = 'b';
+    n++;
+}
+
+int main(void) {
+    int a = os_task_create("a", ta, 0, 1, 8192);
+    int b = os_task_create("b", tb, 0, 1, 8192);
+    if (a <= 0 || b <= 0) {
+        return 1;
+    }
+    os_task_start();
+    order[n] = '\0';
+    const char *want = "ABab";
+    u32 i = 0;
+    while (want[i] != '\0') {
+        if (order[i] != want[i]) {
+            port_puts("FAIL: order ");
+            port_puts(order);
+            port_puts("\n");
+            return 2;
+        }
+        i++;
+    }
+    if (order[i] != '\0') {
+        return 3;
+    }
+    port_puts("PASS: sched\n");
+    return 0;
+}

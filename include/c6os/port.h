@@ -9,6 +9,12 @@ void port_init(void);
 void port_idle(void);
 void port_panic_halt(void);
 
+/* 任务上下文（协作 port）：ctx 对内核不透明。 */
+void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size);
+void port_task_ctx_free(void *ctx);
+void port_task_switch(void *ctx);
+void port_task_yield(void);
+
 void port_putc(int ch);
 void port_puts(const char *s);
 void port_delay_ms(u32 ms);

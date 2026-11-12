@@ -81,6 +81,10 @@ $(BUILDH)/port_sim.o: port/sim/port_sim.c
 	@mkdir -p $(BUILDH)
 	gcc -Iinclude -c $< -o $@
 
+$(BUILDH)/port_ctx.o: port/sim/port_ctx.c
+	@mkdir -p $(BUILDH)
+	gcc -Iinclude -c $< -o $@
+
 $(HOSTBIN): $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
@@ -127,11 +131,25 @@ $(BUILDH)/t_tick: $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick
+$(BUILDH)/task.ll: kernel/task.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_sched.ll: tests/t_sched.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_sched: $(BUILDH)/t_sched.ll $(BUILDH)/task.ll $(BUILDH)/port_ctx.o \
+		$(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_sched.ll $(BUILDH)/task.ll \
+		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
 	./$(BUILDH)/t_tick
+	./$(BUILDH)/t_sched
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"

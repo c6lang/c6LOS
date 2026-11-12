@@ -1,0 +1,138 @@
+#include "c6os/task.h"
+#include "c6os/log.h"
+#include "c6os/port.h"
+
+/* M1 最小调度器：优先级抢占（协作 port 上以 yield 触发）+ 同优先级轮转。
+ * 抢占式 port 在 M1-5 接入 os_sched_irq；本文件先保证策略可测。 */
+
+static OsTask g_tasks[C6OS_MAX_TASKS] = {0};
+static u32 g_next_id = 1;
+static u32 g_rr = 0;
+static OsTask *g_cur = 0;
+
+static OsTask *sched_pick(void) {
+    u32 i = 0;
+    u32 best = 0xFFFFFFFFu;
+    OsTask *t = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        u32 idx = (g_rr + i) % (u32)C6OS_MAX_TASKS;
+        OsTask *c = &g_tasks[idx];
+        if (c->state == (u8)OS_TASK_READY) {
+            if ((u32)c->prio < best) {
+                best = (u32)c->prio;
+                t = c;
+                g_rr = (idx + 1u) % (u32)C6OS_MAX_TASKS;
+            }
+        }
+        i++;
+    }
+    return t;
+}
+
+int os_task_create(const char *name, OsTaskEntry entry, void *arg,
+                   u32 prio, u32 stack_size) {
+    u32 i = 0;
+    OsTask *t = 0;
+
+    if (prio >= (u32)C6OS_PRIOS) {
+        return -1;
+    }
+    if (stack_size < 512u) {
+        stack_size = 512u;
+    }
+    while (i < (u32)C6OS_MAX_TASKS) {
+        if (g_tasks[i].state == (u8)OS_TASK_FREE) {
+            t = &g_tasks[i];
+            break;
+        }
+        i++;
+    }
+    if (t == 0) {
+        return -2;
+    }
+
+    t->id = g_next_id;
+    g_next_id++;
+    t->entry = entry;
+    t->arg = arg;
+    t->prio = (u8)prio;
+    t->stack_size = stack_size;
+    t->slice = (u32)C6OS_TIMESLICE;
+    t->ctx = port_task_ctx_create(entry, arg, stack_size);
+    if (t->ctx == 0) {
+        t->state = (u8)OS_TASK_FREE;
+        return -3;
+    }
+    i = 0;
+    while (i + 1u < (u32)C6OS_NAME_MAX && name[i] != '\0') {
+        t->name[i] = name[i];
+        i++;
+    }
+    t->name[i] = '\0';
+    t->state = (u8)OS_TASK_READY;
+    return (int)t->id;
+}
+
+void os_task_start(void) {
+    while (1) {
+        OsTask *t = sched_pick();
+        if (t == 0) {
+            break;
+        }
+        g_cur = t;
+        t->state = (u8)OS_TASK_RUNNING;
+        port_task_switch(t->ctx);
+        if (t->state == (u8)OS_TASK_RUNNING) {
+            t->state = (u8)OS_TASK_READY;
+        }
+    }
+    g_cur = 0;
+}
+
+void os_task_yield(void) {
+    if (g_cur == 0) {
+        return;
+    }
+    g_cur->state = (u8)OS_TASK_READY;
+    port_task_yield();
+}
+
+void os_task_exit(void) {
+    if (g_cur != 0) {
+        g_cur->state = (u8)OS_TASK_DEAD;
+    }
+    port_task_yield();
+}
+
+u32 os_task_self(void) {
+    if (g_cur == 0) {
+        return 0;
+    }
+    return g_cur->id;
+}
+
+u32 os_task_count(void) {
+    u32 i = 0;
+    u32 n = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        if (g_tasks[i].state != (u8)OS_TASK_FREE) {
+            n++;
+        }
+        i++;
+    }
+    return n;
+}
+
+OsTask *os_task_get(u32 id) {
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        if (g_tasks[i].state != (u8)OS_TASK_FREE && g_tasks[i].id == id) {
+            return &g_tasks[i];
+        }
+        i++;
+    }
+    return 0;
+}
