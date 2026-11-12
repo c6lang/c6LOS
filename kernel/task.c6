@@ -312,6 +312,26 @@ void os_sched_tick(void) {
     os_timer_tick();
 }
 
+void *os_sched_preempt_ctx(void) {
+    OsTask *t = 0;
+
+    if (g_cur == 0) {
+        return 0;
+    }
+    if (g_cur->state == (u8)OS_TASK_RUNNING) {
+        make_ready(g_cur);
+    }
+    t = sched_pick();
+    if (t == 0) {
+        t = g_cur;
+    }
+    if (t != g_cur) {
+        g_cur = t;
+        t->state = (u8)OS_TASK_RUNNING;
+    }
+    return t->ctx;
+}
+
 void os_task_start(void) {
     while (1) {
         OsTask *t = sched_pick();

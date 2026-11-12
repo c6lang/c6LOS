@@ -46,7 +46,17 @@ static void tick_sig(int sig)
     }
     os_sched_tick();
     if (g_in_task != 0 && g_cur != 0) {
-        swapcontext(&g_cur->uc, &g_sched);
+        SimCtx *prev = g_cur;
+        SimCtx *next = (SimCtx *)os_sched_preempt_ctx();
+
+        if (next != 0 && next != prev) {
+            g_cur = next;
+            g_pending = next;
+            swapcontext(&prev->uc, &next->uc);
+            g_cur = prev;
+            g_pending = prev;
+            g_in_task = 1;
+        }
     }
 }
 

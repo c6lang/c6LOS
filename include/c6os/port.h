@@ -22,6 +22,7 @@ u32 port_virtual_tick(void);
 u32 port_in_isr(void);
 void os_test_set_isr(u32 v);
 void port_sim_preempt_start(void);
+void *os_sched_preempt_ctx(void);
 
 void port_putc(int ch);
 void port_puts(const char *s);
