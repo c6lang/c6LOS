@@ -14,9 +14,14 @@ void port_mark(u32 v);
 void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size);
 void port_task_ctx_free(void *ctx);
 void port_task_switch(void *ctx);
+void port_enter_task(void);
+void port_leave_task(void);
 void port_task_yield(void);
 u32 port_task_stack_ok(void *ctx);
 u32 port_virtual_tick(void);
+u32 port_in_isr(void);
+void os_test_set_isr(u32 v);
+void os_test_tick_isr(void);
 
 void port_putc(int ch);
 void port_puts(const char *s);

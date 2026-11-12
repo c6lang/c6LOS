@@ -89,11 +89,11 @@
 | M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（create/delete 1000 次 host PASS；magic 待加） |
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
-| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 进行中（delay + 虚拟 tick host PASS；suspend 未做） |
-| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
-| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
+| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
+| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 裸机 PIT 100Hz 抢占：`ca≈cb≈1.18M` / `PASS: x86 preempt`；协作 sim 仍按 yield 轮转） |
+| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 完成（`t_overflow` 深递归覆盖哨兵，输出 `*** PANIC: task stack overflow ***` 后 `PASS`；sim 栈前留 64KB 安全垫） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
-| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；抢占/陷阱帧未接） |
+| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；x86-64 已接完整陷阱帧抢占 `PASS: x86 preempt`；S3 抢占待接） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
 
@@ -104,7 +104,7 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 | 完成（计数/换算 host PASS；`ms→tick` 已改向上取整，0/1/101ms 边界断言通过） |
-| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 未开始（当前线性扫描） |
+| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 完成（`kernel/timeout.c6` 有序数组 + u32 回绕比较；`t_timeout` 乱序 100 个、取消、到期弹出 PASS） |
 | M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS；S3 实测一次 100 tick 于第 100 tick 命中） |
 | M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 未开始 |
 | M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 | 完成（`port_virtual_tick` + `os_sched_tick` 虚拟推进） |
@@ -118,8 +118,8 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 完成（pend/post/超时 + 3 等待者按优先级唤醒 host PASS） |
-| M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 进行中（递归 + 所有权移交 host PASS；ISR 禁 pend 待接） |
-| M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 进行中（boost/restore + mutex pend 钩子已接；链式重算待做） |
+| M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 完成（递归 + 所有权移交 host PASS；`port_in_isr` 下 block/delay panic，`t_isr` PASS） |
+| M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 完成（`t_pi_chain`：L(5) 持 M1→M(3) 持 M2 等 M1→H(1) 等 M2，L 依次被抬到 3/1，`PASS: PI chain`） |
 | M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
 | M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 进行中（单等待节点 + 超时扫描已接；双归属链/竞争压测待做） |
 
@@ -146,7 +146,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M5-1 `include/los/*.h` | 类型/宏/原型与 LiteOS-M 对齐 | 用 LiteOS 示例头可编译 |
-| M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 |
+| M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 | 完成（Task/Sem/Mux/Event/Queue/Membox/Mem/Swtmr 均有 host PASS：`t_los`/`t_los2`/`t_los3`/`t_los4`） |
 | M5-3 错误码映射 | `OS_*` → `LOS_*` | 映射表 100% 覆盖 |
 | M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 |
 
@@ -166,7 +166,7 @@
 | M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 |
 | M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs |
 | M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 |
-| M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic |
+| M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic | 完成（`os_task_block_arg`/`os_task_delay` 检查 `port_in_isr` 并 panic；`t_isr` 输出两条 PANIC 后 PASS） |
 
 **M6 验收**：ISR 唤醒任务延迟实测；嵌套中断不丢 tick。
 
@@ -189,7 +189,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic |
+| M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 进行中（host `t_stress` 125k 轮×8=10^6 次创建/删除/延时，6.9s，`count==0` 且 panic==0；S3 长稳待跑） |
 | M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 |
@@ -295,3 +295,28 @@
   `port_idle` 用 `csrr time` 每 1,000,000 周期推进一 tick，
   `make run-rv32-tick` 输出 `elapsed=100` / `PASS: rv32 tick`。
   32 位目标缺 `__udivdi3/__umoddi3`，已在 `rt/x86_libc.c` 补移位实现。
+
+- **x86-64 抢占（2026-11）**：`port/x86_64/irq.c` 建 IDT、重映射 PIC、PIT 100Hz；
+  `irq.S` 保存完整陷阱帧，抢占时把帧当成任务上下文切回调度器，恢复时
+  `iretq`。`make run-x86-preempt` 两同优先级任务纯忙等，输出
+  `ca≈1.18M cb≈1.19M` / `PASS: x86 preempt`。
+  两个关键坑：抢占路径不回 `iret`，必须在切回调度器后 `sti`；切换前把
+  `g_in_task` 清零，避免在调度器栈上再次抢占写坏任务上下文。
+
+- **M2-2 有序超时队列（2026-11）**：`os_timeout_add/cancel/pop_expired` 用绝对
+  deadline 有序插入（`(i32)(a-b)` 处理 u32 回绕）；`os_sched_tick` 只弹到期项，
+  不再线性递减 `delay_left`。阻塞/延时/唤醒/删除都同步取消，减少 M3-5 的双归属窗口。
+  host `t_timeout`：100 个乱序插入后 deadline 单调、取消中间项、到期全弹出 PASS。
+
+- **S3 level-1 定时器中断（2026-11，真板 PASS）**：`port/s3/irq.S` 在 IRAM 建 1KB
+  向量表（Xtensa `j` 是 3 字节，0x300 偏移要 256 条），`wsr vecbase` 前先清
+  `PMS_CORE_0_VECBASE_OVERRIDE`（0x600C11C0 SEL=0，否则 VECBASE 被 ROM 覆盖），
+  并清 `PS.UM`（ROM 进来是 user mode，level-1 会走 0x340 用户向量）。
+  `CCOMPARE0 = CCOUNT + 400000`、`INTENABLE |= (1<<6)`，handler 保存 a0–a15/EPC1/PS，
+  用 `wsr PS + rsync + rfe` 返回。`make ... S3_MAIN=tests/t_s3_irq.c6 s3` 实测
+  `PASS: s3 irq tick`（纯忙等任务里 tick 仍推进 5 个）。`port_idle` 改为 `waiti 0`。
+
+- **模拟器 tick 抢占注入（host sim PASS）**：`os_test_tick_isr()` = `os_sched_tick()` +
+  `port_task_yield()`，由忙等任务每 1024 次迭代调用一次，等价于在任意指令边界收到
+  定时器中断后立刻重调度；`t_preempt_sim` 两个同优先级任务都拿到时间片
+  （`ca=10240 cb=11264`），输出 `PASS: sim preempt`。

@@ -5,7 +5,14 @@
 /* M0 panic：打印原因 + 环形日志 + 可选陷阱帧，然后停机。
  * host/sim 的 port_panic_halt() 直接返回，便于测试断言。 */
 
+static u32 g_panic_count = 0;
+
+u32 os_panic_count(void) {
+    return g_panic_count;
+}
+
 void os_panic(const char *msg) {
+    g_panic_count = g_panic_count + 1u;
     port_puts("\n*** PANIC: ");
     port_puts(msg);
     port_puts(" ***\n");

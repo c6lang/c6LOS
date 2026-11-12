@@ -1,0 +1,67 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+static u32 ca = 0;
+static u32 cb = 0;
+static u32 done = 0;
+
+static void ta(void *arg) {
+    while (os_tick_get() < 20u) {
+        ca++;
+    }
+    done++;
+}
+
+static void tb(void *arg) {
+    while (os_tick_get() < 20u) {
+        cb++;
+    }
+    done++;
+}
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+void os_main(void) {
+    int a = 0;
+    int b = 0;
+
+    port_init();
+    port_puts("c6os x86 preempt test\n");
+    a = os_task_create("a", ta, 0, 1u, 8192u);
+    b = os_task_create("b", tb, 0, 1u, 8192u);
+    if (a <= 0 || b <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    x86_irq_init();
+    os_task_start();
+    port_puts("ca=");
+    put_u32(ca);
+    port_puts(" cb=");
+    put_u32(cb);
+    port_puts("\n");
+    if (done == 2u && ca > 0u && cb > 0u) {
+        port_puts("PASS: x86 preempt\n");
+    } else {
+        port_puts("FAIL: x86 preempt\n");
+    }
+}

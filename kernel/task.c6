@@ -4,6 +4,7 @@
 #include "c6os/port.h"
 #include "c6os/tick.h"
 #include "c6os/timer.h"
+#include "c6os/timeout.h"
 
 /* M1 调度器：16 槽静态池 + 优先级位图 + 同优先级轮转。
  * 协作 port 用 yield 触发调度；tick 时间片/抢占在抢占 port 接入。 */
@@ -13,6 +14,22 @@ static u32 g_next_id = 1;
 static u32 g_rr = 0;
 static u32 g_ready_bit = 0;
 static OsTask *g_cur = 0;
+
+static void make_ready(OsTask *t) {
+    if (t->suspend_cnt > 0u) {
+        t->state = (u8)OS_TASK_SUSP;
+    } else {
+        t->state = (u8)OS_TASK_READY;
+    }
+}
+
+static void unblock(OsTask *t, int result) {
+    t->wait_obj = 0;
+    t->wait_result = result;
+    t->delay_left = 0;
+    (void)os_timeout_cancel(t->id);
+    make_ready(t);
+}
 
 static u32 ctz32(u32 x) {
     u32 n = 0;
@@ -109,6 +126,7 @@ int os_task_delete(u32 id) {
     if (t == 0) {
         return -1;
     }
+    (void)os_timeout_cancel(id);
     if (t == g_cur) {
         t->state = (u8)OS_TASK_DEAD;
         port_task_yield();
@@ -126,6 +144,10 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     if (g_cur == 0) {
         return -1;
     }
+    if (port_in_isr() != 0u) {
+        os_panic("block in ISR");
+        return -1;
+    }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
     g_cur->wait_arg = arg;
@@ -133,6 +155,9 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     g_cur->wait_result = 0;
     g_cur->delay_left = timeout;
     g_cur->state = (u8)OS_TASK_BLOCKED;
+    if (timeout != 0u) {
+        (void)os_timeout_add(g_cur->id, timeout);
+    }
     port_task_yield();
     return g_cur->wait_result;
 }
@@ -173,10 +198,7 @@ int os_task_wake_event(void *obj, u32 bits) {
             int hit = all ? ((bits & m) == m) : ((bits & m) != 0u);
             if (hit) {
                 t->wait_bits = bits & m;
-                t->wait_obj = 0;
-                t->wait_result = 0;
-                t->delay_left = 0;
-                t->state = (u8)OS_TASK_READY;
+                unblock(t, 0);
                 woke++;
             }
         }
@@ -202,11 +224,48 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
     if (best == 0) {
         return 0;
     }
-    best->wait_obj = 0;
-    best->wait_result = result;
-    best->delay_left = 0;
-    best->state = (u8)OS_TASK_READY;
+    unblock(best, result);
     return 1;
+}
+
+int os_task_suspend(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return -1;
+    }
+    t->suspend_cnt = t->suspend_cnt + 1u;
+    if (t->suspend_cnt == 1u) {
+        if (t->state == (u8)OS_TASK_READY || t->state == (u8)OS_TASK_RUNNING) {
+            t->state = (u8)OS_TASK_SUSP;
+            if (t == g_cur) {
+                port_task_yield();
+            }
+        }
+    }
+    return 0;
+}
+
+int os_task_resume(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0 || t->suspend_cnt == 0u) {
+        return -1;
+    }
+    t->suspend_cnt = t->suspend_cnt - 1u;
+    if (t->suspend_cnt == 0u && t->state == (u8)OS_TASK_SUSP) {
+        t->state = (u8)OS_TASK_READY;
+    }
+    return 0;
+}
+
+int os_task_suspend_count(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return -1;
+    }
+    return (int)t->suspend_cnt;
 }
 
 void os_task_boost(u32 id, u32 prio) {
@@ -232,29 +291,23 @@ static void os_task_wake_join(u32 id) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_kind == 8u &&
             t->wait_arg == id) {
-            t->wait_obj = 0;
-            t->wait_result = 0;
-            t->delay_left = 0;
-            t->state = (u8)OS_TASK_READY;
+            unblock(t, 0);
         }
         i++;
     }
 }
 
 void os_sched_tick(void) {
-    u32 i = 0;
+    u32 now = 0;
+    u32 id = 0;
 
     os_tick_advance(1);
-    while (i < (u32)C6OS_MAX_TASKS) {
-        if (g_tasks[i].state == (u8)OS_TASK_BLOCKED && g_tasks[i].delay_left > 0u) {
-            g_tasks[i].delay_left = g_tasks[i].delay_left - 1u;
-            if (g_tasks[i].delay_left == 0u) {
-                g_tasks[i].wait_obj = 0;
-                g_tasks[i].wait_result = -2;
-                g_tasks[i].state = (u8)OS_TASK_READY;
-            }
+    now = (u32)os_tick_get();
+    while (os_timeout_pop_expired(now, &id) != 0) {
+        OsTask *t = os_task_get(id);
+        if (t != 0 && t->state == (u8)OS_TASK_BLOCKED) {
+            unblock(t, -2);
         }
-        i++;
     }
     os_timer_tick();
 }
@@ -275,9 +328,11 @@ void os_task_start(void) {
         }
         g_cur = t;
         t->state = (u8)OS_TASK_RUNNING;
+        port_enter_task();
         port_task_switch(t->ctx);
+        port_leave_task();
         if (t->state == (u8)OS_TASK_RUNNING) {
-            t->state = (u8)OS_TASK_READY;
+            make_ready(t);
         }
         if (t->state == (u8)OS_TASK_DEAD) {
             port_task_ctx_free(t->ctx);
@@ -295,12 +350,16 @@ void os_task_yield(void) {
     if (g_cur == 0) {
         return;
     }
-    g_cur->state = (u8)OS_TASK_READY;
+    make_ready(g_cur);
     port_task_yield();
 }
 
 void os_task_delay(u32 ticks) {
     if (g_cur == 0) {
+        return;
+    }
+    if (port_in_isr() != 0u) {
+        os_panic("delay in ISR");
         return;
     }
     if (ticks == 0u) {
@@ -309,6 +368,12 @@ void os_task_delay(u32 ticks) {
     }
     g_cur->delay_left = ticks;
     g_cur->state = (u8)OS_TASK_BLOCKED;
+    (void)os_timeout_add(g_cur->id, ticks);
+    port_task_yield();
+}
+
+void os_test_tick_isr(void) {
+    os_sched_tick();
     port_task_yield();
 }
 

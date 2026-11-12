@@ -1,0 +1,69 @@
+#include "los/los_swtmr.h"
+#include "c6os/timer.h"
+
+#define LOS_SW_MAX 8u
+
+static OsTimer g_t[LOS_SW_MAX] = {0};
+static u8 g_used[LOS_SW_MAX] = {0};
+static SWTMR_PROC_FUNC g_cb[LOS_SW_MAX] = {0};
+static u32 g_arg[LOS_SW_MAX] = {0};
+
+static void swtramp(void *p) {
+    u32 id = (u32)p;
+    u32 i = id - 1u;
+
+    if (id == 0u || id > LOS_SW_MAX || g_cb[i] == 0) {
+        return;
+    }
+    g_cb[i](g_arg[i]);
+}
+
+UINT32 LOS_SwtmrCreate(UINT32 interval, UINT8 mode, SWTMR_PROC_FUNC proc,
+                       UINT32 *timerId, UINT32 arg) {
+    u32 i = 0;
+
+    if (timerId == 0 || proc == 0 || interval == 0u) {
+        return 1u;
+    }
+    while (i < LOS_SW_MAX) {
+        if (g_used[i] == 0u) {
+            g_cb[i] = proc;
+            g_arg[i] = arg;
+            if (os_timer_init(&g_t[i], (u32)interval,
+                              (mode == LOS_SWTMR_MODE_PERIOD) ? 1 : 0,
+                              swtramp, (void *)(i + 1u)) != 0) {
+                g_cb[i] = 0;
+                return 2u;
+            }
+            g_used[i] = 1u;
+            *timerId = i + 1u;
+            return 0u;
+        }
+        i++;
+    }
+    return 3u;
+}
+
+UINT32 LOS_SwtmrStart(UINT32 timerId) {
+    if (timerId == 0u || timerId > LOS_SW_MAX || g_used[timerId - 1u] == 0u) {
+        return 1u;
+    }
+    return (os_timer_start(&g_t[timerId - 1u]) == 0) ? 0u : 2u;
+}
+
+UINT32 LOS_SwtmrStop(UINT32 timerId) {
+    if (timerId == 0u || timerId > LOS_SW_MAX || g_used[timerId - 1u] == 0u) {
+        return 1u;
+    }
+    return (os_timer_stop(&g_t[timerId - 1u]) == 0) ? 0u : 2u;
+}
+
+UINT32 LOS_SwtmrDelete(UINT32 timerId) {
+    if (timerId == 0u || timerId > LOS_SW_MAX || g_used[timerId - 1u] == 0u) {
+        return 1u;
+    }
+    (void)os_timer_stop(&g_t[timerId - 1u]);
+    g_used[timerId - 1u] = 0u;
+    g_cb[timerId - 1u] = 0;
+    return 0u;
+}

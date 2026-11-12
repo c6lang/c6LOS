@@ -1,0 +1,63 @@
+#include "c6os/types.h"
+#include "c6os/tick.h"
+#include "c6os/timeout.h"
+#include "c6os/port.h"
+
+int main(void) {
+    u32 i = 0;
+    u32 last = 0;
+    u32 got = 0;
+    u32 id = 0;
+
+    os_timeout_init();
+    if (os_timeout_count() != 0u) {
+        return 1;
+    }
+    /* 乱序插入 100 个 */
+    while (i < 100u) {
+        u32 ticks = (i * 37u) % 101u + 1u;
+        if (os_timeout_add(i + 1u, ticks) != 0) {
+            return 2;
+        }
+        i++;
+    }
+    if (os_timeout_count() != 100u) {
+        return 3;
+    }
+    i = 0;
+    last = 0;
+    while (i < os_timeout_count()) {
+        u32 d = os_timeout_deadline_at(i);
+        if (i > 0u && (i32)(d - last) < 0) {
+            port_puts("FAIL: timeout order\n");
+            return 4;
+        }
+        last = d;
+        i++;
+    }
+    /* 取消中间一个 */
+    if (os_timeout_cancel(50u) != 0 || os_timeout_count() != 99u) {
+        return 5;
+    }
+    if (os_timeout_cancel(50u) == 0) {
+        return 6;
+    }
+    i = 0;
+    while (os_timeout_pop_expired(1000u, &id) != 0) {
+        i++;
+        if (i > 100u) {
+            return 7;
+        }
+    }
+    if (i != 99u || os_timeout_count() != 0u) {
+        port_puts("FAIL: timeout pop count\n");
+        return 8;
+    }
+    /* 未到期不弹 */
+    os_timeout_add(9u, 10u);
+    if (os_timeout_pop_expired(0u, &id) != 0) {
+        return 9;
+    }
+    port_puts("PASS: timeout queue\n");
+    return 0;
+}

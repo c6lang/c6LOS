@@ -1,0 +1,83 @@
+#include "los/los_task.h"
+#include "los/los_membox.h"
+#include "los/los_mem.h"
+#include "los/los_swtmr.h"
+#include "c6os/port.h"
+
+static u8 g_box[1024] = {0};
+static u8 g_pool[4096] = {0};
+static u32 g_fired = 0u;
+static u32 g_tid = 0u;
+
+static VOID on_timer(UINT32 arg) {
+    g_fired = arg;
+}
+
+static VOID worker(VOID *arg) {
+    UINT32 mb = 0u;
+    VOID *p = 0;
+    VOID *q = 0;
+    UINT32 before = 0u;
+
+    if (LOS_MemboxInit(&mb, g_box, 32u, 16u) != 0u) {
+        port_puts("FAIL: membox init\n");
+        return;
+    }
+    before = LOS_MemboxFreeCount(mb);
+    p = LOS_MemboxAlloc(mb);
+    q = LOS_MemboxAlloc(mb);
+    if (p == 0 || q == 0 || LOS_MemboxFreeCount(mb) != before - 2u) {
+        port_puts("FAIL: membox alloc\n");
+        return;
+    }
+    if (LOS_MemboxFree(mb, p) != 0u || LOS_MemboxFree(mb, q) != 0u ||
+        LOS_MemboxFreeCount(mb) != before) {
+        port_puts("FAIL: membox free\n");
+        return;
+    }
+
+    if (LOS_MemInit(g_pool, 4096u) != 0u) {
+        port_puts("FAIL: mem init\n");
+        return;
+    }
+    p = LOS_MemAlloc(g_pool, 100u);
+    if (p == 0 || LOS_MemUsed(g_pool) == 0u) {
+        port_puts("FAIL: mem alloc\n");
+        return;
+    }
+    if (LOS_MemFree(g_pool, p) != 0u || LOS_MemUsed(g_pool) != 0u) {
+        port_puts("FAIL: mem free\n");
+        return;
+    }
+
+    if (LOS_SwtmrCreate(2u, LOS_SWTMR_MODE_ONCE, on_timer, &g_tid, 7u) != 0u) {
+        port_puts("FAIL: swtmr create\n");
+        return;
+    }
+    if (LOS_SwtmrStart(g_tid) != 0u) {
+        port_puts("FAIL: swtmr start\n");
+        return;
+    }
+    LOS_TaskDelay(5u);
+    if (g_fired != 7u) {
+        port_puts("FAIL: swtmr fired\n");
+        return;
+    }
+    port_puts("PASS: LOS_Mem/Swtmr\n");
+}
+
+int main(void) {
+    UINT32 id = 0;
+    TSK_INIT_PARAM_S p = {0};
+
+    p.pfnTaskEntry = worker;
+    p.pArgs = 0;
+    p.usTaskPrio = 1u;
+    p.uwStackSize = 8192u;
+    p.pcName = "w";
+    if (LOS_TaskCreate(&id, &p) != 0u) {
+        return 1;
+    }
+    os_task_start();
+    return 0;
+}

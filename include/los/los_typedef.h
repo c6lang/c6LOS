@@ -8,6 +8,7 @@ typedef unsigned int UINT32;
 typedef unsigned long long UINT64;
 typedef signed int INT32;
 typedef void VOID;
+typedef char CHAR;
 typedef int BOOL;
 
 #define LOS_OK 0u

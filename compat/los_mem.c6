@@ -1,0 +1,35 @@
+#include "los/los_mem.h"
+#include "c6os/heap.h"
+
+static OsHeap g_heap = {0};
+static u8 g_ready = 0;
+
+UINT32 LOS_MemInit(VOID *pool, UINT32 size) {
+    if (pool == 0 || size < 64u) {
+        return 1u;
+    }
+    os_heap_init(&g_heap, pool, (u32)size);
+    g_ready = 1u;
+    return 0u;
+}
+
+VOID *LOS_MemAlloc(VOID *pool, UINT32 size) {
+    (void)pool;
+    if (g_ready == 0u) {
+        return 0;
+    }
+    return os_heap_alloc(&g_heap, (u32)size);
+}
+
+UINT32 LOS_MemFree(VOID *pool, VOID *ptr) {
+    (void)pool;
+    if (g_ready == 0u || ptr == 0) {
+        return 1u;
+    }
+    return (os_heap_free(&g_heap, ptr) == 0) ? 0u : 2u;
+}
+
+UINT32 LOS_MemUsed(VOID *pool) {
+    (void)pool;
+    return (UINT32)os_heap_used(&g_heap);
+}

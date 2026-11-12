@@ -1,0 +1,60 @@
+#include "los/los_task.h"
+#include "c6os/task.h"
+
+UINT32 LOS_TaskCreate(UINT32 *taskId, TSK_INIT_PARAM_S *initParam) {
+    int id = 0;
+    u32 stack = 4096u;
+
+    if (taskId == 0 || initParam == 0 || initParam->pfnTaskEntry == 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    if (initParam->uwStackSize > 4096u) {
+        stack = initParam->uwStackSize;
+    }
+    id = os_task_create(initParam->pcName, initParam->pfnTaskEntry,
+                        initParam->pArgs, (u32)initParam->usTaskPrio, stack);
+    if (id <= 0) {
+        return LOS_ERRNO_TSK_NO_MEMORY;
+    }
+    *taskId = (UINT32)id;
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskDelete(UINT32 taskId) {
+    if (os_task_delete((u32)taskId) != 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskDelay(UINT32 tick) {
+    os_task_delay((u32)tick);
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskSuspend(UINT32 taskId) {
+    if (os_task_suspend((u32)taskId) != 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskResume(UINT32 taskId) {
+    if (os_task_resume((u32)taskId) != 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskYield(VOID) {
+    os_task_yield();
+    return LOS_OK;
+}
+
+UINT32 LOS_TaskIDGet(VOID) {
+    return (UINT32)os_task_self();
+}
+
+UINT32 LOS_TaskCount(VOID) {
+    return (UINT32)os_task_count();
+}

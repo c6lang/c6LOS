@@ -15,6 +15,8 @@ static u8 inb(u32 port)
     return v;
 }
 
+extern void x86_irq_init(void);
+
 void port_init(void)
 {
     outb(COM1 + 1u, 0x00u);
@@ -24,6 +26,7 @@ void port_init(void)
     outb(COM1 + 3u, 0x03u);
     outb(COM1 + 2u, 0xC7u);
     outb(COM1 + 4u, 0x0Bu);
+    x86_irq_init();
 }
 
 void port_putc(int ch)
@@ -47,8 +50,6 @@ void port_puts(const char *s)
     }
 }
 
-extern void os_sched_tick(void);
-
 static u64 g_last_tsc;
 
 static u64 rdtsc(void)
@@ -62,17 +63,9 @@ static u64 rdtsc(void)
 
 void port_idle(void)
 {
-    /* 裸机没接中断：用 rdtsc 忙等出一个 tick，不能 hlt（没有唤醒源）。 */
-    for (;;) {
-        u64 now = rdtsc();
-
-        if ((now - g_last_tsc) >= 10000000ull) {
-            g_last_tsc = now;
-            os_sched_tick();
-            return;
-        }
-        __asm__ __volatile__("pause");
-    }
+    /* PIT 100Hz 已接管时基，睡眠等中断即可。 */
+    __asm__ __volatile__("sti");
+    __asm__ __volatile__("hlt");
 }
 
 void port_panic_halt(void)

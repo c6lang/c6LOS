@@ -6,5 +6,6 @@
 
 void os_panic(const char *msg);
 void os_panic_frame(const char *msg, const OsTrapFrame *tf);
+u32 os_panic_count(void);
 
 #endif
