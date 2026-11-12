@@ -3,6 +3,7 @@
 #include "c6os/panic.h"
 #include "c6os/port.h"
 #include "c6os/tick.h"
+#include "c6os/timer.h"
 
 /* M1 调度器：16 槽静态池 + 优先级位图 + 同优先级轮转。
  * 协作 port 用 yield 触发调度；tick 时间片/抢占在抢占 port 接入。 */
@@ -204,6 +205,7 @@ void os_sched_tick(void) {
         }
         i++;
     }
+    os_timer_tick();
 }
 
 void os_task_start(void) {

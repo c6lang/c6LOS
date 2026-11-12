@@ -1,0 +1,55 @@
+#include "c6os/timer.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static u32 hits = 0;
+static OsTimer t = {0};
+static OsTimer one = {0};
+
+static void cb(void *arg) {
+    hits++;
+}
+
+int main(void) {
+    if (os_timer_init(&t, 2, 1, cb, 0) != 0) {
+        return 1;
+    }
+    if (os_timer_start(&t) != 0) {
+        return 2;
+    }
+    os_sched_tick();
+    os_sched_tick();
+    if (hits != 1u) {
+        return 3;
+    }
+    os_sched_tick();
+    os_sched_tick();
+    if (hits != 2u) {
+        return 4;
+    }
+    if (os_timer_stop(&t) != 0) {
+        return 5;
+    }
+    os_sched_tick();
+    os_sched_tick();
+    if (hits != 2u) {
+        return 6;
+    }
+
+    if (os_timer_init(&one, 1, 0, cb, 0) != 0) {
+        return 7;
+    }
+    if (os_timer_start(&one) != 0) {
+        return 8;
+    }
+    os_sched_tick();
+    if (hits != 3u) {
+        return 9;
+    }
+    os_sched_tick();
+    if (hits != 3u) {
+        return 10;
+    }
+    port_puts("PASS: timer\n");
+    return 0;
+}

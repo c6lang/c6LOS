@@ -69,6 +69,8 @@
   取回 1+2=3，顺序 `PGpg`；空队列 get 超时返回 0。
 - M4-3/M4-4 host PASS：4×32B membox 耗尽返回空、非法/未对齐 free 返回 -1；
   8KB best-fit 堆 1000 次随机分配/释放后 `used==0`、`peak>0`。
+- M2-3 host PASS：周期 2 tick 定时器第 2/4 tick 各命中一次，stop 后不再命中；
+  一次性定时器只命中一次。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
@@ -93,13 +95,13 @@
 
 ## M2 tick 与软定时器
 
-| 任务 | 细节 | 验收 |
-|---|---|---|
-| M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 |
-| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 |
-| M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 |
-| M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 |
-| M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 |
+| 任务 | 细节 | 验收 | 状态 |
+|---|---|---|---|
+| M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 | 完成（计数/换算 host PASS；向下取整，待改向上） |
+| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 未开始（当前线性扫描） |
+| M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS） |
+| M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 未开始 |
+| M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 | 完成（`port_virtual_tick` + `os_sched_tick` 虚拟推进） |
 
 **M2 验收**：S3 上 100Hz 实测 ±1%；软定时器 100 次周期无漂移累积。
 
