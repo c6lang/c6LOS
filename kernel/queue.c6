@@ -1,0 +1,62 @@
+#include "c6os/queue.h"
+#include "c6os/task.h"
+
+#define QUEUE_MAGIC 0xC6E50004u
+#define Q_WAIT_PUT 6u
+#define Q_WAIT_GET 7u
+
+int os_queue_init(OsQueue *q, void **storage, u32 cap) {
+    if (q == 0 || storage == 0 || cap == 0u) {
+        return -1;
+    }
+    q->buf = storage;
+    q->cap = cap;
+    q->head = 0;
+    q->tail = 0;
+    q->count = 0;
+    q->magic = QUEUE_MAGIC;
+    return 0;
+}
+
+int os_queue_put(OsQueue *q, void *item, u32 timeout) {
+    if (q == 0 || q->magic != QUEUE_MAGIC) {
+        return -1;
+    }
+    while (q->count == q->cap) {
+        int r = os_task_block(q, timeout, Q_WAIT_PUT);
+        if (r != 0) {
+            return r;
+        }
+    }
+    q->buf[q->tail] = item;
+    q->tail = (q->tail + 1u) % q->cap;
+    q->count = q->count + 1u;
+    os_task_wake_first(q, Q_WAIT_GET, 0);
+    return 0;
+}
+
+void *os_queue_get(OsQueue *q, u32 timeout) {
+    void *item = 0;
+
+    if (q == 0 || q->magic != QUEUE_MAGIC) {
+        return 0;
+    }
+    while (q->count == 0u) {
+        int r = os_task_block(q, timeout, Q_WAIT_GET);
+        if (r != 0) {
+            return 0;
+        }
+    }
+    item = q->buf[q->head];
+    q->head = (q->head + 1u) % q->cap;
+    q->count = q->count - 1u;
+    os_task_wake_first(q, Q_WAIT_PUT, 0);
+    return item;
+}
+
+u32 os_queue_count(OsQueue *q) {
+    if (q == 0) {
+        return 0;
+    }
+    return q->count;
+}

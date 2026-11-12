@@ -1,0 +1,87 @@
+#include "c6os/queue.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static void *store[1] = {0};
+static OsQueue q = {0};
+static char order[16] = {0};
+static u32 n = 0;
+static u32 sum = 0;
+
+static void qa(void *arg) {
+    os_queue_put(&q, (void *)1, 0);
+    order[n] = 'P';
+    n++;
+    os_queue_put(&q, (void *)2, 0);
+    order[n] = 'p';
+    n++;
+}
+
+static void qb(void *arg) {
+    void *a = os_queue_get(&q, 0);
+    sum = sum + (u32)(unsigned long)a;
+    order[n] = 'G';
+    n++;
+    void *b = os_queue_get(&q, 0);
+    sum = sum + (u32)(unsigned long)b;
+    order[n] = 'g';
+    n++;
+}
+
+static void qt(void *arg) {
+    void *v = os_queue_get(&q, 1);
+    if (v == 0) {
+        order[n] = 'T';
+        n++;
+    }
+}
+
+static int expect(const char *want) {
+    u32 i = 0;
+    while (want[i] != '\0') {
+        if (order[i] != want[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return order[i] == '\0';
+}
+
+int main(void) {
+    if (os_queue_init(&q, store, 1) != 0) {
+        return 1;
+    }
+    if (os_task_create("a", qa, 0, 1, 4096) <= 0) {
+        return 2;
+    }
+    if (os_task_create("b", qb, 0, 1, 4096) <= 0) {
+        return 3;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (sum != 3u) {
+        return 4;
+    }
+    if (!expect("PGpg")) {
+        port_puts("FAIL: queue order ");
+        port_puts(order);
+        port_puts("\n");
+        return 5;
+    }
+
+    n = 0;
+    order[0] = '\0';
+    if (os_task_create("t", qt, 0, 1, 4096) <= 0) {
+        return 6;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (!expect("T")) {
+        return 7;
+    }
+    if (os_queue_count(&q) != 0u) {
+        return 8;
+    }
+    port_puts("PASS: queue\n");
+    return 0;
+}
