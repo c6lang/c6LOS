@@ -3,6 +3,30 @@
 
 #define MUTEX_MAGIC 0xC6E50002u
 
+static void boost_chain(OsMutex *m, u32 prio) {
+    u32 owner = 0;
+    OsTask *t = 0;
+
+    if (m == 0) {
+        return;
+    }
+    owner = m->owner;
+    if (owner == 0u) {
+        return;
+    }
+    t = os_task_get(owner);
+    if (t == 0) {
+        return;
+    }
+    if (prio < (u32)t->prio) {
+        os_task_boost(owner, prio);
+        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_kind == 2u &&
+            t->wait_obj != 0) {
+            boost_chain((OsMutex *)t->wait_obj, prio);
+        }
+    }
+}
+
 int os_mutex_init(OsMutex *m) {
     if (m == 0) {
         return -1;
@@ -29,8 +53,9 @@ int os_mutex_pend(OsMutex *m, u32 timeout) {
         m->count = 1;
         return 0;
     }
-    if (m->owner != 0u) {
-        os_task_boost(m->owner, self);
+    {
+        OsTask *me = os_task_get(self);
+        boost_chain(m, me != 0 ? (u32)me->prio : 32u);
     }
     {
         int r = os_task_block(m, timeout, 2u);
