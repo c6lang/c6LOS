@@ -1,0 +1,84 @@
+#include "los/los_event.h"
+#include "c6os/event.h"
+
+#define LOS_EVENT_MAX 4u
+
+static OsEvent g_e[LOS_EVENT_MAX] = {0};
+static u8 g_used[LOS_EVENT_MAX] = {0};
+
+static OsEvent *e_get(UINT32 id) {
+    if (id == 0u || id > LOS_EVENT_MAX || g_used[id - 1u] == 0u) {
+        return 0;
+    }
+    return &g_e[id - 1u];
+}
+
+UINT32 LOS_EventInit(UINT32 *eventId) {
+    u32 i = 0;
+
+    if (eventId == 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    while (i < LOS_EVENT_MAX) {
+        if (g_used[i] == 0u) {
+            if (os_event_init(&g_e[i]) != 0) {
+                return LOS_ERRNO_EVENT_NO_MEMORY;
+            }
+            g_used[i] = 1u;
+            *eventId = i + 1u;
+            return LOS_OK;
+        }
+        i++;
+    }
+    return LOS_ERRNO_EVENT_NO_MEMORY;
+}
+
+UINT32 LOS_EventDelete(UINT32 eventId) {
+    OsEvent *e = e_get(eventId);
+
+    if (e == 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    g_used[eventId - 1u] = 0u;
+    e->magic = 0;
+    return LOS_OK;
+}
+
+UINT32 LOS_EventWrite(UINT32 eventId, UINT32 bits) {
+    OsEvent *e = e_get(eventId);
+
+    if (e == 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    if (os_event_set(e, (u32)bits) != 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_EventClear(UINT32 eventId, UINT32 bits) {
+    OsEvent *e = e_get(eventId);
+
+    if (e == 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    if (os_event_clear(e, (u32)bits) != 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout) {
+    OsEvent *e = e_get(eventId);
+    u32 m = ((u32)mode & LOS_WAITMODE_AND) != 0u ? OS_EVENT_ALL : OS_EVENT_ANY;
+    u32 bits = 0;
+
+    if (e == 0) {
+        return LOS_ERRNO_EVENT_INVALID;
+    }
+    bits = os_event_wait(e, (u32)mask, m, (u32)timeout);
+    if (bits == 0u) {
+        return LOS_ERRNO_EVENT_TIMEOUT;
+    }
+    return bits;
+}

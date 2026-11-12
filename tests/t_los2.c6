@@ -1,0 +1,67 @@
+#include "los/los_queue.h"
+#include "los/los_mux.h"
+#include "los/los_event.h"
+#include "c6os/port.h"
+
+int main(void) {
+    UINT32 qid = 0;
+    UINT32 mid = 0;
+    UINT32 eid = 0;
+    UINT32 v = 42;
+    UINT32 out = 0;
+    UINT32 bits = 0;
+
+    if (LOS_QueueCreate("q", 8, &qid, 0, 4) != LOS_OK) {
+        return 1;
+    }
+    if (LOS_QueueUsed(qid) != 0u) {
+        return 2;
+    }
+    if (LOS_QueueWrite(qid, &v, 4, 0) != LOS_OK) {
+        return 3;
+    }
+    if (LOS_QueueUsed(qid) != 1u) {
+        return 4;
+    }
+    if (LOS_QueueRead(qid, &out, 4, 0) != LOS_OK) {
+        return 5;
+    }
+    if (out != 42u) {
+        return 6;
+    }
+    if (LOS_QueueDelete(qid) != LOS_OK) {
+        return 7;
+    }
+
+    if (LOS_MuxCreate(&mid) != LOS_OK) {
+        return 8;
+    }
+    if (LOS_MuxPend(mid, 0) != LOS_OK) {
+        return 9;
+    }
+    if (LOS_MuxPost(mid) != LOS_OK) {
+        return 10;
+    }
+    if (LOS_MuxDelete(mid) != LOS_OK) {
+        return 11;
+    }
+
+    if (LOS_EventInit(&eid) != LOS_OK) {
+        return 12;
+    }
+    if (LOS_EventWrite(eid, 2) != LOS_OK) {
+        return 13;
+    }
+    bits = LOS_EventRead(eid, 3, LOS_WAITMODE_OR, 0);
+    if (bits != 2u) {
+        return 14;
+    }
+    if (LOS_EventClear(eid, 2) != LOS_OK) {
+        return 15;
+    }
+    if (LOS_EventDelete(eid) != LOS_OK) {
+        return 16;
+    }
+    port_puts("PASS: LOS_Queue/Mux/Event\n");
+    return 0;
+}

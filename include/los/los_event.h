@@ -1,0 +1,20 @@
+#ifndef _LOS_EVENT_H
+#define _LOS_EVENT_H
+
+#include "los/los_typedef.h"
+
+#define LOS_ERRNO_EVENT_NO_MEMORY 0x02000501u
+#define LOS_ERRNO_EVENT_INVALID 0x02000502u
+#define LOS_ERRNO_EVENT_TIMEOUT 0x02000503u
+
+#define LOS_WAITMODE_AND 0x00000002u
+#define LOS_WAITMODE_OR 0x00000001u
+#define LOS_WAITMODE_CLR 0x00000004u
+
+UINT32 LOS_EventInit(UINT32 *eventId);
+UINT32 LOS_EventDelete(UINT32 eventId);
+UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout);
+UINT32 LOS_EventWrite(UINT32 eventId, UINT32 bits);
+UINT32 LOS_EventClear(UINT32 eventId, UINT32 bits);
+
+#endif

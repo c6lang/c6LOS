@@ -1,0 +1,71 @@
+#include "los/los_mux.h"
+#include "c6os/mutex.h"
+
+#define LOS_MUX_MAX 4u
+
+static OsMutex g_m[LOS_MUX_MAX] = {0};
+static u8 g_used[LOS_MUX_MAX] = {0};
+
+static OsMutex *m_get(UINT32 id) {
+    if (id == 0u || id > LOS_MUX_MAX || g_used[id - 1u] == 0u) {
+        return 0;
+    }
+    return &g_m[id - 1u];
+}
+
+UINT32 LOS_MuxCreate(UINT32 *muxId) {
+    u32 i = 0;
+
+    if (muxId == 0) {
+        return LOS_ERRNO_MUX_INVALID;
+    }
+    while (i < LOS_MUX_MAX) {
+        if (g_used[i] == 0u) {
+            if (os_mutex_init(&g_m[i]) != 0) {
+                return LOS_ERRNO_MUX_NO_MEMORY;
+            }
+            g_used[i] = 1u;
+            *muxId = i + 1u;
+            return LOS_OK;
+        }
+        i++;
+    }
+    return LOS_ERRNO_MUX_NO_MEMORY;
+}
+
+UINT32 LOS_MuxDelete(UINT32 muxId) {
+    OsMutex *m = m_get(muxId);
+
+    if (m == 0) {
+        return LOS_ERRNO_MUX_INVALID;
+    }
+    g_used[muxId - 1u] = 0u;
+    m->magic = 0;
+    return LOS_OK;
+}
+
+UINT32 LOS_MuxPend(UINT32 muxId, UINT32 timeout) {
+    OsMutex *m = m_get(muxId);
+    int r = 0;
+
+    if (m == 0) {
+        return LOS_ERRNO_MUX_INVALID;
+    }
+    r = os_mutex_pend(m, (u32)timeout);
+    if (r == 0) {
+        return LOS_OK;
+    }
+    return (r == -2) ? LOS_ERRNO_MUX_TIMEOUT : LOS_ERRNO_MUX_INVALID;
+}
+
+UINT32 LOS_MuxPost(UINT32 muxId) {
+    OsMutex *m = m_get(muxId);
+
+    if (m == 0) {
+        return LOS_ERRNO_MUX_INVALID;
+    }
+    if (os_mutex_post(m) != 0) {
+        return LOS_ERRNO_MUX_INVALID;
+    }
+    return LOS_OK;
+}
