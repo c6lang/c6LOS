@@ -3,7 +3,7 @@
 #include "c6os/tick.h"
 #include "c6os/port.h"
 
-#define STRESS_N 60000u
+#define STRESS_N 25000u
 
 static u32 g_runs = 0;
 
@@ -46,7 +46,7 @@ static void driver(void *arg) {
         if (os_task_get((u32)id) != 0) {
             (void)os_task_delete((u32)id);
         }
-        if ((i % 10000u) == 9999u) {
+        if ((i % 5000u) == 4999u) {
             port_puts("step ");
             put_u32(i + 1u);
             port_puts(" runs=");

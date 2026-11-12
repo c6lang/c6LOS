@@ -1,0 +1,38 @@
+#include "c6os/gfx.h"
+#include "c6os/port.h"
+
+static u16 g_fb[16 * 8] = {0};
+static u16 g_src[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+int main(void) {
+    OsGfx g = {0};
+    u32 i = 0;
+
+    os_gfx_init(&g, g_fb, 16u, 8u);
+    os_gfx_fill_rect(&g, 0, 0, 16, 8, 0x1234u);
+    if (os_gfx_get(&g, 0, 0) != 0x1234u || os_gfx_get(&g, 15, 7) != 0x1234u) {
+        port_puts("FAIL: fill\n");
+        return 1;
+    }
+    os_gfx_fill_rect(&g, -2, -2, 4, 4, 0xFFFFu);
+    if (os_gfx_get(&g, 0, 0) != 0xFFFFu || os_gfx_get(&g, 2, 2) != 0x1234u) {
+        port_puts("FAIL: clip\n");
+        return 2;
+    }
+    os_gfx_blit(&g, 14, 6, g_src, 3, 3);
+    if (os_gfx_get(&g, 14, 6) != 1u || os_gfx_get(&g, 15, 7) != 5u) {
+        port_puts("FAIL: blit\n");
+        return 3;
+    }
+    os_gfx_pixel(&g, -1, 0, 0);
+    os_gfx_pixel(&g, 16, 0, 0);
+    while (i < 16u * 8u) {
+        if (g_fb[i] == 0u && i != 0u) {
+            port_puts("FAIL: pixel oob\n");
+            return 4;
+        }
+        i++;
+    }
+    port_puts("PASS: gfx\n");
+    return 0;
+}

@@ -178,7 +178,7 @@
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log/date/reboot + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit` 带裁剪，`t_gfx` host PASS；字体与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
@@ -410,3 +410,7 @@
 - **M5-4 原生/LOS 一致性（host PASS）**：`t_consistency` 同一段断言分别走
   `os_sem_*`/`os_queue_*` 与 `LOS_Sem*`/`LOS_Queue*`，比较返回码、超时失败、
   指针出队和 4 字节值（0x1234 小端 34 12）一致。
+
+- **M7-3 帧缓冲基础（host PASS）**：`OsGfx` 保存 RGB565 缓冲与宽高，
+  `os_gfx_pixel/get/fill_rect/blit` 全部做边界裁剪；`t_gfx` 验证整屏填充、
+  负坐标裁剪、3×3 blit 和越界像素不写，输出 `PASS: gfx`。
