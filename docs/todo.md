@@ -307,3 +307,11 @@
   deadline 有序插入（`(i32)(a-b)` 处理 u32 回绕）；`os_sched_tick` 只弹到期项，
   不再线性递减 `delay_left`。阻塞/延时/唤醒/删除都同步取消，减少 M3-5 的双归属窗口。
   host `t_timeout`：100 个乱序插入后 deadline 单调、取消中间项、到期全弹出 PASS。
+
+- **S3 level-1 定时器中断（2026-11，真板 PASS）**：`port/s3/irq.S` 在 IRAM 建 1KB
+  向量表（Xtensa `j` 是 3 字节，0x300 偏移要 256 条），`wsr vecbase` 前先清
+  `PMS_CORE_0_VECBASE_OVERRIDE`（0x600C11C0 SEL=0，否则 VECBASE 被 ROM 覆盖），
+  并清 `PS.UM`（ROM 进来是 user mode，level-1 会走 0x340 用户向量）。
+  `CCOMPARE0 = CCOUNT + 400000`、`INTENABLE |= (1<<6)`，handler 保存 a0–a15/EPC1/PS，
+  用 `wsr PS + rsync + rfe` 返回。`make ... S3_MAIN=tests/t_s3_irq.c6 s3` 实测
+  `PASS: s3 irq tick`（纯忙等任务里 tick 仍推进 5 个）。`port_idle` 改为 `waiti 0`。

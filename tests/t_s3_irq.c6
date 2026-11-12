@@ -1,0 +1,57 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+static u32 g_ok = 0;
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+static void busy(void *arg) {
+    u32 start = (u32)os_tick_get();
+    u32 guard = 0;
+
+    /* 不 yield：只能靠 level-1 定时器中断推进 tick。 */
+    while ((u32)os_tick_get() < start + 5u) {
+        guard++;
+        if (guard > 200000000u) {
+            return;
+        }
+    }
+    g_ok = 1u;
+}
+
+void os_main(void) {
+    int id = 0;
+
+    port_init();
+    port_puts("c6os s3 irq tick test\n");
+    id = os_task_create("busy", busy, 0, 1u, 4096u);
+    if (id <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+    if (g_ok == 1u) {
+        port_puts("PASS: s3 irq tick\n");
+    } else {
+        port_puts("FAIL: s3 irq tick\n");
+    }
+}

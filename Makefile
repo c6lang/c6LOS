@@ -18,7 +18,8 @@ S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
 S3_OBJ  := $(BUILD)/obj/start.o \
            $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
-           $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
+           $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
+           $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o
 
 .PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
@@ -55,6 +56,14 @@ $(BUILD)/obj/c6rt.o: rt/c6rt.c
 $(BUILD)/obj/ctx.o: port/s3/ctx.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/irq.o: port/s3/irq.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/irq_asm.o: port/s3/irq.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
 
 $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj

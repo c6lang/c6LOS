@@ -10,6 +10,7 @@
 #include "c6os/tick.h"
 
 extern void os_sched_tick(void);
+extern void s3_irq_init(void);
 
 /* 诊断：RTC_CNTL STORE0..7 在复位后保留，esptool read-mem 0x60008050 可读。 */
 void s3_mark(u32 idx, u32 v)
@@ -96,8 +97,6 @@ void port_delay_ms(u32 ms)
     }
 }
 
-static u32 g_last_ccount = 0u;
-
 static u32 s3_ccount(void)
 {
     u32 v = 0u;
@@ -107,7 +106,7 @@ static u32 s3_ccount(void)
 
 /* ROM/bootloader 留下的 TG0 看门狗约 3s 复位一次；关掉并在 idle 里复喂，
    即使关闭没生效也不会把应用打断。 */
-static void s3_wdt_kick(void)
+void s3_wdt_kick(void)
 {
     *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0x50D83AA1u;
     *(volatile u32 *)(S3_TIMG0_BASE + 0x48u) = 0u;
@@ -117,15 +116,8 @@ static void s3_wdt_kick(void)
 
 void port_idle(void)
 {
-    u32 now = s3_ccount();
-
-    s3_wdt_kick();
-
-    /* 当前 CPU 还是复位后的 40MHz XTAL：40MHz / 100Hz = 400,000 cycles/tick。 */
-    if ((u32)(now - g_last_ccount) >= 400000u) {
-        g_last_ccount += 400000u;
-        os_sched_tick();
-    }
+    /* tick 已由 level-1 定时器中断推进；睡到下一次中断再回调度器。 */
+    __asm__ __volatile__("waiti 0");
 }
 
 void port_init(void)
@@ -133,7 +125,6 @@ void port_init(void)
     volatile u32 i;
 
     s3_mark(0u, 0x1111u);
-    g_last_ccount = s3_ccount();
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);
@@ -166,6 +157,7 @@ void port_init(void)
 
     s3_mark(2u, 0x3333u);
     port_puts("c6os s3 boot\n");
+    s3_irq_init();
 }
 
 void port_panic_halt(void)

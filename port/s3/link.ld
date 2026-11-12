@@ -10,6 +10,11 @@ SECTIONS
 {
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的
      （M1 之后代码变大时改用 -mno-text-section-literals + --auto-litpools）。 */
+  .vector : {
+    . = ALIGN(1024);
+    KEEP(*(.vector))
+  } > IRAM
+
   .text : {
     *(.literal.start)
     *(.text.start)
