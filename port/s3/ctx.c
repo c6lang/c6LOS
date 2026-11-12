@@ -74,6 +74,11 @@ void port_task_ctx_free(void *ctx)
     c->size = 0u;
 }
 
+void port_leave_task(void)
+{
+    g_s3_cur = 0;
+}
+
 void *port_cur_ctx(void)
 {
     return (void *)g_s3_cur;

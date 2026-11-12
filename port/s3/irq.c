@@ -13,6 +13,58 @@ extern void *os_sched_preempt_ctx(void);
 #define S3_IRQ_HZ 100u
 #define S3_XTAL_HZ 40000000u
 
+static u32 g_jlast;
+static u32 g_jmin = 0xFFFFFFFFu;
+static u32 g_jmax;
+static u32 g_jsum;
+static u32 g_jn;
+static u32 g_jhist[16];
+
+static void jitter_sample(u32 cc)
+{
+    if (g_jlast != 0u) {
+        u32 d = cc - g_jlast;
+        u32 dev = (d > 400000u) ? (d - 400000u) : (400000u - d);
+        u32 b = dev / 2000u;
+
+        if (b > 15u) {
+            b = 15u;
+        }
+        g_jhist[b] = g_jhist[b] + 1u;
+        if (d < g_jmin) {
+            g_jmin = d;
+        }
+        if (d > g_jmax) {
+            g_jmax = d;
+        }
+        g_jsum = g_jsum + d;
+        g_jn = g_jn + 1u;
+    }
+    g_jlast = cc;
+}
+
+u32 os_jitter_min(void) { return g_jmin; }
+u32 os_jitter_max(void) { return g_jmax; }
+u32 os_jitter_count(void) { return g_jn; }
+u32 os_jitter_avg(void) {
+    return g_jn != 0u ? g_jsum / g_jn : 0u;
+}
+u32 os_jitter_p99(void)
+{
+    u32 i = 0;
+    u32 acc = 0;
+    u32 need = (g_jn * 99u) / 100u;
+
+    while (i < 16u) {
+        acc = acc + g_jhist[i];
+        if (acc >= need) {
+            return i * 2000u;
+        }
+        i++;
+    }
+    return 15u * 2000u;
+}
+
 static void s3_timer_rearm(void)
 {
     u32 cc = 0;
@@ -66,6 +118,10 @@ void s3_trap(u32 frame_sp)
 
 void *s3_timer_irq(u32 frame_sp)
 {
+    u32 cc = 0;
+
+    __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
+    jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
     s3_mark(6u, (u32)os_tick_get());

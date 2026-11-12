@@ -32,10 +32,6 @@ void port_enter_task(void)
 {
 }
 
-void port_leave_task(void)
-{
-}
-
 void port_mark(u32 v)
 {
     s3_mark(4u, v);

@@ -106,7 +106,7 @@
 | M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 | 完成（计数/换算 host PASS；`ms→tick` 已改向上取整，0/1/101ms 边界断言通过） |
 | M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 完成（`kernel/timeout.c6` 有序数组 + u32 回绕比较；`t_timeout` 乱序 100 个、取消、到期弹出 PASS） |
 | M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS；S3 实测一次 100 tick 于第 100 tick 命中） |
-| M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 未开始 |
+| M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 完成（S3 真板：`min=400053 max=695423 avg=401052 p99dev=0 n=311`，`PASS: s3 jitter`；直方图 2k cycles/桶算 P99） |
 | M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 | 完成（`port_virtual_tick` + `os_sched_tick` 虚拟推进） |
 
 **M2 验收**：S3 上 100Hz 实测 ±1%；软定时器 100 次周期无漂移累积。
@@ -341,3 +341,9 @@
   中断，其余跳到 `_vec_exc`，把陷阱帧交给 `s3_trap()` 打印 `cause/pc/ps` 并停机。
   `tests/t_s3_trap.c6` 执行 `ill`，实测 `*** TRAP cause=00000000 pc=403cb9f0 ps=00060500`；
   定时器用例仍 `PASS: s3 irq tick`。
+
+- **M2-4 tick 抖动（真板 PASS）**：定时器 ISR 入口读 `CCOUNT`，统计相邻中断间隔，
+  `os_jitter_min/max/avg/p99/count()` 输出；200 tick 后 `avg=401052` cycles
+  （100.26Hz，理论 400000），99% 偏差落在 <2000 cycles 桶。同时修掉调度器空转时
+  `g_s3_cur` 仍指向已阻塞任务的问题：S3 `port_leave_task()` 现在清空当前 ctx，
+  否则 ISR 会把 idle 上下文写进阻塞任务。

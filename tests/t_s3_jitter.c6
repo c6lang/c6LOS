@@ -1,0 +1,62 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+extern u32 os_jitter_min(void);
+extern u32 os_jitter_max(void);
+extern u32 os_jitter_avg(void);
+extern u32 os_jitter_p99(void);
+extern u32 os_jitter_count(void);
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+static void measure(void *arg) {
+    u32 n = 0;
+
+    os_task_delay(200u);
+    n = os_jitter_count();
+    port_puts("min=");
+    put_u32(os_jitter_min());
+    port_puts(" max=");
+    put_u32(os_jitter_max());
+    port_puts(" avg=");
+    put_u32(os_jitter_avg());
+    port_puts(" p99dev=");
+    put_u32(os_jitter_p99());
+    port_puts(" n=");
+    put_u32(n);
+    port_puts("\n");
+    if (n >= 150u && os_jitter_avg() > 350000u && os_jitter_avg() < 450000u) {
+        port_puts("PASS: s3 jitter\n");
+    } else {
+        port_puts("FAIL: s3 jitter\n");
+    }
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 jitter test\n");
+    if (os_task_create("m", measure, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+}
