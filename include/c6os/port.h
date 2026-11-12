@@ -7,6 +7,7 @@
 
 void port_init(void);
 void port_idle(void);
+void port_panic_halt(void);
 
 void port_putc(int ch);
 void port_puts(const char *s);

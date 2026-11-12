@@ -6,5 +6,6 @@
 void kputc(int c);
 void kputs(const char *s);
 void kprintf(const char *fmt, ...);
+void klog_dump(void);
 
 #endif

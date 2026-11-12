@@ -1,0 +1,40 @@
+#include "c6os/panic.h"
+#include "c6os/log.h"
+
+void port_sim_capture_begin(void);
+const char *port_sim_capture_end(void);
+
+static int contains(const char *hay, const char *needle) {
+    const char *h = hay;
+    while (*h != '\0') {
+        const char *a = h;
+        const char *b = needle;
+        while (*a != '\0' && *b != '\0' && *a == *b) {
+            a++;
+            b++;
+        }
+        if (*b == '\0') {
+            return 1;
+        }
+        h++;
+    }
+    return 0;
+}
+
+int main(void) {
+    port_sim_capture_begin();
+    kputs("boot ok\n");
+    os_panic("boom");
+    const char *got = port_sim_capture_end();
+    if (!contains(got, "*** PANIC: boom ***")) {
+        return 1;
+    }
+    if (!contains(got, "boot ok")) {
+        return 2;
+    }
+    if (!contains(got, "--- halt ---")) {
+        return 3;
+    }
+    kputs("PASS: panic\n");
+    return 0;
+}

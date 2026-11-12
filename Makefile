@@ -101,9 +101,24 @@ $(BUILDH)/t_log: $(BUILDH)/t_log.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILD
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_log.ll $(BUILDH)/log.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log
+$(BUILDH)/panic.ll: kernel/panic.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_panic.ll: tests/t_panic.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_panic: $(BUILDH)/t_panic.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/kprintf.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_panic.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_sim.o \
+		-L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
+	./$(BUILDH)/t_panic
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"

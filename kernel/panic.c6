@@ -1,10 +1,39 @@
+#include "c6os/panic.h"
+#include "c6os/log.h"
 #include "c6os/port.h"
 
+/* M0 panic：打印原因 + 环形日志 + 可选陷阱帧，然后停机。
+ * host/sim 的 port_panic_halt() 直接返回，便于测试断言。 */
+
 void os_panic(const char *msg) {
-    port_puts("PANIC: ");
+    port_puts("\n*** PANIC: ");
     port_puts(msg);
-    port_puts("\n");
-    for (;;) {
-        port_idle();
+    port_puts(" ***\n");
+    port_puts("--- log ---\n");
+    klog_dump();
+    port_puts("--- halt ---\n");
+    port_panic_halt();
+}
+
+void os_panic_frame(const char *msg, const OsTrapFrame *tf) {
+    u32 i = 0;
+
+    port_puts("\n*** PANIC: ");
+    port_puts(msg);
+    port_puts(" ***\n");
+    kprintf("pc=%08x ps=%08x cause=%u vaddr=%08x\n",
+            tf->pc, tf->ps, tf->exccause, tf->excvaddr);
+    while (i < 16u) {
+        kprintf("a%u=%08x", i, tf->a[i]);
+        if ((i % 4u) == 3u) {
+            kputs("\n");
+        } else {
+            kputs(" ");
+        }
+        i++;
     }
+    port_puts("--- log ---\n");
+    klog_dump();
+    port_puts("--- halt ---\n");
+    port_panic_halt();
 }

@@ -74,3 +74,10 @@ void port_init(void)
 
     port_puts("c6os s3 boot\n");
 }
+
+void port_panic_halt(void)
+{
+    for (;;) {
+        __asm__ __volatile__("waiti 0");
+    }
+}

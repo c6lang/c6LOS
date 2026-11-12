@@ -61,3 +61,8 @@ void port_delay_ms(u32 ms)
 void port_idle(void)
 {
 }
+
+void port_panic_halt(void)
+{
+    /* host 测试：直接返回，让断言继续执行；目标机由 port 层死循环。 */
+}
