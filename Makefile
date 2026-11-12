@@ -1053,7 +1053,8 @@ $(RV32S_DIR)/sched: $(RV32S_OBJ)
 
 # ---- rv32 bare 参考目标（risc6 bare：真定时器陷阱/MTIP） ----
 RV32B_DIR  := build/rv32bare
-RV32B_C6   := tests/t_rv32bare_tick.c6 kernel/task.c6 kernel/tick.c6 \
+RV32B_MAIN ?= tests/t_rv32bare_tick.c6
+RV32B_C6   := $(RV32B_MAIN) kernel/task.c6 kernel/tick.c6 \
               kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6
 RV32B_LL   := $(addprefix $(RV32B_DIR)/ir/,$(notdir $(RV32B_C6:.c6=.ll)))
 RV32B_OBJ  := $(addprefix $(RV32B_DIR)/obj/,$(notdir $(RV32B_C6:.c6=.o))) \
