@@ -1,0 +1,91 @@
+#include "c6os/sem.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+static OsSem sem = {0};
+
+static void w1(void *arg) {
+    os_sem_pend(&sem, 0);
+    order[n] = 'A';
+    n++;
+}
+
+static void w2(void *arg) {
+    os_sem_pend(&sem, 0);
+    order[n] = 'B';
+    n++;
+}
+
+static void w3(void *arg) {
+    os_sem_pend(&sem, 0);
+    order[n] = 'C';
+    n++;
+}
+
+static void waker(void *arg) {
+    os_sem_post(&sem);
+    os_sem_post(&sem);
+    os_sem_post(&sem);
+}
+
+static void noop(void *arg) {
+}
+
+static int expect(const char *want) {
+    u32 i = 0;
+    while (want[i] != '\0') {
+        if (order[i] != want[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return order[i] == '\0';
+}
+
+int main(void) {
+    int id = 0;
+
+    if (os_sem_init(&sem, 0, 3) != 0) {
+        return 1;
+    }
+    if (os_task_create("w1", w1, 0, 3, 4096) <= 0) {
+        return 2;
+    }
+    if (os_task_create("w2", w2, 0, 1, 4096) <= 0) {
+        return 3;
+    }
+    if (os_task_create("w3", w3, 0, 2, 4096) <= 0) {
+        return 4;
+    }
+    if (os_task_create("wk", waker, 0, 9, 4096) <= 0) {
+        return 5;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (!expect("BCA")) {
+        port_puts("FAIL: prio wake ");
+        port_puts(order);
+        port_puts("\n");
+        return 6;
+    }
+
+    id = os_task_create("x", noop, 0, 5, 4096);
+    if (id <= 0) {
+        return 7;
+    }
+    os_task_boost((u32)id, 1);
+    if (os_task_get((u32)id)->prio != 1u) {
+        return 8;
+    }
+    os_task_restore((u32)id);
+    if (os_task_get((u32)id)->prio != 5u) {
+        return 9;
+    }
+    if (os_task_delete((u32)id) != 0) {
+        return 10;
+    }
+    port_puts("PASS: priority\n");
+    return 0;
+}

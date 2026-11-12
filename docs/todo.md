@@ -71,6 +71,8 @@
   8KB best-fit 堆 1000 次随机分配/释放后 `used==0`、`peak>0`。
 - M2-3 host PASS：周期 2 tick 定时器第 2/4 tick 各命中一次，stop 后不再命中；
   一次性定时器只命中一次。
+- M3-1/M3-3 host PASS：3 个等待者（prio 1/2/3）按优先级唤醒，顺序 `BCA`；
+  `os_task_boost/restore` 在 prio 5↔1 间切换正确。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
@@ -111,9 +113,9 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 进行中（pend/post/超时 host PASS；多等待者优先级唤醒待测） |
+| M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 完成（pend/post/超时 + 3 等待者按优先级唤醒 host PASS） |
 | M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 进行中（递归 + 所有权移交 host PASS；ISR 禁 pend 待接） |
-| M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 未开始 |
+| M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 进行中（boost/restore + mutex pend 钩子已接；链式重算待做） |
 | M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
 | M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 进行中（单等待节点 + 超时扫描已接；双归属链/竞争压测待做） |
 

@@ -84,6 +84,7 @@ int os_task_create(const char *name, OsTaskEntry entry, void *arg,
     t->entry = entry;
     t->arg = arg;
     t->prio = (u8)prio;
+    t->base_prio = (u8)prio;
     t->stack_size = stack_size;
     t->slice = (u32)C6OS_TIMESLICE;
     t->delay_left = 0;
@@ -174,20 +175,42 @@ int os_task_wake_event(void *obj, u32 bits) {
 
 int os_task_wake_first(void *obj, u8 kind, int result) {
     u32 i = 0;
+    OsTask *best = 0;
 
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
             t->wait_kind == kind) {
-            t->wait_obj = 0;
-            t->wait_result = result;
-            t->delay_left = 0;
-            t->state = (u8)OS_TASK_READY;
-            return 1;
+            if (best == 0 || t->prio < best->prio) {
+                best = t;
+            }
         }
         i++;
     }
-    return 0;
+    if (best == 0) {
+        return 0;
+    }
+    best->wait_obj = 0;
+    best->wait_result = result;
+    best->delay_left = 0;
+    best->state = (u8)OS_TASK_READY;
+    return 1;
+}
+
+void os_task_boost(u32 id, u32 prio) {
+    OsTask *t = os_task_get(id);
+
+    if (t != 0 && prio < (u32)t->prio) {
+        t->prio = (u8)prio;
+    }
+}
+
+void os_task_restore(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t != 0) {
+        t->prio = t->base_prio;
+    }
 }
 
 void os_sched_tick(void) {

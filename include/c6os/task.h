@@ -22,6 +22,7 @@ typedef struct OsTask {
     u32 slice;                 /* 剩余时间片（tick） */
     u32 delay_left;            /* 延时剩余 tick */
     u8 prio;                   /* 0..31，越小越高 */
+    u8 base_prio;              /* 未继承时的优先级 */
     u8 state;
     u8 wait_kind;              /* 1=对象等待，2=发送，3=接收 */
     void *wait_obj;            /* 等待对象 */
@@ -43,6 +44,8 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg);
 u32 os_task_wait_bits(void);
 int os_task_wake_event(void *obj, u32 bits);
 int os_task_wake_first(void *obj, u8 kind, int result);
+void os_task_boost(u32 id, u32 prio);
+void os_task_restore(u32 id);
 void os_task_exit(void);
 u32 os_task_self(void);
 u32 os_task_count(void);
