@@ -48,8 +48,9 @@ rt/         c6rt：mem*、软除法、err 状态、pthread 8 入口   C
 2. 跨 C ABI 只允许 `void*`、`u32`、`u64`、函数指针。**禁止** `long`、`size_t`、
    `long double`、按值结构体、数组跨边界。
 3. `port` 不得读写内核的 `struct OsTask`（TCB 对 port 不透明，port 只持有 `void *sp`）。
-4. 内核核心禁止浮点（lint）；S3 首版整镜像用**软浮点**（`-msoft-float`），
-   上下文切换不保存 f 寄存器；需要硬浮点时整体切换并加 FPU 帧（M8）。
+4. 内核核心禁止浮点（lint）；S3 工具链**没有软浮点开关**（`-msoft-float`/`-mno-fpu`
+   均不被接受，`float` 直接生成 `add.s`），因此陷阱帧必须保存 `f0–f15` + `FCR/FSR`。
+   浮点只允许出现在应用任务；内核核心仍然禁止。
 5. 内核核心禁用 c6 特性：`@T`、`async/co`、函数字面量/闭包、`f".."`、libc 头。
 6. 所有 `.c6` 源文件单独出 C（每个 TU 一个 `.c`），目标链接期不允许未声明符号。
 
@@ -201,8 +202,10 @@ port 切换路径：
 ### Xtensa 上下文（call0 ABI）
 
 - 编译加 `-mabi=call0`：a0=RA、a1=SP、a2–a11 参数/临时、a12–a15 callee-saved，
-  没有窗口溢出异常，切换简单。
-- 陷阱帧：`a0–a15`、`pc`、`ps`、`sar`、`lbeg`、`lend`、`lcount`（循环寄存器）。
+  没有窗口溢出异常，切换简单（实测生成 `call0`/`ret.n`；默认 windowed 生成
+  `call8`/`retw.n`）。
+- 陷阱帧：`a0–a15`、`pc`、`ps`、`sar`、`lbeg`、`lend`、`lcount`（循环寄存器）、
+  `f0–f15`、`fcr`、`fsr`（S3 默认硬浮点，必须保存）。
 - 中断入口：`VECBASE + level*64` 放跳板 → 公共入口；定时器用 `CCOMPARE0`，
   写回 `CCOMPARE0` 清中断；发 EOI 后再调度。
 - `rfi <level>` 返回；`port_frame_new` 为新任务伪造同样的帧（pc=入口跳板）。
@@ -307,7 +310,7 @@ void  port_panic_dump(void);
 
 约定：
 
-- `port_frame_new` 负责 FPU 区（首版软浮点可空）、入口跳板、16B 栈对齐。
+- `port_frame_new` 负责 FPU 区（`f0–f15`/`FCR`/`FSR`，必填）、入口跳板、16B 栈对齐。
 - 抢占式 port 的陷阱入口保存**完整**上下文；协作 port 只保存 callee-saved。
 - `port_irq_save/restore` 支持嵌套。
 - 时钟中断先清中断源/EOI 再调度；`os_sched_irq` 返回后不得再访问旧栈。
@@ -329,7 +332,7 @@ void  port_panic_dump(void);
 ## 16. 未决问题（施工中确认）
 
 1. 1.85″ 屏的面板 IC 与 SPI 引脚（需板卡丝印/卖家资料；`make s3-info` 清单）。
-2. Xtensa GCC 的 `-mabi=call0`/`-msoft-float` 在该工具链上的可用性（安装后立即验证）。
+2. Xtensa GCC 的 `-mabi=call0` 已实测可用；`-msoft-float` 不可用，FPU 帧必须实现。
 3. S3 的 IRAM/DRAM 精确边界与 ROM 保留区（以 IDF `soc.h` 宏为准，写进 `port/s3/memmap.h`）。
 4. CCOMPARE0 定时器与中断级别在 S3 rev0.2 上的实测行为。
 5. USB-Serial/JTAG 控制台的 FIFO/握手寄存器细节（以 IDF `usb_serial_jtag_ll.h` 为准）。

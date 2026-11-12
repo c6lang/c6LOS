@@ -11,7 +11,7 @@
 kernel/*.c6 ──c6──> │ LLVM IR（--emit-llvm）→ clang/ld.lld → qemu     │
                     └───────────────────────────────────────────────────┘
                     ┌─ 目标机 ESP32-S3 ────────────────────────────────┐
-kernel/*.c6 ──c6──> │ C99（-c -o dir/）→ xtensa-esp-elf-gcc → esptool │
+kernel/*.c6 ──c6──> │ C99（-c -o dir/）→ xtensa-esp32s3-elf-gcc → esptool │
                     └───────────────────────────────────────────────────┘
 ```
 
@@ -55,10 +55,10 @@ kernel/*.c6 ──c6──> │ C99（-c -o dir/）→ xtensa-esp-elf-gcc → es
 | host | `x86_64-linux-gnu` | LLVM IR | `--emit-llvm` + `clang -fuse-ld=lld` + `-ltcc1` | 逻辑单测、虚拟时钟 |
 | x86-64 裸机 | `x86_64-unknown-none` | LLVM IR | `-mno-sse -mno-red-zone -nostdlib` + `boot.S` | qemu-system-x86_64，真抢占 |
 | rv32 | `riscv32-unknown-elf` | LLVM IR | `-march=rv32imac_zicsr_zifencei -mabi=ilp32` | qemu-riscv32（ILP32 回归） |
-| **S3** | `xtensa-esp-elf` | **C99** | `-mcpu=esp32s3 -mabi=call0 -msoft-float -ffreestanding -nostdlib` | 真板（USB-Serial/JTAG） |
+| **S3** | `xtensa-esp32s3-elf-gcc` | **C99** | `-mabi=call0 -Os -ffreestanding -fno-builtin -nostdlib -mlongcalls -mtext-section-literals` | 真板（USB-Serial/JTAG） |
 
-> rv32 用 `-mabi=ilp32`（软浮点）而不是 `ilp32f`：与 S3 的 `-msoft-float` 对齐，
-> 内核核心不需要 FPU 帧；硬浮点留给 M8 的 app 镜像。
+> rv32 用 `-mabi=ilp32`（软浮点）而不是 `ilp32f`：内核核心不需要 FPU 帧，
+> qemu-riscv32 回归更接近纯整数调度路径（S3 的 FPU 帧另算）。
 
 ---
 
@@ -73,13 +73,13 @@ $C6CC -B $C6/tcc -c -o build/s3/c99/ kernel/*.c6 compat/*.c6 app/*.c6
 
 # 2) 每个 TU 编成对象
 for c in build/s3/c99/*.c; do
-  xtensa-esp-elf-gcc -mcpu=esp32s3 -mabi=call0 -msoft-float \
-    -ffreestanding -fno-builtin -fno-common -Os -Wall -Wextra \
+  xtensa-esp32s3-elf-gcc -mabi=call0 -Os -ffreestanding -fno-builtin -fno-common \
+    -mlongcalls -mtext-section-literals -Wall -Wextra \
     -Iinclude -c "$c" -o "build/s3/obj/$(basename "${c%.c}").o"
 done
 
 # 3) 汇编端口
-xtensa-esp-elf-gcc -mcpu=esp32s3 -mabi=call0 -msoft-float -c port/s3/*.S -o ...
+xtensa-esp32s3-elf-gcc -mabi=call0 -c port/s3/*.S -o ...
 
 # 4) 链接（脚本给出 IRAM/DRAM 段与入口）
 xtensa-esp-elf-ld -T port/s3/link.ld -nostdlib -o build/s3/c6os.elf build/s3/obj/*.o
@@ -95,10 +95,11 @@ esptool --chip esp32s3 --port /dev/ttyACM0 write-flash 0x0 build/s3/c6os.bin
 - `c6 -c -o dir/` 每个 `.c6` 产出一个 `.c`，文件名与输入同名；头文件不参与。
 - 生成的 C 只要求 `<string.h>` 的 `memcpy/memmove/memset`；目标侧由 `rt/c6rt.c`
   提供，`-ffreestanding` 下不拉 glibc。
-- `-mabi=call0`：无寄存器窗口溢出异常，上下文切换只存 a0–a15；若该工具链不支持
-  call0，退 windowed ABI 并实现 `WindowOverflow4/8/12` 向量（工作量 +1 天）。
-- `-msoft-float`：整镜像软浮点，陷阱帧不含 f0–f15；M8 若启用硬浮点，必须同时加
-  FPU 帧并全镜像统一 ABI。
+- `-mabi=call0`：无寄存器窗口溢出异常，上下文切换只存 a0–a15；已实测：
+  `-mabi=call0` 生成 `call0`/`ret.n`，默认 windowed 生成 `call8`/`retw.n`。
+- **FPU 必须进陷阱帧**：该 GCC 没有 `-msoft-float`/`-mno-fpu`/`-mfloat-abi` 开关，
+  `float` 直接生成 `add.s f0` 等指令；陷阱帧保存 `f0–f15` + `FCR/FSR`。
+  内核核心自身禁止浮点（lint），浮点只出现在应用任务。
 - 不链接 `libtcc1`（LGPL + LP64 签名）；目标侧运行库是 `rt/c6rt.c`。
 - 链接脚本的 IRAM/DRAM 边界以 IDF `soc/esp32s3/include/soc/soc.h` 的
   `SOC_IRAM_LOW/HIGH`、`SOC_DRAM_LOW/HIGH` 为准，写死在 `port/s3/memmap.h` 并在
@@ -133,11 +134,14 @@ make install-xtensa
 安装后自检（`make toolchain-info`）：
 
 ```sh
-xtensa-esp-elf-gcc --version
-xtensa-esp-elf-gcc -mcpu=esp32s3 -mabi=call0 -msoft-float -c -x c /dev/null -o /dev/null
-xtensa-esp-elf-ld --version
+xtensa-esp32s3-elf-gcc --version       # 实际打印 xtensa-esp-elf-gcc 16.1.0
+xtensa-esp32s3-elf-gcc -mabi=call0 -c -x c /dev/null -o /dev/null
+xtensa-esp32s3-elf-ld --version
 esptool version
 ```
+
+> 该工具链是统一包（`xtensa-esp-elf-*` 二进制 + `xtensa-esp32s3-elf-*` 前缀包装），
+> 用 `xtensa-esp32s3-elf-gcc` 选核；**不要**传 `-mcpu=esp32s3`（不被接受）。
 
 ---
 
@@ -201,7 +205,7 @@ S3 的 C99 路径与此无关，不受影响。
 
 | 现象 | 原因/处理 |
 |---|---|
-| `error: unsupported option '-mcpu='` | 用错编译器（host clang）；S3 必须 `xtensa-esp-elf-gcc` |
+| `error: unsupported option '-mcpu='` | host clang 或统一驱动；S3 必须用 `xtensa-esp32s3-elf-gcc`（前缀选核，不传 `-mcpu`） |
 | `undefined reference to __c6_*` | 忘了编 `rt/c6rt.c` 或没进链接列表 |
 | `region IRAM overflowed` | 内核超预算；先看 `size`，把只读表放 DRAM/或减功能 |
 | esptool 连不上 | 板子不在下载模式；`--before default-reset`，或按住 BOOT 复位 |

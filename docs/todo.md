@@ -9,7 +9,7 @@
 
 | 编号 | 任务 | 产出 | 验收 | 状态 |
 |---|---|---|---|---|
-| P0-1 | 安装 Xtensa 工具链 | `~/.c6os/toolchain/xtensa-esp-elf`（16.1.0） | `xtensa-esp-elf-gcc --version`；`-mcpu=esp32s3 -mabi=call0 -msoft-float` 可编 | 完成 |
+| P0-1 | 安装 Xtensa 工具链 | `~/.c6os/toolchain/xtensa-esp-elf`（16.1.0） | `xtensa-esp32s3-elf-gcc --version`；`-mabi=call0` 可编（`-mcpu=esp32s3`/`-msoft-float` 均不支持） | 完成 |
 | P0-2 | esptool | 5.6.0（系统 pip） | `esptool version`；能连 `/dev/ttyACM0` | 完成 |
 | P0-3 | 硬件实测 | README「已知硬件」 | chip-id / flash-id / PSRAM 8MB / MAC | 完成 |
 | P0-4 | 原厂 flash 备份 | `build/backup/flash-16MB.bin` + sha256 | 读回 16MB，可回滚 | 未开始 |
@@ -47,7 +47,7 @@
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 |
-| M1-8 上下文切换 | S3 陷阱帧 a0–a15/pc/ps/sar/lbeg/lend/lcount | S3-4：两任务交替打印 1000 次无错 |
+| M1-8 上下文切换 | S3 陷阱帧 a0–a15/pc/ps/sar/lbeg/lend/lcount/f0–f15/fcr/fsr | S3-4：两任务交替打印 1000 次无错 |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
 
@@ -140,7 +140,7 @@
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic |
 | M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 |
-| M8-3 硬浮点（可选） | FPU 帧、全镜像统一 ABI | 浮点任务切换上下文一致 |
+| M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 |
 
@@ -152,7 +152,7 @@
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| `-mabi=call0` 在该 GCC 上不可用 | 上下文切换方案变更 | 立即验证；退 windowed ABI + 窗口溢出向量 |
+| FPU 无软浮点开关（实测） | 切换帧变大、开销增加 | 陷阱帧固定保存 f0–f15/FCR/FSR；M8 可做惰性保存 |
 | 屏型号/引脚未知 | M7 阻塞 | `make s3-info` 清单；RDDID 探测；找卖家资料 |
 | USB-Serial/JTAG 控制台寄存器细节 | M0 控制台 | 以 IDF `usb_serial_jtag_ll.h` 为准；UART0 兜底 |
 | ROM 保留 DRAM 区域 | 启动即崩 | 以 `soc.h` 边界为准，栈放 DRAM 顶并留 4KB |
