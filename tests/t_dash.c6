@@ -10,6 +10,8 @@ int main(void) {
 
     os_gfx_init(&g, g_fb, 64u, 64u);
     os_dash_render(&g, 1234u, 5u, 4096u);
+    os_dash_task_row(&g, 52, 7u, 12u, 'R', "IDLE");
+    os_dash_log(&g, 56, "LOG OK");
     while (i < 64u * 64u) {
         if (g_fb[i] != 0u) {
             lit++;
