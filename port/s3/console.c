@@ -140,7 +140,12 @@ void s3_wdt_kick(void)
 
 void port_idle(void)
 {
-    /* tick 已由 level-1 定时器中断推进；睡到下一次中断再回调度器。 */
+    /* 核 0 有 level-1 定时器中断，可 waiti；核 1 暂无 IPI，忙轮询才能
+     * 看到别的核投递的任务/信号量唤醒。 */
+    if (port_core_id() != 0u) {
+        __asm__ __volatile__("nop");
+        return;
+    }
     __asm__ __volatile__("waiti 0");
 }
 
