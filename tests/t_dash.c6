@@ -1,0 +1,25 @@
+#include "c6os/dash.h"
+#include "c6os/port.h"
+
+static u16 g_fb[64 * 64] = {0};
+
+int main(void) {
+    OsGfx g = {0};
+    u32 i = 0;
+    u32 lit = 0;
+
+    os_gfx_init(&g, g_fb, 64u, 64u);
+    os_dash_render(&g, 1234u, 5u, 4096u);
+    while (i < 64u * 64u) {
+        if (g_fb[i] != 0u) {
+            lit++;
+        }
+        i++;
+    }
+    if (lit < 50u) {
+        port_puts("FAIL: dash\n");
+        return 1;
+    }
+    port_puts("PASS: dash\n");
+    return 0;
+}
