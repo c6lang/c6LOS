@@ -8,6 +8,8 @@ static void putc_(int c) { *(volatile unsigned int *)MMIO_CONSOLE = (unsigned in
 static void puts_(const char *s) { while (*s) { putc_(*s++); } }
 static void puthex_(unsigned int v) { int i; const char *h="0123456789abcdef"; for(i=28;i>=0;i-=4) putc_(h[(v>>i)&15]); }
 
+extern int bench_start(void);
+
 static void *demo(UINT32 arg) {
     (void)arg;
     puts_("LiteOS-M S3 up\n");
@@ -34,9 +36,11 @@ int main(void) {
         *(volatile unsigned int *)MMIO_EXIT = 2u;
         while (1) {}
     }
-    r = LOS_TaskCreate(&id, &p);
-    puts_("task create rc="); puthex_(r); putc_('\n');
-    if (r != LOS_OK) {
+    (void)id;
+    (void)p;
+    r = (UINT32)bench_start();
+    puts_("bench start rc="); puthex_(r); putc_('\n');
+    if (r != 0u) {
         *(volatile unsigned int *)MMIO_EXIT = 3u;
         while (1) {}
     }

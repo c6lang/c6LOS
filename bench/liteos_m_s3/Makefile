@@ -63,7 +63,7 @@ OBJS = $(patsubst $(LITEOS_ROOT)/kernel/src/%.c,$(OBJ)/%.o,$(KSRC)) \
        $(OBJ)/los_timer.o $(OBJ)/los_dispatch.o $(OBJ)/los_exc.o $(OBJ)/los_window.o \
        $(OBJ)/los_debug.o $(OBJ)/los_error.o $(OBJ)/los_hook.o \
        $(OBJ)/sec_memcpy_s.o $(OBJ)/sec_memset_s.o $(OBJ)/sec_strncpy_s.o \
-       $(OBJ)/board.o $(OBJ)/mem.o $(OBJ)/start.o
+       $(OBJ)/board.o $(OBJ)/bench.o $(OBJ)/mem.o $(OBJ)/start.o
 
 $(BIN).elf: $(OBJS) link.ld
 	$(LD) -T link.ld -o $@ $(OBJS) \
