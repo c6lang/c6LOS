@@ -146,7 +146,10 @@ void port_idle(void)
 
 u32 port_core_id(void)
 {
-    return 0u;
+    u32 id;
+    /* Xtensa PRID：0=PRO_CPU，1=APP_CPU。 */
+    __asm__ __volatile__("rsr %0, prid" : "=r"(id));
+    return id;
 }
 
 void port_init(void)
