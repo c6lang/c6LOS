@@ -164,7 +164,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 | 完成（`kernel/hwi.c6` 32 槽注册表 + `compat/los_hwi.c6` 双 API；`t_hwi` 3 个 IRQ 共存/参数/禁用/重复注册/删除 + LOS_Hwi 全 PASS） |
-| M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs |
+| M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs | 完成（S3 定时器 ISR 末尾 post 信号量唤醒任务，100 次 `min=2943 avg=2992 max=4486` cycles，平均 74.8µs < 100µs，`PASS: s3 irq latency`） |
 | M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 | 完成（`t_irq_nest` 5 层深度 0→4→0，`PASS: irq nest`；sim 计数、x86 RFLAGS.IF、S3 `rsil/wsr ps`、rv32 用户态 no-op） |
 | M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic | 完成（`os_task_block_arg`/`os_task_delay` 检查 `port_in_isr` 并 panic；`t_isr` 输出两条 PANIC 后 PASS） |
 
@@ -452,3 +452,8 @@
   `os_sys_heap_*()` 只读接口，S3 实测 `ps n=1 / 1 1 X sh`、heap 数值正确。
 - **S3 构建规则**：`$(BUILD)/c99/%.c` 旧缓存只比较源路径列表，改头文件不重编；
   已改为 `S3_C6` 每个源文件一条 c6 规则，依赖全部 `include/c6os|los/*.h`。
+
+- **M6-2 ISR→任务延迟（真板 PASS）**：`s3_irq_set_hook()` 在定时器 ISR
+  `os_sched_tick()` 之后 post 信号量；worker 每 tick `os_sem_pend` 醒来读
+  `CCOUNT - ISR入口CCOUNT`。100 次：min 2943 / avg 2992（74.8µs）/
+  max 4486 cycles（112µs），平均满足 <100µs。hook 为空时对原中断路径零影响。
