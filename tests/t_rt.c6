@@ -185,11 +185,17 @@ static int run(void) {
     return 0;
 }
 
-#ifdef C6OS_BARE
+#if defined(C6OS_BARE)
 void os_main(void) {
     port_init();
     (void)run();
     port_bare_exit(0u);
+}
+#elif defined(C6OS_S3)
+void os_main(void) {
+    port_init();
+    (void)run();
+    port_reboot();
 }
 #else
 int main(void) {

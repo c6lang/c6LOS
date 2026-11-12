@@ -11,6 +11,7 @@ PORT    ?= /dev/ttyACM0
 
 BUILD   := build/s3
 S3_MAIN ?= kernel/os.c6
+S3_C6FLAGS ?=
 S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/heap.c6
 S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(S3_EXTRA_C6)
 S3_NAMES := $(notdir $(S3_C6))
@@ -35,7 +36,7 @@ S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
-	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(1)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 

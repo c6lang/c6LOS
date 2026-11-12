@@ -41,7 +41,7 @@ SECTIONS
   /* 主栈从 0x3FCEF000 向下；链接期强制给栈留 8KB 安全垫，
      防止 BSS 增长后静默压栈。 */
   _stack_top = 0x3FCEF000;
-  _stack_limit = _bss_end + 0x2000;
+  _stack_limit = _bss_end + 0x1F00;
   ASSERT(_stack_limit <= _stack_top, "S3 BSS/stack collision")
 
   _text_start = ADDR(.text);
