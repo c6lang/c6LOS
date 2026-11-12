@@ -87,7 +87,7 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（create/delete 1000 次 host PASS；magic 待加） |
-| M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
+| M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 完成（`t_prio32`：31/5/10 三任务按 5→10→31 运行；32 个优先级逐个创建/运行全 PASS） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 PIT 抢占 `PASS: x86 preempt`；S3 定时器中断抢占 `ca=61198 cb=61311` / `PASS: s3 preempt`；host SIGALRM 异步抢占 `PASS: sim preempt`） |
@@ -347,3 +347,7 @@
   （100.26Hz，理论 400000），99% 偏差落在 <2000 cycles 桶。同时修掉调度器空转时
   `g_s3_cur` 仍指向已阻塞任务的问题：S3 `port_leave_task()` 现在清空当前 ctx，
   否则 ISR 会把 idle 上下文写进阻塞任务。
+
+- **M1-2 就绪位图 32 组（host PASS）**：`t_prio32` 先同时挂 31/5/10 三个就绪任务，
+  验证 `ctz32(ready_bit)` 选最高优先级得到 5→10→31；再对 0..31 每个优先级单独
+  创建/运行一次，全部命中。
