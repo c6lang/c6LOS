@@ -30,6 +30,11 @@ static void cap_put(int ch)
     }
 }
 
+u32 port_core_id(void)
+{
+    return 0u;
+}
+
 void port_init(void)
 {
 }

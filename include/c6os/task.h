@@ -27,6 +27,7 @@ typedef struct OsTask {
     u8 prio;                   /* 0..31，越小越高 */
     u8 base_prio;              /* 未继承时的优先级 */
     u8 state;
+    u8 core;                  /* 所属核（SMP 静态分区） */
     u8 wait_kind;              /* 1=对象等待，2=发送，3=接收 */
     void *wait_obj;            /* 等待对象 */
     int wait_result;           /* 0=OK，-2=超时，-3=删除 */
@@ -38,7 +39,11 @@ typedef struct OsTask {
 
 int os_task_create(const char *name, OsTaskEntry entry, void *arg,
                    u32 prio, u32 stack_size);
+int os_task_create_on(u32 core, const char *name, OsTaskEntry entry, void *arg,
+                      u32 prio, u32 stack_size);
 void os_task_start(void);
+void os_task_start_core(u32 core);
+u32 os_task_core(u32 id);
 void os_task_yield(void);
 void os_task_delay(u32 ticks);
 void os_sched_tick(void);

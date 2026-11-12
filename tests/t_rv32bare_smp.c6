@@ -1,0 +1,59 @@
+/* SMP 冒烟：核 0 建两个任务，分别静态绑定核 0/核 1，各自累加计数。 */
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+extern void port_bare_exit(u32 code);
+
+static volatile u32 g_a = 0;
+static volatile u32 g_b = 0;
+static volatile u32 g_ready = 0;
+
+static void task_a(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < 2000u) {
+        g_a = g_a + 1u;
+        i++;
+    }
+    os_task_exit();
+}
+
+static void task_b(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < 2000u) {
+        g_b = g_b + 1u;
+        i++;
+    }
+    os_task_exit();
+}
+
+void os_main(void) {
+    u32 me = port_core_id();
+
+    if (me == 0u) {
+        (void)os_task_create_on(0u, "a", task_a, 0, 1u, 2048u);
+        (void)os_task_create_on(1u, "b", task_b, 0, 1u, 2048u);
+        g_ready = 1u;
+    } else {
+        while (g_ready == 0u) {
+        }
+    }
+    os_task_start_core(me);
+    if (me == 0u) {
+        if (g_a == 2000u) {
+            port_puts("PASS: smp task a\n");
+        } else {
+            port_puts("FAIL: smp task a\n");
+            port_bare_exit(1u);
+        }
+        if (g_b == 2000u) {
+            port_puts("PASS: smp task b\n");
+            port_bare_exit(0u);
+        }
+        port_puts("FAIL: smp task b\n");
+        port_bare_exit(1u);
+    }
+    for (;;) {
+    }
+}

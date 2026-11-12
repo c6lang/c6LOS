@@ -22,7 +22,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o $(BUILD)/obj/core1.o
 
-.PHONY: all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -1068,7 +1068,7 @@ rv32bare-tick: $(RV32B_DIR)/tick
 run-rv32bare-tick: rv32bare-tick
 	$(RISC6) --bare $(RV32B_DIR)/tick
 
-check-sim: run-rv32-emu run-rv32-emu-sched run-rv32bare-tick
+check-sim: run-rv32-emu run-rv32-emu-sched run-rv32bare-tick run-rv32bare-smp
 
 $(RV32B_DIR)/ir/stamp: $(RV32B_C6)
 	@mkdir -p $(RV32B_DIR)/ir
@@ -1117,6 +1117,71 @@ $(RV32B_DIR)/obj/libc.o: rt/x86_libc.c
 
 $(RV32B_DIR)/tick: $(RV32B_OBJ)
 	clang $(RV32BFLAGS) -static -fuse-ld=lld -o $@ $^
+
+# ---- rv32 bare SMP 参考目标（两 hart 各跑一个任务） ----
+RV32BS_DIR  := build/rv32bare-smp
+RV32BS_MAIN ?= tests/t_rv32bare_smp.c6
+RV32BS_C6   := $(RV32BS_MAIN) kernel/task.c6 kernel/tick.c6 \
+              kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6
+RV32BS_OBJ  := $(addprefix $(RV32BS_DIR)/obj/,$(notdir $(RV32BS_C6:.c6=.o))) \
+              $(RV32BS_DIR)/obj/start.o $(RV32BS_DIR)/obj/trap.o \
+              $(RV32BS_DIR)/obj/console.o $(RV32BS_DIR)/obj/ctx.o \
+              $(RV32BS_DIR)/obj/ctx_asm.o $(RV32BS_DIR)/obj/kprintf.o \
+              $(RV32BS_DIR)/obj/libc.o
+
+rv32bare-smp: $(RV32BS_DIR)/smp
+
+run-rv32bare-smp: rv32bare-smp
+	$(RISC6) --bare --harts 2 $(RV32BS_DIR)/smp
+
+$(RV32BS_DIR)/ir/stamp: $(RV32BS_C6)
+	@mkdir -p $(RV32BS_DIR)/ir
+	for f in $^; do \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $(RV32BS_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
+		sed -e 's|^target datalayout = .*|target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"|' \
+		    -e 's|^target triple = .*|target triple = "riscv32-unknown-linux-gnu"|' \
+		    $(RV32BS_DIR)/ir/$$(basename $$f .c6).raw.ll > $(RV32BS_DIR)/ir/$$(basename $$f .c6).ll || exit 1; \
+	done
+	@touch $@
+
+$(RV32BS_DIR)/ir/%.ll: $(RV32BS_DIR)/ir/stamp
+	@test -f $@
+
+$(RV32BS_DIR)/obj/%.o: $(RV32BS_DIR)/ir/%.ll $(RV32BS_DIR)/ir/stamp
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32BS_DIR)/obj/start.o: port/rv32bare/start.S
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32BS_DIR)/obj/trap.o: port/rv32bare/trap.S
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32BS_DIR)/obj/console.o: port/rv32bare/console.c
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32BS_DIR)/obj/ctx.o: port/rv32/ctx.c
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32BS_DIR)/obj/ctx_asm.o: port/rv32/ctx.S
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32BS_DIR)/obj/kprintf.o: rt/kprintf.c
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -Irt -c -o $@ $<
+
+$(RV32BS_DIR)/obj/libc.o: rt/x86_libc.c
+	@mkdir -p $(RV32BS_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32BS_DIR)/smp: $(RV32BS_OBJ)
+	clang $(RV32BFLAGS) -static -fuse-ld=lld -o $@ $^
+
 
 clean:
 	rm -rf $(BUILD) $(BUILDH)

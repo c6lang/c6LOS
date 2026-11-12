@@ -22,6 +22,11 @@ static void sys_exit(long code)
     }
 }
 
+u32 port_core_id(void)
+{
+    return 0u;
+}
+
 void port_init(void)
 {
 }

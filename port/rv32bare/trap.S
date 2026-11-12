@@ -3,7 +3,7 @@
     .align 4
     .globl risc6_trap_save
 risc6_trap_save:
-    .space 4 * 40
+    .space 4 * 40 * 4
 
     .section .text
     .align 2

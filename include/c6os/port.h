@@ -5,6 +5,7 @@
 
 /* M0 最小端口面。后续里程碑按 docs/architecture.md §14 增补。 */
 
+u32 port_core_id(void);
 void port_init(void);
 void port_idle(void);
 void port_panic_halt(void);

@@ -11,14 +11,21 @@ void rv_bare_tick_irq(void)
 {
     os_sched_tick();
 }
-extern u32 risc6_trap_save[40];
+extern u32 risc6_trap_save[];
+
+u32 port_core_id(void)
+{
+    u32 v;
+    __asm__ __volatile__("csrr %0, mhartid" : "=r"(v));
+    return v;
+}
 
 void port_init(void)
 {
     u32 t = 0x80u;
 
     __asm__ __volatile__("csrw mtvec, %0" : : "r"(&rv_bare_trap));
-    __asm__ __volatile__("csrw mscratch, %0" : : "r"(risc6_trap_save));
+    __asm__ __volatile__("csrw mscratch, %0" : : "r"(&risc6_trap_save[port_core_id() * 40u]));
     __asm__ __volatile__("csrs mie, %0" : : "r"(t));
     __asm__ __volatile__("csrsi mstatus, 8");
 }

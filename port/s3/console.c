@@ -144,6 +144,11 @@ void port_idle(void)
     __asm__ __volatile__("waiti 0");
 }
 
+u32 port_core_id(void)
+{
+    return 0u;
+}
+
 void port_init(void)
 {
     volatile u32 i;

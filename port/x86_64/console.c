@@ -17,6 +17,11 @@ static u8 inb(u32 port)
 
 extern void x86_irq_init(void);
 
+u32 port_core_id(void)
+{
+    return 0u;
+}
+
 void port_init(void)
 {
     outb(COM1 + 1u, 0x00u);

@@ -2,6 +2,9 @@
 #define C6OS_CONFIG_H
 
 /* 可覆盖的编译期配置；目标侧用 -D 覆盖。 */
+#ifndef C6OS_MAX_CORES
+#define C6OS_MAX_CORES 2
+#endif
 #ifndef C6OS_MAX_TASKS
 #define C6OS_MAX_TASKS 16
 #endif

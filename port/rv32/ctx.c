@@ -1,3 +1,4 @@
+#include "c6os/config.h"
 #include "c6os/types.h"
 #include "c6os/port.h"
 
@@ -16,8 +17,8 @@ static RvCtx g_ctx[RV_MAX_CTX];
 static u8 g_stacks[RV_MAX_CTX][RV_STACK_SZ] __attribute__((aligned(16)));
 static u32 g_used;
 
-void *g_cur_ctx;
-void *g_sched_sp;
+void *g_cur_ctx[C6OS_MAX_CORES];
+void *g_sched_sp[C6OS_MAX_CORES];
 
 void rv32_tramp(void);
 
