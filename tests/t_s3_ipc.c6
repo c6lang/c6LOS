@@ -1,0 +1,83 @@
+#include "c6os/types.h"
+#include "c6os/sem.h"
+#include "c6os/mutex.h"
+#include "c6os/event.h"
+#include "c6os/queue.h"
+#include "c6os/membox.h"
+#include "c6os/heap.h"
+#include "c6os/port.h"
+
+static OsSem g_sem = {0};
+static OsMutex g_mux = {0};
+static OsEvent g_ev = {0};
+static void *g_qs[4] = {0};
+static OsQueue g_q = {0};
+static u8 g_mb[128] = {0};
+static OsMembox g_box = {0};
+static u8 g_heap_mem[512] = {0};
+static OsHeap g_heap = {0};
+static u32 g_item = 0x1234u;
+
+static u32 fails = 0;
+
+static void ok(const char *name, u32 cond) {
+    if (cond != 0u) {
+        port_puts("PASS: ");
+        port_puts(name);
+        port_putc(10);
+    } else {
+        fails++;
+        port_puts("FAIL: ");
+        port_puts(name);
+        port_putc(10);
+    }
+}
+
+void os_main(void) {
+    void *p = 0;
+    void *q = 0;
+    u32 n = 0;
+
+    port_puts("s3 ipc test\n");
+
+    ok("sem-init", os_sem_init(&g_sem, 0u, 4u) == 0);
+    (void)os_sem_post(&g_sem);
+    ok("sem-post", os_sem_count(&g_sem) == 1u);
+    ok("sem-pend", os_sem_pend(&g_sem, 0u) == 0 && os_sem_count(&g_sem) == 0u);
+
+    ok("mux-init", os_mutex_init(&g_mux) == 0);
+    ok("mux-pend", os_mutex_pend(&g_mux, 0u) == 0);
+    ok("mux-post", os_mutex_post(&g_mux) == 0);
+
+    ok("ev-init", os_event_init(&g_ev) == 0);
+    (void)os_event_set(&g_ev, 3u);
+    ok("ev-set", os_event_get(&g_ev) == 3u);
+    (void)os_event_clear(&g_ev, 1u);
+    ok("ev-clear", os_event_get(&g_ev) == 2u);
+
+    ok("q-init", os_queue_init(&g_q, g_qs, 4u) == 0);
+    ok("q-put", os_queue_put(&g_q, &g_item, 0u) == 0);
+    p = os_queue_get(&g_q, 0u);
+    ok("q-get", p == &g_item && os_queue_count(&g_q) == 0u);
+
+    ok("mb-init", os_membox_init(&g_box, g_mb, 16u, 4u) == 0);
+    p = os_membox_alloc(&g_box);
+    q = os_membox_alloc(&g_box);
+    ok("mb-alloc", p != 0 && q != 0 && p != q);
+    (void)os_membox_free(&g_box, p);
+    (void)os_membox_free(&g_box, q);
+    ok("mb-free", os_membox_free_count(&g_box) == 4u);
+
+    os_heap_init(&g_heap, g_heap_mem, 512u);
+    p = os_heap_alloc(&g_heap, 32u);
+    n = os_heap_used(&g_heap);
+    ok("heap-alloc", p != 0 && n > 0u);
+    (void)os_heap_free(&g_heap, p);
+    ok("heap-free", os_heap_used(&g_heap) == 0u);
+
+    if (fails == 0u) {
+        port_puts("ALL PASS: ipc\n");
+    } else {
+        port_puts("SOME FAIL: ipc\n");
+    }
+}
