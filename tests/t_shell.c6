@@ -2,6 +2,7 @@
 #include "c6os/task.h"
 #include "c6os/heap.h"
 #include "c6os/port.h"
+#include "c6os/cobs.h"
 
 extern void port_sim_capture_begin(void);
 extern const char *port_sim_capture_end(void);
@@ -47,6 +48,12 @@ int main(void) {
     (void)os_shell_exec("free");
     (void)os_shell_exec("help");
     (void)os_shell_exec("bogus");
+    {
+        u8 enc[32] = {0};
+        u32 en = cobs_encode((const u8 *)"tick", 4u, enc, (u32)sizeof(enc), 1u);
+
+        (void)os_shell_exec_frame(enc, en - 1u);
+    }
     out = port_sim_capture_end();
     if (has(out, "tick=") == 0 || has(out, "worker") == 0 ||
         has(out, "used=") == 0 || has(out, "help tick") == 0 ||

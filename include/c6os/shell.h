@@ -6,5 +6,6 @@
 
 void os_shell_bind_heap(OsHeap *h);
 int os_shell_exec(const char *line);
+int os_shell_exec_frame(const u8 *frame, u32 n);
 
 #endif

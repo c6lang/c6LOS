@@ -4,6 +4,7 @@
 #include "c6os/tick.h"
 #include "c6os/port.h"
 #include "c6os/log.h"
+#include "c6os/cobs.h"
 
 static OsHeap *g_heap;
 
@@ -193,4 +194,21 @@ int os_shell_exec(const char *line)
     port_puts(argv[0]);
     port_puts("\n");
     return -1;
+}
+
+int os_shell_exec_frame(const u8 *frame, u32 n)
+{
+    u8 line[128];
+    int dn = 0;
+
+    if (frame == 0 || n == 0u) {
+        return -1;
+    }
+    dn = cobs_decode(frame, n, line, (u32)sizeof(line) - 1u);
+    if (dn < 0) {
+        port_puts("bad frame\n");
+        return -1;
+    }
+    line[dn] = 0;
+    return os_shell_exec((const char *)line);
 }

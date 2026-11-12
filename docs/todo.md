@@ -380,4 +380,5 @@
 
 - **M7-1 COBS 帧（host PASS）**：`cobs_encode/decode` 带可选 0x00 分隔符；
   `t_cobs` 验证 `{11 22 00 33}` → `03 11 22 02 33 00`、连续 5 个 0 的块码，
-  以及编码→解码回环，输出 `PASS: cobs`。
+  以及编码→解码回环，输出 `PASS: cobs`。`os_shell_exec_frame()` 已把 COBS 帧解成
+  一行再执行，`t_shell` 用编码后的 `tick` 帧走通。
