@@ -30,7 +30,7 @@
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（`os_panic`/`os_panic_frame` + 日志回放已 host PASS；S3 陷阱入口未接） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 完成（S3 实测 `elapsed=100` / `PASS: tick`；40MHz XTAL 下 400k cycles/tick） |
-| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke 已 PASS；rv32/x86 待接） |
+| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke PASS；x86-64 裸机 `make run-x86` 已输出 `PASS: x86 hello`；rv32 待接） |
 
 **M0 验收**：三参考目标打印 banner；S3 上串口有 banner + tick 计数；`make s3` size 在预算内。
 
@@ -269,3 +269,12 @@
 - S3 测试镜像构建：
   `make BUILD=build/s3test S3_MAIN=tests/t_s3_sched.c6 S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6" s3`
 
+
+- **x86-64 参考目标上板等价验证（2026-11）**：`make run-x86` 在 qemu 里从自写引导扇区启动，
+  经 16→32→long mode 进入 c6 生成的 64 位 `os_main`，串口输出
+  `c6os x86_64 boot` / `PASS: x86 hello`。要点：
+  1. qemu 8.2 的 `-kernel` 不再接受 multiboot/PVH，只能走**自有引导扇区**
+     （int13h LBA 读平铺镜像到 0x10000，再切保护模式）。
+  2. 4 级页表需要 PML4→PDPT→PD 三层，直接把 PS=1 的 PD 挂在 PML4 下会 triple fault。
+  3. c6 的 IR 在 `-O1` 下会用 `movaps` 清栈槽；必须开 CR4.OSFXSR/OSXMMEXCPT，
+     或按内核禁浮点约定用 `-mno-sse -mno-sse2` 重编译 IR。

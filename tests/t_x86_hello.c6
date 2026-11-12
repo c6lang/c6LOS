@@ -1,0 +1,11 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os x86_64 boot\n");
+    port_puts("PASS: x86 hello\n");
+    while (1) {
+        port_idle();
+    }
+}

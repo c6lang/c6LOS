@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -377,6 +377,65 @@ toolchain-info:
 	@$(XTGCC) --version | head -1
 	@$(XTP)ld --version | head -1
 	@esptool version | head -1
+
+# ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
+X86      := build/x86
+X86CFLAGS := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1
+X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
+
+x86: $(X86)/disk.img
+
+run-x86: x86
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+$(X86)/hello.ll: tests/t_x86_hello.c6
+	@mkdir -p $(X86)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(X86)/hello_ll.o: $(X86)/hello.ll
+	clang $(X86IRFLAGS) -c -o $@ $<
+
+$(X86)/console.o: port/x86_64/console.c
+	@mkdir -p $(X86)
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86)/stage2.o: port/x86_64/stage2.S
+	@mkdir -p $(X86)
+	clang $(X86CFLAGS) -c -o $@ $<
+
+$(X86)/stage2.elf: $(X86)/stage2.o $(X86)/console.o $(X86)/hello_ll.o port/x86_64/stage2.ld
+	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ $(X86)/stage2.o \
+		$(X86)/console.o $(X86)/hello_ll.o
+
+$(X86)/stage2.bin: $(X86)/stage2.elf
+	llvm-objcopy -O binary $< $@
+
+$(X86)/stage1.S: port/x86_64/stage1.S $(X86)/stage2.bin
+	sed 's|#BLOB#|$(X86)/stage2.bin|' port/x86_64/stage1.S > $@
+	printf '\n.section .stage2, "a"\n.incbin "%s"\n' '$(X86)/stage2.bin' >> $@
+
+$(X86)/stage1.o: $(X86)/stage1.S
+	as --64 -o $@ $<
+
+$(X86)/flat.elf: $(X86)/stage1.o port/x86_64/stage1.ld
+	ld -m elf_x86_64 -static -T port/x86_64/stage1.ld -o $@ $(X86)/stage1.o
+
+$(X86)/flat.bin: $(X86)/flat.elf
+	llvm-objcopy -O binary $< $@
+
+$(X86)/boot16.o: port/x86_64/boot16.S
+	@mkdir -p $(X86)
+	as --32 -o $@ $<
+
+$(X86)/boot16.bin: $(X86)/boot16.o
+	ld -m elf_i386 -Ttext=0x7C00 --oformat binary -o $@ $<
+
+$(X86)/disk.img: $(X86)/boot16.bin $(X86)/flat.bin
+	dd if=/dev/zero of=$@ bs=1M count=1 status=none
+	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
+	dd if=$(X86)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+
 
 clean:
 	rm -rf $(BUILD) $(BUILDH)
