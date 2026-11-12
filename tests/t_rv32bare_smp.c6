@@ -24,9 +24,6 @@ static void task_a(void *arg) {
 static void task_b(void *arg) {
     u32 i = 0;
     (void)arg;
-    /* 创建在核 0，运行后迁移到核 1，验证动态绑核。 */
-    (void)os_task_set_core(os_task_self(), 1u);
-    os_task_yield();
     g_core_b = port_core_id();
     while (i < 2000u) {
         g_b = g_b + 1u;
@@ -54,8 +51,9 @@ void os_main(void) {
             port_puts("FAIL: smp task a\n");
             port_bare_exit(1u);
         }
-        if (g_b == 2000u && g_core_a == 0u && g_core_b == 1u) {
-            port_puts("PASS: smp task b (migrated to core 1)\n");
+        if (g_b == 2000u && g_core_a < 2u && g_core_b < 2u &&
+            g_core_a != g_core_b) {
+            port_puts("PASS: smp task b (one task balanced to core 1)\n");
             port_bare_exit(0u);
         }
         port_puts("FAIL: smp task b\n");

@@ -145,6 +145,43 @@ u32 os_task_core(u32 id) {
     return (u32)t->core;
 }
 
+/* 某核可运行任务数（READY/RUNNING），用于观测与负载均衡。 */
+u32 os_core_ready(u32 core) {
+    u32 i = 0;
+    u32 n = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        OsTask *t = &g_tasks[i];
+        if ((u32)t->core == core &&
+            (t->state == (u8)OS_TASK_READY || t->state == (u8)OS_TASK_RUNNING)) {
+            n++;
+        }
+        i++;
+    }
+    return n;
+}
+
+/* 空闲核从别的核拉一个 READY 任务：只搬多出来的那一个。 */
+static u32 balance_pull(u32 me) {
+    u32 other = 0;
+
+    while (other < (u32)C6OS_MAX_CORES) {
+        u32 i = 0;
+        if (other != me && os_core_ready(other) > 1u) {
+            while (i < (u32)C6OS_MAX_TASKS) {
+                OsTask *t = &g_tasks[i];
+                if ((u32)t->core == other && t->state == (u8)OS_TASK_READY) {
+                    t->core = (u8)me;
+                    return 1u;
+                }
+                i++;
+            }
+        }
+        other++;
+    }
+    return 0u;
+}
+
 int os_task_set_core(u32 id, u32 core) {
     OsTask *t = os_task_get(id);
 
@@ -383,6 +420,9 @@ void os_task_start_core(u32 core) {
         if (t == 0) {
             if (os_task_count() == 0) {
                 break;
+            }
+            if (balance_pull(me) != 0u) {
+                continue;
             }
             if (port_virtual_tick() != 0u) {
                 os_sched_tick();

@@ -45,6 +45,7 @@ void os_task_start(void);
 void os_task_start_core(u32 core);
 u32 os_task_core(u32 id);
 int os_task_set_core(u32 id, u32 core);
+u32 os_core_ready(u32 core);
 void os_task_yield(void);
 void os_task_delay(u32 ticks);
 void os_sched_tick(void);
