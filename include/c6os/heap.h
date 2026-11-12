@@ -18,5 +18,6 @@ void *os_heap_alloc(OsHeap *h, u32 n);
 int os_heap_free(OsHeap *h, void *p);
 u32 os_heap_used(OsHeap *h);
 u32 os_heap_peak(OsHeap *h);
+u32 os_heap_max_free(OsHeap *h);
 
 #endif

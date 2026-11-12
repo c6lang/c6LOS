@@ -17,7 +17,10 @@ u32 os_tick_hz(void) {
 }
 
 u64 os_ms_to_ticks(u64 ms) {
-    return (ms * (u64)C6OS_TICK_HZ) / 1000u;
+    if (ms == 0u) {
+        return 0u;
+    }
+    return (ms * (u64)C6OS_TICK_HZ + 999u) / 1000u;
 }
 
 u64 os_ticks_to_ms(u64 ticks) {

@@ -44,6 +44,25 @@ int main(void) {
     if (os_heap_peak(&h) == 0u) {
         return 5;
     }
+    if (os_heap_max_free(&h) < 8000u) {
+        return 6;
+    }
+    {
+        u32 before = os_heap_max_free(&h);
+        void *one = os_heap_alloc(&h, 32u);
+        if (one == 0) {
+            return 7;
+        }
+        if (os_heap_max_free(&h) >= before) {
+            return 8;
+        }
+        if (os_heap_free(&h, one) != 0) {
+            return 9;
+        }
+        if (os_heap_used(&h) != 0u) {
+            return 10;
+        }
+    }
     port_puts("PASS: heap\n");
     return 0;
 }

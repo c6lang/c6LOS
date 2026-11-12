@@ -135,3 +135,21 @@ u32 os_heap_peak(OsHeap *h) {
     }
     return h->peak;
 }
+
+u32 os_heap_max_free(OsHeap *h) {
+    u8 *p = 0;
+    u32 best = 0;
+
+    if (h == 0 || h->magic != HEAP_MAGIC) {
+        return 0;
+    }
+    p = h->base;
+    while (p < h->base + h->size) {
+        HeapBlk *b = (HeapBlk *)p;
+        if (b->free != 0u && b->size > best) {
+            best = b->size;
+        }
+        p = p + HDR_SIZE + b->size;
+    }
+    return best;
+}

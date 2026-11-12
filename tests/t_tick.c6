@@ -21,6 +21,15 @@ int main(void) {
     if (os_tick_hz() != 100) {
         return 6;
     }
+    if (os_ms_to_ticks(0) != 0) {
+        return 7;
+    }
+    if (os_ms_to_ticks(1) != 1) {
+        return 8;
+    }
+    if (os_ms_to_ticks(101) != 11) {
+        return 9;
+    }
     port_puts("PASS: tick\n");
     return 0;
 }
