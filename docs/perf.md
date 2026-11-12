@@ -23,7 +23,7 @@
 | `os_task_yield`（含调度器一次切换） | 9,057 |
 | `os_sem_post` + `os_sem_pend`（无竞争） | 771 |
 | `os_queue_put` + `os_queue_get`（8 slot） | 1,905 |
-| `os_heap_alloc(32)` + `os_heap_free` | 984 |
+| `os_heap_alloc(32)` + `os_heap_free`（best-fit→first-fit 后） | 956 |
 | `os_sched_tick`（tick+超时队列+timer 扫描） | 627 |
 
 表中是单次宏基准的稳定量级；host TSC 频率随机器而定，不转换成 µs。
@@ -35,13 +35,13 @@
 | `os_task_yield`（含一次切换） | 618,699 | 9,667 |
 | `os_sem_post` + `os_sem_pend` | 297,430 | 4,647 |
 | `os_queue_put` + `os_queue_get` | 823,517 | 12,867 |
-| `os_heap_alloc(32)` + `os_heap_free` | 3,674,274 | 57,410 |
+| `os_heap_alloc(32)` + `os_heap_free`（first-fit） | 3,665,463 | 57,273 |
 | `os_sched_tick` | 317,355 | 4,958 |
 
 说明：
 
 - risc6 bare 的 clang 构建默认 `-O0`，且这是模拟器指令数，不等于 S3 周期；用于回归对比（改动前后同口径）。
-- heap 的 best-fit 线性扫描 + 释放时全堆合并，在 4KB/32B 场景是 O(n²) 量级，是当前最大单次开销；后续可改为分离空闲链表/位图。
+- heap 已从 best-fit 改为 first-fit，减少全堆扫描；4KB/32B 场景仍是 O(n) 量级，是当前最大单次开销；后续可改为分离空闲链表/位图。
 - queue 的 put+get 包含两次对象锁和唤醒扫描，明显高于 sem。
 
 ## 4. 实时性指标（host，TSC cycles）
