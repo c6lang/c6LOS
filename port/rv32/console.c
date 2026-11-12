@@ -84,9 +84,31 @@ void port_panic_halt(void)
     sys_exit(1);
 }
 
+static volatile u32 g_isr_nest = 0;
+
 u32 port_in_isr(void)
 {
-    return 0u;
+    return g_isr_nest;
+}
+
+void port_isr_enter(void)
+{
+    g_isr_nest = g_isr_nest + 1u;
+}
+
+u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
+{
+    if (p == 0) {
+        return 0u;
+    }
+    return __sync_bool_compare_and_swap(p, expect, newv) ? 1u : 0u;
+}
+
+void port_isr_exit(void)
+{
+    if (g_isr_nest != 0u) {
+        g_isr_nest = g_isr_nest - 1u;
+    }
 }
 
 void os_test_set_isr(u32 v)

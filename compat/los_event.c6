@@ -39,8 +39,8 @@ UINT32 LOS_EventDelete(UINT32 eventId) {
     if (e == 0) {
         return LOS_ERRNO_EVENT_INVALID;
     }
+    (void)os_event_destroy(e);
     g_used[eventId - 1u] = 0u;
-    e->magic = 0;
     return LOS_OK;
 }
 
@@ -73,7 +73,9 @@ UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout) {
     u32 m = ((u32)mode & LOS_WAITMODE_AND) != 0u ? OS_EVENT_ALL : OS_EVENT_ANY;
     u32 bits = 0;
 
-    if (e == 0) {
+    if (e == 0 || mask == 0u ||
+        ((u32)mode & ~(LOS_WAITMODE_AND | LOS_WAITMODE_OR | LOS_WAITMODE_CLR)) != 0u ||
+        (((u32)mode & LOS_WAITMODE_AND) != 0u && ((u32)mode & LOS_WAITMODE_OR) != 0u)) {
         return LOS_ERRNO_EVENT_INVALID;
     }
     bits = os_event_wait(e, (u32)mask, m, (u32)timeout);

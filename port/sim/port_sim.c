@@ -104,6 +104,30 @@ u32 port_in_isr(void)
     return g_test_isr;
 }
 
+void port_isr_enter(void)
+{
+    g_test_isr = g_test_isr + 1u;
+}
+
+u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
+{
+    if (p == 0) {
+        return 0u;
+    }
+    if (*p == expect) {
+        *p = newv;
+        return 1u;
+    }
+    return 0u;
+}
+
+void port_isr_exit(void)
+{
+    if (g_test_isr != 0u) {
+        g_test_isr = g_test_isr - 1u;
+    }
+}
+
 void os_test_set_isr(u32 v)
 {
     g_test_isr = v;

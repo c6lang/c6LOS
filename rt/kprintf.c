@@ -5,6 +5,15 @@
 /* 目标侧最小格式化实现（C，va_list）。不分配、不依赖 libc。
  * c6 侧通过 include/c6os/log.h 的 `void kprintf(const char *, ...)` 调用。 */
 
+static void kputsn(const char *s, u32 max)
+{
+    while (*s != '\0' && max != 0u) {
+        kputc((int)*s);
+        s++;
+        max--;
+    }
+}
+
 static void kutoi(u64 v, u32 base, int upper, u32 width, int zero)
 {
     char buf[32];
@@ -42,6 +51,9 @@ void kprintf(const char *fmt, ...)
     va_list ap;
     const char *p = fmt;
 
+    if (fmt == 0) {
+        return;
+    }
     va_start(ap, fmt);
     while (*p != '\0') {
         if (*p != '%') {
@@ -66,7 +78,12 @@ void kprintf(const char *fmt, ...)
                 p++;
             }
             while (*p >= '0' && *p <= '9') {
-                width = width * 10u + (u32)(*p - '0');
+                if (width < 256u) {
+                    width = width * 10u + (u32)(*p - '0');
+                    if (width > 256u) {
+                        width = 256u;
+                    }
+                }
                 p++;
             }
             while (*p == 'l') {
@@ -82,10 +99,12 @@ void kprintf(const char *fmt, ...)
                     v = (i64)va_arg(ap, int);
                 }
                 if (v < 0) {
+                    u64 uv = (u64)(-(v + 1));
                     kputc('-');
-                    v = -v;
+                    kutoi(uv + 1u, 10u, 0, width, zero);
+                } else {
+                    kutoi((u64)v, 10u, 0, width, zero);
                 }
-                kutoi((u64)v, 10u, 0, width, zero);
             } else if (*p == 'u') {
                 u64 v = (is_long >= 2) ? va_arg(ap, u64)
                                        : (u64)(u32)va_arg(ap, unsigned int);
@@ -101,7 +120,7 @@ void kprintf(const char *fmt, ...)
                 if (s == 0) {
                     kputs("(null)");
                 } else {
-                    kputs(s);
+                    kputsn(s, 512u);
                 }
             } else if (*p == 'p') {
                 u64 v = (u64)(unsigned long)va_arg(ap, void *);

@@ -3,7 +3,7 @@
 - 评审基线：`rtos-c6@57b9ce3`（risc6 参考机 `7b83ec6`）
 - 范围：`kernel/`、`compat/los_*`、`rt/`、`port/{sim,x86_64,s3,rv32,rv32bare}`、S3 启动/链接/中断
 - 方法：代码审计 + 威胁建模 + 针对性 PoC（host `c6 -> LLVM IR`）。PoC 为评审临时程序，未提交到仓库。
-- 结论：**M0–M8 的功能路径可用，但当前实现不应被当作安全边界**。共确认 6 个 Critical、5 个 High、13 个 Medium、3 个 Low。最严重的是互斥量所有权交接竞态、优先级继承递归环、堆大小整数溢出、内核对象生命周期/UAF，以及真实端口 ISR 标记失效。
+- 结论：**首轮审计确认 6 个 Critical、5 个 High、13 个 Medium、3 个 Low；本分支已完成代码级修复**（见 §11），PoC 全部由“可利用”转为拒绝/安全退出。剩余限制是架构性的（无 MMU/MPU、S3 真板未复测、调用者仍需遵守 buffer 容量契约）。
 
 > 威胁模型：C6OS 没有 MMU/MPU，所有任务同地址空间、同特权级；"安全"主要指 **任务间故障隔离、对象生命周期安全、ISR/SMP 下的内存安全**，以及串口 shell/LOS API 输入健壮性。若所有任务完全可信，部分 High 可降为健壮性缺陷；但串口 shell、可配置对象参数、跨核共享对象仍属于攻击面。
 
@@ -330,3 +330,45 @@ void *p = os_heap_alloc(&h, 0xFFFFFFFFu);   /* 返回非空 */
 - `make s3` + `t_s3_smp` / `t_s3_smp_sem` 在真板连续运行 ≥30 分钟，无 panic/看门狗复位；core1 `prid=1`。
 - 在 host 构建开启 `-fsanitize=address,undefined` 跑全部测试；cobs/shell/queue 做 ≥10^6 次随机输入 fuzz，无越界/崩溃。
 - SMP 压力：两核随机 create/delete/yield/迁移/共享 sem/queue 10^6 次，断言无同一 ctx 双核运行、无任务表泄漏。
+
+
+---
+
+## 11. 本次修复记录（代码级）
+
+| 编号 | 状态 | 修复要点 |
+|---|---|---|
+| S-01 | 已修 | `os_mutex_post` 在唤醒前把 owner 直接交给被唤醒任务（`os_task_wake_first_id`），消除 owner=0 窗口；主上下文用保留 owner id。 |
+| S-02 | 已修 | PI 链改为迭代 + visited 集合；检测到 ABBA 环时 `os_mutex_pend` 返回 -1，不再递归/死锁。 |
+| S-03 | 已修 | heap 拒绝 `n > 0xFFFFFFF8` 与对齐回绕；块头 magic、边界、尺寸校验；free 按 payload 精确查找；used 下溢保护。 |
+| S-04 | 已修 | 新增 `os_*_destroy`，删除前唤醒所有等待者（-3）；timer deinit 从注册表移除；任务退出/删除唤醒 join 并释放持有的 mutex。 |
+| S-05 | 已修 | 每端口 `port_isr_enter/exit`，rv32bare/S3/rv32/sim/x86 的 `port_in_isr` 读嵌套计数；S3 IRQ 与 rv32bare trap 显式进出。 |
+| S-06 | 已修 | `g_ready_bit` 改为 `sched_pick` 局部变量；移除无锁自动迁核；sem/queue/mutex/event 使用 `os_obj_lock` 临界区；timeout 队列独立锁；同任务抢占状态修正。 |
+| S-07 | 已修 | rv32/S3 端口按请求大小分配栈（上限 8192/4096），超限返回失败而非静默缩栈；ctx 槽可回收。 |
+| S-08 | 已修 | 超时槽申请在进入 BLOCKED 前完成；失败返回 -3，不永久阻塞。 |
+| S-09 | 已修 | `os_task_delete` 调用 `os_task_wake_join` 与 mutex release hook；exit 同样释放锁。 |
+| S-10 | 已修 | LOS queue 每 slot 记录长度；read 只复制实际长度并清零 slot；write 超长/超 maxMsg 返回错误。 |
+| S-11 | 已修 | queue/membox 乘加溢出检查；membox free-list 范围/对齐校验、double-free 扫描、free_count 上限。 |
+| S-12 | 已修 | S3 链接期 `ASSERT(_bss_end + 0x2000 <= _stack_top)`；core1 栈 canary，`s3_core1_count` 检测。 |
+| S-13 | 已修 | timer init 拒绝重复注册；`os_timer_deinit` 移除注册；LOS SwtmrDelete 使用 deinit。 |
+| S-14 | 已修 | LOS sem/mux/event/queue delete 先 destroy/唤醒等待者，再释放槽位。 |
+| S-15 | 已修 | LOS_Mem 支持最多 4 个独立 pool，按 pool 指针隔离。 |
+| S-16 | 已修 | 同 S-13，Swtmr 槽可复用。 |
+| S-17 | 已修 | `%d` INT_MIN 用无符号绝对值；width 上限 256；`%s` 上限 512；`kprintf` NULL fmt；klog 加自旋锁 + 本地关中断。S3 `port_getc` left 每核。 |
+| S-18 | 已修 | `OsGfx.cells` 容量裁剪；pixel/get/fill/blit 用 u64 索引与溢出检查；panel probe 空指针、GPIO 范围、blit 尺寸溢出校验。 |
+| S-19 | 已修 | `s3_irq_init` 读改写 INTENABLE；trap frame 范围校验；ISR 嵌套计数。 |
+| S-20 | 已修 | task create 的 NULL name 默认名、ISR 创建拒绝。 |
+| S-21 | 已修 | mutex 主上下文保留 owner、`os_task_self()==0` 不再误判递归；block prepare 统一 ISR 检查。 |
+| S-22 | 已修 | `os_sched_preempt_ctx` 选中当前任务时恢复 RUNNING。 |
+| S-23 | 已修 | event mask==0 / 非法 mode 拒绝；LOS mode 位白名单。 |
+| S-24 | 已修 | HWI dispatch 取本地 fn/arg 副本，回调内 delete 不影响本次调用。 |
+| S-25 | 已修 | `C6OS_SHELL_ALLOW_REBOOT` 默认 0，生产镜像禁用 reboot（测试仍覆盖 help/命令）。 |
+| S-26 | 已修 | `s3_gpio_loop(_sel)` 限制 p<=48，拒绝任意 IO_MUX 写。 |
+| S-27 | 已修 | heap 统计校验 magic；task_info 校验 magic。 |
+
+**剩余架构限制（非代码可完全消除）**
+
+- 无 MMU/MPU：恶意任务仍可绕过 API 直接读写全局内存；这是平台约束，需要 MPU/TrustZone 或把任务放到用户态。
+- `OsQueue`/`Membox` 等 caller-owned storage 的容量仍由调用者保证；新增了溢出/越界检查，但无法从对象内部推断外部 buffer 长度。
+- S3 真板未复测；S3 栈/IRQ/IPI 行为仍需上电验证。
+- SMP 任务表 create/delete 仍是短临界区假设；sem/queue/mutex/event 已加锁，但完整 SMP 任务生命周期建议下一轮用全局 task 表锁/RCU 化。

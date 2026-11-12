@@ -34,9 +34,16 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     u32 i = 0;
     S3Ctx *c = 0;
     u32 top;
+    u32 want = stack_size;
     u32 *f = 0;
 
-    (void)stack_size;
+    if (want < 512u) {
+        want = 512u;
+    }
+    want = (want + 15u) & ~15u;
+    if (want > (u32)S3_STACK_SZ) {
+        return 0; /* 不静默缩栈 */
+    }
     while (i < (u32)S3_MAX_CTX) {
         if (g_ctx[i].stack == 0) {
             c = &g_ctx[i];
@@ -48,9 +55,9 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         return 0;
     }
 
-    c->stack = (void *)g_stacks[i];
-    c->size = (u32)S3_STACK_SZ;
-    top = (((u32)c->stack + (u32)S3_STACK_SZ) & ~15u) - 80u;
+    c->stack = (void *)(g_stacks[i] + (S3_STACK_SZ - want));
+    c->size = want;
+    top = (((u32)g_stacks[i] + (u32)S3_STACK_SZ) & ~15u) - 80u;
     f = (u32 *)top;
 
     i = 0;

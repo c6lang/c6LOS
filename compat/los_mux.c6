@@ -39,8 +39,8 @@ UINT32 LOS_MuxDelete(UINT32 muxId) {
     if (m == 0) {
         return LOS_ERRNO_MUX_INVALID;
     }
+    (void)os_mutex_destroy(m);
     g_used[muxId - 1u] = 0u;
-    m->magic = 0;
     return LOS_OK;
 }
 

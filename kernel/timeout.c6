@@ -1,5 +1,6 @@
 #include "c6os/timeout.h"
 #include "c6os/tick.h"
+#include "c6os/port.h"
 
 typedef struct {
     u32 id;
@@ -8,6 +9,20 @@ typedef struct {
 
 static OsTimeout g_to[OS_TIMEOUT_MAX] = {0};
 static u32 g_count = 0;
+static volatile u32 g_to_lock = 0;
+
+static u32 to_lock(void) {
+    u32 st = port_irq_save();
+
+    while (port_atomic_cas(&g_to_lock, 0u, 1u) == 0u) {
+    }
+    return st;
+}
+
+static void to_unlock(u32 st) {
+    g_to_lock = 0;
+    port_irq_restore(st);
+}
 
 static int earlier(u32 a, u32 b) {
     return ((i32)(a - b)) < 0;
@@ -24,7 +39,7 @@ void os_timeout_init(void) {
     g_count = 0;
 }
 
-int os_timeout_cancel(u32 id) {
+static int timeout_cancel_locked(u32 id) {
     u32 i = 0;
 
     while (i < g_count) {
@@ -42,11 +57,11 @@ int os_timeout_cancel(u32 id) {
     return -1;
 }
 
-int os_timeout_add(u32 id, u32 ticks) {
+static int timeout_add_locked(u32 id, u32 ticks) {
     u32 deadline = (u32)os_tick_get() + ticks;
     u32 i = 0;
 
-    (void)os_timeout_cancel(id);
+    (void)timeout_cancel_locked(id);
     if (g_count >= (u32)OS_TIMEOUT_MAX) {
         return -1;
     }
@@ -61,7 +76,7 @@ int os_timeout_add(u32 id, u32 ticks) {
     return 0;
 }
 
-int os_timeout_pop_expired(u32 now, u32 *id) {
+static int timeout_pop_locked(u32 now, u32 *id) {
     u32 i = 0;
 
     if (g_count == 0u || id == 0) {
@@ -77,6 +92,27 @@ int os_timeout_pop_expired(u32 now, u32 *id) {
     }
     g_count = g_count - 1u;
     return 1;
+}
+
+int os_timeout_cancel(u32 id) {
+    u32 st = to_lock();
+    int r = timeout_cancel_locked(id);
+    to_unlock(st);
+    return r;
+}
+
+int os_timeout_add(u32 id, u32 ticks) {
+    u32 st = to_lock();
+    int r = timeout_add_locked(id, ticks);
+    to_unlock(st);
+    return r;
+}
+
+int os_timeout_pop_expired(u32 now, u32 *id) {
+    u32 st = to_lock();
+    int r = timeout_pop_locked(now, id);
+    to_unlock(st);
+    return r;
 }
 
 u32 os_timeout_count(void) {

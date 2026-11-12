@@ -98,6 +98,26 @@ u32 port_in_isr(void)
     return g_in_isr;
 }
 
+void port_isr_enter(void)
+{
+    g_in_isr = g_in_isr + 1u;
+}
+
+void port_isr_exit(void)
+{
+    if (g_in_isr != 0u) {
+        g_in_isr = g_in_isr - 1u;
+    }
+}
+
+u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
+{
+    if (p == 0) {
+        return 0u;
+    }
+    return __sync_bool_compare_and_swap(p, expect, newv) ? 1u : 0u;
+}
+
 void os_test_set_isr(u32 v)
 {
     g_in_isr = v;

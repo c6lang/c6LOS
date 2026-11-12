@@ -19,20 +19,42 @@ static int event_hit(u32 bits, u32 mask, u32 mode) {
     return (bits & mask) != 0u;
 }
 
-int os_event_set(OsEvent *e, u32 bits) {
+int os_event_destroy(OsEvent *e) {
+    u32 st = 0;
+
     if (e == 0 || e->magic != EVENT_MAGIC) {
         return -1;
     }
+    st = os_obj_lock();
+    os_task_wake_all(e, -3);
+    e->bits = 0;
+    e->magic = 0;
+    os_obj_unlock(st);
+    return 0;
+}
+
+int os_event_set(OsEvent *e, u32 bits) {
+    u32 st = 0;
+
+    if (e == 0 || e->magic != EVENT_MAGIC) {
+        return -1;
+    }
+    st = os_obj_lock();
     e->bits = e->bits | bits;
     os_task_wake_event(e, e->bits);
+    os_obj_unlock(st);
     return 0;
 }
 
 int os_event_clear(OsEvent *e, u32 bits) {
+    u32 st = 0;
+
     if (e == 0 || e->magic != EVENT_MAGIC) {
         return -1;
     }
+    st = os_obj_lock();
     e->bits = e->bits & ~bits;
+    os_obj_unlock(st);
     return 0;
 }
 
@@ -44,18 +66,29 @@ u32 os_event_get(OsEvent *e) {
 }
 
 u32 os_event_wait(OsEvent *e, u32 mask, u32 mode, u32 timeout) {
-    if (e == 0 || e->magic != EVENT_MAGIC) {
+    u32 st = 0;
+    u8 kind = 0;
+    int r = 0;
+
+    if (e == 0 || e->magic != EVENT_MAGIC || mask == 0u ||
+        (mode != OS_EVENT_ANY && mode != OS_EVENT_ALL)) {
         return 0;
     }
+    st = os_obj_lock();
     if (event_hit(e->bits, mask, mode)) {
-        return e->bits & mask;
+        u32 bits = e->bits & mask;
+        os_obj_unlock(st);
+        return bits;
     }
-    {
-        u8 kind = (mode == OS_EVENT_ALL) ? 5u : 4u;
-        int r = os_task_block_arg(e, timeout, kind, mask);
-        if (r != 0) {
-            return 0;
-        }
-        return os_task_wait_bits();
+    kind = (mode == OS_EVENT_ALL) ? 5u : 4u;
+    r = os_task_block_prepare(e, timeout, kind, mask);
+    os_obj_unlock(st);
+    if (r != 0) {
+        return 0;
     }
+    r = os_task_block_wait();
+    if (r != 0) {
+        return 0;
+    }
+    return os_task_wait_bits();
 }

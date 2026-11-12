@@ -10,6 +10,7 @@
 static u8 klog_buf[KLOG_SIZE] = {0};
 static u32 klog_head = 0;
 static u32 klog_tail = 0;
+static volatile u32 g_log_lock = 0;
 
 static void klog_push(u8 c) {
     u32 next = (klog_head + 1u) % KLOG_SIZE;
@@ -22,8 +23,14 @@ static void klog_push(u8 c) {
 }
 
 void kputc(int c) {
+    u32 st = port_irq_save();
+
+    while (port_atomic_cas(&g_log_lock, 0u, 1u) == 0u) {
+    }
     klog_push((u8)c);
     port_putc(c);
+    g_log_lock = 0;
+    port_irq_restore(st);
 }
 
 void kputs(const char *s) {
@@ -35,9 +42,11 @@ void kputs(const char *s) {
 
 void klog_dump(void) {
     u32 i = klog_tail;
+    u32 st = port_irq_save();
 
     while (i != klog_head) {
         port_putc((int)klog_buf[i]);
         i = (i + 1u) % KLOG_SIZE;
     }
+    port_irq_restore(st);
 }

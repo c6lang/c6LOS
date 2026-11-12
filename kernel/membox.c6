@@ -8,10 +8,16 @@ int os_membox_init(OsMembox *mb, void *storage, u32 blk_size, u32 blk_count) {
     if (mb == 0 || storage == 0 || blk_count == 0u) {
         return -1;
     }
+    if (blk_size > 0xFFFFFFF8u) {
+        return -1;
+    }
     if (blk_size < 8u) {
         blk_size = 8u;
     }
     blk_size = (blk_size + 7u) & ~7u;
+    if (blk_size == 0u || blk_count > 0xFFFFFFFFu / blk_size) {
+        return -1;
+    }
 
     mb->base = (u8 *)storage;
     mb->blk_size = blk_size;
@@ -31,11 +37,21 @@ int os_membox_init(OsMembox *mb, void *storage, u32 blk_size, u32 blk_count) {
 
 void *os_membox_alloc(OsMembox *mb) {
     void *p = 0;
+    u8 *base = 0;
+    u32 total = 0;
 
-    if (mb == 0 || mb->magic != MEMBOX_MAGIC || mb->free_list == 0) {
+    if (mb == 0 || mb->magic != MEMBOX_MAGIC || mb->free_list == 0 ||
+        mb->blk_size == 0u || mb->free_count == 0u) {
         return 0;
     }
+    base = mb->base;
+    total = mb->blk_size * mb->blk_count;
     p = mb->free_list;
+    if ((u8 *)p < base || (u8 *)p >= base + total ||
+        ((u32)((u8 *)p - base) % mb->blk_size) != 0u) {
+        mb->free_list = 0; /* free-list 已损坏，拒绝继续分配 */
+        return 0;
+    }
     mb->free_list = *(void **)p;
     mb->free_count = mb->free_count - 1u;
     return p;
@@ -43,21 +59,35 @@ void *os_membox_alloc(OsMembox *mb) {
 
 int os_membox_free(OsMembox *mb, void *p) {
     u32 off = 0;
+    u32 total = 0;
     u8 *q = 0;
+    void *scan = 0;
 
-    if (mb == 0 || mb->magic != MEMBOX_MAGIC || p == 0) {
+    if (mb == 0 || mb->magic != MEMBOX_MAGIC || p == 0 ||
+        mb->blk_size == 0u || mb->blk_count == 0u) {
         return -1;
     }
     q = (u8 *)p;
-    if (q < mb->base) {
+    total = mb->blk_size * mb->blk_count;
+    if (q < mb->base || q >= mb->base + total) {
         return -1;
     }
     off = (u32)(q - mb->base);
-    if (off >= mb->blk_size * mb->blk_count) {
-        return -1;
-    }
     if ((off % mb->blk_size) != 0u) {
         return -1;
+    }
+    if (mb->free_count >= mb->blk_count) {
+        return -1;
+    }
+    scan = mb->free_list;
+    while (scan != 0) {
+        if (scan == p) {
+            return -1; /* double free */
+        }
+        if ((u8 *)scan < mb->base || (u8 *)scan >= mb->base + total) {
+            return -1;
+        }
+        scan = *(void **)scan;
     }
     *(void **)p = mb->free_list;
     mb->free_list = p;

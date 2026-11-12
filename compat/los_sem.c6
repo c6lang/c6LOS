@@ -42,9 +42,8 @@ UINT32 LOS_SemDelete(UINT32 handle) {
     if (s == 0) {
         return LOS_ERRNO_SEM_INVALID;
     }
+    (void)os_sem_destroy(s);
     g_used[handle - 1u] = 0u;
-    s->magic = 0;
-    s->count = 0;
     return LOS_OK;
 }
 

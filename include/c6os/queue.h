@@ -15,6 +15,7 @@ typedef struct OsQueue {
 
 int os_queue_init(OsQueue *q, void **storage, u32 cap);
 int os_queue_init_ex(OsQueue *q, void *storage, u32 cap, u32 item_size);
+int os_queue_destroy(OsQueue *q);
 int os_queue_put(OsQueue *q, void *item, u32 timeout);
 int os_queue_put_item(OsQueue *q, const void *item, u32 timeout);
 void *os_queue_get(OsQueue *q, u32 timeout);

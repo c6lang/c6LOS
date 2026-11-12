@@ -10,6 +10,7 @@
 #define SYS_CORE1_RESET    0x4u
 
 static u8 g_core1_stack[4096] __attribute__((aligned(16)));
+#define CORE1_STACK_MAGIC 0xC6C0DEADu
 static volatile u32 g_core1_count;
 static volatile u32 g_core1_cmd;
 static volatile u32 g_core1_ack;
@@ -19,6 +20,8 @@ static volatile u32 g_core1_mode;
 static void core1_entry(void)
 {
     extern void _vecbase;
+    *(volatile u32 *)&g_core1_stack[0] = CORE1_STACK_MAGIC;
+    *(volatile u32 *)&g_core1_stack[4] = CORE1_STACK_MAGIC;
     __asm__ __volatile__("mov a1, %0" : : "r"(&g_core1_stack[4096]));
     __asm__ __volatile__("wsr %0, vecbase; isync" : : "r"(&_vecbase));
     g_core1_prid = port_core_id();
@@ -84,6 +87,10 @@ u32 s3_core1_ack(void)
 
 u32 s3_core1_count(void)
 {
+    if (*(volatile u32 *)&g_core1_stack[0] != CORE1_STACK_MAGIC ||
+        *(volatile u32 *)&g_core1_stack[4] != CORE1_STACK_MAGIC) {
+        return 0u;
+    }
     return g_core1_count;
 }
 

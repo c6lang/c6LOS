@@ -12,8 +12,35 @@
 static OsTask g_tasks[C6OS_MAX_TASKS] = {0};
 static u32 g_next_id = 1;
 static u32 g_rr_arr[C6OS_MAX_CORES] = {0};
-static u32 g_ready_bit = 0;
 static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
+
+static void os_task_wake_join(u32 id);
+static void (*g_mutex_release_hook)(u32 id) = 0;
+
+void os_task_set_mutex_release_hook(void (*fn)(u32 id)) {
+    g_mutex_release_hook = fn;
+}
+
+static volatile u32 g_obj_lock = 0;
+
+u32 os_obj_lock(void) {
+    u32 st = port_irq_save();
+
+    while (port_atomic_cas(&g_obj_lock, 0u, 1u) == 0u) {
+    }
+    return st;
+}
+
+void os_obj_unlock(u32 state) {
+    g_obj_lock = 0;
+    port_irq_restore(state);
+}
+
+static void task_release_locks(u32 id) {
+    if (g_mutex_release_hook != 0) {
+        g_mutex_release_hook(id);
+    }
+}
 
 /* 每核当前任务/轮转游标：SMP 下按 hart 隔离，单核时下标恒 0。 */
 #define g_core (port_core_id() & (u32)(C6OS_MAX_CORES - 1))
@@ -46,13 +73,13 @@ static u32 ctz32(u32 x) {
     return n;
 }
 
-static void ready_rebuild(u32 core) {
+static void ready_rebuild(u32 core, u32 *bits) {
     u32 i = 0;
 
-    g_ready_bit = 0;
+    *bits = 0;
     while (i < (u32)C6OS_MAX_TASKS) {
         if (g_tasks[i].state == (u8)OS_TASK_READY && (u32)g_tasks[i].core == core) {
-            g_ready_bit = g_ready_bit | (1u << g_tasks[i].prio);
+            *bits = *bits | (1u << g_tasks[i].prio);
         }
         i++;
     }
@@ -61,12 +88,13 @@ static void ready_rebuild(u32 core) {
 static OsTask *sched_pick(u32 core) {
     u32 i = 0;
     u32 prio = 0;
+    u32 ready_bit = 0;
 
-    ready_rebuild(core);
-    if (g_ready_bit == 0u) {
+    ready_rebuild(core, &ready_bit);
+    if (ready_bit == 0u) {
         return 0;
     }
-    prio = ctz32(g_ready_bit);
+    prio = ctz32(ready_bit);
     while (i < (u32)C6OS_MAX_TASKS) {
         u32 idx = (g_rr + i) % (u32)C6OS_MAX_TASKS;
         OsTask *c = &g_tasks[idx];
@@ -86,6 +114,12 @@ int os_task_create_on(u32 core, const char *name, OsTaskEntry entry, void *arg,
     OsTask *t = 0;
 
     if (core >= (u32)C6OS_MAX_CORES) {
+        return -1;
+    }
+    if (name == 0) {
+        name = "task";
+    }
+    if (port_in_isr() != 0u) {
         return -1;
     }
     if (prio >= (u32)C6OS_PRIOS) {
@@ -161,27 +195,6 @@ u32 os_core_ready(u32 core) {
     return n;
 }
 
-/* 空闲核从别的核拉一个 READY 任务：只搬多出来的那一个。 */
-static u32 balance_pull(u32 me) {
-    u32 other = 0;
-
-    while (other < (u32)C6OS_MAX_CORES) {
-        u32 i = 0;
-        if (other != me && os_core_ready(other) > 1u) {
-            while (i < (u32)C6OS_MAX_TASKS) {
-                OsTask *t = &g_tasks[i];
-                if ((u32)t->core == other && t->state == (u8)OS_TASK_READY) {
-                    t->core = (u8)me;
-                    return 1u;
-                }
-                i++;
-            }
-        }
-        other++;
-    }
-    return 0u;
-}
-
 int os_task_set_core(u32 id, u32 core) {
     OsTask *t = os_task_get(id);
 
@@ -198,10 +211,12 @@ int os_task_set_core(u32 id, u32 core) {
 int os_task_delete(u32 id) {
     OsTask *t = os_task_get(id);
 
-    if (t == 0) {
+    if (t == 0 || port_in_isr() != 0u) {
         return -1;
     }
     (void)os_timeout_cancel(id);
+    os_task_wake_join(id);
+    task_release_locks(id);
     if (t == g_cur) {
         t->state = (u8)OS_TASK_DEAD;
         port_task_yield();
@@ -216,12 +231,8 @@ int os_task_delete(u32 id) {
     return 0;
 }
 
-int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
-    if (g_cur == 0) {
-        return -1;
-    }
-    if (port_in_isr() != 0u) {
-        os_panic("block in ISR");
+int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
+    if (g_cur == 0 || port_in_isr() != 0u) {
         return -1;
     }
     g_cur->wait_obj = obj;
@@ -230,12 +241,40 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     g_cur->wait_bits = 0;
     g_cur->wait_result = 0;
     g_cur->delay_left = timeout;
+    if (timeout != 0u && os_timeout_add(g_cur->id, timeout) != 0) {
+        g_cur->wait_obj = 0;
+        g_cur->delay_left = 0;
+        return -3;
+    }
     g_cur->state = (u8)OS_TASK_BLOCKED;
-    if (timeout != 0u) {
-        (void)os_timeout_add(g_cur->id, timeout);
+    return 0;
+}
+
+int os_task_block_wait(void) {
+    if (g_cur == 0) {
+        return -1;
     }
     port_task_yield();
     return g_cur->wait_result;
+}
+
+int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
+    if (g_cur == 0) {
+        return -1;
+    }
+    if (port_in_isr() != 0u) {
+        os_panic("block in ISR");
+        return -1;
+    }
+    {
+        u32 st = os_obj_lock();
+        int r = os_task_block_prepare(obj, timeout, kind, arg);
+        os_obj_unlock(st);
+        if (r != 0) {
+            return r;
+        }
+    }
+    return os_task_block_wait();
 }
 
 int os_task_join(u32 id, u32 timeout) {
@@ -283,7 +322,7 @@ int os_task_wake_event(void *obj, u32 bits) {
     return woke;
 }
 
-int os_task_wake_first(void *obj, u8 kind, int result) {
+u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     u32 i = 0;
     OsTask *best = 0;
 
@@ -300,8 +339,25 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
     if (best == 0) {
         return 0;
     }
+    port_puts("U");
     unblock(best, result);
-    return 1;
+    return best->id;
+}
+
+int os_task_wake_first(void *obj, u8 kind, int result) {
+    return os_task_wake_first_id(obj, kind, result) != 0u ? 1 : 0;
+}
+
+void os_task_wake_all(void *obj, int result) {
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        OsTask *t = &g_tasks[i];
+        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj) {
+            unblock(t, result);
+        }
+        i++;
+    }
 }
 
 int os_task_suspend(u32 id) {
@@ -407,8 +463,8 @@ void *os_sched_preempt_ctx(void) {
     }
     if (t != g_cur) {
         g_cur = t;
-        t->state = (u8)OS_TASK_RUNNING;
     }
+    t->state = (u8)OS_TASK_RUNNING;
     return t->ctx;
 }
 
@@ -420,9 +476,6 @@ void os_task_start_core(u32 core) {
         if (t == 0) {
             if (os_task_count() == 0) {
                 break;
-            }
-            if (balance_pull(me) != 0u) {
-                continue;
             }
             if (port_virtual_tick() != 0u) {
                 os_sched_tick();
@@ -476,8 +529,11 @@ void os_task_delay(u32 ticks) {
         return;
     }
     g_cur->delay_left = ticks;
+    if (os_timeout_add(g_cur->id, ticks) != 0) {
+        g_cur->delay_left = 0;
+        return;
+    }
     g_cur->state = (u8)OS_TASK_BLOCKED;
-    (void)os_timeout_add(g_cur->id, ticks);
     port_task_yield();
 }
 
@@ -486,6 +542,7 @@ void os_task_exit(void) {
         u32 id = g_cur->id;
         g_cur->state = (u8)OS_TASK_DEAD;
         os_task_wake_join(id);
+        task_release_locks(id);
     }
     port_task_yield();
 }
@@ -518,7 +575,7 @@ u32 os_task_info(u32 idx, u32 *id, u32 *prio, u32 *state, char *name, u32 cap) {
         return 0;
     }
     t = &g_tasks[idx];
-    if (t->state == (u8)OS_TASK_FREE) {
+    if (t->state == (u8)OS_TASK_FREE || t->magic != (u32)OS_TASK_MAGIC) {
         return 0;
     }
     if (id != 0) { *id = t->id; }

@@ -12,6 +12,8 @@ static u8 g_used[LOS_Q_MAX] = {0};
 
 static u8 g_slots[LOS_Q_MAX * LOS_Q_SLOTS * LOS_Q_MSG] = {0};
 static u8 g_slot_used[LOS_Q_MAX * LOS_Q_SLOTS] = {0};
+static u8 g_slot_len[LOS_Q_MAX * LOS_Q_SLOTS] = {0};
+static u32 g_q_msg[LOS_Q_MAX] = {0};
 
 static OsQueue *q_get(UINT32 id) {
     if (id == 0u || id > LOS_Q_MAX || g_used[id - 1u] == 0u) {
@@ -25,7 +27,14 @@ static u8 *slot_alloc(void) {
 
     while (i < LOS_Q_MAX * LOS_Q_SLOTS) {
         if (g_slot_used[i] == 0u) {
+            u32 j = 0;
+
             g_slot_used[i] = 1u;
+            g_slot_len[i] = 0u;
+            while (j < LOS_Q_MSG) {
+                g_slots[i * LOS_Q_MSG + j] = 0u;
+                j++;
+            }
             return &g_slots[i * LOS_Q_MSG];
         }
         i++;
@@ -35,13 +44,16 @@ static u8 *slot_alloc(void) {
 
 static void slot_free(u8 *p) {
     u32 i = 0;
+    u8 *base = &g_slots[0];
+    u8 *end = &g_slots[LOS_Q_MAX * LOS_Q_SLOTS * LOS_Q_MSG];
 
-    if (p == 0) {
+    if (p == 0 || p < base || p >= end) {
         return;
     }
-    i = (u32)(p - &g_slots[0]) / LOS_Q_MSG;
+    i = (u32)(p - base) / LOS_Q_MSG;
     if (i < LOS_Q_MAX * LOS_Q_SLOTS) {
         g_slot_used[i] = 0u;
+        g_slot_len[i] = 0u;
     }
 }
 
@@ -52,7 +64,7 @@ UINT32 LOS_QueueCreate(const char *name, UINT16 len, UINT32 *queueId,
 
     (void)name;
     (void)flags;
-    if (queueId == 0 || maxMsgSize > LOS_Q_MSG) {
+    if (queueId == 0 || maxMsgSize == 0u || maxMsgSize > LOS_Q_MSG) {
         return LOS_ERRNO_QUEUE_INVALID;
     }
     if (cap > LOS_Q_SLOTS) {
@@ -66,6 +78,7 @@ UINT32 LOS_QueueCreate(const char *name, UINT16 len, UINT32 *queueId,
             if (os_queue_init(&g_q[i], &g_storage[i * LOS_Q_SLOTS], cap) != 0) {
                 return LOS_ERRNO_QUEUE_NO_MEMORY;
             }
+            g_q_msg[i] = (u32)maxMsgSize;
             g_used[i] = 1u;
             *queueId = i + 1u;
             return LOS_OK;
@@ -82,11 +95,12 @@ UINT32 LOS_QueueDelete(UINT32 queueId) {
     if (q == 0) {
         return LOS_ERRNO_QUEUE_INVALID;
     }
+    os_task_wake_all(q, -3);
     while ((p = os_queue_get(q, 0)) != 0) {
         slot_free((u8 *)p);
     }
+    (void)os_queue_destroy(q);
     g_used[queueId - 1u] = 0u;
-    q->magic = 0;
     return LOS_OK;
 }
 
@@ -100,8 +114,8 @@ UINT32 LOS_QueueWrite(UINT32 queueId, const void *buf, UINT32 len, UINT32 timeou
     if (q == 0 || buf == 0) {
         return LOS_ERRNO_QUEUE_INVALID;
     }
-    if (n > LOS_Q_MSG) {
-        n = LOS_Q_MSG;
+    if (n > g_q_msg[queueId - 1u] || n > LOS_Q_MSG) {
+        return LOS_ERRNO_QUEUE_INVALID;
     }
     slot = slot_alloc();
     if (slot == 0) {
@@ -110,6 +124,10 @@ UINT32 LOS_QueueWrite(UINT32 queueId, const void *buf, UINT32 len, UINT32 timeou
     while (i < n) {
         slot[i] = ((const u8 *)buf)[i];
         i++;
+    }
+    {
+        u32 slot_i = (u32)(slot - &g_slots[0]) / LOS_Q_MSG;
+        g_slot_len[slot_i] = (u8)n;
     }
     r = os_queue_put(q, (void *)slot, timeout);
     if (r != 0) {
@@ -130,14 +148,18 @@ UINT32 LOS_QueueRead(UINT32 queueId, void *buf, UINT32 maxLen, UINT32 timeout) {
     }
     slot = (u8 *)os_queue_get(q, timeout);
     if (slot == 0) {
-        return LOS_ERRNO_QUEUE_TIMEOUT;
+        return (q->magic == 0u) ? LOS_ERRNO_QUEUE_INVALID : LOS_ERRNO_QUEUE_TIMEOUT;
     }
-    if (n > LOS_Q_MSG) {
-        n = LOS_Q_MSG;
-    }
-    while (i < n) {
-        ((u8 *)buf)[i] = slot[i];
-        i++;
+    {
+        u32 slot_i = (u32)(slot - &g_slots[0]) / LOS_Q_MSG;
+        u32 mlen = g_slot_len[slot_i];
+        if (n > mlen) {
+            n = mlen;
+        }
+        while (i < n) {
+            ((u8 *)buf)[i] = slot[i];
+            i++;
+        }
     }
     slot_free(slot);
     return LOS_OK;

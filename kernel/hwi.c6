@@ -46,11 +46,19 @@ int os_hwi_enable(u32 irq, u32 on) {
 }
 
 void os_hwi_dispatch(u32 irq) {
+    OsHwiHandler fn = 0;
+    void *arg = 0;
+
     if (irq >= (u32)OS_HWI_MAX || g_hwi[irq].used == 0u ||
         g_hwi[irq].enabled == 0u) {
         return;
     }
-    g_hwi[irq].fn(g_hwi[irq].arg);
+    /* 先取本地副本：回调里 delete/recreate 不会让本次调用跳空。 */
+    fn = g_hwi[irq].fn;
+    arg = g_hwi[irq].arg;
+    if (fn != 0) {
+        fn(arg);
+    }
 }
 
 u32 os_hwi_count(void) {

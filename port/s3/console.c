@@ -8,6 +8,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/tick.h"
+#include "c6os/config.h"
 
 extern void os_sched_tick(void);
 extern void s3_irq_init(void);
@@ -18,9 +19,33 @@ void s3_mark(u32 idx, u32 v)
     *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
 }
 
+static volatile u32 g_isr_nest[C6OS_MAX_CORES] = {0};
+
+u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
+{
+    if (p == 0) {
+        return 0u;
+    }
+    return __sync_bool_compare_and_swap(p, expect, newv) ? 1u : 0u;
+}
+
 u32 port_in_isr(void)
 {
-    return 0u;
+    return g_isr_nest[port_core_id() & (u32)(C6OS_MAX_CORES - 1)];
+}
+
+void port_isr_enter(void)
+{
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+    g_isr_nest[core] = g_isr_nest[core] + 1u;
+}
+
+void port_isr_exit(void)
+{
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+    if (g_isr_nest[core] != 0u) {
+        g_isr_nest[core] = g_isr_nest[core] - 1u;
+    }
 }
 
 void os_test_set_isr(u32 v)
@@ -74,9 +99,12 @@ void port_putc(int ch)
     S3_USB_EP1_CONF = 1u;
 }
 
+static u32 g_rx_left[C6OS_MAX_CORES] = {0};
+
 int port_getc(void)
 {
-    static u32 left;
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+    u32 *left = &g_rx_left[core];
     volatile u32 *st = (volatile u32 *)(0x6003803Cu);
     volatile u32 *ist = (volatile u32 *)(0x6003800Cu);
     volatile u32 *iclr = (volatile u32 *)(0x60038014u);
@@ -86,16 +114,16 @@ int port_getc(void)
         if ((*ist & 0x4u) == 0u) {
             return -1;
         }
-        left = (*st >> 16) & 0x7Fu;
-        if (left == 0u) {
+        *left = (*st >> 16) & 0x7Fu;
+        if (*left == 0u) {
             *iclr = 0x4u;
             return -1;
         }
     }
-    left--;
+    *left = *left - 1u;
     {
         int c = (int)(*word & 0xFFu);
-        if (left == 0u) {
+        if (*left == 0u) {
             *iclr = 0x4u;
         }
         return c;

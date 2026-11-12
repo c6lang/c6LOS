@@ -7,9 +7,15 @@
 extern void rv_bare_trap(void);
 extern void os_sched_tick(void);
 
+static volatile u32 g_isr_nest = 0;
+
 void rv_bare_tick_irq(void)
 {
+    g_isr_nest = g_isr_nest + 1u;
     os_sched_tick();
+    if (g_isr_nest != 0u) {
+        g_isr_nest = g_isr_nest - 1u;
+    }
 }
 extern u32 risc6_trap_save[];
 
@@ -79,9 +85,29 @@ void port_mark(u32 v)
     (void)v;
 }
 
+u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
+{
+    if (p == 0) {
+        return 0u;
+    }
+    return __sync_bool_compare_and_swap(p, expect, newv) ? 1u : 0u;
+}
+
 u32 port_in_isr(void)
 {
-    return 0u;
+    return g_isr_nest;
+}
+
+void port_isr_enter(void)
+{
+    g_isr_nest = g_isr_nest + 1u;
+}
+
+void port_isr_exit(void)
+{
+    if (g_isr_nest != 0u) {
+        g_isr_nest = g_isr_nest - 1u;
+    }
 }
 
 void os_test_set_isr(u32 v)

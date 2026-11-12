@@ -12,6 +12,7 @@ typedef struct OsEvent {
 } OsEvent;
 
 int os_event_init(OsEvent *e);
+int os_event_destroy(OsEvent *e);
 int os_event_set(OsEvent *e, u32 bits);
 int os_event_clear(OsEvent *e, u32 bits);
 u32 os_event_get(OsEvent *e);

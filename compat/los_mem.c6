@@ -1,35 +1,75 @@
 #include "los/los_mem.h"
 #include "c6os/heap.h"
 
-static OsHeap g_heap = {0};
-static u8 g_ready = 0;
+#define LOS_MEM_MAX 4u
+
+typedef struct {
+    OsHeap heap;
+    void *pool;
+    u8 used;
+} LosMemPool;
+
+static LosMemPool g_pools[LOS_MEM_MAX] = {0};
+
+static LosMemPool *mem_get(void *pool) {
+    u32 i = 0;
+
+    while (i < LOS_MEM_MAX) {
+        if (g_pools[i].used != 0u && g_pools[i].pool == pool) {
+            return &g_pools[i];
+        }
+        i++;
+    }
+    return 0;
+}
 
 UINT32 LOS_MemInit(VOID *pool, UINT32 size) {
+    u32 i = 0;
+
     if (pool == 0 || size < 64u) {
         return 1u;
     }
-    os_heap_init(&g_heap, pool, (u32)size);
-    g_ready = 1u;
-    return 0u;
+    if (mem_get(pool) != 0) {
+        return 2u; /* 同一 pool 重复初始化 */
+    }
+    while (i < LOS_MEM_MAX) {
+        if (g_pools[i].used == 0u) {
+            os_heap_init(&g_pools[i].heap, pool, (u32)size);
+            if (g_pools[i].heap.magic != 0xC6E50006u) {
+                return 3u;
+            }
+            g_pools[i].pool = pool;
+            g_pools[i].used = 1u;
+            return 0u;
+        }
+        i++;
+    }
+    return 4u; /* 池句柄表满 */
 }
 
 VOID *LOS_MemAlloc(VOID *pool, UINT32 size) {
-    (void)pool;
-    if (g_ready == 0u) {
+    LosMemPool *p = mem_get(pool);
+
+    if (p == 0) {
         return 0;
     }
-    return os_heap_alloc(&g_heap, (u32)size);
+    return os_heap_alloc(&p->heap, (u32)size);
 }
 
 UINT32 LOS_MemFree(VOID *pool, VOID *ptr) {
-    (void)pool;
-    if (g_ready == 0u || ptr == 0) {
+    LosMemPool *p = mem_get(pool);
+
+    if (p == 0 || ptr == 0) {
         return 1u;
     }
-    return (os_heap_free(&g_heap, ptr) == 0) ? 0u : 2u;
+    return (os_heap_free(&p->heap, ptr) == 0) ? 0u : 2u;
 }
 
 UINT32 LOS_MemUsed(VOID *pool) {
-    (void)pool;
-    return (UINT32)os_heap_used(&g_heap);
+    LosMemPool *p = mem_get(pool);
+
+    if (p == 0) {
+        return 0u;
+    }
+    return (UINT32)os_heap_used(&p->heap);
 }

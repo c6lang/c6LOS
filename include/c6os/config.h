@@ -20,6 +20,9 @@
 #ifndef C6OS_STACK_DEFAULT
 #define C6OS_STACK_DEFAULT 8192
 #endif
+#ifndef C6OS_SHELL_ALLOW_REBOOT
+#define C6OS_SHELL_ALLOW_REBOOT 0
+#endif
 #ifndef C6OS_HEAP_SIZE
 #define C6OS_HEAP_SIZE 65536
 #endif

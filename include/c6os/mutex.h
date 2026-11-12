@@ -10,6 +10,8 @@ typedef struct OsMutex {
 } OsMutex;
 
 int os_mutex_init(OsMutex *m);
+int os_mutex_destroy(OsMutex *m);
+void os_mutex_release_owner(u32 id);
 int os_mutex_pend(OsMutex *m, u32 timeout);
 int os_mutex_post(OsMutex *m);
 u32 os_mutex_owner(OsMutex *m);

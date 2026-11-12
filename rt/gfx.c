@@ -1,6 +1,6 @@
 #include "c6os/gfx.h"
 
-void os_gfx_init(OsGfx *g, u16 *fb, u32 w, u32 h)
+void os_gfx_init_n(OsGfx *g, u16 *fb, u32 w, u32 h, u32 cells)
 {
     if (g == 0) {
         return;
@@ -8,54 +8,92 @@ void os_gfx_init(OsGfx *g, u16 *fb, u32 w, u32 h)
     g->fb = fb;
     g->w = w;
     g->h = h;
+    g->cells = cells;
+}
+
+void os_gfx_init(OsGfx *g, u16 *fb, u32 w, u32 h)
+{
+    u32 cells = 0;
+
+    if (w != 0u && h != 0u && w <= 0xFFFFFFFFu / h) {
+        cells = w * h;
+    }
+    os_gfx_init_n(g, fb, w, h, cells);
 }
 
 void os_gfx_pixel(OsGfx *g, int x, int y, u16 color)
 {
-    if (g == 0 || g->fb == 0 || x < 0 || y < 0 ||
-        (u32)x >= g->w || (u32)y >= g->h) {
+    u64 idx = 0;
+
+    if (g == 0 || g->fb == 0 || g->w == 0u || g->h == 0u || g->cells == 0u ||
+        x < 0 || y < 0 || (u32)x >= g->w || (u32)y >= g->h) {
         return;
     }
-    g->fb[(u32)y * g->w + (u32)x] = color;
+    idx = (u64)(u32)y * (u64)g->w + (u64)(u32)x;
+    if (idx >= (u64)g->cells) {
+        return;
+    }
+    g->fb[(u32)idx] = color;
 }
 
 u16 os_gfx_get(const OsGfx *g, int x, int y)
 {
-    if (g == 0 || g->fb == 0 || x < 0 || y < 0 ||
-        (u32)x >= g->w || (u32)y >= g->h) {
+    u64 idx = 0;
+
+    if (g == 0 || g->fb == 0 || g->w == 0u || g->h == 0u || g->cells == 0u ||
+        x < 0 || y < 0 || (u32)x >= g->w || (u32)y >= g->h) {
         return 0;
     }
-    return g->fb[(u32)y * g->w + (u32)x];
+    idx = (u64)(u32)y * (u64)g->w + (u64)(u32)x;
+    if (idx >= (u64)g->cells) {
+        return 0;
+    }
+    return g->fb[(u32)idx];
 }
 
 void os_gfx_fill_rect(OsGfx *g, int x, int y, int w, int h, u16 color)
 {
-    int xe = x + w;
-    int ye = y + h;
     int yy = 0;
+    int xe = 0;
+    int ye = 0;
 
-    if (g == 0 || g->fb == 0) {
+    if (g == 0 || g->fb == 0 || g->w == 0u || g->h == 0u ||
+        g->w > 0x7FFFFFFFu || g->h > 0x7FFFFFFFu) {
+        return;
+    }
+    if (w <= 0 || h <= 0) {
         return;
     }
     if (x < 0) {
+        w = w + x;
         x = 0;
     }
     if (y < 0) {
+        h = h + y;
         y = 0;
     }
-    if (xe > (int)g->w) {
-        xe = (int)g->w;
+    if (w <= 0 || h <= 0 || x >= (int)g->w || y >= (int)g->h) {
+        return;
     }
-    if (ye > (int)g->h) {
-        ye = (int)g->h;
+    xe = x;
+    ye = y;
+    if (w > (int)g->w - x) {
+        w = (int)g->w - x;
     }
+    if (h > (int)g->h - y) {
+        h = (int)g->h - y;
+    }
+    xe = x + w;
+    ye = y + h;
     yy = y;
     while (yy < ye) {
         int xx = x;
-        u16 *row = g->fb + (u32)yy * g->w;
-
         while (xx < xe) {
-            row[(u32)xx] = color;
+            u64 idx = (u64)(u32)yy * (u64)g->w + (u64)(u32)xx;
+            if (idx >= (u64)g->cells) {
+                break;
+            }
+            g->fb[(u32)idx] = color;
             xx++;
         }
         yy++;
@@ -66,14 +104,20 @@ void os_gfx_blit(OsGfx *g, int x, int y, const u16 *src, int sw, int sh)
 {
     int yy = 0;
 
-    if (g == 0 || g->fb == 0 || src == 0) {
+    if (g == 0 || g->fb == 0 || src == 0 || sw <= 0 || sh <= 0 ||
+        sw > 0x7FFFFFFF / sh) {
         return;
     }
     while (yy < sh) {
         int xx = 0;
+        u64 row = (u64)(u32)yy * (u64)(u32)sw;
 
         while (xx < sw) {
-            os_gfx_pixel(g, x + xx, y + yy, src[(u32)yy * (u32)sw + (u32)xx]);
+            u64 idx = row + (u64)(u32)xx;
+            if (idx > 0xFFFFFFFFu) {
+                break;
+            }
+            os_gfx_pixel(g, x + xx, y + yy, src[(u32)idx]);
             xx++;
         }
         yy++;
@@ -155,7 +199,7 @@ void os_gfx_char(OsGfx *g, int x, int y, char c, u16 color, int scale)
     const u8 *glyph = glyph_for(c);
     int row = 0;
 
-    if (g == 0 || scale <= 0 || glyph == 0) {
+    if (g == 0 || scale <= 0 || scale > 1024 || glyph == 0) {
         return;
     }
     while (row < 8) {
@@ -164,8 +208,12 @@ void os_gfx_char(OsGfx *g, int x, int y, char c, u16 color, int scale)
 
         while (col < 8) {
             if ((bits & (0x80u >> col)) != 0u) {
-                os_gfx_fill_rect(g, x + col * scale, y + row * scale,
-                                 scale, scale, color);
+                i64 fx = (i64)x + (i64)col * (i64)scale;
+                i64 fy = (i64)y + (i64)row * (i64)scale;
+                if (fx >= -2147483648LL && fx <= 2147483647LL &&
+                    fy >= -2147483648LL && fy <= 2147483647LL) {
+                    os_gfx_fill_rect(g, (int)fx, (int)fy, scale, scale, color);
+                }
             }
             col++;
         }
@@ -182,6 +230,9 @@ void os_gfx_text(OsGfx *g, int x, int y, const char *s, u16 color, int scale)
     }
     while (*s != '\0') {
         os_gfx_char(g, cx, y, *s, color, scale);
+        if (cx > 0x7FFFFF00) {
+            break;
+        }
         cx += 8 * scale;
         s++;
     }
@@ -192,7 +243,7 @@ void os_gfx_char16(OsGfx *g, int x, int y, char c, u16 color)
     const u8 *glyph = glyph_for(c);
     int row = 0;
 
-    if (g == 0 || glyph == 0) {
+    if (g == 0 || glyph == 0 || x > 0x7FFFFF00 || y > 0x7FFFFF00) {
         return;
     }
     while (row < 8) {

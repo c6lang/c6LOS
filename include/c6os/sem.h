@@ -10,6 +10,7 @@ typedef struct OsSem {
 } OsSem;
 
 int os_sem_init(OsSem *s, u32 initial, u32 max);
+int os_sem_destroy(OsSem *s);
 int os_sem_pend(OsSem *s, u32 timeout);
 int os_sem_post(OsSem *s);
 u32 os_sem_count(OsSem *s);

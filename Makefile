@@ -1101,7 +1101,7 @@ $(RV32B_DIR)/obj/console.o: port/rv32bare/console.c
 
 $(RV32B_DIR)/obj/ctx.o: port/rv32/ctx.c
 	@mkdir -p $(RV32B_DIR)/obj
-	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+	clang $(RV32BFLAGS) -DC6OS_BARE -Iinclude -c -o $@ $<
 
 $(RV32B_DIR)/obj/ctx_asm.o: port/rv32/ctx.S
 	@mkdir -p $(RV32B_DIR)/obj
@@ -1165,7 +1165,7 @@ $(RV32BS_DIR)/obj/console.o: port/rv32bare/console.c
 
 $(RV32BS_DIR)/obj/ctx.o: port/rv32/ctx.c
 	@mkdir -p $(RV32BS_DIR)/obj
-	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+	clang $(RV32BFLAGS) -DC6OS_BARE -Iinclude -c -o $@ $<
 
 $(RV32BS_DIR)/obj/ctx_asm.o: port/rv32/ctx.S
 	@mkdir -p $(RV32BS_DIR)/obj

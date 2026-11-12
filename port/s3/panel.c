@@ -166,8 +166,14 @@ u32 s3_gpio_loop(u32 p);
 
 u32 s3_gpio_loop_sel(u32 p, u32 sel)
 {
-    volatile u32 *mux = (volatile u32 *)(0x60009000u + p * 4u);
-    u32 v = *mux;
+    volatile u32 *mux = 0;
+    u32 v = 0;
+
+    if (p > 48u) {
+        return 0u;
+    }
+    mux = (volatile u32 *)(0x60009000u + p * 4u);
+    v = *mux;
 
     v = (v & ~(7u << 12)) | ((sel & 7u) << 12);
     v = (v | (1u << 9)) & ~(1u << 7);
@@ -179,6 +185,10 @@ u32 s3_gpio_loop(u32 p)
 {
     u32 hi = 0;
     u32 lo = 1;
+
+    if (p > 48u) {
+        return 0u;
+    }
 
     pin_out(p);
     pin_hi(p);
@@ -284,6 +294,10 @@ void s3_st7789_probe(u8 out[4])
 {
     int i = 0;
 
+    if (out == 0) {
+        return;
+    }
+
     pin_out(PIN_LCD_CS);
     pin_out(PIN_LCD_DC);
     pin_out(PIN_LCD_RST);
@@ -307,6 +321,10 @@ void s3_st7789_probe(u8 out[4])
 void s3_panel_probe(u8 out[3])
 {
     int i = 0;
+
+    if (out == 0) {
+        return;
+    }
 
     panel_reset();
     pin_out(PIN_CS);
@@ -458,11 +476,12 @@ void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
     u8 col[4];
     u8 row[4];
     u32 i = 0;
-    u32 n = w * h;
+    u32 n = 0;
 
-    if (fb == 0 || w == 0u || h == 0u) {
+    if (fb == 0 || w == 0u || h == 0u || w > 0xFFFFFFFFu / h) {
         return;
     }
+    n = w * h;
     col[0] = 0; col[1] = 0;
     col[2] = (u8)((w - 1u) >> 8); col[3] = (u8)((w - 1u) & 0xFFu);
     row[0] = 0; row[1] = 0;

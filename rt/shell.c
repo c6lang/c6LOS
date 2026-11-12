@@ -5,6 +5,7 @@
 #include "c6os/port.h"
 #include "c6os/log.h"
 #include "c6os/cobs.h"
+#include "c6os/config.h"
 
 static OsHeap *g_heap;
 
@@ -49,7 +50,11 @@ static void cmd_help(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+#if C6OS_SHELL_ALLOW_REBOOT
     port_puts("help tick ps free log date reboot\n");
+#else
+    port_puts("help tick ps free log date\n");
+#endif
 }
 
 static void cmd_tick(int argc, char **argv)
@@ -142,8 +147,12 @@ static void cmd_reboot(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+#if C6OS_SHELL_ALLOW_REBOOT
     port_puts("reboot\n");
     port_reboot();
+#else
+    port_puts("reboot disabled\n");
+#endif
 }
 
 static void cmd_log(int argc, char **argv)

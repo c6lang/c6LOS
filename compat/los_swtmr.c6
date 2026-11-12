@@ -62,7 +62,7 @@ UINT32 LOS_SwtmrDelete(UINT32 timerId) {
     if (timerId == 0u || timerId > LOS_SW_MAX || g_used[timerId - 1u] == 0u) {
         return 1u;
     }
-    (void)os_timer_stop(&g_t[timerId - 1u]);
+    (void)os_timer_deinit(&g_t[timerId - 1u]);
     g_used[timerId - 1u] = 0u;
     g_cb[timerId - 1u] = 0;
     return 0u;

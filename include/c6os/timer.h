@@ -18,6 +18,7 @@ typedef struct OsTimer {
 int os_timer_init(OsTimer *t, u32 period, int periodic, OsTimerCb cb, void *arg);
 int os_timer_start(OsTimer *t);
 int os_timer_stop(OsTimer *t);
+int os_timer_deinit(OsTimer *t);
 void os_timer_tick(void);
 
 #endif

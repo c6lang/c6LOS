@@ -1,6 +1,7 @@
 #include "c6os/types.h"
 #include "c6os/tick.h"
 #include "c6os/port.h"
+#include "memmap.h"
 
 extern void os_sched_tick(void);
 extern void s3_wdt_kick(void);
@@ -98,8 +99,10 @@ static void s3_timer_rearm(void)
 void s3_irq_init(void)
 {
     u32 mask = (1u << 6);   /* XCHAL_TIMER0_INTERRUPT = 6, level 1 */
+    u32 old = 0;
     s3_timer_rearm();
-    __asm__ __volatile__("wsr %0, intenable" : : "r"(mask));
+    __asm__ __volatile__("rsr %0, intenable" : "=r"(old));
+    __asm__ __volatile__("wsr %0, intenable" : : "r"(old | mask));
     __asm__ __volatile__("rsil a2, 0" : : : "a2");
 }
 
@@ -122,7 +125,8 @@ void s3_trap(u32 frame_sp)
     u32 ps = 0;
 
     __asm__ __volatile__("rsr %0, exccause" : "=r"(cause));
-    if (frame_sp != 0u) {
+    if (frame_sp >= (u32)S3_DRAM_LOW &&
+        frame_sp < (u32)S3_DRAM_HIGH - 80u) {
         pc = f[15];
         ps = f[16];
     }
@@ -150,10 +154,12 @@ void *s3_timer_irq(u32 frame_sp)
     if (port_cur_ctx() != 0) {
         port_irq_fill(frame_sp);
     }
+    port_isr_enter();
     os_sched_tick();
     if (g_hook != 0) {
         g_hook();
     }
+    port_isr_exit();
     {
         void *cur = port_cur_ctx();
         void *next = 0;

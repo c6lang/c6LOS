@@ -1,94 +1,240 @@
 #include "c6os/mutex.h"
 #include "c6os/task.h"
+#include "c6os/config.h"
 
 #define MUTEX_MAGIC 0xC6E50002u
+#define MUTEX_MAX ((u32)C6OS_MAX_TASKS)
 
-static void boost_chain(OsMutex *m, u32 prio) {
-    u32 owner = 0;
-    OsTask *t = 0;
+static OsMutex *g_mutexes[MUTEX_MAX] = {0};
 
-    if (m == 0) {
-        return;
-    }
-    owner = m->owner;
-    if (owner == 0u) {
-        return;
-    }
-    t = os_task_get(owner);
-    if (t == 0) {
-        return;
-    }
-    if (prio < (u32)t->prio) {
-        os_task_boost(owner, prio);
-        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_kind == 2u &&
-            t->wait_obj != 0) {
-            boost_chain((OsMutex *)t->wait_obj, prio);
+/* 调度器启动前/主上下文没有 TCB；用一个保留 id 表示“主上下文”。 */
+#define MUTEX_MAIN_OWNER 0xFFFFFFFFu
+
+static u32 mutex_self_id(void) {
+    u32 self = os_task_self();
+
+    return self == 0u ? (u32)MUTEX_MAIN_OWNER : self;
+}
+
+void os_mutex_release_owner(u32 id);
+
+static int mutex_register(OsMutex *m) {
+    u32 i = 0;
+
+    while (i < MUTEX_MAX) {
+        if (g_mutexes[i] == m) {
+            return 0;
         }
+        if (g_mutexes[i] == 0) {
+            g_mutexes[i] = m;
+            return 0;
+        }
+        i++;
+    }
+    return -1;
+}
+
+static void mutex_unregister(OsMutex *m) {
+    u32 i = 0;
+
+    while (i < MUTEX_MAX) {
+        if (g_mutexes[i] == m) {
+            g_mutexes[i] = 0;
+            return;
+        }
+        i++;
     }
 }
 
+/* 迭代式优先级继承，带 visited 集合：ABBA 环不会递归爆栈。 */
+static int boost_chain(OsMutex *m, u32 prio) {
+    u32 seen[MUTEX_MAX] = {0};
+    u32 n = 0;
+
+    while (m != 0 && n < MUTEX_MAX) {
+        u32 owner = m->owner;
+        u32 i = 0;
+        OsTask *t = 0;
+
+        if (owner == 0u) {
+            return 0;
+        }
+        while (i < n) {
+            if (seen[i] == owner) {
+                return -1; /* 等待图成环：拒绝本次 pend，避免 ABBA 死锁 */
+            }
+            i++;
+        }
+        seen[n] = owner;
+        n++;
+        t = os_task_get(owner);
+        if (t == 0) {
+            return 0;
+        }
+        if (prio < (u32)t->prio) {
+            os_task_boost(owner, prio);
+        }
+        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_kind == 2u &&
+            t->wait_obj != 0) {
+            OsMutex *next = (OsMutex *)t->wait_obj;
+            if (next->magic != MUTEX_MAGIC) {
+                return 0;
+            }
+            m = next;
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
+
 int os_mutex_init(OsMutex *m) {
-    if (m == 0) {
+    if (m == 0 || m->magic == MUTEX_MAGIC) {
         return -1;
     }
+    if (mutex_register(m) != 0) {
+        return -2;
+    }
+    os_task_set_mutex_release_hook(os_mutex_release_owner);
     m->owner = 0;
     m->count = 0;
     m->magic = MUTEX_MAGIC;
     return 0;
 }
 
+int os_mutex_destroy(OsMutex *m) {
+    if (m == 0 || m->magic != MUTEX_MAGIC) {
+        return -1;
+    }
+    {
+        u32 st = os_obj_lock();
+        /* 先唤醒等待者（-3=对象删除），再失效对象。 */
+        os_task_wake_all(m, -3);
+        m->owner = 0;
+        m->count = 0;
+        m->magic = 0;
+        mutex_unregister(m);
+        os_obj_unlock(st);
+    }
+    return 0;
+}
+
 int os_mutex_pend(OsMutex *m, u32 timeout) {
     u32 self = 0;
+    u32 st = 0;
+    int r = 0;
 
     if (m == 0 || m->magic != MUTEX_MAGIC) {
         return -1;
     }
-    self = os_task_self();
+    st = os_obj_lock();
+    if (m->magic != MUTEX_MAGIC) {
+        os_obj_unlock(st);
+        return -1;
+    }
+    self = mutex_self_id();
     if (m->owner == self) {
+        if (m->count == 0xFFFFFFFFu) {
+            os_obj_unlock(st);
+            return -1;
+        }
         m->count = m->count + 1u;
+        os_obj_unlock(st);
         return 0;
     }
     if (m->owner == 0u) {
         m->owner = self;
         m->count = 1;
+        os_obj_unlock(st);
         return 0;
     }
-    {
-        OsTask *me = os_task_get(self);
-        boost_chain(m, me != 0 ? (u32)me->prio : 32u);
+    if (boost_chain(m, (u32)(os_task_get(self) != 0 ? os_task_get(self)->prio : 32u)) != 0) {
+        os_obj_unlock(st);
+        return -1; /* 检测到环形等待：拒绝阻塞 */
     }
-    {
-        int r = os_task_block(m, timeout, 2u);
-        if (r == 0) {
-            m->owner = self;
-            m->count = 1;
-        }
+    r = os_task_block_prepare(m, timeout, 2u, 0u);
+    os_obj_unlock(st);
+    if (r != 0) {
         return r;
     }
+    r = os_task_block_wait();
+    if (r == 0 && m->magic == MUTEX_MAGIC) {
+        /* post 已把所有权交给本任务；保持交接结果。 */
+        if (m->owner != self) {
+            m->owner = self;
+        }
+        m->count = 1;
+    }
+    return r;
 }
 
 int os_mutex_post(OsMutex *m) {
     u32 self = 0;
+    u32 waiter = 0;
+    u32 st = 0;
 
     if (m == 0 || m->magic != MUTEX_MAGIC) {
         return -1;
     }
-    self = os_task_self();
+    st = os_obj_lock();
+    if (m->magic != MUTEX_MAGIC) {
+        os_obj_unlock(st);
+        return -1;
+    }
+    self = mutex_self_id();
     if (m->owner != self || m->count == 0u) {
+        os_obj_unlock(st);
         return -1;
     }
     m->count = m->count - 1u;
-    if (m->count == 0u) {
-        m->owner = 0;
-        os_task_restore(self);
-        os_task_wake_first(m, 2u, 0);
+    if (m->count != 0u) {
+        os_obj_unlock(st);
+        return 0;
     }
+    os_task_restore(self);
+    /* 关键：唤醒前把所有权交给等待者，消除“owner=0 窗口”。 */
+    waiter = os_task_wake_first_id(m, 2u, 0);
+    if (waiter != 0u) {
+        m->owner = waiter;
+        m->count = 1;
+    } else {
+        m->owner = 0;
+        m->count = 0;
+    }
+    os_obj_unlock(st);
     return 0;
 }
 
 u32 os_mutex_owner(OsMutex *m) {
-    if (m == 0) {
+    if (m == 0 || m->magic != MUTEX_MAGIC) {
         return 0;
     }
     return m->owner;
+}
+
+/* 任务删除/退出时释放它持有的锁；每个锁交给下一个等待者。 */
+void os_mutex_release_owner(u32 id) {
+    u32 i = 0;
+
+    if (id == 0u) {
+        return;
+    }
+    {
+        u32 st = os_obj_lock();
+        while (i < MUTEX_MAX) {
+            OsMutex *m = g_mutexes[i];
+            if (m != 0 && m->magic == MUTEX_MAGIC && m->owner == id) {
+                u32 waiter = 0;
+                m->count = 0;
+                m->owner = 0;
+                waiter = os_task_wake_first_id(m, 2u, 0);
+                if (waiter != 0u) {
+                    m->owner = waiter;
+                    m->count = 1;
+                }
+            }
+            i++;
+        }
+        os_obj_unlock(st);
+    }
 }
