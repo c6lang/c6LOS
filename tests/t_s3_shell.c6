@@ -39,7 +39,7 @@ static void shell_task(void *arg) {
 void os_main(void) {
     port_init();
     port_puts("c6os s3 shell test\n");
-    os_heap_init(&g_heap, g_mem, (u32)sizeof(g_mem));
+    os_sys_heap_init(g_mem, (u32)sizeof(g_mem));
     if (os_task_create("sh", shell_task, 0, 1u, 4096u) <= 0) {
         port_puts("FAIL: create\n");
         return;

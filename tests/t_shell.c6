@@ -36,7 +36,7 @@ static int has(const char *s, const char *needle) {
 int main(void) {
     const char *out = 0;
 
-    os_heap_init(&g_heap, g_mem, (u32)sizeof(g_mem));
+    os_sys_heap_init(g_mem, (u32)sizeof(g_mem));
     os_shell_bind_heap(&g_heap);
     if (os_task_create("worker", worker, 0, 5u, 8192u) <= 0) {
         port_puts("FAIL: create\n");

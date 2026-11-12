@@ -13,14 +13,12 @@ typedef void (*OsTaskEntry)(void *);
 #define OS_TASK_DEAD 3u
 #define OS_TASK_BLOCKED 4u
 #define OS_TASK_SUSP 5u
-#define OS_TASK_MAGIC 0xC6A50001u
 
 typedef struct OsTask {
     void *ctx;                 /* port 上下文（不透明） */
     OsTaskEntry entry;
     void *arg;
     u32 id;
-    u32 magic;                 /* OS_TASK_MAGIC，释放后清 0 */
     u32 stack_size;
     u32 slice;                 /* 剩余时间片（tick） */
     u32 delay_left;            /* 延时剩余 tick */
@@ -58,5 +56,6 @@ void os_task_exit(void);
 u32 os_task_self(void);
 u32 os_task_count(void);
 OsTask *os_task_get(u32 id);
+u32 os_task_info(u32 idx, u32 *id, u32 *prio, u32 *state, char *name, u32 cap);
 
 #endif

@@ -86,7 +86,7 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 完成（`OsTask.magic=0xC6A50001`，create 置位、delete/reap 清 0，`os_task_get` 校验；`t_stress` 10^6 次 + `t_task2` 删除后查找为空 PASS） |
+| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（16 槽静态池 + 10^6 次创建/删除 host PASS；magic 字段会改变 c6 C99 与 gcc 的结构体布局，暂缓，改为 `os_task_info` 跨语言只读接口） |
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 完成（`t_prio32`：31/5/10 三任务按 5→10→31 运行；32 个优先级逐个创建/运行全 PASS） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 完成（`t_task2` 自删除后不返回、调度器延迟 `port_task_ctx_free` 并清 magic，`t_stress` 10^6 次无泄漏） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
@@ -176,7 +176,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log/date/reboot + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`） |
+| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` 按 RDDID 第 2/3 字节匹配 ST7789 240×280 / ST77916 360×360，未知回退 ST7789；`t_panel` host PASS；SPI 读 RDDID 与初始化序列待接） |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 用帧缓冲绘制 tick/任务数/堆用量的彩色数字行，`t_dash` host PASS；任务表/日志滚动与真实屏刷新待做） |
@@ -434,3 +434,14 @@
   紧接 `PASS: s3 stress`，任务数回到 1（driver 自身），全程无 panic。
   串口抓取注意：杀掉后台 capture 时必须连子进程一起杀，否则残留 python
   会占住 `/dev/ttyACM0` 导致后续 esptool 报 I/O error。
+
+- **M7-1 S3 shell 输入打通（真板 PASS）**：USB-Serial/JTAG OUT 必须用 **32 位读**
+  `*(volatile u32*)0x60038000 & 0xFF`，用 8 位读会一直得到 0；数据可用性看
+  `INT_ST bit2`，字节数取 `OUT_EP1_ST[22:16]`，读完清 `INT_CLR bit2`。
+  实测发 `ps\r/free\r/help\r` 得到 `ps n=1`、`1 1 X sh`、`used=0 ...`、
+  `help tick ps free log date reboot`。
+- **跨语言结构体 ABI**：c6 C99 后端与 gcc 的 `OsTask` 布局不一致，shell 不能直接
+  解引用；新增 `os_task_info(idx,id,prio,state,name,cap)` 与 `os_sys_heap_*`
+  让 C 侧只走 c6 导出函数。`rt/shell.c` 已改用这两个接口。
+- **S3 构建规则修复**：C99 缓存按“源文件路径列表”判断导致改头文件不重编；改为
+  `S3_C6` 每个源文件一条规则、依赖全部 `include/c6os|los/*.h`，彻底避免旧布局。

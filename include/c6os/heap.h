@@ -20,4 +20,9 @@ u32 os_heap_used(OsHeap *h);
 u32 os_heap_peak(OsHeap *h);
 u32 os_heap_max_free(OsHeap *h);
 
+void os_sys_heap_init(void *mem, u32 size);
+u32 os_sys_heap_used(void);
+u32 os_sys_heap_peak(void);
+u32 os_sys_heap_max_free(void);
+
 #endif

@@ -83,22 +83,29 @@ static char state_ch(u8 s)
 
 static void cmd_ps(int argc, char **argv)
 {
-    u32 id = 1;
+    u32 id = 0;
 
     (void)argc;
     (void)argv;
-    while (id < 64u) {
-        OsTask *t = os_task_get(id);
+    port_puts("ps n=");
+    out_u32(os_task_count());
+    port_puts("\n");
+    while (id < 16u) {
+        u32 tid = 0;
+        u32 prio = 0;
+        u32 st = 0;
+        char name[16];
 
-        if (t != 0 && t->state != (u8)OS_TASK_FREE) {
+        name[0] = '\0';
+        if (os_task_info(id, &tid, &prio, &st, name, 16u) != 0u) {
             port_putc(' ');
-            out_u32(t->id);
+            out_u32(tid);
             port_putc(' ');
-            out_u32((u32)t->prio);
+            out_u32(prio);
             port_putc(' ');
-            port_putc((int)state_ch(t->state));
+            port_putc((int)state_ch((u8)st));
             port_putc(' ');
-            port_puts(t->name);
+            port_puts(name);
             port_puts("\n");
         }
         id++;
@@ -114,11 +121,11 @@ static void cmd_free(int argc, char **argv)
         return;
     }
     port_puts("used=");
-    out_u32(os_heap_used(g_heap));
+    out_u32(os_sys_heap_used());
     port_puts(" peak=");
-    out_u32(os_heap_peak(g_heap));
+    out_u32(os_sys_heap_peak());
     port_puts(" maxfree=");
-    out_u32(os_heap_max_free(g_heap));
+    out_u32(os_sys_heap_max_free());
     port_puts("\n");
 }
 

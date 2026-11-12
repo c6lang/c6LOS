@@ -30,12 +30,14 @@ all: s3
 
 s3: $(BUILD)/c6os.bin
 
-$(BUILD)/c99/.stamp: s3-src-check $(S3_C6)
-	@mkdir -p $(BUILD)/c99
-	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(S3_C6)
-	@touch $@
+S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 
-$(BUILD)/c99/%.c: $(BUILD)/c99/.stamp ;
+define S3_C_RULE
+$(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
+	@mkdir -p $(BUILD)/c99
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(1)
+endef
+$(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 
 $(BUILD)/obj/%.o: $(BUILD)/c99/%.c
 	@mkdir -p $(BUILD)/obj
