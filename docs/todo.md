@@ -506,3 +506,7 @@
   `include/c6os/st77916_table.h` 的 v1 初始化表；`t_s3_lcd` 循环红/绿/蓝/白。
   烧写运行后 **USB 直接掉线**（`/dev/ttyACM0` 消失），符合“无电池时屏/背光
   电流把 USB 拉垮”的猜测；接 3.7V 电池后再验证。
+
+- **M8-2 双核并行用例（待上电）**：`tests/t_s3_twocore.c6` 启动 core1 计数循环，
+  core0 同时跑 20 万次内核任务循环，完成后打印 `core0=/core1=` 并要求两者非 0；
+  镜像 `build/s3tc/c6os.bin` 已构建，等 USB/电池恢复后上板。

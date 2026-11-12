@@ -1,0 +1,52 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+extern int s3_core1_start(void);
+extern u32 s3_core1_count(void);
+
+static u32 g_core0 = 0;
+
+static void worker(void *arg) {
+    u32 i = 0;
+    while (i < 200000u) {
+        g_core0++;
+        i++;
+    }
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os two-core test\n");
+    s3_core1_start();
+    if (os_task_create("w", worker, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+    port_puts("core0=");
+    /* 简易十进制输出 */
+    {
+        char b[12] = {0};
+        u32 v = g_core0;
+        int i = 0;
+        if (v == 0u) { port_putc('0'); }
+        while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v /= 10u; }
+        while (i > 0) { i--; port_putc((int)b[i]); }
+    }
+    port_puts(" core1=");
+    {
+        char b[12] = {0};
+        u32 v = s3_core1_count();
+        int i = 0;
+        if (v == 0u) { port_putc('0'); }
+        while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v /= 10u; }
+        while (i > 0) { i--; port_putc((int)b[i]); }
+    }
+    port_puts("\n");
+    if (g_core0 != 0u && s3_core1_count() != 0u) {
+        port_puts("PASS: two-core\n");
+    } else {
+        port_puts("FAIL: two-core\n");
+    }
+}
