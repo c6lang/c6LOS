@@ -1,0 +1,61 @@
+#include "los/los_membox.h"
+#include "c6os/membox.h"
+
+#define LOS_MB_MAX 4u
+
+static OsMembox g_mb[LOS_MB_MAX] = {0};
+static u8 g_used[LOS_MB_MAX] = {0};
+
+static OsMembox *mb_get(UINT32 h) {
+    if (h == 0u || h > LOS_MB_MAX || g_used[h - 1u] == 0u) {
+        return 0;
+    }
+    return &g_mb[h - 1u];
+}
+
+UINT32 LOS_MemboxInit(UINT32 *handle, VOID *pool, UINT32 blkSize, UINT32 blkNum) {
+    u32 i = 0;
+
+    if (handle == 0 || pool == 0) {
+        return 1u;
+    }
+    while (i < LOS_MB_MAX) {
+        if (g_used[i] == 0u) {
+            if (os_membox_init(&g_mb[i], pool, (u32)blkSize, (u32)blkNum) != 0) {
+                return 2u;
+            }
+            g_used[i] = 1u;
+            *handle = i + 1u;
+            return 0u;
+        }
+        i++;
+    }
+    return 3u;
+}
+
+VOID *LOS_MemboxAlloc(UINT32 handle) {
+    OsMembox *m = mb_get(handle);
+
+    if (m == 0) {
+        return 0;
+    }
+    return os_membox_alloc(m);
+}
+
+UINT32 LOS_MemboxFree(UINT32 handle, VOID *p) {
+    OsMembox *m = mb_get(handle);
+
+    if (m == 0) {
+        return 1u;
+    }
+    return (os_membox_free(m, p) == 0) ? 0u : 2u;
+}
+
+UINT32 LOS_MemboxFreeCount(UINT32 handle) {
+    OsMembox *m = mb_get(handle);
+
+    if (m == 0) {
+        return 0u;
+    }
+    return (UINT32)os_membox_free_count(m);
+}
