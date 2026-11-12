@@ -28,7 +28,13 @@ VOID LOS_TaskUnlock(VOID);
 UINT32 LOS_TaskPriSet(UINT32 taskId, UINT16 taskPrio);
 UINT32 LOS_CurTaskPriSet(UINT16 taskPrio);
 UINT32 LOS_TaskPriGet(UINT32 taskId);
-UINT32 LOS_TaskSwitchInfoGet(VOID);
+typedef struct {
+    UINT32 switchCount;   /* 全系统累计切换次数 */
+    UINT32 taskId;        /* 当前任务 id，0=无 */
+    UINT64 runCycles;     /* 当前任务累计运行周期 */
+} TaskSwitchInfo;
+
+UINT32 LOS_TaskSwitchInfoGet(TaskSwitchInfo *info);
 UINT32 LOS_TaskIDGet(VOID);
 UINT32 LOS_TaskCount(VOID);
 

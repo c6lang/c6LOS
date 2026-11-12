@@ -74,8 +74,14 @@ UINT32 LOS_TaskPriGet(UINT32 taskId) {
     return os_task_get_prio((u32)taskId);
 }
 
-UINT32 LOS_TaskSwitchInfoGet(VOID) {
-    return os_task_switch_count();
+UINT32 LOS_TaskSwitchInfoGet(TaskSwitchInfo *info) {
+    if (info == 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    info->switchCount = os_task_switch_count();
+    info->taskId = os_task_self();
+    info->runCycles = os_task_run_cycles(info->taskId);
+    return LOS_OK;
 }
 
 UINT32 LOS_TaskIDGet(VOID) {

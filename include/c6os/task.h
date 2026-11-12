@@ -34,6 +34,8 @@ typedef struct OsTask {
     u32 wait_arg;              /* 事件掩码等 */
     u32 suspend_cnt;
     u32 wait_bits;             /* 事件唤醒时返回的位 */
+    u64 run_cycles;            /* 累计运行周期（port_cycles 口径） */
+    u32 switches;              /* 被调度次数 */
     char name[C6OS_NAME_MAX];
 } OsTask;
 
@@ -67,6 +69,8 @@ void os_task_unlock(void);
 int os_task_set_prio(u32 id, u32 prio);
 u32 os_task_get_prio(u32 id);
 u32 os_task_switch_count(void);
+u64 os_task_run_cycles(u32 id);
+u32 os_task_switches(u32 id);
 u32 os_obj_lock(void);
 void os_obj_unlock(u32 state);
 int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg);

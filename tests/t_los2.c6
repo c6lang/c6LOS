@@ -1,6 +1,7 @@
 #include "los/los_queue.h"
 #include "los/los_mux.h"
 #include "los/los_event.h"
+#include "los/los_task.h"
 #include "c6os/port.h"
 
 int main(void) {
@@ -84,6 +85,12 @@ int main(void) {
     }
     if (LOS_TaskPriSet(999u, 1u) == LOS_OK) {
         return 18;
+    }
+    {
+        TaskSwitchInfo ti = {0};
+        if (LOS_TaskSwitchInfoGet(&ti) != LOS_OK || LOS_TaskSwitchInfoGet(0) == LOS_OK) {
+            return 19;
+        }
     }
     port_puts("PASS: LOS_Queue/Mux/Event\n");
     return 0;

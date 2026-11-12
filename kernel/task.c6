@@ -163,6 +163,8 @@ int os_task_create_on(u32 core, const char *name, OsTaskEntry entry, void *arg,
         i++;
     }
     t->name[i] = '\0';
+    t->run_cycles = 0u;
+    t->switches = 0u;
     t->state = (u8)OS_TASK_READY;
     return (int)t->id;
 }
@@ -197,6 +199,18 @@ u32 os_task_get_prio(u32 id) {
 
 u32 os_task_switch_count(void) {
     return g_switch_count;
+}
+
+u64 os_task_run_cycles(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    return (t != 0) ? t->run_cycles : 0u;
+}
+
+u32 os_task_switches(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    return (t != 0) ? t->switches : 0u;
 }
 
 u32 os_task_core(u32 id) {
@@ -522,9 +536,14 @@ void os_task_start_core(u32 core) {
         g_cur_arr[me] = t;
         t->state = (u8)OS_TASK_RUNNING;
         g_switch_count = g_switch_count + 1u;
-        port_enter_task();
-        port_task_switch(t->ctx);
-        port_leave_task();
+        {
+            u64 t0 = port_cycles();
+            port_enter_task();
+            port_task_switch(t->ctx);
+            t->run_cycles = t->run_cycles + (port_cycles() - t0);
+            t->switches = t->switches + 1u;
+            port_leave_task();
+        }
         if (t->state == (u8)OS_TASK_RUNNING) {
             make_ready(t);
         }
