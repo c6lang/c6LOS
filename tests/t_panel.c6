@@ -1,0 +1,36 @@
+#include "c6os/panel.h"
+#include "c6os/port.h"
+
+static int same(const char *a, const char *b) {
+    while (*a != '\0' && *b != '\0') {
+        if (*a != *b) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+int main(void) {
+    OsPanel p = {0};
+    u8 a[3] = {0x00, 0x85, 0x52};
+    u8 b[3] = {0x00, 0x77, 0x91};
+    u8 c[3] = {0x00, 0xAA, 0x55};
+
+    if (os_panel_pick(a, &p) != 0 || same(p.name, "st7789") == 0 ||
+        p.width != 240u || p.height != 280u) {
+        port_puts("FAIL: st7789\n");
+        return 1;
+    }
+    if (os_panel_pick(b, &p) != 0 || same(p.name, "st77916") == 0) {
+        port_puts("FAIL: st77916\n");
+        return 2;
+    }
+    if (os_panel_pick(c, &p) != 1 || same(p.name, "st7789") == 0) {
+        port_puts("FAIL: fallback\n");
+        return 3;
+    }
+    port_puts("PASS: panel probe\n");
+    return 0;
+}

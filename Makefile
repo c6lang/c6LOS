@@ -128,6 +128,18 @@ $(BUILDH)/log.ll: kernel/log.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
+$(BUILDH)/panel.o: rt/panel.c
+	@mkdir -p $(BUILDH)
+	gcc -Iinclude -c $< -o $@
+
+$(BUILDH)/t_panel.ll: tests/t_panel.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_panel: $(BUILDH)/t_panel.ll $(BUILDH)/panel.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_panel.ll $(BUILDH)/panel.o \
+		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
 $(BUILDH)/gfx.o: rt/gfx.c
 	@mkdir -p $(BUILDH)
 	gcc -Iinclude -c $< -o $@
@@ -652,7 +664,7 @@ check-all: check-host x86 rv32
 
 check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join $(BUILDH)/t_suspend $(BUILDH)/t_los3 $(BUILDH)/t_timeout $(BUILDH)/t_los4 $(BUILDH)/t_task2 $(BUILDH)/t_los_err $(BUILDH)/t_queue_generic $(BUILDH)/t_race $(BUILDH)/t_hwi $(BUILDH)/t_shell $(BUILDH)/t_cobs \
 	$(BUILDH)/t_pi_chain $(BUILDH)/t_isr $(BUILDH)/t_overflow $(BUILDH)/t_stress \
-	$(BUILDH)/t_preempt_sim $(BUILDH)/t_irq_nest $(BUILDH)/t_prio32 $(BUILDH)/t_consistency $(BUILDH)/t_gfx
+	$(BUILDH)/t_preempt_sim $(BUILDH)/t_irq_nest $(BUILDH)/t_prio32 $(BUILDH)/t_consistency $(BUILDH)/t_gfx $(BUILDH)/t_panel
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
@@ -680,6 +692,7 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_prio32
 	./$(BUILDH)/t_consistency
 	./$(BUILDH)/t_gfx
+	./$(BUILDH)/t_panel
 	./$(BUILDH)/t_los3
 	./$(BUILDH)/t_los4
 	./$(BUILDH)/t_task2
