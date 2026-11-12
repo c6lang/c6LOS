@@ -18,6 +18,8 @@
   - `utils/los_debug.c`、`los_error.c`、`los_hook.c`
   - securec 的 `memcpy_s.c`/`memset_s.c`/`strncpy_s.c`
 - 说明“源码可编译”这一关已过；尚未完成 S3 启动、向量、时钟/中断和链接。
+- 已进一步完成 **最小可构建基线**：`bench/liteos_m_s3/` 提供 S3 target_config、windowed start.S、LiteOS 向量/链接脚本、USB 控制台和 demo 任务；`make` 生成 `build/liteos_s3.elf`（text 23,956B / data 35,152B / bss 17,336B），`make image` 生成 `build/liteos_s3.bin`（esptool 校验通过，entry `_start`、vector 位于 0x403C9000）。
+- 还未上板，因此启动/中断/tick/demo 打印均未验证；这是下一步。
 
 ## 3. 仍需移植的部分
 
