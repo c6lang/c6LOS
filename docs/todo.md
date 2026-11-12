@@ -121,7 +121,7 @@
 | M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 完成（递归 + 所有权移交 host PASS；`port_in_isr` 下 block/delay panic，`t_isr` PASS） |
 | M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 完成（`t_pi_chain`：L(5) 持 M1→M(3) 持 M2 等 M1→H(1) 等 M2，L 依次被抬到 3/1，`PASS: PI chain`） |
 | M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
-| M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 进行中（单等待节点 + 超时扫描已接；双归属链/竞争压测待做） |
+| M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 完成（`t_race` 10^4 轮 pend/post/tick 竞争：成功+超时=10000、坏返回 0、任务数归零，`PASS: wait race`） |
 
 **M3 验收**：反转对照组（无 PI vs 有 PI）延迟差 ≥5×；超时路径无泄漏。
 
@@ -361,3 +361,8 @@
   用 c6 泛型 `Queue@T` 包装成 `q_init/q_put/q_get`。`t_queue_generic` 覆盖
   `int`/`u64`/`struct Pair`，输出 `PASS: generic queue`；S3 `t_s3_ipc` 的
   q-init/put/get 与其余 IPC 全 PASS。
+
+- **M3-5 等待节点竞争（host PASS）**：`t_race` 让 waiter（prio 2）循环
+  `os_sem_pend(...,1)`，poster（prio 1）交替 `post + yield`，双方每轮都
+  `os_sched_tick()` 推进超时；10000 轮后 `ok+timeout==N`、`bad==0`，
+  `os_task_count()==0`，没有双重入队/唤醒泄漏。

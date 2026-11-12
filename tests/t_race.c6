@@ -1,0 +1,72 @@
+#include "c6os/sem.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+#define RACE_N 10000u
+
+static OsSem g_sem;
+static u32 g_ok = 0;
+static u32 g_to = 0;
+static u32 g_bad = 0;
+static int g_created = 0;
+
+static void waiter(void *arg) {
+    u32 i = 0;
+
+    while (i < RACE_N) {
+        int r = 0;
+
+        os_sched_tick();
+        r = os_sem_pend(&g_sem, 1u);
+        if (r == 0) {
+            g_ok++;
+        } else if (r == -2) {
+            g_to++;
+        } else {
+            g_bad++;
+        }
+        i++;
+    }
+}
+
+static void poster(void *arg) {
+    u32 i = 0;
+
+    while (i < RACE_N) {
+        os_sched_tick();
+        if ((i & 1u) == 0u) {
+            (void)os_sem_post(&g_sem);
+        }
+        os_task_yield();
+        i++;
+    }
+}
+
+int main(void) {
+    int w = 0;
+    int p = 0;
+
+    if (os_sem_init(&g_sem, 0u, 0xFFu) != 0) {
+        port_puts("FAIL: sem init\n");
+        return 1;
+    }
+    w = os_task_create("w", waiter, 0, 2u, 8192u);
+    p = os_task_create("p", poster, 0, 1u, 8192u);
+    if (w <= 0 || p <= 0) {
+        port_puts("FAIL: create\n");
+        return 2;
+    }
+    g_created = 1;
+    os_task_start();
+    if (g_ok + g_to != RACE_N || g_bad != 0u) {
+        port_puts("FAIL: race count\n");
+        return 3;
+    }
+    if (os_task_count() != 0u) {
+        port_puts("FAIL: race leak\n");
+        return 4;
+    }
+    port_puts("PASS: wait race\n");
+    return 0;
+}
