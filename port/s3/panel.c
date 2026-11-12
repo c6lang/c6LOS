@@ -204,15 +204,17 @@ void s3_backlight_test(void)
     pin_out(5u);
     pin_lo(5u);
 
-    port_puts("BL42 on\n");
-    pin_hi(42u);
-    delay_loop(3000000u);
-    pin_lo(42u);
-    port_puts("BL5 on\n");
-    pin_hi(5u);
-    delay_loop(3000000u);
-    pin_lo(5u);
-    port_puts("BL off\n");
+    while (1) {
+        port_puts("BL42 on\n");
+        pin_hi(42u);
+        delay_loop(30000000u);
+        pin_lo(42u);
+        port_puts("BL5 on\n");
+        pin_hi(5u);
+        delay_loop(30000000u);
+        pin_lo(5u);
+        port_puts("BL off\n");
+    }
 }
 
 u32 s3_i2c_probe(u8 addr)
@@ -231,14 +233,13 @@ u32 s3_i2c_probe(u8 addr)
 
 static void panel_reset(void)
 {
-    pin_out(PIN_SCL);
-    pin_out(PIN_SDA);
-    pin_pullup(PIN_SCL);
-    pin_pullup(PIN_SDA);
-    tca_write(0x03u, 0xFBu);   /* EXIO2 输出 */
-    tca_write(0x01u, 0x00u);
+    /* 1.85b: LCD_RST = GPIO3，低有效 */
+    pin_out(3u);
+    pin_hi(3u);
+    delay_loop(500000u);
+    pin_lo(3u);
     delay_loop(2000000u);
-    tca_write(0x01u, 0x04u);
+    pin_hi(3u);
     delay_loop(2000000u);
 }
 
@@ -307,7 +308,7 @@ void s3_panel_probe(u8 out[3])
 {
     int i = 0;
 
-    /* panel_reset();  TODO: TCA9554 复位路径会卡住，先不调用 */
+    panel_reset();
     pin_out(PIN_CS);
     pin_out(PIN_CLK);
     pin_hi(PIN_CS);

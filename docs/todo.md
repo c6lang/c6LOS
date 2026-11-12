@@ -478,3 +478,14 @@
 - **S3 GPIO 回环诊断**：`s3_gpio_loop` 写高/低后读 `GPIO_IN/IN1`；46/45 正常，
   42/41/40/21/10/11 始终为 0；`s3_gpio_loop_sel` 对 pin42 扫 IO_MUX 0..7 也无变化，
   说明这些脚不是空闲 GPIO（接屏/触摸）或需要外设功能，不能当普通 IO 探测。
+
+- **官方固件对照（真板）**：下载 xiaozhi-esp32 v2.5.2 的 1.85 / 1.85b / 1.85c
+  合并镜像并烧到 0x0：
+  - `1.85`：启动即报 `tca9554 write_direction_reg failed` 并 abort；
+  - `1.85c`：同样 TCA9554 失败；
+  - `1.85b`：`77916_spi: LCD panel create success`、`Backlight: Set brightness to 75`，
+    随后 ES8311 I2C(0x30) 失败 abort；但**屏幕始终不亮**。
+  1.85b 源码确认了真实引脚：PCLK40/CS21/D0 46/D1 45/D2 42/D3 41、**RST=GPIO3**、
+  BL=5、ST77916 360×360 QSPI，并已生成 `include/c6os/st77916_table.h`
+  （v1/v2 两套初始化命令）。结论：屏/背光在当前硬件上 1.85b 官方固件也不亮，
+  更像屏排线/背光供电或板型不符，已先恢复 c6 `t_s3_irq` 镜像。
