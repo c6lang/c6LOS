@@ -22,7 +22,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o $(BUILD)/obj/core1.o
 
-.PHONY: all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -1068,7 +1068,7 @@ rv32bare-tick: $(RV32B_DIR)/tick
 run-rv32bare-tick: rv32bare-tick
 	$(RISC6) --bare $(RV32B_DIR)/tick
 
-check-sim: run-rv32-emu run-rv32-emu-sched run-rv32bare-tick run-rv32bare-smp
+check-sim: run-rv32-emu run-rv32-emu-sched run-rv32bare-tick run-rv32bare-smp run-rv32bare-smp-sem
 
 $(RV32B_DIR)/ir/stamp: $(RV32B_C6)
 	@mkdir -p $(RV32B_DIR)/ir
@@ -1181,6 +1181,18 @@ $(RV32BS_DIR)/obj/libc.o: rt/x86_libc.c
 
 $(RV32BS_DIR)/smp: $(RV32BS_OBJ)
 	clang $(RV32BFLAGS) -static -fuse-ld=lld -o $@ $^
+
+
+# ---- rv32 bare SMP 跨核信号量 ----
+RV32BSS_DIR := build/rv32bare-smp-sem
+rv32bare-smp-sem:
+	$(MAKE) RV32BS_DIR=$(RV32BSS_DIR) \
+		RV32BS_MAIN=tests/t_rv32bare_smp_sem.c6 \
+		RV32BS_C6="tests/t_rv32bare_smp_sem.c6 kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6 kernel/sem.c6" \
+		$(RV32BSS_DIR)/smp
+
+run-rv32bare-smp-sem: rv32bare-smp-sem
+	$(RISC6) --bare --harts 2 $(RV32BSS_DIR)/smp
 
 
 clean:

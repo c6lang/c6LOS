@@ -1,0 +1,52 @@
+/* SMP 跨核同步：核 1 等信号量，核 0 post。 */
+#include "c6os/task.h"
+#include "c6os/sem.h"
+#include "c6os/port.h"
+
+extern void port_bare_exit(u32 code);
+
+static OsSem g_sem;
+static volatile u32 g_ready = 0;
+static volatile u32 g_seen = 0;
+static volatile u32 g_val = 0;
+static volatile u32 g_cons_core = 0xFFFFFFFFu;
+
+static void consumer(void *arg) {
+    (void)arg;
+    (void)os_sem_pend(&g_sem, 0u);
+    g_cons_core = port_core_id();
+    g_val = g_sem.count;
+    g_seen = 1u;
+    os_task_exit();
+}
+
+static void producer(void *arg) {
+    (void)arg;
+    (void)os_sem_post(&g_sem);
+    os_task_exit();
+}
+
+void os_main(void) {
+    u32 me = port_core_id();
+
+    if (me == 0u) {
+        (void)os_sem_init(&g_sem, 0u, 1u);
+        (void)os_task_create_on(1u, "cons", consumer, 0, 1u, 2048u);
+        (void)os_task_create_on(0u, "prod", producer, 0, 1u, 2048u);
+        g_ready = 1u;
+    } else {
+        while (g_ready == 0u) {
+        }
+    }
+    os_task_start_core(me);
+    if (me == 0u) {
+        if (g_seen != 0u && g_cons_core == 1u && g_val == 0u) {
+            port_puts("PASS: smp cross-core sem\n");
+            port_bare_exit(0u);
+        }
+        port_puts("FAIL: smp cross-core sem\n");
+        port_bare_exit(1u);
+    }
+    for (;;) {
+    }
+}
