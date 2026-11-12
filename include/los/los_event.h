@@ -14,6 +14,7 @@
 UINT32 LOS_EventInit(UINT32 *eventId);
 UINT32 LOS_EventDelete(UINT32 eventId);
 UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout);
+UINT32 LOS_EventPoll(UINT32 eventId, UINT32 mask, UINT32 mode);
 UINT32 LOS_EventWrite(UINT32 eventId, UINT32 bits);
 UINT32 LOS_EventClear(UINT32 eventId, UINT32 bits);
 

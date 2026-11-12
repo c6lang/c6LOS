@@ -13,6 +13,8 @@ UINT32 LOS_QueueCreate(const char *name, UINT16 len, UINT32 *queueId,
 UINT32 LOS_QueueDelete(UINT32 queueId);
 UINT32 LOS_QueueRead(UINT32 queueId, void *buf, UINT32 maxLen, UINT32 timeout);
 UINT32 LOS_QueueWrite(UINT32 queueId, const void *buf, UINT32 len, UINT32 timeout);
+UINT32 LOS_QueueReadCopy(UINT32 queueId, VOID *buf, UINT32 *len, UINT32 timeout);
+UINT32 LOS_QueueWriteCopy(UINT32 queueId, const VOID *buf, UINT32 len, UINT32 timeout);
 UINT32 LOS_QueueUsed(UINT32 queueId);
 
 #endif

@@ -25,6 +25,11 @@ UINT32 LOS_HwiEnable(UINT32 irq) {
     return LOS_OK;
 }
 
+UINT32 LOS_HwiTrigger(UINT32 irq) {
+    os_hwi_dispatch((u32)irq);
+    return LOS_OK;
+}
+
 UINT32 LOS_HwiDisable(UINT32 irq) {
     if (os_hwi_enable((u32)irq, 0u) != 0) {
         return LOS_ERRNO_HWI_INVALID;

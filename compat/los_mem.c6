@@ -65,6 +65,15 @@ UINT32 LOS_MemFree(VOID *pool, VOID *ptr) {
     return (os_heap_free(&p->heap, ptr) == 0) ? 0u : 2u;
 }
 
+VOID *LOS_MemRealloc(VOID *pool, VOID *ptr, UINT32 size) {
+    LosMemPool *p = mem_get(pool);
+
+    if (p == 0) {
+        return 0;
+    }
+    return os_heap_realloc(&p->heap, ptr, (u32)size);
+}
+
 UINT32 LOS_MemUsed(VOID *pool) {
     LosMemPool *p = mem_get(pool);
 

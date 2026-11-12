@@ -68,6 +68,20 @@ UINT32 LOS_EventClear(UINT32 eventId, UINT32 bits) {
     return LOS_OK;
 }
 
+UINT32 LOS_EventPoll(UINT32 eventId, UINT32 mask, UINT32 mode) {
+    OsEvent *e = e_get(eventId);
+    u32 bits = 0;
+
+    if (e == 0 || mask == 0u) {
+        return 0u;
+    }
+    bits = os_event_get(e) & (u32)mask;
+    if (((u32)mode & LOS_WAITMODE_AND) != 0u) {
+        return (bits == (u32)mask) ? bits : 0u;
+    }
+    return bits;
+}
+
 UINT32 LOS_EventRead(UINT32 eventId, UINT32 mask, UINT32 mode, UINT32 timeout) {
     OsEvent *e = e_get(eventId);
     u32 m = ((u32)mode & LOS_WAITMODE_AND) != 0u ? OS_EVENT_ALL : OS_EVENT_ANY;

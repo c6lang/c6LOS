@@ -13,5 +13,6 @@ UINT32 LOS_HwiCreate(UINT32 irq, UINT16 prio, UINT32 mode,
 UINT32 LOS_HwiDelete(UINT32 irq);
 UINT32 LOS_HwiEnable(UINT32 irq);
 UINT32 LOS_HwiDisable(UINT32 irq);
+UINT32 LOS_HwiTrigger(UINT32 irq);
 
 #endif

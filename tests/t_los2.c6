@@ -29,6 +29,18 @@ int main(void) {
     if (out != 42u) {
         return 6;
     }
+    {
+        UINT32 wlen = 4;
+        UINT32 rlen = 4;
+        out = 0;
+        if (LOS_QueueWriteCopy(qid, &v, wlen, 0) != LOS_OK) {
+            return 19;
+        }
+        if (LOS_QueueReadCopy(qid, &out, &rlen, 0) != LOS_OK ||
+            rlen != 4u || out != 42u) {
+            return 20;
+        }
+    }
     if (LOS_QueueDelete(qid) != LOS_OK) {
         return 7;
     }
@@ -51,6 +63,9 @@ int main(void) {
     }
     if (LOS_EventWrite(eid, 2) != LOS_OK) {
         return 13;
+    }
+    if (LOS_EventPoll(eid, 3, LOS_WAITMODE_OR) != 2u) {
+        return 21;
     }
     bits = LOS_EventRead(eid, 3, LOS_WAITMODE_OR, 0);
     if (bits != 2u) {

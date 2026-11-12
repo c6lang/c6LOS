@@ -187,6 +187,62 @@ int os_heap_free(OsHeap *h, void *p) {
     return 0;
 }
 
+void *os_heap_realloc(OsHeap *h, void *p, u32 n) {
+    HeapBlk *b = 0;
+    u8 *q = 0;
+    u8 *end = 0;
+    void *np = 0;
+    u32 old = 0;
+    u32 copy = 0;
+
+    if (h == 0 || h->magic != HEAP_MAGIC) {
+        return 0;
+    }
+    if (p == 0) {
+        return os_heap_alloc(h, n);
+    }
+    if (n == 0u) {
+        (void)os_heap_free(h, p);
+        return 0;
+    }
+    if (n > HEAP_MAX_ALLOC) {
+        return 0;
+    }
+    end = h->base + h->size;
+    q = h->base;
+    while (q + HDR_SIZE <= end) {
+        HeapBlk *c = (HeapBlk *)q;
+        if (heap_block_ok(h, c) == 0) {
+            return 0;
+        }
+        if ((u8 *)c + HDR_SIZE == (u8 *)p) {
+            b = c;
+            break;
+        }
+        q = heap_next(h, c);
+    }
+    if (b == 0 || b->free != 0u) {
+        return 0;
+    }
+    old = b->size;
+    if (old >= n) {
+        return p; /* 原地复用；不额外拆分，保证 free 语义简单 */
+    }
+    np = os_heap_alloc(h, n);
+    if (np == 0) {
+        return 0;
+    }
+    copy = old;
+    {
+        u8 *d = (u8 *)np;
+        u8 *s = (u8 *)p;
+        u32 i = 0;
+        while (i < copy) { d[i] = s[i]; i++; }
+    }
+    (void)os_heap_free(h, p);
+    return np;
+}
+
 u32 os_heap_used(OsHeap *h) {
     if (h == 0 || h->magic != HEAP_MAGIC) {
         return 0;
