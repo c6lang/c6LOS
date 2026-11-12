@@ -1,0 +1,47 @@
+#include "c6os/cobs.h"
+#include "c6os/port.h"
+
+static int check(const u8 *in, u32 n, const u8 *want, u32 wn) {
+    u8 enc[64] = {0};
+    u8 dec[64] = {0};
+    u32 en = 0;
+    int dn = 0;
+    u32 i = 0;
+
+    en = cobs_encode(in, n, enc, (u32)sizeof(enc), 1u);
+    if (en != wn) {
+        return 0;
+    }
+    while (i < wn) {
+        if (enc[i] != want[i]) {
+            return 0;
+        }
+        i++;
+    }
+    dn = cobs_decode(enc, en - 1u, dec, (u32)sizeof(dec));
+    if (dn != (int)n) {
+        return 0;
+    }
+    i = 0;
+    while (i < n) {
+        if (dec[i] != in[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return 1;
+}
+
+int main(void) {
+    u8 a[4] = {0x11, 0x22, 0x00, 0x33};
+    u8 want_a[6] = {0x03, 0x11, 0x22, 0x02, 0x33, 0x00};
+    u8 b[5] = {0, 0, 0, 0, 0};
+    u8 want_b[7] = {0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00};
+
+    if (check(a, 4u, want_a, 6u) == 0 || check(b, 5u, want_b, 7u) == 0) {
+        port_puts("FAIL: cobs\n");
+        return 1;
+    }
+    port_puts("PASS: cobs\n");
+    return 0;
+}

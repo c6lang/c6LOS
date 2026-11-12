@@ -176,7 +176,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log，host 捕获断言 PASS；COBS 帧、date/reboot、S3 USB 输入待接） |
+| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log + `rt/cobs.c` 编解码，host 捕获断言 PASS；date/reboot、S3 USB 输入待接） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 |
@@ -377,3 +377,7 @@
 - **M7-1 shell 核心（host PASS）**：`os_shell_exec()` 解析一行命令，内置
   `help/tick/ps/free/log`（`free` 绑定 `OsHeap`，`ps` 遍历任务表打印 id/prio/状态/名字，
   `log` 走 `klog_dump`）。`t_shell` 捕获输出并逐条断言，`PASS: shell`。
+
+- **M7-1 COBS 帧（host PASS）**：`cobs_encode/decode` 带可选 0x00 分隔符；
+  `t_cobs` 验证 `{11 22 00 33}` → `03 11 22 02 33 00`、连续 5 个 0 的块码，
+  以及编码→解码回环，输出 `PASS: cobs`。
