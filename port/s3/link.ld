@@ -15,11 +15,11 @@ SECTIONS
     *(.text.start)
     *(.literal*)
     *(.text*)
-    *(.rodata*)
   } > IRAM
 
   .data : {
     . = ALIGN(16);
+    *(.rodata*)
     *(.data*)
     . = ALIGN(16);
   } > DRAM

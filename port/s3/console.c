@@ -11,7 +11,6 @@
 /* 诊断：RTC_CNTL STORE0..7 在复位后保留，esptool read-mem 0x60008050 可读。 */
 static void s3_mark(u32 idx, u32 v)
 {
-    *(volatile u32 *)(0x60008050u + idx * 4u) = v;
     *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
 }
 
@@ -28,6 +27,9 @@ void port_mark(u32 v)
 #define S3_SYSTEM_PERIP_CLK_EN1 (*(volatile u32 *)0x600C001Cu)
 #define S3_SYSTEM_PERIP_RST_EN1 (*(volatile u32 *)0x600C0024u)
 #define S3_USB_DEVICE_BIT       (1u << 10)
+#define S3_RTC_USB_CONF         (*(volatile u32 *)0x60008120u)
+#define S3_SYS_CLK_EN0          (*(volatile u32 *)0x600C0018u)
+#define S3_TIMG0_BASE           0x6001F000u
 
 void port_putc(int ch)
 {
@@ -75,8 +77,28 @@ void port_init(void)
 
     s3_mark(0u, 0x1111u);
 
-    /* ROM 已经把 USB-Serial/JTAG 配好并枚举；这里不再复位 USB 设备，
-     * 否则会掉枚举、控制台彻底失联。只做少量延时后直接写 EP1 FIFO。 */
+    /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
+    S3_SYS_CLK_EN0 |= (1u << 13);
+    *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0x50D83AA1u;
+    *(volatile u32 *)(S3_TIMG0_BASE + 0x48u) = 0u;
+    *(volatile u32 *)(S3_TIMG0_BASE + 0x4Cu) = 0u;
+    *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0u;
+
+    /* CPU 复位会把 USB-Serial/JTAG 的枚举打断，应用必须重新使能时钟和 PAD。
+     * 只置位时钟、确保退出复位，不做 assert-reset（会再次掉枚举）。 */
+    /* 内部 USB FSLS PHY 默认可能映射给 USB-OTG；USJ 要先抢回 PHY：
+     * RTCCNTL.usb_conf.SW_HW_USB_PHY_SEL=1, SW_USB_PHY_SEL=0。 */
+    S3_RTC_USB_CONF = (S3_RTC_USB_CONF & ~(1u << 19)) | (1u << 20);
+    S3_SYSTEM_PERIP_CLK_EN1 |= S3_USB_DEVICE_BIT;
+    S3_SYSTEM_PERIP_RST_EN1 &= ~S3_USB_DEVICE_BIT;
+    S3_USB_CONF0 &= ~(1u << 16);
+    S3_USB_CONF0 |= (1u << 14);
+    S3_USB_EP1_CONF = 1u;
+
+    /* 等主机重新枚举。 */
+    for (i = 0; i < 2000000u; i++) {
+        __asm__ __volatile__("" ::: "memory");
+    }
     s3_mark(1u, 0x2222u);
 
     /* 等主机枚举 CDC-ACM；40MHz 下约 0.5s。 */

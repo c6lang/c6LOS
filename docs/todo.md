@@ -24,9 +24,9 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M0-1 `port/s3/start.S` | 关 WDT、设 SP、清 bss、跳 `port_init` | S3-1：串口打印 `c6os s3 boot` | 进行中（镜像已被 ROM 接受，banner 未出） |
+| M0-1 `port/s3/start.S` | 设 SP、清 bss、跳 `port_init`（WDT 移到 C 侧关） | S3-1：串口打印 `c6os s3 boot` | 完成（实测输出 `c6os s3 boot` / `c6os: alive`） |
 | M0-2 `port/s3/memmap.h` | IRAM `0x40370000+448K`、DRAM `0x3FC88000+480K`、栈顶 | S3-2：打印段用量/栈顶/`sizeof(TCB)` | 完成（link.ld + image-info 段地址核对） |
-| M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 进行中（FIFO 写已实现，无输出） |
+| M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 完成（PHY 抢回 USJ + 时钟/PAD 使能后实测有输出） |
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（`os_panic`/`os_panic_frame` + 日志回放已 host PASS；S3 陷阱入口未接） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 未开始 |
@@ -213,3 +213,22 @@
   初始化后仍消失。下一步用**纯汇编最小镜像**（只写 USB EP1）区分“未执行”与“执行后挂死”。
 - 注意：清 `build/s3` 时把原厂 16MB flash 备份 `build/s3/backup/flash-16MB.bin` 删掉了；
   原厂固件已无本地备份（`0x0` 处已被本内核覆盖）。如要恢复原厂，需要重新从官方固件包刷。
+
+- **S3 上板成功（2026-11）**：USB-Serial/JTAG 打印 `c6os s3 boot` / `c6os: alive`。
+  三个关键修复：
+  1. **`.rodata` 不能放 IRAM `0x403C...`**：该地址是 Xtensa 指令别名，数据 load 触发
+     `Guru Meditation Error: LoadStoreError`（`EXCVADDR` 指向字符串）。链接脚本把
+     `.rodata*` 并入 `.data`（DRAM `0x3FCE3000`）。
+  2. **USB PHY 归属**：S3 内部 FSLS PHY 默认可能给 USB-OTG；应用要先写
+     `RTCCNTL.usb_conf`（`0x60008120`）`SW_HW_USB_PHY_SEL(bit20)=1`、
+     `SW_USB_PHY_SEL(bit19)=0` 把 PHY 切回 USB-Serial/JTAG，再使能
+     `SYSTEM_PERIP_CLK_EN1` bit10 与 `CONF0.USB_PAD_ENABLE(bit14)`。
+  3. **看门狗**：`start.S` 里过早写 TIMG0 不可靠；改在 `port_init` 先开
+     `SYSTEM_PERIP_CLK_EN0` bit13（TIMG0），再按 `0x50D83AA1` 解锁写
+     `WDTCONFIG0/1=0`。否则约 300ms 被 `TG0WDT_SYS_RST` 复位，USB 永远枚举不上。
+- 实测启动日志（拨插 USB，非按 RESET）：
+  `ESP-ROM ... load:0x3fce3000,len:... load:0x403c9000,len:... entry 0x403c901c`
+  → `c6os s3 boot` → `c6os: alive`。`--ram-only-header` 会带一条
+  `SHA-256 comparison failed ... Attempting to boot anyway`，不影响启动；后续改成
+  带 SHA256 的普通镜像即可消除。
+- 注意：本板按 RESET 会让 USB 直接掉线不回来，验证请用**拔插 USB**（重新上电）。

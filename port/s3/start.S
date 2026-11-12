@@ -11,7 +11,6 @@
     .literal .Lbss1,    _bss_end
     .literal .Lmark,    0x3FCF0000
     .literal .Lmarkv,   0x0000CAFE
-    .literal .Lmark2,   0x60008050
 
     .global _start
     .type   _start, @function
@@ -20,23 +19,11 @@ _start:
     l32r    a2, .Lmark
     l32r    a3, .Lmarkv
     s32i    a3, a2, 0
-    l32r    a2, .Lmark2
-    s32i    a3, a2, 0
 
     /* 栈 */
     l32r    a1, .Lsp
 
-    /* 关 TIMG0 看门狗：WDTWPROTECT=0x50D83AA1，WDTCONFIG0/1=0 */
-    l32r    a2, .Ltimg
-    l32r    a3, .Lwdtkey
-    s32i    a3, a2, 0x64
-    movi    a3, 0
-    s32i    a3, a2, 0x48
-    s32i    a3, a2, 0x4C
-    l32r    a3, .Lwdtkey
-    s32i    a3, a2, 0x64
-    movi    a3, 1
-    s32i    a3, a2, 0x50
+    /* TIMG0 看门狗留给 C 侧在时钟确定后关闭；此处不碰外设。 */
 
     /* 清 .bss */
     l32r    a2, .Lbss0

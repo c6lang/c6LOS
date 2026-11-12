@@ -16,7 +16,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(patsubst $(BUILD)/c99/%.c,$(BUILD)/obj/%.o,$(S3_C)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o
 
-.PHONY: all s3 check-host clean toolchain-info backup-flash flash image-info
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -349,6 +349,15 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_los
 	./$(BUILDH)/t_los2
 	./$(BUILDH)/t_join
+
+s3-min: $(BUILD)/min.bin
+
+$(BUILD)/min.elf: port/s3/min.S port/s3/min.ld
+	@mkdir -p $(BUILD)
+	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
+
+$(BUILD)/min.bin: $(BUILD)/min.elf
+	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq 40m -o $@ $<
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"
