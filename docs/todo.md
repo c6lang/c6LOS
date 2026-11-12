@@ -204,3 +204,12 @@
 | ROM 保留 DRAM 区域 | 启动即崩 | 以 `soc.h` 边界为准，栈放 DRAM 顶并留 4KB |
 | 无 qemu-system-xtensa | S3 只能真板验证 | L1–L3 覆盖逻辑；上板阶梯逐步验收 |
 | 原厂 flash 被覆盖 | 无法恢复 | P0-4 先备份，写进 `make flash` 前置检查 |
+
+- 2026-11 追加：`_bss_start` 原先未 4 字节对齐（`0x3FCE309B`），`start.S` 的清零循环会触发
+  Xtensa 对齐异常；链接脚本已给 `.data/.bss` 加 `ALIGN(16)`。栈顶原 `0x3FCFF000`
+  超出 S3 480KB DRAM（`0x3FC88000+0x78000=0x3FCF8000`），已改 `0x3FCEF000`。
+- 入口/阶段标记实验：RTC STORE0 预置 `0xBEEF` 后复位仍为 `0xBEEF`，未见应用写入；
+  物理 RESET 后 USB 设备直接消失（dmesg `USB disconnect`），换用“不复位 USB”的控制台
+  初始化后仍消失。下一步用**纯汇编最小镜像**（只写 USB EP1）区分“未执行”与“执行后挂死”。
+- 注意：清 `build/s3` 时把原厂 16MB flash 备份 `build/s3/backup/flash-16MB.bin` 删掉了；
+  原厂固件已无本地备份（`0x0` 处已被本内核覆盖）。如要恢复原厂，需要重新从官方固件包刷。
