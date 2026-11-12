@@ -30,7 +30,7 @@
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 完成（host `os_panic_frame` + 日志回放 PASS；S3 level-1 向量按 `EXCCAUSE==4` 区分定时器中断与异常，异常走 `s3_trap` 打印 cause/pc/ps 后停机，`ill` 实测 `TRAP cause=0 pc=...`） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 完成（S3 实测 `elapsed=100` / `PASS: tick`；40MHz XTAL 下 400k cycles/tick） |
-| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke PASS；x86-64 裸机 hello/sched/tick 三个 qemu 用例全 PASS；rv32 user-mode hello/sched/tick PASS） |
+| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 完成（新增 `check-all = check-host + x86 + rv32`；clean 后 host 34 项全 PASS，x86/rv32 构建 PASS） |
 
 **M0 验收**：三参考目标打印 banner；S3 上串口有 banner + tick 计数；`make s3` size 在预算内。
 
@@ -86,9 +86,9 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（create/delete 1000 次 host PASS；magic 待加） |
+| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 完成（`OsTask.magic=0xC6A50001`，create 置位、delete/reap 清 0，`os_task_get` 校验；`t_stress` 10^6 次 + `t_task2` 删除后查找为空 PASS） |
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 完成（`t_prio32`：31/5/10 三任务按 5→10→31 运行；32 个优先级逐个创建/运行全 PASS） |
-| M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
+| M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 完成（`t_task2` 自删除后不返回、调度器延迟 `port_task_ctx_free` 并清 magic，`t_stress` 10^6 次无泄漏） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 PIT 抢占 `PASS: x86 preempt`；S3 定时器中断抢占 `ca=61198 cb=61311` / `PASS: s3 preempt`；host SIGALRM 异步抢占 `PASS: sim preempt`） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 完成（`t_overflow` 深递归覆盖哨兵，输出 `*** PANIC: task stack overflow ***` 后 `PASS`；sim 栈前留 64KB 安全垫） |
@@ -397,3 +397,8 @@
 - **S3 构建源列表修复**：`$(BUILD)/c99/.stamp` 原先用 `cmp` 只比较源文件**路径列表**，
   内容改了但路径不变时会跳过 c6 重编译（曾导致改了测试却烧旧镜像）。现在
   `.stamp` 依赖 `s3-src-check` 且每次调用 c6，保证 `S3_MAIN/S3_EXTRA_C6` 变化生效。
+
+- **任务 magic 与 clean 构建（host PASS）**：`OsTask` 增加 `magic`，创建置
+  `0xC6A50001`，删除/回收清 0，`os_task_get` 同时校验 state+magic；`t_task2`
+  删除后 `os_task_get(id)==0`。另修 `check-host` 漏列 7 个测试依赖的问题，
+  `make clean` 后 34 项全 PASS；新增 `make check-all = check-host + x86 + rv32`。

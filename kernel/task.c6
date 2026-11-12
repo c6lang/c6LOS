@@ -97,6 +97,7 @@ int os_task_create(const char *name, OsTaskEntry entry, void *arg,
     }
 
     t->id = g_next_id;
+    t->magic = (u32)OS_TASK_MAGIC;
     g_next_id++;
     t->entry = entry;
     t->arg = arg;
@@ -137,6 +138,7 @@ int os_task_delete(u32 id) {
         t->ctx = 0;
     }
     t->state = (u8)OS_TASK_FREE;
+    t->magic = 0u;
     return 0;
 }
 
@@ -358,6 +360,7 @@ void os_task_start(void) {
             port_task_ctx_free(t->ctx);
             t->ctx = 0;
             t->state = (u8)OS_TASK_FREE;
+            t->magic = 0u;
         } else if (port_task_stack_ok(t->ctx) == 0u) {
             os_panic("task stack overflow");
         }
@@ -425,7 +428,8 @@ OsTask *os_task_get(u32 id) {
     u32 i = 0;
 
     while (i < (u32)C6OS_MAX_TASKS) {
-        if (g_tasks[i].state != (u8)OS_TASK_FREE && g_tasks[i].id == id) {
+        if (g_tasks[i].state != (u8)OS_TASK_FREE &&
+            g_tasks[i].magic == (u32)OS_TASK_MAGIC && g_tasks[i].id == id) {
             return &g_tasks[i];
         }
         i++;

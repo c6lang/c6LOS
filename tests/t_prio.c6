@@ -76,6 +76,10 @@ int main(void) {
         return 7;
     }
     os_task_boost((u32)id, 1);
+    if (os_task_get((u32)id) == 0) {
+        port_puts("null task\n");
+        return 11;
+    }
     if (os_task_get((u32)id)->prio != 1u) {
         return 8;
     }
