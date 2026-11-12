@@ -27,7 +27,7 @@
 | M0-1 `port/s3/start.S` | 设 SP、清 bss、跳 `port_init`（WDT 移到 C 侧关） | S3-1：串口打印 `c6os s3 boot` | 完成（实测输出 `c6os s3 boot` / `c6os: alive`） |
 | M0-2 `port/s3/memmap.h` | IRAM `0x40370000+448K`、DRAM `0x3FC88000+480K`、栈顶 | S3-2：打印段用量/栈顶/`sizeof(TCB)` | 完成（link.ld + image-info 段地址核对） |
 | M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 完成（PHY 抢回 USJ + 时钟/PAD 使能后实测有输出） |
-| M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（`os_panic`/`os_panic_frame` + 日志回放已 host PASS；S3 陷阱入口未接） |
+| M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 完成（host `os_panic_frame` + 日志回放 PASS；S3 level-1 向量按 `EXCCAUSE==4` 区分定时器中断与异常，异常走 `s3_trap` 打印 cause/pc/ps 后停机，`ill` 实测 `TRAP cause=0 pc=...`） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 完成（S3 实测 `elapsed=100` / `PASS: tick`；40MHz XTAL 下 400k cycles/tick） |
 | M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke PASS；x86-64 裸机 hello/sched/tick 三个 qemu 用例全 PASS；rv32 user-mode hello/sched/tick PASS） |
@@ -336,3 +336,8 @@
   `port_irq_restore(state)` 恢复；5 层嵌套返回 0/1/2/3/4，倒序恢复后再次 save 仍为 0。
   sim 用计数模拟；x86 保存 RFLAGS 并清 IF；S3 用 `rsil a2,15` / `wsr a2,ps`；
   rv32 参考机是用户态，当前 no-op。
+
+- **S3 陷阱入口（真板 PASS）**：`_vec_level1` 先读 `EXCCAUSE`，等于 4 才是定时器
+  中断，其余跳到 `_vec_exc`，把陷阱帧交给 `s3_trap()` 打印 `cause/pc/ps` 并停机。
+  `tests/t_s3_trap.c6` 执行 `ill`，实测 `*** TRAP cause=00000000 pc=403cb9f0 ps=00060500`；
+  定时器用例仍 `PASS: s3 irq tick`。

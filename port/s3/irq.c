@@ -30,6 +30,40 @@ void s3_irq_init(void)
     __asm__ __volatile__("rsil a2, 0" : : : "a2");
 }
 
+static void trap_hex(u32 v)
+{
+    static const char h[] = "0123456789abcdef";
+    int i = 28;
+
+    while (i >= 0) {
+        port_putc((int)h[(v >> i) & 0xFu]);
+        i = i - 4;
+    }
+}
+
+void s3_trap(u32 frame_sp)
+{
+    u32 *f = (u32 *)frame_sp;
+    u32 cause = 0;
+    u32 pc = 0;
+    u32 ps = 0;
+
+    __asm__ __volatile__("rsr %0, exccause" : "=r"(cause));
+    if (frame_sp != 0u) {
+        pc = f[15];
+        ps = f[16];
+    }
+    s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
+    port_puts("*** TRAP cause=");
+    trap_hex(cause);
+    port_puts(" pc=");
+    trap_hex(pc);
+    port_puts(" ps=");
+    trap_hex(ps);
+    port_puts("\n");
+    port_panic_halt();
+}
+
 void *s3_timer_irq(u32 frame_sp)
 {
     s3_timer_rearm();

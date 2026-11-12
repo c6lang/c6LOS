@@ -15,6 +15,13 @@ _vecbase:
 
     .section .text, "ax", @progbits
     .align 4
+_vec_exc:
+    mov     a2, a1
+    call0   s3_trap
+1:
+    j       1b
+
+    .align 4
 _vec_default:
     movi    a2, 0x3FCF0004
     movi    a3, 0xBAD0
@@ -47,6 +54,11 @@ _vec_level1:
     movi    a3, -32
     and     a2, a2, a3
     s32i    a2, a1, 64
+
+    /* level-1 定时器中断的 EXCCAUSE 为 4；其它异常走陷阱打印。 */
+    rsr     a3, exccause
+    movi    a4, 4
+    bne     a3, a4, _vec_exc
 
     mov     a2, a1
     call0   s3_timer_irq
@@ -84,6 +96,11 @@ _vec_level1:
 
     .section .text, "ax", @progbits
     .align 4
+    .global s3_test_trap
+    .type   s3_test_trap, @function
+s3_test_trap:
+    ill
+
     .global port_irq_save
     .type   port_irq_save, @function
 port_irq_save:

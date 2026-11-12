@@ -1,0 +1,11 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern void s3_test_trap(void);
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 trap test\n");
+    s3_test_trap();
+    port_puts("FAIL: trap returned\n");
+}
