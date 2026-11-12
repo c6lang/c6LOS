@@ -1,0 +1,53 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+static u32 g_elapsed = 0;
+
+void put_u32(u32 v) {
+    char buf[12] = {0};
+    u32 n = 0;
+
+    if (v == 0u) {
+        port_putc((int)48);
+        return;
+    }
+    while (v > 0u && n < 12u) {
+        buf[n] = (char)(48 + (v % 10u));
+        v = v / 10u;
+        n++;
+    }
+    while (n > 0u) {
+        n--;
+        port_putc((int)buf[n]);
+    }
+}
+
+static void ta(void *arg) {
+    u32 t0 = (u32)os_tick_get();
+
+    os_task_delay(100u);
+    g_elapsed = (u32)os_tick_get() - t0;
+}
+
+void os_main(void) {
+    int a = 0;
+
+    port_init();
+    port_puts("x86 tick test\n");
+    a = os_task_create("a", ta, 0, 1u, 4096u);
+    if (a <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+    port_puts("DONE elapsed=");
+    put_u32(g_elapsed);
+    port_putc(10);
+    if (g_elapsed >= 99u && g_elapsed <= 101u) {
+        port_puts("PASS: x86 tick\n");
+    } else {
+        port_puts("FAIL: x86 tick\n");
+    }
+}

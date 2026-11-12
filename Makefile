@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -379,14 +379,38 @@ toolchain-info:
 	@esptool version | head -1
 
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
-X86      := build/x86
-X86CFLAGS := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1
+X86        := build/x86
+X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1
 X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
+X86S_NAME  ?= sched
+X86S_MAIN  ?= tests/t_x86_sched.c6
+X86S_DIR   := $(X86)/$(X86S_NAME)
+X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
+              kernel/timer.c6 kernel/log.c6 kernel/panic.c6
+X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
+              $(X86S_DIR)/obj/ctx_asm.o $(X86S_DIR)/obj/kprintf.o \
+              $(X86S_DIR)/obj/libc.o
 
 x86: $(X86)/disk.img
 
 run-x86: x86
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+x86-sched:
+	$(MAKE) X86S_NAME=sched X86S_MAIN=tests/t_x86_sched.c6 $(X86)/sched-disk.img
+
+x86-tick:
+	$(MAKE) X86S_NAME=tick X86S_MAIN=tests/t_x86_tick.c6 $(X86)/tick-disk.img
+
+run-x86-tick: x86-tick
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/tick-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+run-x86-sched: x86-sched
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/$(X86S_NAME)-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
 
 $(X86)/hello.ll: tests/t_x86_hello.c6
@@ -435,6 +459,67 @@ $(X86)/disk.img: $(X86)/boot16.bin $(X86)/flat.bin
 	dd if=/dev/zero of=$@ bs=1M count=1 status=none
 	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
 	dd if=$(X86)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+
+# sched 载荷：内核 + 上下文切换
+$(X86S_DIR)/ir/stamp: $(X86S_C6)
+	@mkdir -p $(X86S_DIR)/ir
+	for f in $^; do \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm \
+			-o $(X86S_DIR)/ir/$$(basename $$f .c6).ll $$f || exit 1; \
+	done
+	@touch $@
+
+$(X86S_DIR)/ir/%.ll: $(X86S_DIR)/ir/stamp
+	@test -f $@
+
+$(X86S_DIR)/obj/%.o: $(X86S_DIR)/ir/%.ll $(X86S_DIR)/ir/stamp
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86IRFLAGS) -c -o $@ $<
+
+$(X86S_DIR)/obj/console.o: port/x86_64/console.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/ctx.o: port/x86_64/ctx.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/ctx_asm.o: port/x86_64/ctx.S
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -c -o $@ $<
+
+$(X86S_DIR)/obj/kprintf.o: rt/kprintf.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -Irt -c -o $@ $<
+
+$(X86S_DIR)/obj/libc.o: rt/x86_libc.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/stage2.elf: $(X86)/stage2.o $(X86S_OBJ) port/x86_64/stage2.ld
+	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ \
+		$(X86)/stage2.o $(X86S_OBJ)
+
+$(X86S_DIR)/stage2.bin: $(X86S_DIR)/stage2.elf
+	llvm-objcopy -O binary $< $@
+
+$(X86S_DIR)/stage1.S: port/x86_64/stage1.S $(X86S_DIR)/stage2.bin
+	sed 's|#BLOB#|$(X86S_DIR)/stage2.bin|' port/x86_64/stage1.S > $@
+	printf '\n.section .stage2, "a"\n.incbin "%s"\n' '$(X86S_DIR)/stage2.bin' >> $@
+
+$(X86S_DIR)/stage1.o: $(X86S_DIR)/stage1.S
+	as --64 -o $@ $<
+
+$(X86S_DIR)/flat.elf: $(X86S_DIR)/stage1.o port/x86_64/stage1.ld
+	ld -m elf_x86_64 -static -T port/x86_64/stage1.ld -o $@ $<
+
+$(X86S_DIR)/flat.bin: $(X86S_DIR)/flat.elf
+	llvm-objcopy -O binary $< $@
+
+$(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin
+	dd if=/dev/zero of=$@ bs=1M count=1 status=none
+	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
+	dd if=$(X86S_DIR)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
 
 
 clean:

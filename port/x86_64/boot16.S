@@ -25,6 +25,12 @@ _boot:
     int $0x13
     jc 1f
 
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap3, %si
+    int $0x13
+    jc 1f
+
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -51,9 +57,14 @@ dap1:
     .quad 1
 dap2:
     .byte 0x10, 0
-    .word 8
+    .word 120
     .word 0x0000, 0x1FE0
     .quad 128
+dap3:
+    .byte 0x10, 0
+    .word 8
+    .word 0x0000, 0x2EE0
+    .quad 248
 
 .align 8
 gdt:
