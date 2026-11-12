@@ -29,9 +29,6 @@ static void ta(void *arg) {
     u32 end = (u32)os_tick_get() + 20u;
     while ((u32)os_tick_get() < end) {
         ca++;
-        if ((ca & 0x3FFu) == 0u) {
-            os_test_tick_isr();
-        }
     }
 }
 
@@ -39,9 +36,6 @@ static void tb(void *arg) {
     u32 end = (u32)os_tick_get() + 20u;
     while ((u32)os_tick_get() < end) {
         cb++;
-        if ((cb & 0x3FFu) == 0u) {
-            os_test_tick_isr();
-        }
     }
 }
 
@@ -50,6 +44,7 @@ int main(void) {
         os_task_create("b", tb, 0, 1u, 8192u) <= 0) {
         return 1;
     }
+    port_sim_preempt_start();
     os_task_start();
     port_puts("ca=");
     put_u32(ca);

@@ -1,9 +1,14 @@
-/* host/sim 协作上下文：ucontext；只用于参考机测试，不模拟抢占。 */
+/* host/sim 上下文：ucontext + SIGALRM 模拟定时器中断抢占。
+ * 信号处理栈必须落在任务自己的栈上（SA_ONSTACK 会让所有任务共用一块
+ * altstack，后一次中断覆盖前一个任务的 sigreturn 帧）。 */
 
 #include <ucontext.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "c6os/types.h"
+#include "c6os/tick.h"
 #include "c6os/port.h"
 
 extern void os_task_exit(void);
@@ -20,12 +25,66 @@ typedef struct {
 static SimCtx *g_cur;
 static SimCtx *g_pending;
 static ucontext_t g_sched;
+static volatile sig_atomic_t g_in_task;
+static volatile sig_atomic_t g_preempt_on;
+
 void port_enter_task(void)
 {
+    g_in_task = 1;
 }
 
 void port_leave_task(void)
 {
+    g_in_task = 0;
+}
+
+static void tick_sig(int sig)
+{
+    (void)sig;
+    if (!g_preempt_on) {
+        return;
+    }
+    os_sched_tick();
+    if (g_in_task != 0 && g_cur != 0) {
+        swapcontext(&g_cur->uc, &g_sched);
+    }
+}
+
+void port_sim_preempt_start(void)
+{
+    static int installed;
+    struct sigaction sa;
+    struct itimerval it;
+
+    if (installed != 0) {
+        return;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = tick_sig;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, 0);
+
+    it.it_interval.tv_sec = 0;
+    it.it_interval.tv_usec = 10000;
+    it.it_value = it.it_interval;
+    setitimer(ITIMER_REAL, &it, 0);
+    installed = 1;
+    g_preempt_on = 1;
+}
+
+static void alarm_block(sigset_t *old)
+{
+    sigset_t s;
+
+    sigemptyset(&s);
+    sigaddset(&s, SIGALRM);
+    sigprocmask(SIG_BLOCK, &s, old);
+}
+
+static void alarm_restore(sigset_t *old)
+{
+    sigprocmask(SIG_SETMASK, old, 0);
 }
 
 static void tramp(void)
@@ -82,15 +141,27 @@ void port_task_ctx_free(void *ctx)
 void port_task_switch(void *ctx)
 {
     SimCtx *c = (SimCtx *)ctx;
+    sigset_t old;
+
     g_cur = c;
     g_pending = c;
+    alarm_block(&old);
+    g_in_task = 1;
     swapcontext(&g_sched, &c->uc);
+    g_in_task = 0;
+    alarm_restore(&old);
 }
 
 void port_task_yield(void)
 {
     if (g_cur != 0) {
+        sigset_t old;
+
+        alarm_block(&old);
+        g_in_task = 0;
         swapcontext(&g_cur->uc, &g_sched);
+        g_in_task = 1;
+        alarm_restore(&old);
     }
 }
 

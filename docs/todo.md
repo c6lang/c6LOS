@@ -316,7 +316,8 @@
   用 `wsr PS + rsync + rfe` 返回。`make ... S3_MAIN=tests/t_s3_irq.c6 s3` 实测
   `PASS: s3 irq tick`（纯忙等任务里 tick 仍推进 5 个）。`port_idle` 改为 `waiti 0`。
 
-- **模拟器 tick 抢占注入（host sim PASS）**：`os_test_tick_isr()` = `os_sched_tick()` +
-  `port_task_yield()`，由忙等任务每 1024 次迭代调用一次，等价于在任意指令边界收到
-  定时器中断后立刻重调度；`t_preempt_sim` 两个同优先级任务都拿到时间片
-  （`ca=10240 cb=11264`），输出 `PASS: sim preempt`。
+- **模拟器异步 tick 抢占（host sim PASS）**：`port/sim/port_ctx.c` 用 `SIGALRM`
+  （10ms）模拟定时器中断，handler 里 `os_sched_tick()` 后 `swapcontext` 到调度器；
+  两个忙等任务完全不让出 CPU，仍都能推进（`ca≈8.2M cb≈9.0M`），输出
+  `PASS: sim preempt`。关键坑：信号处理栈**不能**用 `SA_ONSTACK` 共用 altstack，
+  否则后一次中断会覆盖前一个任务挂起中的 sigreturn 帧，任务会“凭空返回”。

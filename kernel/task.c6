@@ -372,11 +372,6 @@ void os_task_delay(u32 ticks) {
     port_task_yield();
 }
 
-void os_test_tick_isr(void) {
-    os_sched_tick();
-    port_task_yield();
-}
-
 void os_task_exit(void) {
     if (g_cur != 0) {
         u32 id = g_cur->id;
