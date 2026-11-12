@@ -3,6 +3,9 @@
 
 extern void s3_lcd_init(void);
 extern void s3_lcd_fill(u16 color);
+extern void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+
+static u16 g_fb[8 * 8] = {0};
 
 static void wait(u32 n) { volatile u32 i = 0; while (i < n) { i++; } }
 
@@ -21,5 +24,10 @@ void os_main(void) {
     wait(20000000u);
     port_puts("white\n");
     s3_lcd_fill(0xFFFFu);
+    {
+        u32 i = 0;
+        while (i < 64u) { g_fb[i] = 0xF800u; i++; }
+        s3_lcd_blit(g_fb, 8u, 8u);
+    }
     port_puts("done\n");
 }

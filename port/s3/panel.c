@@ -453,6 +453,37 @@ void s3_lcd_init(void)
     (void)n;
 }
 
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
+{
+    u8 col[4];
+    u8 row[4];
+    u32 i = 0;
+    u32 n = w * h;
+
+    if (fb == 0 || w == 0u || h == 0u) {
+        return;
+    }
+    col[0] = 0; col[1] = 0;
+    col[2] = (u8)((w - 1u) >> 8); col[3] = (u8)((w - 1u) & 0xFFu);
+    row[0] = 0; row[1] = 0;
+    row[2] = (u8)((h - 1u) >> 8); row[3] = (u8)((h - 1u) & 0xFFu);
+    qcmd_data(0x2Au, col, 4);
+    qcmd_data(0x2Bu, row, 4);
+
+    pin_lo(21u);
+    qcmd(0x32u, 0x2Cu);
+    while (i < n) {
+        u8 hi = (u8)(fb[i] >> 8);
+        u8 lo = (u8)(fb[i] & 0xFFu);
+        qnib((u8)(hi >> 4));
+        qnib((u8)(hi & 0xFu));
+        qnib((u8)(lo >> 4));
+        qnib((u8)(lo & 0xFu));
+        i++;
+    }
+    pin_hi(21u);
+}
+
 void s3_lcd_fill(u16 color)
 {
     qcolor(color, LCD_W * LCD_H);
