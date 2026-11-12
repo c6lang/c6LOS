@@ -534,3 +534,11 @@
 
 - **M7-3 8×16 字符单元**：`os_gfx_char16/text16` 将 8×8 点阵每行画两遍，
   得到 8×16 单元（当前字库仍是 8×8 形状）；`t_gfx` 断言 "AB" 的 (3,0)/(3,1) 同时点亮。
+
+- **risc6 裸机定时器（模拟器 PASS）**：新增 `port/rv32bare/`（`.risc6_bare` 标记、
+  `mtvec`/`mret` 陷阱、32 寄存器帧、MMIO 0x40000000 控制台）与
+  `tests/t_rv32bare_tick.c6`；`make run-rv32bare-tick` 在 `~/risc6/build/risc6 --bare`
+  下输出 `PASS: rv32 bare tick`，`insns=263076 rc=0`。这是在**指令边界注入 MTIP**
+  的真陷阱路径，不是协作 tick。
+- **risc6 用户态回归**：现有 `rv32 hello/sched/tick` 全部在 risc6 上跑通：
+  hello 1776 条 / sched 36318 条 / tick 1,876,629 条指令，输出与 qemu-riscv32 一致。

@@ -22,7 +22,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o $(BUILD)/obj/core1.o
 
-.PHONY: all s3 s3-src-check check-all s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: all s3 s3-src-check check-all rv32bare-tick run-rv32bare-tick s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -704,7 +704,7 @@ $(BUILDH)/t_join: $(BUILDH)/t_join.ll $(BUILDH)/task.ll $(BUILDH)/timeout.ll $(B
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-check-all: check-host x86 rv32
+check-all: check-host x86 rv32 rv32bare-tick
 
 check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join $(BUILDH)/t_suspend $(BUILDH)/t_los3 $(BUILDH)/t_timeout $(BUILDH)/t_los4 $(BUILDH)/t_task2 $(BUILDH)/t_los_err $(BUILDH)/t_queue_generic $(BUILDH)/t_race $(BUILDH)/t_hwi $(BUILDH)/t_shell $(BUILDH)/t_cobs \
 	$(BUILDH)/t_pi_chain $(BUILDH)/t_isr $(BUILDH)/t_overflow $(BUILDH)/t_stress \
@@ -938,6 +938,8 @@ $(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin
 RV32        := build/rv32
 RV32CFLAGS  := --target=riscv32-unknown-linux-gnu -march=rv32imac -mabi=ilp32 \
                -nostdlib -ffreestanding
+RV32BFLAGS  := --target=riscv32-unknown-linux-gnu -march=rv32imac -mabi=ilp32 \
+               -nostdlib -ffreestanding -msmall-data-limit=0
 RV32_MAIN   ?= tests/t_rv32_hello.c6
 
 rv32: $(RV32)/hello
@@ -1047,6 +1049,71 @@ $(RV32S_DIR)/obj/libc.o: rt/x86_libc.c
 $(RV32S_DIR)/sched: $(RV32S_OBJ)
 	clang $(RV32CFLAGS) -fuse-ld=lld -static -o $@ $^
 
+
+
+# ---- rv32 bare 参考目标（risc6 bare：真定时器陷阱/MTIP） ----
+RV32B_DIR  := build/rv32bare
+RV32B_C6   := tests/t_rv32bare_tick.c6 kernel/task.c6 kernel/tick.c6 \
+              kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6
+RV32B_LL   := $(addprefix $(RV32B_DIR)/ir/,$(notdir $(RV32B_C6:.c6=.ll)))
+RV32B_OBJ  := $(addprefix $(RV32B_DIR)/obj/,$(notdir $(RV32B_C6:.c6=.o))) \
+              $(RV32B_DIR)/obj/start.o $(RV32B_DIR)/obj/trap.o \
+              $(RV32B_DIR)/obj/console.o $(RV32B_DIR)/obj/ctx.o \
+              $(RV32B_DIR)/obj/ctx_asm.o $(RV32B_DIR)/obj/kprintf.o \
+              $(RV32B_DIR)/obj/libc.o
+
+rv32bare-tick: $(RV32B_DIR)/tick
+
+run-rv32bare-tick: rv32bare-tick
+	$(RISC6) --bare $(RV32B_DIR)/tick
+
+$(RV32B_DIR)/ir/stamp: $(RV32B_C6)
+	@mkdir -p $(RV32B_DIR)/ir
+	for f in $^; do \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $(RV32B_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
+		sed -e 's|^target datalayout = .*|target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"|' \
+		    -e 's|^target triple = .*|target triple = "riscv32-unknown-linux-gnu"|' \
+		    $(RV32B_DIR)/ir/$$(basename $$f .c6).raw.ll > $(RV32B_DIR)/ir/$$(basename $$f .c6).ll || exit 1; \
+	done
+	@touch $@
+
+$(RV32B_DIR)/ir/%.ll: $(RV32B_DIR)/ir/stamp
+	@test -f $@
+
+$(RV32B_DIR)/obj/%.o: $(RV32B_DIR)/ir/%.ll $(RV32B_DIR)/ir/stamp
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32B_DIR)/obj/start.o: port/rv32bare/start.S
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32B_DIR)/obj/trap.o: port/rv32bare/trap.S
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32B_DIR)/obj/console.o: port/rv32bare/console.c
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32B_DIR)/obj/ctx.o: port/rv32/ctx.c
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32B_DIR)/obj/ctx_asm.o: port/rv32/ctx.S
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -c -o $@ $<
+
+$(RV32B_DIR)/obj/kprintf.o: rt/kprintf.c
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -Irt -c -o $@ $<
+
+$(RV32B_DIR)/obj/libc.o: rt/x86_libc.c
+	@mkdir -p $(RV32B_DIR)/obj
+	clang $(RV32BFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32B_DIR)/tick: $(RV32B_OBJ)
+	clang $(RV32BFLAGS) -static -fuse-ld=lld -o $@ $^
 
 clean:
 	rm -rf $(BUILD) $(BUILDH)

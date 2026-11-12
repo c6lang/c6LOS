@@ -1,0 +1,37 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+extern void port_bare_exit(u32 code);
+
+static u32 g_ok = 0;
+
+static void busy(void *arg) {
+    u32 start = (u32)os_tick_get();
+    u32 guard = 0;
+
+    while ((u32)os_tick_get() < start + 5u) {
+        guard++;
+        if (guard > 4000000u) {
+            return;
+        }
+    }
+    g_ok = 1u;
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("rv32 bare tick\n");
+    if (os_task_create("b", busy, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+    if (g_ok == 1u) {
+        port_puts("PASS: rv32 bare tick\n");
+    } else {
+        port_puts("FAIL: rv32 bare tick\n");
+    }
+    port_bare_exit(0u);
+}
