@@ -81,3 +81,14 @@ void port_panic_halt(void)
         __asm__ __volatile__("waiti 0");
     }
 }
+
+u32 port_virtual_tick(void)
+{
+    return 0u;
+}
+
+u32 port_task_stack_ok(void *ctx)
+{
+    (void)ctx;
+    return 1u;
+}

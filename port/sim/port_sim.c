@@ -62,6 +62,12 @@ void port_idle(void)
 {
 }
 
+u32 port_virtual_tick(void)
+{
+    /* host 参考机：无硬件 tick，由调度器在空闲时推进虚拟时钟。 */
+    return 1u;
+}
+
 void port_panic_halt(void)
 {
     /* host 测试：直接返回，让断言继续执行；目标机由 port 层死循环。 */

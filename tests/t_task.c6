@@ -1,0 +1,60 @@
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+
+static void ta(void *arg) {
+    order[n] = 'A';
+    n++;
+    os_task_delay(2);
+    order[n] = 'a';
+    n++;
+}
+
+static void tb(void *arg) {
+    order[n] = 'B';
+    n++;
+    os_task_delay(1);
+    order[n] = 'b';
+    n++;
+}
+
+int main(void) {
+    u32 i = 0;
+    while (i < 1000u) {
+        int id = os_task_create("tmp", ta, 0, 3, 4096);
+        if (id <= 0) {
+            return 1;
+        }
+        if (os_task_delete((u32)id) != 0) {
+            return 2;
+        }
+        i++;
+    }
+    if (os_task_count() != 0u) {
+        return 3;
+    }
+
+    if (os_task_create("a", ta, 0, 1, 4096) <= 0) {
+        return 4;
+    }
+    if (os_task_create("b", tb, 0, 1, 4096) <= 0) {
+        return 5;
+    }
+    os_task_start();
+    order[n] = '\0';
+    const char *want = "ABba";
+    i = 0;
+    while (want[i] != '\0') {
+        if (order[i] != want[i]) {
+            port_puts("FAIL: delay order ");
+            port_puts(order);
+            port_puts("\n");
+            return 6;
+        }
+        i++;
+    }
+    port_puts("PASS: task delete/delay\n");
+    return 0;
+}

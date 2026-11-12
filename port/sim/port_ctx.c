@@ -51,6 +51,10 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     c->uc.uc_stack.ss_sp = c->stack;
     c->uc.uc_stack.ss_size = sz;
     c->uc.uc_link = 0;
+    {
+        u32 sentinel = 0xC6C0DEADu;
+        memcpy(c->stack, &sentinel, sizeof(sentinel));
+    }
     makecontext(&c->uc, tramp, 0);
     return c;
 }
@@ -78,4 +82,16 @@ void port_task_yield(void)
     if (g_cur != 0) {
         swapcontext(&g_cur->uc, &g_sched);
     }
+}
+
+u32 port_task_stack_ok(void *ctx)
+{
+    SimCtx *c = (SimCtx *)ctx;
+    u32 sentinel = 0;
+
+    if (c == 0 || c->stack == 0) {
+        return 0;
+    }
+    memcpy(&sentinel, c->stack, sizeof(sentinel));
+    return sentinel == 0xC6C0DEADu ? 1u : 0u;
 }

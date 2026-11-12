@@ -58,6 +58,9 @@
 - tick 计数/换算 host PASS（`os_tick_get/advance`、100Hz、`ms<->ticks`）。
 - M1 最小调度器 host PASS：16 槽静态池、`os_task_create/yield/exit/start`、
   同优先级轮转，两任务顺序 `ABab`；sim 用 ucontext（`port/sim/port_ctx.c`）。
+- M1 补测 host PASS：`create/delete` 1000 次后 `os_task_count()==0`；
+  `os_task_delay` + 虚拟 tick 顺序 `ABba`；就绪位图 + 软件 ctz 选优先级；
+  每次切换检查栈底 `0xC6C0DEAD`，损坏走 `os_panic("task stack overflow")`。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
@@ -67,12 +70,12 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（静态池 + create + host 两任务 PASS；delete/magic 待做） |
-| M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（轮转扫描可用；位图+clz 待改） |
-| M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 未开始 |
-| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 未开始 |
+| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（create/delete 1000 次 host PASS；magic 待加） |
+| M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
+| M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
+| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 进行中（delay + 虚拟 tick host PASS；suspend 未做） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
-| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 未开始 |
+| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 未开始 |
 | M1-8 上下文切换 | S3 陷阱帧 a0–a15/pc/ps/sar/lbeg/lend/lcount/f0–f15/fcr/fsr | S3-4：两任务交替打印 1000 次无错 | 进行中（sim ucontext 两任务 PASS；S3 陷阱帧未接） |
 

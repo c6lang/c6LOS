@@ -11,6 +11,7 @@ typedef void (*OsTaskEntry)(void *);
 #define OS_TASK_READY 1u
 #define OS_TASK_RUNNING 2u
 #define OS_TASK_DEAD 3u
+#define OS_TASK_BLOCKED 4u
 
 typedef struct OsTask {
     void *ctx;                 /* port 上下文（不透明） */
@@ -19,6 +20,7 @@ typedef struct OsTask {
     u32 id;
     u32 stack_size;
     u32 slice;                 /* 剩余时间片（tick） */
+    u32 delay_left;            /* 延时剩余 tick */
     u8 prio;                   /* 0..31，越小越高 */
     u8 state;
     char name[C6OS_NAME_MAX];
@@ -28,6 +30,9 @@ int os_task_create(const char *name, OsTaskEntry entry, void *arg,
                    u32 prio, u32 stack_size);
 void os_task_start(void);
 void os_task_yield(void);
+void os_task_delay(u32 ticks);
+void os_sched_tick(void);
+int os_task_delete(u32 id);
 void os_task_exit(void);
 u32 os_task_self(void);
 u32 os_task_count(void);
