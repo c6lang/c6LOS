@@ -1,0 +1,137 @@
+#include "c6os/heap.h"
+
+#define HEAP_MAGIC 0xC6E50006u
+#define HDR_SIZE 16u
+#define ALIGN8(x) (((x) + 7u) & ~7u)
+
+typedef struct HeapBlk {
+    u32 size;      /* 负载字节数（不含块头） */
+    u32 free;
+    u32 pad;
+    u32 pad2;
+} HeapBlk;
+
+static u32 heap_align_up(u32 x) {
+    u8 *p = (u8 *)0;
+
+    (void)p;
+    return ALIGN8(x);
+}
+
+void os_heap_init(OsHeap *h, void *mem, u32 size) {
+    u8 *base = (u8 *)mem;
+    u32 off = 0;
+    HeapBlk *b = 0;
+
+    if (h == 0 || mem == 0 || size < (HDR_SIZE + 8u)) {
+        return;
+    }
+    while (((u32)(unsigned long)base & 7u) != 0u) {
+        base++;
+        size--;
+    }
+    off = size - HDR_SIZE;
+    off = off & ~7u;
+
+    h->base = base;
+    h->size = off + HDR_SIZE;
+    h->used = 0;
+    h->peak = 0;
+    h->magic = HEAP_MAGIC;
+
+    b = (HeapBlk *)base;
+    b->size = off;
+    b->free = 1;
+    b->pad = 0;
+    b->pad2 = 0;
+}
+
+void *os_heap_alloc(OsHeap *h, u32 n) {
+    u8 *p = 0;
+    u32 need = 0;
+    HeapBlk *best = 0;
+    u32 best_size = 0xFFFFFFFFu;
+
+    if (h == 0 || h->magic != HEAP_MAGIC || n == 0u) {
+        return 0;
+    }
+    need = heap_align_up(n);
+    p = h->base;
+    while (p < h->base + h->size) {
+        HeapBlk *b = (HeapBlk *)p;
+        if (b->free != 0u && b->size >= need && b->size < best_size) {
+            best = b;
+            best_size = b->size;
+        }
+        p = p + HDR_SIZE + b->size;
+    }
+    if (best == 0) {
+        return 0;
+    }
+    if (best->size >= need + HDR_SIZE + 8u) {
+        u8 *nb = (u8 *)best + HDR_SIZE + need;
+        HeapBlk *b2 = (HeapBlk *)nb;
+        b2->size = best->size - need - HDR_SIZE;
+        b2->free = 1;
+        b2->pad = 0;
+        b2->pad2 = 0;
+        best->size = need;
+    }
+    best->free = 0;
+    h->used = h->used + best->size;
+    if (h->used > h->peak) {
+        h->peak = h->used;
+    }
+    return (void *)((u8 *)best + HDR_SIZE);
+}
+
+int os_heap_free(OsHeap *h, void *p) {
+    HeapBlk *b = 0;
+    u32 merged = 1;
+
+    if (h == 0 || h->magic != HEAP_MAGIC || p == 0) {
+        return -1;
+    }
+    b = (HeapBlk *)((u8 *)p - HDR_SIZE);
+    if ((u8 *)b < h->base || (u8 *)b >= h->base + h->size) {
+        return -1;
+    }
+    if (b->free != 0u) {
+        return -1;
+    }
+    b->free = 1;
+    h->used = h->used - b->size;
+
+    while (merged != 0u) {
+        u8 *q = h->base;
+        merged = 0;
+        while (q < h->base + h->size) {
+            HeapBlk *c = (HeapBlk *)q;
+            u8 *nq = q + HDR_SIZE + c->size;
+            if (c->free != 0u && nq < h->base + h->size) {
+                HeapBlk *n = (HeapBlk *)nq;
+                if (n->free != 0u) {
+                    c->size = c->size + HDR_SIZE + n->size;
+                    merged = 1;
+                    break;
+                }
+            }
+            q = nq;
+        }
+    }
+    return 0;
+}
+
+u32 os_heap_used(OsHeap *h) {
+    if (h == 0) {
+        return 0;
+    }
+    return h->used;
+}
+
+u32 os_heap_peak(OsHeap *h) {
+    if (h == 0) {
+        return 0;
+    }
+    return h->peak;
+}

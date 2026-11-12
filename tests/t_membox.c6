@@ -1,0 +1,47 @@
+#include "c6os/membox.h"
+#include "c6os/port.h"
+
+static u8 pool[4 * 32] = {0};
+static OsMembox mb = {0};
+
+int main(void) {
+    void *p[4] = {0};
+    u32 i = 0;
+
+    if (os_membox_init(&mb, pool, 32, 4) != 0) {
+        return 1;
+    }
+    if (os_membox_free_count(&mb) != 4u) {
+        return 2;
+    }
+    while (i < 4u) {
+        p[i] = os_membox_alloc(&mb);
+        if (p[i] == 0) {
+            return 3;
+        }
+        i++;
+    }
+    if (os_membox_alloc(&mb) != 0) {
+        return 4;
+    }
+    if (os_membox_free_count(&mb) != 0u) {
+        return 5;
+    }
+    if (p[0] == p[1] || p[1] == p[2] || p[2] == p[3]) {
+        return 6;
+    }
+    if (os_membox_free(&mb, p[0]) != 0) {
+        return 7;
+    }
+    if (os_membox_free_count(&mb) != 1u) {
+        return 8;
+    }
+    if (os_membox_alloc(&mb) == 0) {
+        return 9;
+    }
+    if (os_membox_free(&mb, (void *)(pool + 1)) == 0) {
+        return 10;
+    }
+    port_puts("PASS: membox\n");
+    return 0;
+}

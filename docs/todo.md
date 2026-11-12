@@ -67,6 +67,8 @@
   `os_event_clear` 后 `os_event_get` 只剩另一位。
 - M4-1 host PASS：容量 1 的指针队列，生产者第二次 put 阻塞、消费者 get 唤醒，
   取回 1+2=3，顺序 `PGpg`；空队列 get 超时返回 0。
+- M4-3/M4-4 host PASS：4×32B membox 耗尽返回空、非法/未对齐 free 返回 -1；
+  8KB best-fit 堆 1000 次随机分配/释放后 `used==0`、`peak>0`。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
@@ -123,9 +125,9 @@
 |---|---|---|---|
 | M4-1 `Queue@T` | 泛型队列、元素拷贝、满/空/超时 | 元素为结构体/指针/u64 三类 | 进行中（指针队列 + 满/空阻塞/超时 host PASS；泛型待做） |
 | M4-2 兼容队列 | `LOS_QueueCreate/Read/Write` | 与原生同一断言集 | 未开始 |
-| M4-3 定长内存池 | `membox`、O(1) 分配、归属校验 | 耗尽返回 `OS_ENOMEM` | 未开始 |
-| M4-4 best-fit 堆 | 块头/合并/对齐/统计 | 1000 次随机分配释放无碎片泄漏 | 未开始 |
-| M4-5 统计 | 已用/峰值/最大空闲块 | 与手算一致 | 未开始 |
+| M4-3 定长内存池 | `membox`、O(1) 分配、归属校验 | 耗尽返回 `OS_ENOMEM` | 完成（O(1) 分配/释放 + 归属/对齐校验，host PASS） |
+| M4-4 best-fit 堆 | 块头/合并/对齐/统计 | 1000 次随机分配释放无碎片泄漏 | 完成（best-fit + 相邻合并 + 8B 对齐，1000 次随机 host PASS） |
+| M4-5 统计 | 已用/峰值/最大空闲块 | 与手算一致 | 进行中（used/peak 已有；最大空闲块待加） |
 
 **M4 验收**：队列三类元素；堆 1000 次随机操作后 `used==0`；OOM 路径可恢复。
 

@@ -1,0 +1,73 @@
+#include "c6os/membox.h"
+
+#define MEMBOX_MAGIC 0xC6E50005u
+
+int os_membox_init(OsMembox *mb, void *storage, u32 blk_size, u32 blk_count) {
+    u32 i = 0;
+
+    if (mb == 0 || storage == 0 || blk_count == 0u) {
+        return -1;
+    }
+    if (blk_size < 8u) {
+        blk_size = 8u;
+    }
+    blk_size = (blk_size + 7u) & ~7u;
+
+    mb->base = (u8 *)storage;
+    mb->blk_size = blk_size;
+    mb->blk_count = blk_count;
+    mb->free_count = blk_count;
+    mb->free_list = 0;
+    mb->magic = MEMBOX_MAGIC;
+
+    while (i < blk_count) {
+        u8 *p = mb->base + (i * blk_size);
+        *(void **)p = mb->free_list;
+        mb->free_list = (void *)p;
+        i++;
+    }
+    return 0;
+}
+
+void *os_membox_alloc(OsMembox *mb) {
+    void *p = 0;
+
+    if (mb == 0 || mb->magic != MEMBOX_MAGIC || mb->free_list == 0) {
+        return 0;
+    }
+    p = mb->free_list;
+    mb->free_list = *(void **)p;
+    mb->free_count = mb->free_count - 1u;
+    return p;
+}
+
+int os_membox_free(OsMembox *mb, void *p) {
+    u32 off = 0;
+    u8 *q = 0;
+
+    if (mb == 0 || mb->magic != MEMBOX_MAGIC || p == 0) {
+        return -1;
+    }
+    q = (u8 *)p;
+    if (q < mb->base) {
+        return -1;
+    }
+    off = (u32)(q - mb->base);
+    if (off >= mb->blk_size * mb->blk_count) {
+        return -1;
+    }
+    if ((off % mb->blk_size) != 0u) {
+        return -1;
+    }
+    *(void **)p = mb->free_list;
+    mb->free_list = p;
+    mb->free_count = mb->free_count + 1u;
+    return 0;
+}
+
+u32 os_membox_free_count(OsMembox *mb) {
+    if (mb == 0) {
+        return 0;
+    }
+    return mb->free_count;
+}

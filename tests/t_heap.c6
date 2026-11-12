@@ -1,0 +1,49 @@
+#include "c6os/heap.h"
+#include "c6os/port.h"
+
+static u8 pool[8192] = {0};
+static OsHeap h = {0};
+static void *ptrs[32] = {0};
+
+int main(void) {
+    u32 rnd = 12345u;
+    u32 i = 0;
+
+    os_heap_init(&h, pool, 8192);
+    while (i < 1000u) {
+        u32 slot = 0;
+        rnd = rnd * 1103515245u + 12345u;
+        slot = (rnd >> 16) % 32u;
+        if (ptrs[slot] != 0) {
+            if (os_heap_free(&h, ptrs[slot]) != 0) {
+                return 1;
+            }
+            ptrs[slot] = 0;
+        } else {
+            u32 sz = ((rnd >> 8) % 200u) + 8u;
+            ptrs[slot] = os_heap_alloc(&h, sz);
+            if (ptrs[slot] == 0) {
+                return 2;
+            }
+        }
+        i++;
+    }
+    i = 0;
+    while (i < 32u) {
+        if (ptrs[i] != 0) {
+            if (os_heap_free(&h, ptrs[i]) != 0) {
+                return 3;
+            }
+            ptrs[i] = 0;
+        }
+        i++;
+    }
+    if (os_heap_used(&h) != 0u) {
+        return 4;
+    }
+    if (os_heap_peak(&h) == 0u) {
+        return 5;
+    }
+    port_puts("PASS: heap\n");
+    return 0;
+}
