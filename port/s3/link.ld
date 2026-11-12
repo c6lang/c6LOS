@@ -2,8 +2,8 @@ ENTRY(_start)
 
 MEMORY
 {
-  IRAM (rx) : ORIGIN = 0x40370000, LENGTH = 0x70000
-  DRAM (rw) : ORIGIN = 0x3FC88000, LENGTH = 0x78000
+  IRAM (rx) : ORIGIN = 0x403C9000, LENGTH = 0x17000
+  DRAM (rw) : ORIGIN = 0x3FCE3000, LENGTH = 0x1D000
 }
 
 SECTIONS
@@ -15,9 +15,6 @@ SECTIONS
     *(.text.start)
     *(.literal*)
     *(.text*)
-  } > IRAM
-
-  .rodata : {
     *(.rodata*)
   } > IRAM
 

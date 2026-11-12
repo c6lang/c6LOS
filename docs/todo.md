@@ -44,6 +44,12 @@
   （sha256 `fa1a3fcb…8dfe`，build/ 被 git 忽略）。
 - 下一步：核对 USB-Serial/JTAG 时钟/PHY（`SYSTEM_PERIP_CLK_EN1` bit10、
   `CONF0` bit14）与主机重枚举；必要时用 ROM `ets_printf` 做对照。
+- 根因（镜像）：esptool 生成的第三个段 `0x403c927e` 落在第二段
+  （`0x403c9000+0x280=0x403c9280`）内部，**段重叠** → ROM 判
+  `Invalid image block`。已把 `.rodata` 合并进 `.text`，镜像变为 2 段
+  （DRAM + IRAM），待复测。
+- 当前：旧镜像使 ROM 在 `ets_main.c` 死循环并每 ~300ms 被 TG0WDT 复位，
+  USB 反复重枚举、`/dev/ttyACM0` 消失；需按住 BOOT 再复位进入下载模式后重烧。
 
 ---
 
