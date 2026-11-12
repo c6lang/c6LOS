@@ -323,7 +323,9 @@ void os_task_start(void) {
         }
         g_cur = t;
         t->state = (u8)OS_TASK_RUNNING;
+        port_enter_task();
         port_task_switch(t->ctx);
+        port_leave_task();
         if (t->state == (u8)OS_TASK_RUNNING) {
             make_ready(t);
         }

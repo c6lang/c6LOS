@@ -68,6 +68,14 @@ u32 port_virtual_tick(void)
     return 1u;
 }
 
+void port_enter_task(void)
+{
+}
+
+void port_leave_task(void)
+{
+}
+
 void port_mark(u32 v)
 {
     (void)v;

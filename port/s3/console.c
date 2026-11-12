@@ -17,6 +17,14 @@ void s3_mark(u32 idx, u32 v)
     *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
 }
 
+void port_enter_task(void)
+{
+}
+
+void port_leave_task(void)
+{
+}
+
 void port_mark(u32 v)
 {
     s3_mark(4u, v);

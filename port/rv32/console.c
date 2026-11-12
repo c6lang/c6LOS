@@ -68,6 +68,14 @@ void port_panic_halt(void)
     sys_exit(1);
 }
 
+void port_enter_task(void)
+{
+}
+
+void port_leave_task(void)
+{
+}
+
 void port_mark(u32 v)
 {
     (void)v;

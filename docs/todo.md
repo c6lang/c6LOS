@@ -90,10 +90,10 @@
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
-| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
+| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 裸机 PIT 100Hz 抢占：`ca≈cb≈1.18M` / `PASS: x86 preempt`；协作 sim 仍按 yield 轮转） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
-| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；抢占/陷阱帧未接） |
+| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；x86-64 已接完整陷阱帧抢占 `PASS: x86 preempt`；S3 抢占待接） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
 
@@ -295,3 +295,10 @@
   `port_idle` 用 `csrr time` 每 1,000,000 周期推进一 tick，
   `make run-rv32-tick` 输出 `elapsed=100` / `PASS: rv32 tick`。
   32 位目标缺 `__udivdi3/__umoddi3`，已在 `rt/x86_libc.c` 补移位实现。
+
+- **x86-64 抢占（2026-11）**：`port/x86_64/irq.c` 建 IDT、重映射 PIC、PIT 100Hz；
+  `irq.S` 保存完整陷阱帧，抢占时把帧当成任务上下文切回调度器，恢复时
+  `iretq`。`make run-x86-preempt` 两同优先级任务纯忙等，输出
+  `ca≈1.18M cb≈1.19M` / `PASS: x86 preempt`。
+  两个关键坑：抢占路径不回 `iret`，必须在切回调度器后 `sti`；切换前把
+  `g_in_task` 清零，避免在调度器栈上再次抢占写坏任务上下文。

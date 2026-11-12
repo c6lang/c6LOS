@@ -1,0 +1,71 @@
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static u32 g_b_ran = 0;
+static int g_join_rc = 0;
+static u32 g_a = 0;
+static u32 g_d = 0;
+
+static void ta(void *arg) {
+    os_task_delete(os_task_self());
+    /* 不应返回 */
+    g_b_ran = 99u;
+}
+
+static void tb(void *arg) {
+    g_b_ran = 1u;
+}
+
+static void tc(void *arg) {
+    g_join_rc = os_task_join(g_d, 2u);
+}
+
+static void td(void *arg) {
+    os_task_delay(5u);
+}
+
+int main(void) {
+    int a = 0;
+    int b = 0;
+    int c = 0;
+    int d = 0;
+    int e = 0;
+
+    a = os_task_create("a", ta, 0, 1u, 8192u);
+    b = os_task_create("b", tb, 0, 2u, 8192u);
+    if (a <= 0 || b <= 0) {
+        return 1;
+    }
+    os_task_start();
+    if (g_b_ran != 1u || os_task_count() != 0u) {
+        port_puts("FAIL: self delete\n");
+        return 2;
+    }
+
+    d = os_task_create("d", td, 0, 2u, 8192u);
+    g_d = (u32)d;
+    c = os_task_create("c", tc, 0, 1u, 8192u);
+    if (c <= 0 || d <= 0) {
+        return 3;
+    }
+    os_task_start();
+    if (g_join_rc != -2) {
+        port_puts("FAIL: join timeout\n");
+        return 4;
+    }
+
+    e = os_task_create("e", tb, 0, 1u, 8192u);
+    if (e <= 0) {
+        return 5;
+    }
+    if (os_task_delete((u32)e) != 0) {
+        return 6;
+    }
+    if (os_task_join((u32)e, 1u) != 0) {
+        port_puts("FAIL: join deleted\n");
+        return 7;
+    }
+    (void)g_a;
+    port_puts("PASS: task selfdel/join\n");
+    return 0;
+}
