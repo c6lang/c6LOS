@@ -75,17 +75,12 @@ void port_init(void)
 
     s3_mark(0u, 0x1111u);
 
-    /* 打开 USB-Serial/JTAG 模块时钟，复位一次，再打默认 PHY/PAD。 */
-    S3_SYSTEM_PERIP_CLK_EN1 |= S3_USB_DEVICE_BIT;
-    S3_SYSTEM_PERIP_RST_EN1 |= S3_USB_DEVICE_BIT;
-    S3_SYSTEM_PERIP_RST_EN1 &= ~S3_USB_DEVICE_BIT;
-    S3_USB_CONF0 &= ~(1u << 16); /* 断开 JTAG 桥 */
-    S3_USB_CONF0 &= ~(1u << 0);  /* 内部 PHY */
-    S3_USB_CONF0 |= (1u << 14);  /* USB pad enable */
+    /* ROM 已经把 USB-Serial/JTAG 配好并枚举；这里不再复位 USB 设备，
+     * 否则会掉枚举、控制台彻底失联。只做少量延时后直接写 EP1 FIFO。 */
     s3_mark(1u, 0x2222u);
 
     /* 等主机枚举 CDC-ACM；40MHz 下约 0.5s。 */
-    for (i = 0; i < 20000000u; i++) {
+    for (i = 0; i < 1000000u; i++) {
         __asm__ __volatile__("" ::: "memory");
     }
 

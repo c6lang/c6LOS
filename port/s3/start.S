@@ -11,6 +11,7 @@
     .literal .Lbss1,    _bss_end
     .literal .Lmark,    0x3FCF0000
     .literal .Lmarkv,   0x0000CAFE
+    .literal .Lmark2,   0x60008050
 
     .global _start
     .type   _start, @function
@@ -18,6 +19,8 @@ _start:
     /* 入口标记：立即写 RTC STORE0，验证 ROM 确实跳到 entry。 */
     l32r    a2, .Lmark
     l32r    a3, .Lmarkv
+    s32i    a3, a2, 0
+    l32r    a2, .Lmark2
     s32i    a3, a2, 0
 
     /* 栈 */
