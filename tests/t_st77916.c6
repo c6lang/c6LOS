@@ -1,0 +1,30 @@
+#include "c6os/st77916_table.h"
+#include "c6os/port.h"
+
+static u32 check(const St77916Cmd *t) {
+    u32 n = 0;
+
+    while (t->cmd != 0u) {
+        if (t->len > 16u || t->delay > 2000u) {
+            return 0;
+        }
+        n++;
+        t++;
+        if (n > 300u) {
+            return 0;
+        }
+    }
+    return n;
+}
+
+int main(void) {
+    u32 a = check(g_st77916_v1);
+    u32 b = check(g_st77916_v2);
+
+    if (a < 50u || b < 50u) {
+        port_puts("FAIL: st77916 table\n");
+        return 1;
+    }
+    port_puts("PASS: st77916 table\n");
+    return 0;
+}
