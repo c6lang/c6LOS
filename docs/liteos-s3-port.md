@@ -21,6 +21,7 @@
 - 已进一步完成 **最小可构建基线**：`bench/liteos_m_s3/` 提供 S3 target_config、windowed start.S、LiteOS 向量/链接脚本、USB 控制台和 demo 任务；`make` 生成 `build/liteos_s3.elf`（text 23,956B / data 35,152B / bss 17,336B），`make image` 生成 `build/liteos_s3.bin`（esptool 校验通过，entry `_start`、vector 位于 0x403C9000）。
 - c6LOS 侧已生成同口径 S3 镜像：`build/s3perf`（`tests/t_perf.c6`，CCOUNT 微基准）和 `build/s3rt`（`tests/t_rt.c6`，唤醒/切换/tick 抖动），与 `bench/liteos_m_s3` 的 `bench.c` 使用同一组操作和 CCOUNT 口径。
 - 因 t_rt 的 BSS 比默认镜像多几十字节，S3 链接期栈保护从 8KB 调整为 7.75KB（`_bss_end + 0x1F00 <= 0x3FCEF000`）；仍保留约 7.7KB 主栈余量。
+- 新增 `bench/check_s3_images.py` 静态预检：校验 c6LOS 默认/perf/rt 与 LiteOS-M bench 四个 S3 镜像的入口、`_vecbase/_init_start`(0x403C9000)、向量段 VMA、BSS 与栈顶边界；当前四项全部 `OK`，输出 `PASS: s3 static preflight`。
 - 还未上板，因此启动/中断/tick/demo 打印均未验证；这是下一步。
 
 ## 3. 仍需移植的部分
