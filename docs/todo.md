@@ -190,7 +190,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 完成（host `t_stress` 10^6 次 6.9s；S3 `t_s3_stress` 25000 轮创建/延时/回收，00:20:11→00:29:59 约 9m48s，`PASS: s3 stress`，无 panic） |
-| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（`port/s3/core1.c` 写 `SYSTEM_CORE_1_CONTROL_0` 的 CLKGATE/RESET/RUNSTALL 并放 IRAM 入口，实测 core1 count=0，MESSAGE 启动地址字段/ROM 入口待确认；调度器仍单核） |
+| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。每核就绪队列/IPI/负载均衡未做） |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
@@ -494,3 +494,9 @@
   `g_core1_count`；core0 写 0x600C0014（bit1 CLKGATE、bit2 RESET、bit0 RUNSTALL，
   MESSAGE 暂按 bit16 起放入口地址）后等待，读回 count=0。说明启动地址字段编码
   不对（地址 0x403Cxxxx 被截断）或需要 ROM `ets_set_appcpu_boot_addr`；暂不继续。
+
+- **M8-2 core1 启动（真板 PASS）**：正确寄存器是 `SYSTEM_CORE_1_CONTROL_0`
+  0x600C0000（bit1 CLKGATE、bit2 RESET、bit0 RUNSTALL）与 `CONTROL_1`
+  0x600C0004（32 位入口地址，之前误用 0x600C0014 导致 count=0）。core1 入口在
+  IRAM 设自己的 SP/VECBASE 后计数；core0 等 2M 循环读回 `count=83`，输出
+  `PASS: core1`。SMP 调度仍未接。
