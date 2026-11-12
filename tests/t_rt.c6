@@ -1,0 +1,198 @@
+/* 实时性指标：任务唤醒延迟、上下文切换代价、tick 处理代价。
+ * 数值单位=port_cycles：host 是 TSC，risc6 bare 是 rdcycle（指令数*64）。 */
+#include "c6os/task.h"
+#include "c6os/sem.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+#ifdef C6OS_BARE
+#define RT_N 2000u
+#else
+#define RT_N 20000u
+#endif
+
+static OsSem g_sem;
+static volatile u32 g_wake_min = 0xFFFFFFFFu;
+static volatile u32 g_wake_max;
+static volatile u32 g_wake_sum;
+static volatile u32 g_wake_n;
+static volatile u32 g_sw_min = 0xFFFFFFFFu;
+static volatile u32 g_sw_max;
+static volatile u32 g_sw_sum;
+static volatile u32 g_sw_n;
+static volatile u32 g_tick_cost;
+static volatile u32 g_done_a;
+static volatile u32 g_done_b;
+static volatile u32 g_tick_min = 0xFFFFFFFFu;
+static volatile u32 g_tick_max;
+static volatile u32 g_tick_sum;
+static volatile u32 g_tick_n;
+
+static void out_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u && i < 12) { b[i] = (char)('0' + (v % 10u)); i++; v /= 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void metric(const char *name, u32 mn, u32 sum, u32 mx, u32 n) {
+    port_puts(name);
+    port_puts(": min=");
+    out_u32(mn);
+    port_puts(" avg=");
+    out_u32(n != 0u ? sum / n : 0u);
+    port_puts(" max=");
+    out_u32(mx);
+    port_puts(" n=");
+    out_u32(n);
+    port_puts("\n");
+}
+
+static void waiter(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < RT_N) {
+        u32 t0 = (u32)port_cycles();
+        int r = os_sem_pend(&g_sem, 0u);
+        u32 t1 = (u32)port_cycles();
+        if (r == 0) {
+            u32 d = t1 - t0;
+            if (d < g_wake_min) { g_wake_min = d; }
+            if (d > g_wake_max) { g_wake_max = d; }
+            g_wake_sum = g_wake_sum + d;
+            g_wake_n = g_wake_n + 1u;
+        }
+        i++;
+    }
+    os_task_exit();
+}
+
+static void poster(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < RT_N) {
+        (void)os_sem_post(&g_sem);
+        os_task_yield();
+        i++;
+    }
+    os_task_exit();
+}
+
+static void sw_a(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < RT_N) {
+        u32 t0 = (u32)port_cycles();
+        os_task_yield();
+        {
+            u32 d = (u32)port_cycles() - t0;
+            if (d < g_sw_min) { g_sw_min = d; }
+            if (d > g_sw_max) { g_sw_max = d; }
+            g_sw_sum = g_sw_sum + d;
+            g_sw_n = g_sw_n + 1u;
+        }
+        i++;
+    }
+    g_done_a = 1u;
+    os_task_exit();
+}
+
+static void sw_b(void *arg) {
+    u32 i = 0;
+    (void)arg;
+    while (i < RT_N) {
+        os_task_yield();
+        i++;
+    }
+    g_done_b = 1u;
+    os_task_exit();
+}
+
+static void tick_wait_task(void *arg) {
+    u32 i = 0;
+    u32 last = (u32)os_tick_get();
+    u32 t0 = (u32)port_cycles();
+    (void)arg;
+    while (i < 100u) {
+        while ((u32)os_tick_get() == last) {
+        }
+        {
+            u32 t1 = (u32)port_cycles();
+            u32 d = t1 - t0;
+            if (d < g_tick_min) { g_tick_min = d; }
+            if (d > g_tick_max) { g_tick_max = d; }
+            g_tick_sum = g_tick_sum + d;
+            g_tick_n = g_tick_n + 1u;
+            last = (u32)os_tick_get();
+            t0 = t1;
+        }
+        i++;
+    }
+    os_task_exit();
+}
+
+static void tick_task(void *arg) {
+    u32 i = 0;
+    u32 t0 = 0;
+    (void)arg;
+    t0 = (u32)port_cycles();
+    while (i < RT_N) {
+        os_sched_tick();
+        i++;
+    }
+    g_tick_cost = ((u32)port_cycles() - t0) / RT_N;
+    os_task_exit();
+}
+
+static int run(void) {
+    int w = 0;
+    int p = 0;
+    int a = 0;
+    int b = 0;
+    int t = 0;
+
+    (void)os_sem_init(&g_sem, 0u, 1u);
+    w = os_task_create("waiter", waiter, 0, 1u, 8192u);
+    p = os_task_create("poster", poster, 0, 2u, 8192u);
+    if (w <= 0 || p <= 0) { port_puts("FAIL: rt create\n"); return 1; }
+    os_task_start();
+    metric("sem wake", g_wake_min, g_wake_sum, g_wake_max, g_wake_n);
+
+    g_sem = (OsSem){0};
+    (void)os_sem_init(&g_sem, 0u, 1u);
+    a = os_task_create("swa", sw_a, 0, 2u, 8192u);
+    b = os_task_create("swb", sw_b, 0, 2u, 8192u);
+    if (a <= 0 || b <= 0) { port_puts("FAIL: rt sw create\n"); return 1; }
+    os_task_start();
+    metric("ctx switch", g_sw_min, g_sw_sum, g_sw_max, g_sw_n);
+
+    t = os_task_create("tick", tick_task, 0, 1u, 8192u);
+    if (t <= 0) { port_puts("FAIL: rt tick create\n"); return 1; }
+    os_task_start();
+    port_puts("tick cost: per_op=");
+    out_u32(g_tick_cost);
+    port_puts("\n");
+
+#ifdef C6OS_BARE
+    t = os_task_create("tickwait", tick_wait_task, 0, 1u, 8192u);
+    if (t <= 0) { port_puts("FAIL: rt tickwait create\n"); return 1; }
+    os_task_start();
+    metric("tick period", g_tick_min, g_tick_sum, g_tick_max, g_tick_n);
+#endif
+
+    port_puts("RT done\n");
+    return 0;
+}
+
+#ifdef C6OS_BARE
+void os_main(void) {
+    port_init();
+    (void)run();
+    port_bare_exit(0u);
+}
+#else
+int main(void) {
+    return run();
+}
+#endif

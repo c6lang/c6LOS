@@ -22,7 +22,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o $(BUILD)/obj/core1.o
 
-.PHONY: all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: rt-host run-rt-host rv32bare-rt run-rv32bare-rt perf-host run-perf-host rv32bare-perf run-rv32bare-perf all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -1137,7 +1137,7 @@ run-rv32bare-smp: rv32bare-smp
 $(RV32BS_DIR)/ir/stamp: $(RV32BS_C6)
 	@mkdir -p $(RV32BS_DIR)/ir
 	for f in $^; do \
-		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $(RV32BS_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -DC6OS_BARE --emit-llvm -o $(RV32BS_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
 		sed -e 's|^target datalayout = .*|target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"|' \
 		    -e 's|^target triple = .*|target triple = "riscv32-unknown-linux-gnu"|' \
 		    $(RV32BS_DIR)/ir/$$(basename $$f .c6).raw.ll > $(RV32BS_DIR)/ir/$$(basename $$f .c6).ll || exit 1; \
@@ -1193,6 +1193,66 @@ rv32bare-smp-sem:
 
 run-rv32bare-smp-sem: rv32bare-smp-sem
 	$(RISC6) --bare --harts 2 $(RV32BSS_DIR)/smp
+
+
+# ---- 性能微基准 ----
+perf-host: $(BUILDH)/t_perf
+
+$(BUILDH)/t_perf.ll: tests/t_perf.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_perf: $(BUILDH)/t_perf.ll $(BUILDH)/task.ll $(BUILDH)/sem.ll $(BUILDH)/queue.ll \
+		$(BUILDH)/heap.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/timeout.ll \
+		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_perf.ll $(BUILDH)/task.ll $(BUILDH)/sem.ll \
+		$(BUILDH)/queue.ll $(BUILDH)/heap.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
+		$(BUILDH)/timeout.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
+		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
+run-perf-host: perf-host
+	./$(BUILDH)/t_perf
+
+
+# ---- rv32 bare 性能微基准 ----
+RV32BP_DIR := build/rv32bare-perf
+rv32bare-perf:
+	$(MAKE) RV32BS_DIR=$(RV32BP_DIR) \
+		RV32BS_MAIN=tests/t_perf.c6 \
+		RV32BS_C6="tests/t_perf.c6 kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6 kernel/sem.c6 kernel/queue.c6 kernel/heap.c6" \
+		$(RV32BP_DIR)/smp
+
+run-rv32bare-perf: rv32bare-perf
+	$(RISC6) --bare $(RV32BP_DIR)/smp
+
+
+rt-host: $(BUILDH)/t_rt
+
+$(BUILDH)/t_rt.ll: tests/t_rt.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_rt: $(BUILDH)/t_rt.ll $(BUILDH)/task.ll $(BUILDH)/sem.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/timer.ll $(BUILDH)/timeout.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_rt.ll $(BUILDH)/task.ll $(BUILDH)/sem.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/timeout.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o \
+		-L$(C6_ROOT)/tcc -ltcc1
+
+run-rt-host: rt-host
+	./$(BUILDH)/t_rt
+
+
+RV32BR_DIR := build/rv32bare-rt
+rv32bare-rt:
+	$(MAKE) RV32BS_DIR=$(RV32BR_DIR) \
+		RV32BS_MAIN=tests/t_rt.c6 \
+		RV32BS_C6="tests/t_rt.c6 kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/panic.c6 kernel/log.c6 kernel/sem.c6" \
+		$(RV32BR_DIR)/smp
+
+run-rv32bare-rt: rv32bare-rt
+	$(RISC6) --bare $(RV32BR_DIR)/smp
 
 
 clean:
