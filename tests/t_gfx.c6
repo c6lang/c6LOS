@@ -34,8 +34,8 @@ int main(void) {
         i++;
     }
     os_gfx_fill_rect(&g, 0, 0, 16, 8, 0u);
-    os_gfx_text(&g, 0, 0, "1", 0xFFFFu, 1);
-    if (os_gfx_get(&g, 3, 0) == 0u || os_gfx_get(&g, 0, 7) != 0u) {
+    os_gfx_text(&g, 0, 0, "A1", 0xFFFFu, 1);
+    if (os_gfx_get(&g, 3, 0) == 0u || os_gfx_get(&g, 7, 7) != 0u) {
         port_puts("FAIL: text\n");
         return 5;
     }

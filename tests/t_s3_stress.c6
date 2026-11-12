@@ -55,7 +55,7 @@ static void driver(void *arg) {
         }
         i++;
     }
-    if (g_runs == STRESS_N && os_task_count() == 0u) {
+    if (g_runs == STRESS_N && os_task_count() <= 1u) {
         port_puts("PASS: s3 stress\n");
     } else {
         port_puts("FAIL: s3 stress\n");

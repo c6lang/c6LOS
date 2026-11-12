@@ -178,7 +178,7 @@
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log/date/reboot + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` 按 RDDID 第 2/3 字节匹配 ST7789 240×280 / ST77916 360×360，未知回退 ST7789；`t_panel` host PASS；SPI 读 RDDID 与初始化序列待接） |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 用帧缓冲绘制 tick/任务数/堆用量的彩色数字行，`t_dash` host PASS；任务表/日志滚动与真实屏刷新待做） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
@@ -424,3 +424,6 @@
 
 - **M7-4 仪表盘渲染（host PASS）**：`os_dash_render(g,tick,tasks,heap_used)` 清屏后
   用 2× 数字分三行画白/绿/红数值；`t_dash` 统计非背景像素 >50，输出 `PASS: dash`。
+
+- **M7-3 字库扩展**：8×8 点阵增加 `A-Z`、空格、`-`、`.`，`os_gfx_text` 可绘制
+  `"CPU-1"` 一类标签；`t_gfx` 用 `"A1"` 覆盖字母与数字。
