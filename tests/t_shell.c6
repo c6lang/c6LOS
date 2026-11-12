@@ -1,0 +1,59 @@
+#include "c6os/shell.h"
+#include "c6os/task.h"
+#include "c6os/heap.h"
+#include "c6os/port.h"
+
+extern void port_sim_capture_begin(void);
+extern const char *port_sim_capture_end(void);
+
+static u8 g_mem[1024] = {0};
+static OsHeap g_heap;
+
+static void worker(void *arg) {
+}
+
+static int has(const char *s, const char *needle) {
+    const char *p = s;
+    const char *q = 0;
+    const char *r = 0;
+
+    while (*p != '\0') {
+        q = p;
+        r = needle;
+        while (*r != '\0' && *q == *r) {
+            q++;
+            r++;
+        }
+        if (*r == '\0') {
+            return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+int main(void) {
+    const char *out = 0;
+
+    os_heap_init(&g_heap, g_mem, (u32)sizeof(g_mem));
+    os_shell_bind_heap(&g_heap);
+    if (os_task_create("worker", worker, 0, 5u, 8192u) <= 0) {
+        port_puts("FAIL: create\n");
+        return 1;
+    }
+    port_sim_capture_begin();
+    (void)os_shell_exec("tick");
+    (void)os_shell_exec("ps");
+    (void)os_shell_exec("free");
+    (void)os_shell_exec("help");
+    (void)os_shell_exec("bogus");
+    out = port_sim_capture_end();
+    if (has(out, "tick=") == 0 || has(out, "worker") == 0 ||
+        has(out, "used=") == 0 || has(out, "help tick") == 0 ||
+        has(out, "unknown: bogus") == 0) {
+        port_puts("FAIL: shell output\n");
+        return 2;
+    }
+    port_puts("PASS: shell\n");
+    return 0;
+}
