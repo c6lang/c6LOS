@@ -127,27 +127,35 @@ static const u8 g_alpha[26][8] = {
     {0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00},
 };
 
+static const u8 *glyph_for(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return g_digits[(int)(c - '0')];
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return g_alpha[(int)(c - 'A')];
+    }
+    if (c == ':') {
+        return g_colon;
+    }
+    if (c == '-') {
+        return g_dash;
+    }
+    if (c == '.') {
+        return g_dot;
+    }
+    if (c == ' ') {
+        return g_space;
+    }
+    return 0;
+}
+
 void os_gfx_char(OsGfx *g, int x, int y, char c, u16 color, int scale)
 {
-    const u8 *glyph = 0;
+    const u8 *glyph = glyph_for(c);
     int row = 0;
 
-    if (g == 0 || scale <= 0) {
-        return;
-    }
-    if (c >= '0' && c <= '9') {
-        glyph = g_digits[(int)(c - '0')];
-    } else if (c >= 'A' && c <= 'Z') {
-        glyph = g_alpha[(int)(c - 'A')];
-    } else if (c == ':') {
-        glyph = g_colon;
-    } else if (c == '-') {
-        glyph = g_dash;
-    } else if (c == '.') {
-        glyph = g_dot;
-    } else if (c == ' ') {
-        glyph = g_space;
-    } else {
+    if (g == 0 || scale <= 0 || glyph == 0) {
         return;
     }
     while (row < 8) {
@@ -175,6 +183,43 @@ void os_gfx_text(OsGfx *g, int x, int y, const char *s, u16 color, int scale)
     while (*s != '\0') {
         os_gfx_char(g, cx, y, *s, color, scale);
         cx += 8 * scale;
+        s++;
+    }
+}
+
+void os_gfx_char16(OsGfx *g, int x, int y, char c, u16 color)
+{
+    const u8 *glyph = glyph_for(c);
+    int row = 0;
+
+    if (g == 0 || glyph == 0) {
+        return;
+    }
+    while (row < 8) {
+        u8 bits = glyph[row];
+        int col = 0;
+
+        while (col < 8) {
+            if ((bits & (0x80u >> col)) != 0u) {
+                os_gfx_pixel(g, x + col, y + row * 2, color);
+                os_gfx_pixel(g, x + col, y + row * 2 + 1, color);
+            }
+            col++;
+        }
+        row++;
+    }
+}
+
+void os_gfx_text16(OsGfx *g, int x, int y, const char *s, u16 color)
+{
+    int cx = x;
+
+    if (s == 0) {
+        return;
+    }
+    while (*s != '\0') {
+        os_gfx_char16(g, cx, y, *s, color);
+        cx += 8;
         s++;
     }
 }

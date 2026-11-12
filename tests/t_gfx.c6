@@ -39,6 +39,12 @@ int main(void) {
         port_puts("FAIL: text\n");
         return 5;
     }
+    os_gfx_fill_rect(&g, 0, 0, 16, 16, 0u);
+    os_gfx_text16(&g, 0, 0, "AB", 0xFFFFu);
+    if (os_gfx_get(&g, 3, 0) == 0u || os_gfx_get(&g, 3, 1) == 0u) {
+        port_puts("FAIL: text16\n");
+        return 6;
+    }
     port_puts("PASS: gfx\n");
     return 0;
 }

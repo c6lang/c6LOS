@@ -16,5 +16,7 @@ void os_gfx_fill_rect(OsGfx *g, int x, int y, int w, int h, u16 color);
 void os_gfx_blit(OsGfx *g, int x, int y, const u16 *src, int sw, int sh);
 void os_gfx_char(OsGfx *g, int x, int y, char c, u16 color, int scale);
 void os_gfx_text(OsGfx *g, int x, int y, const char *s, u16 color, int scale);
+void os_gfx_char16(OsGfx *g, int x, int y, char c, u16 color);
+void os_gfx_text16(OsGfx *g, int x, int y, const char *s, u16 color);
 
 #endif

@@ -178,7 +178,7 @@
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已改读 D1/IO1 并加上拉仍 0；ST7789 面包板引脚 21/47/40/41/45 读 0x04 也全 0；I2C 10/11 扫描所有地址都“ACK”，说明无上拉/引脚不对；GPIO42、GPIO5 背光均不亮）。下一步需确认板子型号/屏幕 FPC 丝印与背光/复位真实引脚 |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS；真实屏刷新待硬件） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 绘制 tick/任务数/堆用量的彩色数字行、`os_dash_task_row` 任务行、`os_dash_log` 日志行；`t_dash` host PASS；真实屏刷新待硬件恢复） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
@@ -531,3 +531,6 @@
 - **M3-4 读后清（host PASS）**：`LOS_EventRead` 支持 `LOS_WAITMODE_CLR`，
   读到 bits 后 `os_event_clear(e,bits)`；`t_los_event_clr` 写 0x5，读 0x1 后
   再读 0x1 超时、读 0x4 成功，输出 `PASS: event clear`。
+
+- **M7-3 8×16 字符单元**：`os_gfx_char16/text16` 将 8×8 点阵每行画两遍，
+  得到 8×16 单元（当前字库仍是 8×8 形状）；`t_gfx` 断言 "AB" 的 (3,0)/(3,1) 同时点亮。
