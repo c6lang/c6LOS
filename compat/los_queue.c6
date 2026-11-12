@@ -191,6 +191,29 @@ UINT32 LOS_QueueWriteCopy(UINT32 queueId, const void *buf, UINT32 len, UINT32 ti
     return LOS_QueueWrite(queueId, buf, len, timeout);
 }
 
+UINT32 LOS_QueueInfoGet(UINT32 queueId, QUEUE_INFO_S *info) {
+    OsQueue *q = q_get(queueId);
+    u32 i = 0;
+
+    if (q == 0 || info == 0) {
+        return LOS_ERRNO_QUEUE_INVALID;
+    }
+    info->queueID = queueId;
+    info->queueLen = (UINT16)q->cap;
+    info->queueSize = (UINT16)g_q_msg[queueId - 1u];
+    info->queueHead = (UINT16)q->head;
+    info->queueTail = (UINT16)q->tail;
+    info->readableCnt = (UINT16)q->count;
+    info->writableCnt = (UINT16)(q->cap - q->count);
+    while (i < OS_WAIT_TASK_ARRAY_LEN) {
+        info->waitReadTask[i] = 0u;
+        info->waitWriteTask[i] = 0u;
+        info->waitMemTask[i] = 0u;
+        i++;
+    }
+    return LOS_OK;
+}
+
 UINT32 LOS_QueueUsed(UINT32 queueId) {
     OsQueue *q = q_get(queueId);
 
