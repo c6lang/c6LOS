@@ -1,6 +1,7 @@
 /* ESP32-S3 第二核最小启动：core1 在 IRAM 里跑一个计数循环。 */
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/task.h"
 
 #define SYS_CORE1_CTRL0 (*(volatile u32 *)0x600C0000u)
 #define SYS_CORE1_CTRL1 (*(volatile u32 *)0x600C0004u)
@@ -13,6 +14,7 @@ static volatile u32 g_core1_count;
 static volatile u32 g_core1_cmd;
 static volatile u32 g_core1_ack;
 static volatile u32 g_core1_prid = 0xFFFFFFFFu;
+static volatile u32 g_core1_mode;
 
 static void core1_entry(void)
 {
@@ -20,12 +22,23 @@ static void core1_entry(void)
     __asm__ __volatile__("mov a1, %0" : : "r"(&g_core1_stack[4096]));
     __asm__ __volatile__("wsr %0, vecbase; isync" : : "r"(&_vecbase));
     g_core1_prid = port_core_id();
+    if (g_core1_mode != 0u) {
+        os_task_start_core(1u);
+    }
     while (1) {
         g_core1_count++;
         if (g_core1_cmd != g_core1_ack) {
             g_core1_ack = g_core1_cmd;
         }
     }
+}
+
+int s3_core1_start(void);
+
+int s3_core1_start_mode(u32 mode)
+{
+    g_core1_mode = mode;
+    return s3_core1_start();
 }
 
 int s3_core1_start(void)

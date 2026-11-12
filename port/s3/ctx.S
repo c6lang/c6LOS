@@ -41,6 +41,10 @@ port_task_switch:
     /* a2 = 目标任务 ctx */
     mov     a4, a2
     l32r    a3, .Lg_sched
+    rsr     a5, prid
+    movi    a6, 76
+    mull    a5, a5, a6
+    add     a3, a3, a5
 
     /* 保存调度器：在调度器栈上压一个陷阱帧，恢复 PC 用 a0（call0 返回地址）。 */
     addi    a1, a1, -80
@@ -67,6 +71,9 @@ port_task_switch:
     s32i    a1, a3, 64
 
     l32r    a3, .Lg_cur
+    rsr     a5, prid
+    slli    a5, a5, 2
+    add     a3, a3, a5
     s32i    a4, a3, 0
     l32i    a1, a4, 64
     RESTORE_FRAME
@@ -75,6 +82,9 @@ port_task_switch:
     .type   port_task_yield, @function
 port_task_yield:
     l32r    a4, .Lg_cur
+    rsr     a5, prid
+    slli    a5, a5, 2
+    add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
 
@@ -102,6 +112,10 @@ port_task_yield:
     s32i    a1, a4, 64
 
     l32r    a3, .Lg_sched
+    rsr     a5, prid
+    movi    a6, 76
+    mull    a5, a5, a6
+    add     a3, a3, a5
     l32i    a1, a3, 64
     RESTORE_FRAME
 1:
