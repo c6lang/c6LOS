@@ -56,3 +56,18 @@ irq_resume:
     popq %rcx
     popq %rax
     iretq
+
+.globl port_irq_save
+port_irq_save:
+    pushfq
+    popq %rax
+    cli
+    ret
+
+.globl port_irq_restore
+port_irq_restore:
+    testl $0x200, %edi
+    jz 1f
+    sti
+1:
+    ret

@@ -92,7 +92,7 @@
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 PIT 抢占 `PASS: x86 preempt`；S3 定时器中断抢占 `ca=61198 cb=61311` / `PASS: s3 preempt`；host SIGALRM 异步抢占 `PASS: sim preempt`） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 完成（`t_overflow` 深递归覆盖哨兵，输出 `*** PANIC: task stack overflow ***` 后 `PASS`；sim 栈前留 64KB 安全垫） |
-| M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
+| M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 完成（`t_task2`：自删除、join 超时 `-2`、delete 后 join 返回 0，全部 PASS） |
 | M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 完成（S3 协作 `order: ABab` / `PASS: sched`；S3 定时器中断里 `os_sched_preempt_ctx()` 直接换任务，忙等任务不让出 CPU 也能 `PASS: s3 preempt`；x86 陷阱帧抢占 `PASS`） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
@@ -132,7 +132,7 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M4-1 `Queue@T` | 泛型队列、元素拷贝、满/空/超时 | 元素为结构体/指针/u64 三类 | 进行中（指针队列 + 满/空阻塞/超时 host PASS；泛型待做） |
-| M4-2 兼容队列 | `LOS_QueueCreate/Read/Write` | 与原生同一断言集 | 未开始 |
+| M4-2 兼容队列 | `LOS_QueueCreate/Read/Write` | 与原生同一断言集 | 完成（`compat/los_queue.c6` + `t_los2` 的 LOS_Queue 读写/PASS） |
 | M4-3 定长内存池 | `membox`、O(1) 分配、归属校验 | 耗尽返回 `OS_ENOMEM` | 完成（O(1) 分配/释放 + 归属/对齐校验，host PASS） |
 | M4-4 best-fit 堆 | 块头/合并/对齐/统计 | 1000 次随机分配释放无碎片泄漏 | 完成（best-fit + 相邻合并 + 8B 对齐，1000 次随机 host PASS） |
 | M4-5 统计 | 已用/峰值/最大空闲块 | 与手算一致 | 完成（`os_heap_used/peak/max_free`，分配后最大空闲块下降断言通过） |
@@ -165,7 +165,7 @@
 |---|---|---|
 | M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 |
 | M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs |
-| M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 |
+| M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 | 完成（`t_irq_nest` 5 层深度 0→4→0，`PASS: irq nest`；sim 计数、x86 RFLAGS.IF、S3 `rsil/wsr ps`、rv32 用户态 no-op） |
 | M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic | 完成（`os_task_block_arg`/`os_task_delay` 检查 `port_in_isr` 并 panic；`t_isr` 输出两条 PANIC 后 PASS） |
 
 **M6 验收**：ISR 唤醒任务延迟实测；嵌套中断不丢 tick。
@@ -331,3 +331,8 @@
   EPC=tramp）。两个同优先级忙等任务都不 yield，20 tick 内计数 `ca=61198 cb=61311`。
   关键坑：XTOS 的 `PS` 必须用 `wsr ps` 写入“去掉 EXCM/INTLEVEL 的值再或上 EXCM”
   后 `rfe`；协作切换保持 `ret`（a0=恢复 PC）。
+
+- **M6-3 关中断嵌套（host PASS）**：`u32 port_irq_save()` 返回进入前状态、
+  `port_irq_restore(state)` 恢复；5 层嵌套返回 0/1/2/3/4，倒序恢复后再次 save 仍为 0。
+  sim 用计数模拟；x86 保存 RFLAGS 并清 IF；S3 用 `rsil a2,15` / `wsr a2,ps`；
+  rv32 参考机是用户态，当前 no-op。

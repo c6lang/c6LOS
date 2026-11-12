@@ -1,0 +1,32 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+int main(void) {
+    u32 s0 = 0;
+    u32 s1 = 0;
+    u32 s2 = 0;
+    u32 s3 = 0;
+    u32 s4 = 0;
+
+    s0 = port_irq_save();
+    s1 = port_irq_save();
+    s2 = port_irq_save();
+    s3 = port_irq_save();
+    s4 = port_irq_save();
+    if (s0 != 0u || s1 != 1u || s2 != 2u || s3 != 3u || s4 != 4u) {
+        port_puts("FAIL: irq nest depth\n");
+        return 1;
+    }
+    port_irq_restore(s4);
+    port_irq_restore(s3);
+    port_irq_restore(s2);
+    port_irq_restore(s1);
+    port_irq_restore(s0);
+    if (port_irq_save() != 0u) {
+        port_puts("FAIL: irq nest restore\n");
+        return 2;
+    }
+    port_irq_restore(0u);
+    port_puts("PASS: irq nest\n");
+    return 0;
+}

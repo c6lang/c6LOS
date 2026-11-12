@@ -20,6 +20,8 @@ void port_task_yield(void);
 u32 port_task_stack_ok(void *ctx);
 u32 port_virtual_tick(void);
 u32 port_in_isr(void);
+u32 port_irq_save(void);
+void port_irq_restore(u32 state);
 void os_test_set_isr(u32 v);
 void port_sim_preempt_start(void);
 void *os_sched_preempt_ctx(void);

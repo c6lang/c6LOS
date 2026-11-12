@@ -81,3 +81,18 @@ _vec_level1:
     l32i    a15, a1, 56
     addi    a1, a1, 80
     rfe
+
+    .section .text, "ax", @progbits
+    .align 4
+    .global port_irq_save
+    .type   port_irq_save, @function
+port_irq_save:
+    rsil    a2, 15
+    ret
+
+    .global port_irq_restore
+    .type   port_irq_restore, @function
+port_irq_restore:
+    wsr     a2, ps
+    rsync
+    ret

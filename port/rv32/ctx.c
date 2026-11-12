@@ -62,6 +62,16 @@ void port_task_ctx_free(void *ctx)
     (void)ctx;
 }
 
+u32 port_irq_save(void)
+{
+    return 0u;
+}
+
+void port_irq_restore(u32 state)
+{
+    (void)state;
+}
+
 u32 port_task_stack_ok(void *ctx)
 {
     RvCtx *c = (RvCtx *)ctx;

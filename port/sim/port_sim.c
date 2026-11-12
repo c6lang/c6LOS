@@ -34,6 +34,21 @@ void port_init(void)
 {
 }
 
+static u32 g_irq_nest;
+
+u32 port_irq_save(void)
+{
+    u32 old = g_irq_nest;
+
+    g_irq_nest = g_irq_nest + 1u;
+    return old;
+}
+
+void port_irq_restore(u32 state)
+{
+    g_irq_nest = state;
+}
+
 void port_putc(int ch)
 {
     cap_put(ch);
