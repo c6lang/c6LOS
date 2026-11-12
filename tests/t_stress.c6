@@ -1,0 +1,48 @@
+#include "c6os/task.h"
+#include "c6os/panic.h"
+#include "c6os/port.h"
+
+static u32 g_seed = 0x12345u;
+
+static u32 rnd(void) {
+    g_seed = g_seed * 1664525u + 1013904223u;
+    return g_seed >> 8;
+}
+
+static void worker(void *arg) {
+    u32 n = (u32)arg;
+
+    if ((rnd() & 7u) == 0u) {
+        os_task_delete(os_task_self());
+    }
+    os_task_delay(n % 5u + 1u);
+}
+
+int main(void) {
+    u32 round = 0;
+    u32 i = 0;
+
+    while (round < 125000u) {
+        i = 0;
+        while (i < 8u) {
+            int id = os_task_create("w", worker, (void *)(round + i), 1u + (i % 3u), 8192u);
+            if (id <= 0) {
+                port_puts("FAIL: stress create\n");
+                return 1;
+            }
+            i++;
+        }
+        os_task_start();
+        if (os_task_count() != 0u) {
+            port_puts("FAIL: stress leak\n");
+            return 2;
+        }
+        if (os_panic_count() != 0u) {
+            port_puts("FAIL: stress panic\n");
+            return 3;
+        }
+        round++;
+    }
+    port_puts("PASS: stress create/delete/delay\n");
+    return 0;
+}
