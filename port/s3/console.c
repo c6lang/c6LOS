@@ -76,19 +76,28 @@ void port_putc(int ch)
 
 int port_getc(void)
 {
+    static u32 left;
     volatile u32 *st = (volatile u32 *)(0x6003803Cu);
     volatile u32 *conf = (volatile u32 *)(0x60038004u);
     volatile u32 *ist = (volatile u32 *)(0x6003800Cu);
     volatile u32 *iclr = (volatile u32 *)(0x60038014u);
     volatile u8 *byte = (volatile u8 *)(0x60038000u);
-    u32 cnt = (*st >> 16) & 0x7Fu;
 
-    if (cnt == 0u && (*conf & 0x4u) == 0u && (*ist & 0x4u) == 0u) {
-        return -1;
+    if (left == 0u) {
+        if ((*conf & 0x4u) == 0u && (*ist & 0x4u) == 0u) {
+            return -1;
+        }
+        left = (*st >> 16) & 0x7Fu;
+        if (left == 0u) {
+            left = 1u;
+        }
     }
+    left--;
     {
         int c = (int)(*byte);
-        *iclr = 0x4u;
+        if (left == 0u) {
+            *iclr = 0x4u;
+        }
         return c;
     }
 }

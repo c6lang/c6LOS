@@ -384,11 +384,16 @@
   一行再执行，`t_shell` 用编码后的 `tick` 帧走通。
 
 - **S3 shell 输入基础（未完成）**：`port_getc()` 已读 `USB_SERIAL_JTAG_EP1_REG`
-  并检查 `EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL` / `OUT_EP1_ST.REC_DATA_CNT`，
-  默认 S3 构建加入 `rt/shell.c`、`rt/cobs.c`、`kernel/heap.c6`，`t_s3_shell`
-  可构建并输出 banner；但主机 `os.write("help\r")` 后设备侧未观察到 OUT 数据，
-  `t_s3_irq` 仍 PASS，说明中断/调度未被破坏。下一步查 CDC OUT 端点使能时序。
+  并用 `EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL` 门控、`OUT_EP1_ST.REC_DATA_CNT`
+  计数批量取字节；默认 S3 构建加入 `rt/shell.c`、`rt/cobs.c`、`kernel/heap.c6`，
+  `t_s3_shell` 可构建并输出 banner。调试中曾观察到主机写入后 `EP1_CONF` 由
+  `0x2` 变 `0x6`、`OUT_EP1_ST` 计数变为 3，但 shell 任务未稳定取到命令；
+  下一步在任务里打印每次 `port_getc()` 的返回与寄存器。
 
 - **M7-1 命令补齐（host PASS）**：新增 `date`（tick→ms uptime）与 `reboot`
   （`port_reboot()`，S3 置 `RTC_CNTL_OPTIONS0.SW_SYS_RST`，host no-op）。
   `t_shell` 断言 `uptime_ms=`，命令表覆盖 help/tick/ps/free/log/date/reboot。
+
+- **S3 构建源列表修复**：`$(BUILD)/c99/.stamp` 原先用 `cmp` 只比较源文件**路径列表**，
+  内容改了但路径不变时会跳过 c6 重编译（曾导致改了测试却烧旧镜像）。现在
+  `.stamp` 依赖 `s3-src-check` 且每次调用 c6，保证 `S3_MAIN/S3_EXTRA_C6` 变化生效。

@@ -32,13 +32,8 @@ s3: $(BUILD)/c6os.bin
 
 $(BUILD)/c99/.stamp: s3-src-check $(S3_C6)
 	@mkdir -p $(BUILD)/c99
-	@printf '%s\n' '$(S3_C6)' > $(BUILD)/c99/.sources.tmp
-	@if cmp -s $(BUILD)/c99/.sources.tmp $(BUILD)/c99/.sources; then \
-		rm -f $(BUILD)/c99/.sources.tmp; \
-	else \
-		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(S3_C6) && \
-		mv $(BUILD)/c99/.sources.tmp $(BUILD)/c99/.sources && touch $@; \
-	fi
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(S3_C6)
+	@touch $@
 
 $(BUILD)/c99/%.c: $(BUILD)/c99/.stamp ;
 
