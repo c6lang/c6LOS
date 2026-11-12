@@ -61,6 +61,10 @@ int main(void) {
     if (os_task_delete((u32)e) != 0) {
         return 6;
     }
+    if (os_task_get((u32)e) != 0) {
+        port_puts("FAIL: magic clear\n");
+        return 8;
+    }
     if (os_task_join((u32)e, 1u) != 0) {
         port_puts("FAIL: join deleted\n");
         return 7;

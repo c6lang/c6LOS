@@ -86,7 +86,7 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（16 槽静态池 + 10^6 次创建/删除 host PASS；magic 字段会改变 c6 C99 与 gcc 的结构体布局，暂缓，改为 `os_task_info` 跨语言只读接口） |
+| M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 完成（`magic=0xC6A50001` create 置位/delete+reap 清 0/lookup 校验，`t_task2` 删除后查找为空；C 侧不再解引用 OsTask，改用 `os_task_info`） |
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 完成（`t_prio32`：31/5/10 三任务按 5→10→31 运行；32 个优先级逐个创建/运行全 PASS） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 完成（`t_task2` 自删除后不返回、调度器延迟 `port_task_ctx_free` 并清 magic，`t_stress` 10^6 次无泄漏） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
@@ -445,3 +445,10 @@
   让 C 侧只走 c6 导出函数。`rt/shell.c` 已改用这两个接口。
 - **S3 构建规则修复**：C99 缓存按“源文件路径列表”判断导致改头文件不重编；改为
   `S3_C6` 每个源文件一条规则、依赖全部 `include/c6os|los/*.h`，彻底避免旧布局。
+
+- **c6 C99 与 C 的结构体布局差异**：c6 `-c99` 后端按 64 位主机布局生成结构体偏移
+  （`OsTask` 步长 88），而 xtensa-gcc 按 32 位是 72。因此 **C 文件不得直接解引用
+  c6 内核结构体**：`rt/shell.c` 的 ps/free 已改为 `os_task_info()` /
+  `os_sys_heap_*()` 只读接口，S3 实测 `ps n=1 / 1 1 X sh`、heap 数值正确。
+- **S3 构建规则**：`$(BUILD)/c99/%.c` 旧缓存只比较源路径列表，改头文件不重编；
+  已改为 `S3_C6` 每个源文件一条 c6 规则，依赖全部 `include/c6os|los/*.h`。
