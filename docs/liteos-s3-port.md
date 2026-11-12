@@ -1,0 +1,49 @@
+# LiteOS-M on ESP32-S3（同板对比基线）进展
+
+目标：在同一块 ESP32-S3（Xtensa LX7 双核 240MHz）上运行 c6LOS 和 LiteOS-M，用同一 CCOUNT/工作负载 harness 比较功能、切换、IPC、tick/实时性，要求 c6LOS 对齐或超越。
+
+## 1. 上游支持现状（已核实）
+
+- OpenHarmony `kernel_liteos_m` 的 Xtensa 端口只有 **lx6（ESP32）**；官方明确回复 **不支持 LX7/ESP32-S3**，需要参考 lx6 自行移植。
+- 参考板配置在 `device/qemu/esp32/liteos_m`（GN + xtensa-esp32-elf-gcc，`-mlongcalls -mtext-section-literals`）。
+- 因此“同板 LiteOS-M”不是现成可跑基线，**必须先做 LX7/S3 端口**；上游没有可下载的 S3 镜像。
+
+## 2. 已完成的可行性构建（本地 /tmp，未入库）
+
+- 拉取 `kernel_liteos_m`（GitHub 镜像）与 `device_qemu/esp32` 配置。
+- 用 `xtensa-esp32s3-elf-gcc -mabi=windowed -mlongcalls -mtext-section-literals -Os` 成功编译：
+  - `kernel/src/*.c`、`kernel/src/mm/*.c`
+  - `arch/xtensa/lx6/gcc/*.c` + `*.S`（windowed ABI 在 S3 上可编译）
+  - `arch/xtensa/common/los_common_interrupt.c`
+  - `utils/los_debug.c`、`los_error.c`、`los_hook.c`
+  - securec 的 `memcpy_s.c`/`memset_s.c`/`strncpy_s.c`
+- 说明“源码可编译”这一关已过；尚未完成 S3 启动、向量、时钟/中断和链接。
+
+## 3. 仍需移植的部分
+
+1. **target_config.h（S3）**：`OS_SYS_CLOCK=40000000`（CCOUNT）、tick 100Hz、`OS_TICK_INT_NUM=6`、任务/IPC 上限、heap 区间。
+2. **启动/链接**：S3 IRAM/DRAM 布局、`.vector`、`_bss`、栈、ROM 二级引导约定；LiteOS lx6 的 `los_exc.S`/`los_dispatch.S` 需确认 LX7 向量/窗口溢出/PS 行为。
+3. **控制台/板级**：USB-Serial/JTAG 或 UART0 的 `printf`/`putc`，复用 c6LOS `port/s3/console.c` 的寄存器初始化经验。
+4. **中断/定时器**：S3 的 `CCOMPARE0`/`INTENABLE`/level-1 向量与 lx6 的差异；tick 中断号、`HalHwiInit`、`OsSetVector`。
+5. **linker/board main**：`LOS_KernelInit`、`LOS_Start`、idle 任务、heap 初始化。
+6. **securec**：至少 `memcpy_s/memset_s/strncpy_s`，后续按链接未定义符号补齐。
+
+## 4. 同板对比验收（待基线可跑后执行）
+
+| 指标 | 方法 | 目标 |
+|---|---|---|
+| 功能 | 同一组任务/IPC/内存/定时器用例（LOS API 子集） | c6LOS 全部通过，语义一致 |
+| 任务切换 | 两任务 ping-pong，CCOUNT 取 N 次 min/avg/max | c6LOS ≤ LiteOS-M |
+| sem/queue 唤醒 | 阻塞→post→恢复，CCOUNT | c6LOS ≤ LiteOS-M |
+| tick 抖动 | 100/1000 个 tick 的 CCOUNT 间隔 | c6LOS max 偏差 ≤ LiteOS-M |
+| 内存 | alloc/free 32/128/1024B，CCOUNT | c6LOS ≤ LiteOS-M |
+| 代码/内存 | `size` text/data/bss | 记录差异，不强制 |
+
+注意：LiteOS-M 的 lx6 端口使用 windowed ABI，c6LOS 的 S3 端口使用 call0；两者不能在同一镜像混链，必须各自独立镜像、同一块板分别烧写。
+
+## 5. 下一步
+
+1. 写 S3 `target_config.h` 与最小 linker/start，先让 LiteOS-M 在 S3 跑起 `LOS_Start` + idle + 一个打印任务。
+2. 再补 timer/HWI，跑通 `LOS_TaskDelay` 与 sem。
+3. 最后接入与 c6LOS 相同的 benchmark（`tests/t_perf.c6`/`t_rt.c6` 的等价 C 版本），收集同板数据。
+4. 硬件不在线时，以上只能在构建/静态层面推进；上板是最终验收的必要条件。
