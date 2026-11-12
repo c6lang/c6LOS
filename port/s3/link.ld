@@ -19,14 +19,18 @@ SECTIONS
   } > IRAM
 
   .data : {
+    . = ALIGN(16);
     *(.data*)
+    . = ALIGN(16);
   } > DRAM
 
   .bss (NOLOAD) : {
+    . = ALIGN(16);
     _bss_start = .;
     *(.bss*)
     *(COMMON)
     _bss_end = .;
+    . = ALIGN(16);
   } > DRAM
 
   _text_start = ADDR(.text);

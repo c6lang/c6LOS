@@ -10,6 +10,6 @@
 #define S3_DRAM_HIGH  0x3FD00000u
 
 /* 内核栈顶：留 4KB 给 ROM/异常。 */
-#define S3_STACK_TOP  0x3FCFF000u
+#define S3_STACK_TOP  0x3FCEF000u
 
 #endif

@@ -8,6 +8,18 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 
+/* 诊断：RTC_CNTL STORE0..7 在复位后保留，esptool read-mem 0x60008050 可读。 */
+static void s3_mark(u32 idx, u32 v)
+{
+    *(volatile u32 *)(0x60008050u + idx * 4u) = v;
+    *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
+}
+
+void port_mark(u32 v)
+{
+    s3_mark(4u, v);
+}
+
 #define S3_USB_JTAG_BASE 0x60038000u
 #define S3_USB_EP1      (*(volatile u32 *)(S3_USB_JTAG_BASE + 0x00u))
 #define S3_USB_EP1_CONF (*(volatile u32 *)(S3_USB_JTAG_BASE + 0x04u))
@@ -20,6 +32,8 @@
 void port_putc(int ch)
 {
     u32 guard = 0;
+
+    s3_mark(3u, 0x5555u);
 
     while ((S3_USB_EP1_CONF & (1u << 1)) == 0u) {
         guard++;
@@ -59,6 +73,8 @@ void port_init(void)
 {
     volatile u32 i;
 
+    s3_mark(0u, 0x1111u);
+
     /* 打开 USB-Serial/JTAG 模块时钟，复位一次，再打默认 PHY/PAD。 */
     S3_SYSTEM_PERIP_CLK_EN1 |= S3_USB_DEVICE_BIT;
     S3_SYSTEM_PERIP_RST_EN1 |= S3_USB_DEVICE_BIT;
@@ -66,12 +82,14 @@ void port_init(void)
     S3_USB_CONF0 &= ~(1u << 16); /* 断开 JTAG 桥 */
     S3_USB_CONF0 &= ~(1u << 0);  /* 内部 PHY */
     S3_USB_CONF0 |= (1u << 14);  /* USB pad enable */
+    s3_mark(1u, 0x2222u);
 
     /* 等主机枚举 CDC-ACM；40MHz 下约 0.5s。 */
     for (i = 0; i < 20000000u; i++) {
         __asm__ __volatile__("" ::: "memory");
     }
 
+    s3_mark(2u, 0x3333u);
     port_puts("c6os s3 boot\n");
 }
 

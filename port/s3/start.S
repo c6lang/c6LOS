@@ -4,15 +4,22 @@
     .section .text.start, "ax", @progbits
     .align 4
     .literal_position
-    .literal .Lsp,      0x3FCFF000
+    .literal .Lsp,      0x3FCEF000
     .literal .Ltimg,    0x6001F000
     .literal .Lwdtkey,  0x50D83AA1
     .literal .Lbss0,    _bss_start
     .literal .Lbss1,    _bss_end
+    .literal .Lmark,    0x3FCF0000
+    .literal .Lmarkv,   0x0000CAFE
 
     .global _start
     .type   _start, @function
 _start:
+    /* 入口标记：立即写 RTC STORE0，验证 ROM 确实跳到 entry。 */
+    l32r    a2, .Lmark
+    l32r    a3, .Lmarkv
+    s32i    a3, a2, 0
+
     /* 栈 */
     l32r    a1, .Lsp
 

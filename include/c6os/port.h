@@ -8,6 +8,7 @@
 void port_init(void);
 void port_idle(void);
 void port_panic_halt(void);
+void port_mark(u32 v);
 
 /* 任务上下文（协作 port）：ctx 对内核不透明。 */
 void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size);
