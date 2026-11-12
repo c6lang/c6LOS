@@ -177,7 +177,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` 按 RDDID 第 2/3 字节匹配 ST7789 240×280 / ST77916 360×360，未知回退 ST7789；`t_panel` host PASS；SPI 读 RDDID 与初始化序列待接） |
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`，待确认面板复位/引脚或改 4-line 命令） |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 用帧缓冲绘制 tick/任务数/堆用量的彩色数字行，`t_dash` host PASS；任务表/日志滚动与真实屏刷新待做） |
 
@@ -457,3 +457,8 @@
   `os_sched_tick()` 之后 post 信号量；worker 每 tick `os_sem_pend` 醒来读
   `CCOUNT - ISR入口CCOUNT`。100 次：min 2943 / avg 2992（74.8µs）/
   max 4486 cycles（112µs），平均满足 <100µs。hook 为空时对原中断路径零影响。
+
+- **S3 面板 ID 探测（未通过）**：`t_s3_panelid` 在微雪 1.85 引脚上 bit-bang
+  QSPI：CS 拉低→0x0B+00 04 00→8 dummy→单线读 3 字节，返回全 0；
+  已尝试 TCA9554 0x20 配置 EXIO2 输出并 0/1 复位，仍为 0。下一步用示波器/
+  确认板型（微雪 ST77916 QSPI vs 面包板 ST7789 SPI）与复位极性。
