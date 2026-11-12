@@ -11,17 +11,18 @@ PORT    ?= /dev/ttyACM0
 
 BUILD   := build/s3
 S3_MAIN ?= kernel/os.c6
-S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6
+S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/heap.c6
 S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(S3_EXTRA_C6)
 S3_NAMES := $(notdir $(S3_C6))
 S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
 S3_OBJ  := $(BUILD)/obj/start.o \
            $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
+           $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: all s3 s3-src-check s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -29,7 +30,7 @@ all: s3
 
 s3: $(BUILD)/c6os.bin
 
-$(BUILD)/c99/.stamp: $(S3_C6)
+$(BUILD)/c99/.stamp: s3-src-check $(S3_C6)
 	@mkdir -p $(BUILD)/c99
 	@printf '%s\n' '$(S3_C6)' > $(BUILD)/c99/.sources.tmp
 	@if cmp -s $(BUILD)/c99/.sources.tmp $(BUILD)/c99/.sources; then \
@@ -46,6 +47,14 @@ $(BUILD)/obj/%.o: $(BUILD)/c99/%.c
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
 $(BUILD)/obj/console.o: port/s3/console.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/shell.o: rt/shell.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/cobs.o: rt/cobs.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 

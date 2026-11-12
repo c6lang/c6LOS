@@ -176,7 +176,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log + `rt/cobs.c` 编解码，host 捕获断言 PASS；date/reboot、S3 USB 输入待接） |
+| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`，date/reboot 待做） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 |
@@ -382,3 +382,9 @@
   `t_cobs` 验证 `{11 22 00 33}` → `03 11 22 02 33 00`、连续 5 个 0 的块码，
   以及编码→解码回环，输出 `PASS: cobs`。`os_shell_exec_frame()` 已把 COBS 帧解成
   一行再执行，`t_shell` 用编码后的 `tick` 帧走通。
+
+- **S3 shell 输入基础（未完成）**：`port_getc()` 已读 `USB_SERIAL_JTAG_EP1_REG`
+  并检查 `EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL` / `OUT_EP1_ST.REC_DATA_CNT`，
+  默认 S3 构建加入 `rt/shell.c`、`rt/cobs.c`、`kernel/heap.c6`，`t_s3_shell`
+  可构建并输出 banner；但主机 `os.write("help\r")` 后设备侧未观察到 OUT 数据，
+  `t_s3_irq` 仍 PASS，说明中断/调度未被破坏。下一步查 CDC OUT 端点使能时序。

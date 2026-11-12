@@ -42,6 +42,14 @@ void port_putc(int ch)
     outb(COM1, (u8)(ch & 0xff));
 }
 
+int port_getc(void)
+{
+    if ((inb(COM1 + 5u) & 0x01u) == 0u) {
+        return -1;
+    }
+    return (int)inb(COM1);
+}
+
 void port_puts(const char *s)
 {
     while (*s != '\0') {

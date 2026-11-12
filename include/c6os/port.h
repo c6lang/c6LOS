@@ -27,6 +27,7 @@ void port_sim_preempt_start(void);
 void *os_sched_preempt_ctx(void);
 
 void port_putc(int ch);
+int port_getc(void);
 void port_puts(const char *s);
 void port_delay_ms(u32 ms);
 

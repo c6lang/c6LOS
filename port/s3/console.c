@@ -74,6 +74,25 @@ void port_putc(int ch)
     S3_USB_EP1_CONF = 1u;
 }
 
+int port_getc(void)
+{
+    volatile u32 *st = (volatile u32 *)(0x6003803Cu);
+    volatile u32 *conf = (volatile u32 *)(0x60038004u);
+    volatile u32 *ist = (volatile u32 *)(0x6003800Cu);
+    volatile u32 *iclr = (volatile u32 *)(0x60038014u);
+    volatile u8 *byte = (volatile u8 *)(0x60038000u);
+    u32 cnt = (*st >> 16) & 0x7Fu;
+
+    if (cnt == 0u && (*conf & 0x4u) == 0u && (*ist & 0x4u) == 0u) {
+        return -1;
+    }
+    {
+        int c = (int)(*byte);
+        *iclr = 0x4u;
+        return c;
+    }
+}
+
 void port_puts(const char *s)
 {
     while (*s != '\0') {
@@ -138,6 +157,7 @@ void port_init(void)
     S3_SYSTEM_PERIP_RST_EN1 &= ~S3_USB_DEVICE_BIT;
     S3_USB_CONF0 &= ~(1u << 16);
     S3_USB_CONF0 |= (1u << 14);
+    *(volatile u32 *)(0x60038010u) = 0x4u;   /* INT_ENA: OUT packet */
     S3_USB_EP1_CONF = 1u;
 
     /* 等主机重新枚举。 */

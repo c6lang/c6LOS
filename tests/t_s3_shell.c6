@@ -1,0 +1,48 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/heap.h"
+#include "c6os/shell.h"
+#include "c6os/port.h"
+
+static u8 g_mem[4096] = {0};
+static OsHeap g_heap;
+static u8 g_acc[128] = {0};
+static u32 g_n = 0;
+
+static void shell_task(void *arg) {
+    os_shell_bind_heap(&g_heap);
+    while (1) {
+        int c = port_getc();
+
+        if (c < 0) {
+            os_task_delay(1u);
+            continue;
+        }
+        if (c == 0) {
+            if (g_n > 0u) {
+                (void)os_shell_exec_frame(g_acc, g_n);
+            }
+            g_n = 0;
+        } else if (c == '\r' || c == '\n') {
+            g_acc[g_n] = 0;
+            if (g_n > 0u) {
+                (void)os_shell_exec((const char *)g_acc);
+            }
+            g_n = 0;
+        } else if (g_n < 120u) {
+            g_acc[g_n] = (u8)c;
+            g_n++;
+        }
+    }
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 shell test\n");
+    os_heap_init(&g_heap, g_mem, (u32)sizeof(g_mem));
+    if (os_task_create("sh", shell_task, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+}

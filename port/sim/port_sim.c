@@ -49,6 +49,11 @@ void port_irq_restore(u32 state)
     g_irq_nest = state;
 }
 
+int port_getc(void)
+{
+    return -1;
+}
+
 void port_putc(int ch)
 {
     cap_put(ch);

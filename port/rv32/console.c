@@ -26,6 +26,11 @@ void port_init(void)
 {
 }
 
+int port_getc(void)
+{
+    return -1;
+}
+
 void port_putc(int ch)
 {
     char c = (char)ch;
