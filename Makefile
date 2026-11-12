@@ -159,13 +159,35 @@ $(BUILDH)/t_task: $(BUILDH)/t_task.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
 		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task
+$(BUILDH)/sem.ll: kernel/sem.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/mutex.ll: kernel/mutex.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_ipc.ll: tests/t_ipc.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_ipc: $(BUILDH)/t_ipc.ll $(BUILDH)/sem.ll $(BUILDH)/mutex.ll \
+		$(BUILDH)/task.ll $(BUILDH)/tick.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
+		$(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_ipc.ll $(BUILDH)/sem.ll \
+		$(BUILDH)/mutex.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
+		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
 	./$(BUILDH)/t_tick
 	./$(BUILDH)/t_sched
 	./$(BUILDH)/t_task
+	./$(BUILDH)/t_ipc
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"

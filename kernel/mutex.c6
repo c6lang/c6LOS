@@ -1,0 +1,65 @@
+#include "c6os/mutex.h"
+#include "c6os/task.h"
+
+#define MUTEX_MAGIC 0xC6E50002u
+
+int os_mutex_init(OsMutex *m) {
+    if (m == 0) {
+        return -1;
+    }
+    m->owner = 0;
+    m->count = 0;
+    m->magic = MUTEX_MAGIC;
+    return 0;
+}
+
+int os_mutex_pend(OsMutex *m, u32 timeout) {
+    u32 self = 0;
+
+    if (m == 0 || m->magic != MUTEX_MAGIC) {
+        return -1;
+    }
+    self = os_task_self();
+    if (m->owner == self) {
+        m->count = m->count + 1u;
+        return 0;
+    }
+    if (m->owner == 0u) {
+        m->owner = self;
+        m->count = 1;
+        return 0;
+    }
+    {
+        int r = os_task_block(m, timeout, 2u);
+        if (r == 0) {
+            m->owner = self;
+            m->count = 1;
+        }
+        return r;
+    }
+}
+
+int os_mutex_post(OsMutex *m) {
+    u32 self = 0;
+
+    if (m == 0 || m->magic != MUTEX_MAGIC) {
+        return -1;
+    }
+    self = os_task_self();
+    if (m->owner != self || m->count == 0u) {
+        return -1;
+    }
+    m->count = m->count - 1u;
+    if (m->count == 0u) {
+        m->owner = 0;
+        os_task_wake_first(m, 2u, 0);
+    }
+    return 0;
+}
+
+u32 os_mutex_owner(OsMutex *m) {
+    if (m == 0) {
+        return 0;
+    }
+    return m->owner;
+}

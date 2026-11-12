@@ -1,0 +1,45 @@
+#include "c6os/sem.h"
+#include "c6os/task.h"
+
+#define SEM_MAGIC 0xC6E50001u
+
+int os_sem_init(OsSem *s, u32 initial, u32 max) {
+    if (s == 0 || initial > max) {
+        return -1;
+    }
+    s->count = initial;
+    s->max = max;
+    s->magic = SEM_MAGIC;
+    return 0;
+}
+
+int os_sem_pend(OsSem *s, u32 timeout) {
+    if (s == 0 || s->magic != SEM_MAGIC) {
+        return -1;
+    }
+    if (s->count > 0u) {
+        s->count = s->count - 1u;
+        return 0;
+    }
+    return os_task_block(s, timeout, 1u);
+}
+
+int os_sem_post(OsSem *s) {
+    if (s == 0 || s->magic != SEM_MAGIC) {
+        return -1;
+    }
+    if (os_task_wake_first(s, 1u, 0) != 0) {
+        return 0;
+    }
+    if (s->count < s->max) {
+        s->count = s->count + 1u;
+    }
+    return 0;
+}
+
+u32 os_sem_count(OsSem *s) {
+    if (s == 0) {
+        return 0;
+    }
+    return s->count;
+}

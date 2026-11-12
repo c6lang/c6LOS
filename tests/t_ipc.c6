@@ -1,0 +1,110 @@
+#include "c6os/sem.h"
+#include "c6os/mutex.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[32] = {0};
+static u32 n = 0;
+static OsSem sem = {0};
+static OsMutex mtx = {0};
+
+static void sa(void *arg) {
+    os_sem_pend(&sem, 0);
+    order[n] = 'A';
+    n++;
+}
+
+static void sb(void *arg) {
+    order[n] = 'B';
+    n++;
+    os_sem_post(&sem);
+}
+
+static void st(void *arg) {
+    int r = os_sem_pend(&sem, 1);
+    if (r == -2) {
+        order[n] = 'T';
+        n++;
+    }
+}
+
+static void ma(void *arg) {
+    os_mutex_pend(&mtx, 0);
+    order[n] = 'A';
+    n++;
+    os_task_yield();
+    os_mutex_post(&mtx);
+    order[n] = 'a';
+    n++;
+}
+
+static void mb(void *arg) {
+    os_mutex_pend(&mtx, 0);
+    order[n] = 'B';
+    n++;
+    os_mutex_post(&mtx);
+}
+
+static int expect(const char *want) {
+    u32 i = 0;
+    while (want[i] != '\0') {
+        if (order[i] != want[i]) {
+            return 0;
+        }
+        i++;
+    }
+    return order[i] == '\0';
+}
+
+int main(void) {
+    if (os_sem_init(&sem, 0, 1) != 0) {
+        return 1;
+    }
+    if (os_task_create("a", sa, 0, 1, 4096) <= 0) {
+        return 2;
+    }
+    if (os_task_create("b", sb, 0, 1, 4096) <= 0) {
+        return 3;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (!expect("BA")) {
+        port_puts("FAIL: sem order ");
+        port_puts(order);
+        port_puts("\n");
+        return 4;
+    }
+
+    n = 0;
+    order[0] = '\0';
+    if (os_task_create("t", st, 0, 1, 4096) <= 0) {
+        return 5;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (!expect("T")) {
+        return 6;
+    }
+
+    n = 0;
+    order[0] = '\0';
+    if (os_mutex_init(&mtx) != 0) {
+        return 7;
+    }
+    if (os_task_create("a", ma, 0, 1, 4096) <= 0) {
+        return 8;
+    }
+    if (os_task_create("b", mb, 0, 1, 4096) <= 0) {
+        return 9;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (!expect("AaB")) {
+        port_puts("FAIL: mutex order ");
+        port_puts(order);
+        port_puts("\n");
+        return 10;
+    }
+    port_puts("PASS: sem/mutex\n");
+    return 0;
+}
