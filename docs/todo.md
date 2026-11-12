@@ -29,7 +29,7 @@
 | M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 完成（PHY 抢回 USJ + 时钟/PAD 使能后实测有输出） |
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（`os_panic`/`os_panic_frame` + 日志回放已 host PASS；S3 陷阱入口未接） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
-| M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 未开始 |
+| M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 完成（S3 实测 `elapsed=100` / `PASS: tick`；40MHz XTAL 下 400k cycles/tick） |
 | M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke 已 PASS；rv32/x86 待接） |
 
 **M0 验收**：三参考目标打印 banner；S3 上串口有 banner + tick 计数；`make s3` size 在预算内。
@@ -247,6 +247,20 @@
   `(long long)(unsigned long)*(void **)slot`（按目标指针宽度加载）。
   superc 仓库提交 `a8d010a`；`make c99test` 103/103 通过；S3 上 `os_timer_tick`
   恢复原来的 `t && active && expire` 写法后不再误入空指针分支。
-- S3 tick 现状：`port_idle` 用 `CCOUNT` 每 2.4M 周期补一次 `os_sched_tick`，
-  串口能看到 tick 标记，但约 24 次后停住；下一步用 CCOUNT 直接测量 S3 实际
-  CPU 频率并检查 `os_sched_tick`/`os_timer_tick` 在该点的状态。
+- **S3 tick 实测通过（2026-11）**：`tests/t_s3_tick.c6` 串口输出
+  `DONE elapsed=100` / `PASS: tick`。此前“约 24 个 tick 后停住”其实是三个问题叠加：
+  1. **TG0 看门狗每 ~3s 复位一次**（`dmesg` 里 USB 每 3 秒 disconnect/reconnect）。
+     `port_init` 的关闭只做一次且不可靠，现改为 `s3_wdt_kick()` 在每次 `port_idle`
+     里重新解锁并清零 `WDTCONFIG0/1`，复位消失。
+  2. **CPU 仍是复位后的 40MHz XTAL**，不是 240MHz；按 240MHz 算的
+     `2,400,000 cycles/tick` 大了 6 倍。现按 40MHz 用 `400,000 cycles/tick`
+     （真正的 240MHz PLL 配置留作 M0 后续项）。
+  3. **USB-Serial/JTAG 发送**：写入前必须等 `EP1_CONF.WR_DONE` 清零，否则 FIFO
+     写不进去、`DATA_FREE` 再也不置位，串口在几十字节处整体卡死；`port_putc`
+     已加这段等待。
+- **c6 → C 变参 ABI**：`kprintf("elapsed=%u", (u64)...)` 在 S3 上只打出
+  `elapsed=` 就停住（c6 调用侧与 C `va_list` 布局不一致）。S3 测试暂时改用手写
+  十进制输出；`kprintf` 的变参修复单列为 c6 后续项。
+- S3 测试镜像构建：
+  `make BUILD=build/s3test S3_MAIN=tests/t_s3_sched.c6 S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6" s3`
+

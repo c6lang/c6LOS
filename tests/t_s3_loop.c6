@@ -1,0 +1,19 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void os_main(void) {
+    u32 i = 0;
+    volatile u32 *const st4 = (volatile u32 *)0x60008060u;
+    volatile u32 *const st5 = (volatile u32 *)0x60008064u;
+
+    port_puts("s3 loop test\n");
+    *st4 = 0xAAAA0000u;
+    while (i < 200000000u) {
+        i++;
+        if ((i & 0xFFFFu) == 0u) {
+            *st5 = i;
+        }
+    }
+    *st4 = 0xBBBB0000u;
+    port_puts("PURE DONE\n");
+}
