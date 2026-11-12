@@ -48,8 +48,15 @@ _vec_level1:
     and     a2, a2, a3
     s32i    a2, a1, 64
 
+    mov     a2, a1
     call0   s3_timer_irq
+    beqz    a2, 2f
+    /* a2 = 目标任务 ctx，ctx->sp 指向它自己的陷阱帧。 */
+    l32i    a1, a2, 64
+    j       2f
 
+2:
+    /* 恢复 a1 指向的陷阱帧并用 rfe 返回。 */
     l32i    a2, a1, 60
     wsr     a2, epc1
     l32i    a2, a1, 64

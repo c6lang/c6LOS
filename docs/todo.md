@@ -90,10 +90,10 @@
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
-| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 裸机 PIT 100Hz 抢占：`ca≈cb≈1.18M` / `PASS: x86 preempt`；协作 sim 仍按 yield 轮转） |
+| M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 PIT 抢占 `PASS: x86 preempt`；S3 定时器中断抢占 `ca=61198 cb=61311` / `PASS: s3 preempt`；host SIGALRM 异步抢占 `PASS: sim preempt`） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 完成（`t_overflow` 深递归覆盖哨兵，输出 `*** PANIC: task stack overflow ***` 后 `PASS`；sim 栈前留 64KB 安全垫） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
-| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；x86-64 已接完整陷阱帧抢占 `PASS: x86 preempt`；S3 抢占待接） |
+| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 完成（S3 协作 `order: ABab` / `PASS: sched`；S3 定时器中断里 `os_sched_preempt_ctx()` 直接换任务，忙等任务不让出 CPU 也能 `PASS: s3 preempt`；x86 陷阱帧抢占 `PASS`） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
 
@@ -323,3 +323,11 @@
   （不经过协作调度器），与 S3 计划的中断返回路径同构。关键坑：信号处理栈
   **不能**用 `SA_ONSTACK` 共用 altstack，否则后一次中断会覆盖前一个任务挂起中的
   sigreturn 帧，任务会“凭空返回”。
+
+- **S3 定时器中断抢占（真板 PASS）**：level-1 入口把 a0/a2–a15 + EPC1 + PS 压成
+  80 字节陷阱帧，`s3_timer_irq(frame)` 只把 `ctx->sp` 指到该帧，`os_sched_tick()`
+  后用 `os_sched_preempt_ctx()` 选出下一个任务，入口改 `a1 = target->sp` 并复用
+  “弹帧 + `rfe`” 路径。任务创建时预置同样格式的初始帧（a2=entry、a3=arg、
+  EPC=tramp）。两个同优先级忙等任务都不 yield，20 tick 内计数 `ca=61198 cb=61311`。
+  关键坑：XTOS 的 `PS` 必须用 `wsr ps` 写入“去掉 EXCM/INTLEVEL 的值再或上 EXCM”
+  后 `rfe`；协作切换保持 `ret`（a0=恢复 PC）。

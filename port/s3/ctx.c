@@ -1,14 +1,16 @@
-/* ESP32-S3 call0 协作上下文：内核不透明 ctx，静态栈池。
- * 汇编侧（ctx.S）按 { u32 r[16]; u32 sp; void *stack; u32 size; } 访问。 */
+/* ESP32-S3 call0 上下文：内核不透明 ctx，静态栈池。
+ * ctx->sp 指向该任务栈上的 80 字节陷阱帧（a0/a2..a15 + EPC + PS）；
+ * r[16] 仅为保持 sp 在偏移 64 的汇编布局，已不使用。 */
 
 #include "c6os/types.h"
 #include "c6os/port.h"
 
 extern void s3_task_tramp(void);
 extern void os_task_exit(void);
+extern u32 port_ps_get(void);
 
 typedef struct {
-    u32 r[16];      /* a0..a15 */
+    u32 r[16];      /* 占位，保持 sp@64 布局 */
     u32 sp;
     void *stack;
     u32 size;
@@ -28,6 +30,7 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     u32 i = 0;
     S3Ctx *c = 0;
     u32 top;
+    u32 *f = 0;
 
     (void)stack_size;
     while (i < (u32)S3_MAX_CTX) {
@@ -43,17 +46,18 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
 
     c->stack = (void *)g_stacks[i];
     c->size = (u32)S3_STACK_SZ;
-    top = ((u32)c->stack + (u32)S3_STACK_SZ) & ~15u;
+    top = (((u32)c->stack + (u32)S3_STACK_SZ) & ~15u) - 80u;
+    f = (u32 *)top;
 
     i = 0;
-    while (i < 16u) {
-        c->r[i] = 0u;
+    while (i < 17u) {
+        f[i] = 0u;
         i++;
     }
-    c->r[0] = (u32)s3_task_tramp;
-    c->r[1] = top;
-    c->r[2] = (u32)entry;
-    c->r[3] = (u32)arg;
+    f[1] = (u32)entry;                 /* a2 */
+    f[2] = (u32)arg;                   /* a3 */
+    f[15] = (u32)s3_task_tramp;        /* EPC */
+    f[16] = port_ps_get() & ~0x1Fu;    /* PS */
     c->sp = top;
     *(volatile u32 *)c->stack = 0xC6C0DEADu;
     return c;
@@ -68,6 +72,26 @@ void port_task_ctx_free(void *ctx)
     }
     c->stack = 0;
     c->size = 0u;
+}
+
+void *port_cur_ctx(void)
+{
+    return (void *)g_s3_cur;
+}
+
+void port_set_cur_ctx(void *ctx)
+{
+    g_s3_cur = (S3Ctx *)ctx;
+}
+
+/* 把 level-1 陷阱帧复制进当前任务 ctx：frame[15]=EPC1, frame[16]=PS。 */
+void port_irq_fill(u32 frame_sp)
+{
+    S3Ctx *c = g_s3_cur;
+
+    if (c != 0) {
+        c->sp = frame_sp;
+    }
 }
 
 u32 port_task_stack_ok(void *ctx)
