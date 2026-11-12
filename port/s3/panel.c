@@ -42,6 +42,14 @@ static void pin_out(u32 p)
     else { wr((volatile u32 *)GPIO_ENA1_W1TS, 1u << (p - 32u)); }
 }
 
+static void pin_pullup(u32 p)
+{
+    volatile u32 *mux = (volatile u32 *)(0x60009000u + p * 4u);
+    u32 v = *mux;
+    v = (v | (1u << 8)) & ~(1u << 9);
+    *mux = v;
+}
+
 static void pin_in(u32 p)
 {
     if (p < 32u) { wr((volatile u32 *)GPIO_ENA_W1TC, 1u << p); }
@@ -150,6 +158,8 @@ static void panel_reset(void)
 {
     pin_out(PIN_SCL);
     pin_out(PIN_SDA);
+    pin_pullup(PIN_SCL);
+    pin_pullup(PIN_SDA);
     tca_write(0x03u, 0xFBu);   /* EXIO2 输出 */
     tca_write(0x01u, 0x00u);
     port_delay_ms(300u);
@@ -167,6 +177,7 @@ void s3_panel_probe(u8 out[3])
     pin_hi(PIN_CS);
     pin_lo(PIN_CLK);
     pin_out(PIN_D0);
+    pin_pullup(PIN_D0);
     pin_out(45u);
     pin_out(42u);
     pin_out(41u);
