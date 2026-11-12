@@ -131,7 +131,7 @@
 
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
-| M4-1 `Queue@T` | 泛型队列、元素拷贝、满/空/超时 | 元素为结构体/指针/u64 三类 | 进行中（指针队列 + 满/空阻塞/超时 host PASS；泛型待做） |
+| M4-1 `Queue@T` | 泛型队列、元素拷贝、满/空/超时 | 元素为结构体/指针/u64 三类 | 完成（`Queue@T` 按 `sizeof(T)` 深拷贝；`t_queue_generic` 验证 int/u64/结构体；指针队列 `os_queue_init` 与 LOS_Queue 仍 PASS） |
 | M4-2 兼容队列 | `LOS_QueueCreate/Read/Write` | 与原生同一断言集 | 完成（`compat/los_queue.c6` + `t_los2` 的 LOS_Queue 读写/PASS） |
 | M4-3 定长内存池 | `membox`、O(1) 分配、归属校验 | 耗尽返回 `OS_ENOMEM` | 完成（O(1) 分配/释放 + 归属/对齐校验，host PASS） |
 | M4-4 best-fit 堆 | 块头/合并/对齐/统计 | 1000 次随机分配释放无碎片泄漏 | 完成（best-fit + 相邻合并 + 8B 对齐，1000 次随机 host PASS） |
@@ -355,3 +355,9 @@
 - **M5-3 错误码映射（host PASS）**：`t_los_err` 在任务上下文里逐项断言
   `LOS_ERRNO_SEM_INVALID/TIMEOUT`、`LOS_ERRNO_TSK_INVALID/NO_MEMORY`、
   `LOS_ERRNO_QUEUE_INVALID`，输出 `PASS: LOS error mapping`。
+
+- **M4-1 泛型值队列（host + S3 PASS）**：`OsQueue` 改为按 `item_size` 字节拷贝，
+  `os_queue_init_ex/put_item/get_item` 支持任意元素；`include/c6os/queue_t.h`
+  用 c6 泛型 `Queue@T` 包装成 `q_init/q_put/q_get`。`t_queue_generic` 覆盖
+  `int`/`u64`/`struct Pair`，输出 `PASS: generic queue`；S3 `t_s3_ipc` 的
+  q-init/put/get 与其余 IPC 全 PASS。

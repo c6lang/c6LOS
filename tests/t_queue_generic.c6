@@ -1,0 +1,59 @@
+#include "c6os/types.h"
+#include "c6os/queue_t.h"
+#include "c6os/port.h"
+
+typedef struct {
+    u32 a;
+    u32 b;
+} Pair;
+
+static int g_bad = 0;
+
+static void chk(int cond, int code) {
+    if (cond == 0) {
+        g_bad = code;
+    }
+}
+
+int main(void) {
+    Queue@int qi = {0};
+    Queue@u64 ql = {0};
+    Queue@Pair qp = {0};
+    int ibuf[4] = {0};
+    u64 lbuf[4] = {0};
+    Pair pbuf[4] = {{0, 0}, {0, 0}, {0, 0}, {0, 0}};
+    int v = 0;
+    u64 lv = 0;
+    Pair pv = {0, 0};
+    Pair pout = {0, 0};
+
+    chk(q_init@int(&qi, ibuf, 4u) == 0, 1);
+    v = 11;
+    chk(q_put@int(&qi, v, 0u) == 0, 2);
+    v = 22;
+    chk(q_put@int(&qi, v, 0u) == 0, 3);
+    v = 0;
+    chk(q_get@int(&qi, &v, 0u) == 0 && v == 11, 4);
+    chk(q_get@int(&qi, &v, 0u) == 0 && v == 22, 5);
+
+    chk(q_init@u64(&ql, lbuf, 4u) == 0, 6);
+    lv = 0x1122334455667788u;
+    chk(q_put@u64(&ql, lv, 0u) == 0, 7);
+    lv = 0;
+    chk(q_get@u64(&ql, &lv, 0u) == 0 && lv == 0x1122334455667788u, 8);
+
+    chk(q_init@Pair(&qp, pbuf, 4u) == 0, 9);
+    pv.a = 7u;
+    pv.b = 9u;
+    chk(q_put@Pair(&qp, pv, 0u) == 0, 10);
+    chk(q_get@Pair(&qp, &pout, 0u) == 0 && pout.a == 7u && pout.b == 9u, 11);
+
+    if (g_bad != 0) {
+        port_putc((int)('0' + (g_bad / 10)));
+        port_putc((int)('0' + (g_bad % 10)));
+        port_puts(" FAIL: generic queue\n");
+        return 1;
+    }
+    port_puts("PASS: generic queue\n");
+    return 0;
+}

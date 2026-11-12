@@ -1,15 +1,16 @@
 #include "c6os/queue.h"
 #include "c6os/task.h"
 
-#define QUEUE_MAGIC 0xC6E50004u
-#define Q_WAIT_PUT 6u
-#define Q_WAIT_GET 7u
+#define QUEUE_MAGIC 0x51E5C6A5u
+#define Q_WAIT_GET 6u
+#define Q_WAIT_PUT 7u
 
-int os_queue_init(OsQueue *q, void **storage, u32 cap) {
-    if (q == 0 || storage == 0 || cap == 0u) {
+int os_queue_init_ex(OsQueue *q, void *storage, u32 cap, u32 item_size) {
+    if (q == 0 || storage == 0 || cap == 0u || item_size == 0u) {
         return -1;
     }
-    q->buf = storage;
+    q->buf = (u8 *)storage;
+    q->item_size = item_size;
     q->cap = cap;
     q->head = 0;
     q->tail = 0;
@@ -18,8 +19,34 @@ int os_queue_init(OsQueue *q, void **storage, u32 cap) {
     return 0;
 }
 
-int os_queue_put(OsQueue *q, void *item, u32 timeout) {
-    if (q == 0 || q->magic != QUEUE_MAGIC) {
+int os_queue_init(OsQueue *q, void **storage, u32 cap) {
+    return os_queue_init_ex(q, (void *)storage, cap, (u32)sizeof(void *));
+}
+
+static void slot_write(OsQueue *q, u32 idx, const void *src) {
+    u8 *d = q->buf + idx * q->item_size;
+    const u8 *s = (const u8 *)src;
+    u32 i = 0;
+
+    while (i < q->item_size) {
+        d[i] = s[i];
+        i++;
+    }
+}
+
+static void slot_read(OsQueue *q, u32 idx, void *dst) {
+    const u8 *s = q->buf + idx * q->item_size;
+    u8 *d = (u8 *)dst;
+    u32 i = 0;
+
+    while (i < q->item_size) {
+        d[i] = s[i];
+        i++;
+    }
+}
+
+int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
+    if (q == 0 || q->magic != QUEUE_MAGIC || item == 0) {
         return -1;
     }
     while (q->count == q->cap) {
@@ -28,29 +55,40 @@ int os_queue_put(OsQueue *q, void *item, u32 timeout) {
             return r;
         }
     }
-    q->buf[q->tail] = item;
+    slot_write(q, q->tail, item);
     q->tail = (q->tail + 1u) % q->cap;
     q->count = q->count + 1u;
     os_task_wake_first(q, Q_WAIT_GET, 0);
     return 0;
 }
 
-void *os_queue_get(OsQueue *q, u32 timeout) {
-    void *item = 0;
+int os_queue_put(OsQueue *q, void *item, u32 timeout) {
+    return os_queue_put_item(q, (const void *)&item, timeout);
+}
 
-    if (q == 0 || q->magic != QUEUE_MAGIC) {
-        return 0;
+int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
+    if (q == 0 || q->magic != QUEUE_MAGIC || out == 0) {
+        return -1;
     }
     while (q->count == 0u) {
         int r = os_task_block(q, timeout, Q_WAIT_GET);
         if (r != 0) {
-            return 0;
+            return r;
         }
     }
-    item = q->buf[q->head];
+    slot_read(q, q->head, out);
     q->head = (q->head + 1u) % q->cap;
     q->count = q->count - 1u;
     os_task_wake_first(q, Q_WAIT_PUT, 0);
+    return 0;
+}
+
+void *os_queue_get(OsQueue *q, u32 timeout) {
+    void *item = 0;
+
+    if (os_queue_get_item(q, (void *)&item, timeout) != 0) {
+        return 0;
+    }
     return item;
 }
 
