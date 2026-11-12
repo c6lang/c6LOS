@@ -1,0 +1,58 @@
+#include "c6os/hwi.h"
+
+typedef struct {
+    OsHwiHandler fn;
+    void *arg;
+    u32 used;
+    u32 enabled;
+} OsHwi;
+
+static OsHwi g_hwi[OS_HWI_MAX];
+static u32 g_hwi_n;
+
+int os_hwi_create(u32 irq, OsHwiHandler fn, void *arg) {
+    if (irq >= (u32)OS_HWI_MAX || fn == 0) {
+        return -1;
+    }
+    if (g_hwi[irq].used != 0u) {
+        return -2;
+    }
+    g_hwi[irq].fn = fn;
+    g_hwi[irq].arg = arg;
+    g_hwi[irq].used = 1u;
+    g_hwi[irq].enabled = 1u;
+    g_hwi_n = g_hwi_n + 1u;
+    return 0;
+}
+
+int os_hwi_delete(u32 irq) {
+    if (irq >= (u32)OS_HWI_MAX || g_hwi[irq].used == 0u) {
+        return -1;
+    }
+    g_hwi[irq].used = 0u;
+    g_hwi[irq].enabled = 0u;
+    g_hwi[irq].fn = 0;
+    g_hwi[irq].arg = 0;
+    g_hwi_n = g_hwi_n - 1u;
+    return 0;
+}
+
+int os_hwi_enable(u32 irq, u32 on) {
+    if (irq >= (u32)OS_HWI_MAX || g_hwi[irq].used == 0u) {
+        return -1;
+    }
+    g_hwi[irq].enabled = on != 0u ? 1u : 0u;
+    return 0;
+}
+
+void os_hwi_dispatch(u32 irq) {
+    if (irq >= (u32)OS_HWI_MAX || g_hwi[irq].used == 0u ||
+        g_hwi[irq].enabled == 0u) {
+        return;
+    }
+    g_hwi[irq].fn(g_hwi[irq].arg);
+}
+
+u32 os_hwi_count(void) {
+    return g_hwi_n;
+}

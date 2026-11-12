@@ -1,0 +1,49 @@
+#include "c6os/hwi.h"
+#include "c6os/port.h"
+
+static u32 c1 = 0;
+static u32 c2 = 0;
+static u32 c3 = 0;
+
+static void h1(void *arg) { c1 = c1 + (u32)arg; }
+static void h2(void *arg) { c2 = c2 + (u32)arg; }
+static void h3(void *arg) { c3 = c3 + (u32)arg; }
+
+int main(void) {
+    if (os_hwi_create(2u, h1, (void *)1u) != 0 ||
+        os_hwi_create(5u, h2, (void *)2u) != 0 ||
+        os_hwi_create(9u, h3, (void *)3u) != 0) {
+        port_puts("FAIL: hwi create\n");
+        return 1;
+    }
+    if (os_hwi_count() != 3u) {
+        port_puts("FAIL: hwi count\n");
+        return 2;
+    }
+    os_hwi_dispatch(2u);
+    os_hwi_dispatch(5u);
+    os_hwi_dispatch(9u);
+    if (c1 != 1u || c2 != 2u || c3 != 3u) {
+        port_puts("FAIL: hwi args\n");
+        return 3;
+    }
+    if (os_hwi_enable(5u, 0u) != 0) {
+        port_puts("FAIL: hwi disable\n");
+        return 4;
+    }
+    os_hwi_dispatch(5u);
+    if (c2 != 2u) {
+        port_puts("FAIL: hwi disabled\n");
+        return 5;
+    }
+    if (os_hwi_create(2u, h1, (void *)1u) == 0) {
+        port_puts("FAIL: hwi double\n");
+        return 6;
+    }
+    if (os_hwi_delete(9u) != 0 || os_hwi_count() != 2u) {
+        port_puts("FAIL: hwi delete\n");
+        return 7;
+    }
+    port_puts("PASS: hwi 3 irq\n");
+    return 0;
+}
