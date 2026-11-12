@@ -1,0 +1,25 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern void s3_lcd_init(void);
+extern void s3_lcd_fill(u16 color);
+
+static void wait(u32 n) { volatile u32 i = 0; while (i < n) { i++; } }
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os lcd test\n");
+    s3_lcd_init();
+    port_puts("init done, red\n");
+    s3_lcd_fill(0xF800u);
+    wait(20000000u);
+    port_puts("green\n");
+    s3_lcd_fill(0x07E0u);
+    wait(20000000u);
+    port_puts("blue\n");
+    s3_lcd_fill(0x001Fu);
+    wait(20000000u);
+    port_puts("white\n");
+    s3_lcd_fill(0xFFFFu);
+    port_puts("done\n");
+}

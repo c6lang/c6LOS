@@ -337,3 +337,123 @@ void s3_panel_probe(u8 out[3])
     }
     pin_hi(PIN_CS);
 }
+
+/* ---- ST77916 360x360 QSPI 极简驱动（bit-bang 4-line） ---- */
+#include "c6os/st77916_table.h"
+
+#define LCD_W 360
+#define LCD_H 360
+
+static void qnib(u8 n)
+{
+    if (n & 1u) { pin_hi(46u); } else { pin_lo(46u); }
+    if (n & 2u) { pin_hi(45u); } else { pin_lo(45u); }
+    if (n & 4u) { pin_hi(42u); } else { pin_lo(42u); }
+    if (n & 8u) { pin_hi(41u); } else { pin_lo(41u); }
+    rd_delay();
+    pin_hi(40u);
+    rd_delay();
+    pin_lo(40u);
+}
+
+static void qcmd(u8 op, u8 cmd)
+{
+    u32 w = ((u32)op << 24) | ((u32)cmd << 8);
+    int sh = 28;
+
+    while (sh >= 0) {
+        qnib((u8)((w >> sh) & 0xFu));
+        sh -= 4;
+    }
+}
+
+static void qdata(const u8 *p, u32 n)
+{
+    u32 i = 0;
+
+    while (i < n) {
+        qnib((u8)(p[i] >> 4));
+        qnib((u8)(p[i] & 0xFu));
+        i++;
+    }
+}
+
+static void qcmd_data(u8 cmd, const u8 *p, u32 n)
+{
+    pin_lo(21u);
+    qcmd(0x02u, cmd);
+    if (n != 0u) {
+        qdata(p, n);
+    }
+    pin_hi(21u);
+}
+
+static void qcolor(u16 color, u32 n)
+{
+    u32 i = 0;
+    u8 hi = (u8)(color >> 8);
+    u8 lo = (u8)(color & 0xFFu);
+
+    pin_lo(21u);
+    qcmd(0x32u, 0x2Cu);
+    while (i < n) {
+        qnib((u8)(hi >> 4));
+        qnib((u8)(hi & 0xFu));
+        qnib((u8)(lo >> 4));
+        qnib((u8)(lo & 0xFu));
+        i++;
+    }
+    pin_hi(21u);
+}
+
+static void lcd_pins_init(void)
+{
+    pin_out(21u); pin_out(40u); pin_out(46u); pin_out(45u);
+    pin_out(42u); pin_out(41u); pin_out(3u); pin_out(5u);
+    pin_hi(21u);
+    pin_lo(40u);
+    pin_hi(3u);
+    pin_hi(5u);
+}
+
+void s3_lcd_init(void)
+{
+    const St77916Cmd *c = g_st77916_v1;
+    u8 col[4];
+    u8 row[4];
+    u32 n = 0;
+
+    lcd_pins_init();
+    pin_lo(3u);
+    delay_loop(2000000u);
+    pin_hi(3u);
+    delay_loop(3000000u);
+
+    qcmd_data(0x01u, 0, 0);
+    delay_loop(2000000u);
+    while (c->cmd != 0x00u) {
+        qcmd_data(c->cmd, c->data, c->len);
+        if (c->delay != 0u) {
+            delay_loop((u32)c->delay * 40000u);
+        }
+        c++;
+        n++;
+    }
+    qcmd_data(0x21u, 0, 0);
+    qcmd_data(0x11u, 0, 0);
+    delay_loop(4000000u);
+    qcmd_data(0x29u, 0, 0);
+
+    col[0] = 0; col[1] = 0;
+    col[2] = (u8)((LCD_W - 1) >> 8); col[3] = (u8)((LCD_W - 1) & 0xFF);
+    row[0] = 0; row[1] = 0;
+    row[2] = (u8)((LCD_H - 1) >> 8); row[3] = (u8)((LCD_H - 1) & 0xFF);
+    qcmd_data(0x2Au, col, 4);
+    qcmd_data(0x2Bu, row, 4);
+    (void)n;
+}
+
+void s3_lcd_fill(u16 color)
+{
+    qcolor(color, LCD_W * LCD_H);
+}

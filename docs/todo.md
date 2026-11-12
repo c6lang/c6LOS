@@ -500,3 +500,9 @@
   0x600C0004（32 位入口地址，之前误用 0x600C0014 导致 count=0）。core1 入口在
   IRAM 设自己的 SP/VECBASE 后计数；core0 等 2M 循环读回 `count=83`，输出
   `PASS: core1`。SMP 调度仍未接。
+
+- **ST77916 QSPI 软件驱动（待上电验证）**：`port/s3/panel.c` 增加 4-line bit-bang
+  命令（0x02/cmd/0x00 + 参数）、0x32 颜色写、GPIO3 硬复位、GPIO5 背光，使用
+  `include/c6os/st77916_table.h` 的 v1 初始化表；`t_s3_lcd` 循环红/绿/蓝/白。
+  烧写运行后 **USB 直接掉线**（`/dev/ttyACM0` 消失），符合“无电池时屏/背光
+  电流把 USB 拉垮”的猜测；接 3.7V 电池后再验证。
