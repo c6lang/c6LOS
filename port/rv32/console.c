@@ -68,6 +68,16 @@ void port_panic_halt(void)
     sys_exit(1);
 }
 
+u32 port_in_isr(void)
+{
+    return 0u;
+}
+
+void os_test_set_isr(u32 v)
+{
+    (void)v;
+}
+
 void port_enter_task(void)
 {
 }

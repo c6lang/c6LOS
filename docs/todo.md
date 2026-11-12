@@ -118,7 +118,7 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 完成（pend/post/超时 + 3 等待者按优先级唤醒 host PASS） |
-| M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 进行中（递归 + 所有权移交 host PASS；ISR 禁 pend 待接） |
+| M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 完成（递归 + 所有权移交 host PASS；`port_in_isr` 下 block/delay panic，`t_isr` PASS） |
 | M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 完成（`t_pi_chain`：L(5) 持 M1→M(3) 持 M2 等 M1→H(1) 等 M2，L 依次被抬到 3/1，`PASS: PI chain`） |
 | M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
 | M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 进行中（单等待节点 + 超时扫描已接；双归属链/竞争压测待做） |
@@ -166,7 +166,7 @@
 | M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 |
 | M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs |
 | M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 |
-| M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic |
+| M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic | 完成（`os_task_block_arg`/`os_task_delay` 检查 `port_in_isr` 并 panic；`t_isr` 输出两条 PANIC 后 PASS） |
 
 **M6 验收**：ISR 唤醒任务延迟实测；嵌套中断不丢 tick。
 

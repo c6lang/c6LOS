@@ -1,0 +1,29 @@
+#include "c6os/task.h"
+#include "c6os/sem.h"
+#include "c6os/port.h"
+
+static OsSem sem = {0};
+static int g_rc = 0;
+
+static void worker(void *arg) {
+    os_test_set_isr(1u);
+    g_rc = os_sem_pend(&sem, 0);
+    os_task_delay(1u);
+    os_test_set_isr(0u);
+}
+
+int main(void) {
+    if (os_sem_init(&sem, 0, 1) != 0) {
+        return 1;
+    }
+    if (os_task_create("w", worker, 0, 1u, 8192u) <= 0) {
+        return 2;
+    }
+    os_task_start();
+    if (g_rc != -1) {
+        port_puts("FAIL: isr block returned\n");
+        return 3;
+    }
+    port_puts("PASS: ISR safety\n");
+    return 0;
+}

@@ -68,6 +68,18 @@ u32 port_virtual_tick(void)
     return 1u;
 }
 
+static u32 g_test_isr;
+
+u32 port_in_isr(void)
+{
+    return g_test_isr;
+}
+
+void os_test_set_isr(u32 v)
+{
+    g_test_isr = v;
+}
+
 void port_enter_task(void)
 {
 }

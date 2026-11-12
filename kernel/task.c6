@@ -144,6 +144,10 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     if (g_cur == 0) {
         return -1;
     }
+    if (port_in_isr() != 0u) {
+        os_panic("block in ISR");
+        return -1;
+    }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
     g_cur->wait_arg = arg;
@@ -352,6 +356,10 @@ void os_task_yield(void) {
 
 void os_task_delay(u32 ticks) {
     if (g_cur == 0) {
+        return;
+    }
+    if (port_in_isr() != 0u) {
+        os_panic("delay in ISR");
         return;
     }
     if (ticks == 0u) {

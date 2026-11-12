@@ -17,6 +17,16 @@ void s3_mark(u32 idx, u32 v)
     *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
 }
 
+u32 port_in_isr(void)
+{
+    return 0u;
+}
+
+void os_test_set_isr(u32 v)
+{
+    (void)v;
+}
+
 void port_enter_task(void)
 {
 }

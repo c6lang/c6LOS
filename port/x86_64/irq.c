@@ -20,6 +20,7 @@ static IdtEntry g_idt[256];
 static IdtPtr g_idtp;
 
 u32 g_in_task;
+u32 g_in_isr;
 /* 无内核的 hello 载荷也链接本文件：弱符号兜底。 */
 __attribute__((weak)) void *g_cur_ctx;
 __attribute__((weak)) void *g_sched_sp;
@@ -90,6 +91,16 @@ void x86_irq_init(void)
     pic_remap();
     pit_init();
     __asm__ __volatile__("sti");
+}
+
+u32 port_in_isr(void)
+{
+    return g_in_isr;
+}
+
+void os_test_set_isr(u32 v)
+{
+    g_in_isr = v;
 }
 
 void port_enter_task(void)
