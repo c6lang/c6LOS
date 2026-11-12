@@ -1,0 +1,11 @@
+build/
+.toolchain/
+*.o
+*.obj
+*.elf
+*.bin
+*.ll
+*.map
+*.d
+__pycache__/
+.cache/
