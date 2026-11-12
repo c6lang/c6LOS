@@ -1,0 +1,103 @@
+#include "los/los_cpup.h"
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+/* 精简 CPUP：用 port_cycles 的运行周期估计占用率（0..1000）。
+ * 与 LiteOS-M 的 sampler 语义不完全相同，但字段/量程一致。 */
+static u32 cpup_total(void) {
+    static u32 boot = 0;
+    static u8 started = 0;
+    u32 now = (u32)port_cycles();
+
+    if (started == 0u) {
+        boot = now;
+        started = 1u;
+        return 0u;
+    }
+    return now - boot;
+}
+
+static u32 cpup_of(u32 id) {
+    u32 total = cpup_total();
+    u64 run = 0;
+    u64 usage = 0;
+
+    if (total == 0u) {
+        return 0u;
+    }
+    run = os_task_run_cycles(id);
+    usage = (run * (u64)LOS_CPUP_PRECISION) / (u64)total;
+    if (usage > (u64)LOS_CPUP_PRECISION) {
+        usage = (u64)LOS_CPUP_PRECISION;
+    }
+    return (u32)usage;
+}
+
+UINT32 LOS_SysCpuUsage(VOID) {
+    u32 i = 0;
+    u32 sum = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        u32 id = 0;
+        u32 prio = 0;
+        u32 st = 0;
+        if (os_task_info(i, &id, &prio, &st, 0, 0u) != 0u) {
+            u32 v = cpup_of(id);
+            if (sum > LOS_CPUP_PRECISION - v) {
+                return LOS_CPUP_PRECISION;
+            }
+            sum = sum + v;
+        }
+        i++;
+    }
+    return sum;
+}
+
+UINT32 LOS_HistorySysCpuUsage(UINT16 mode) {
+    (void)mode;
+    return LOS_SysCpuUsage();
+}
+
+UINT32 LOS_TaskCpuUsage(UINT32 taskID) {
+    if (os_task_get((u32)taskID) == 0) {
+        return 0u;
+    }
+    return cpup_of((u32)taskID);
+}
+
+UINT32 LOS_HistoryTaskCpuUsage(UINT32 taskID, UINT16 mode) {
+    (void)mode;
+    return LOS_TaskCpuUsage(taskID);
+}
+
+UINT32 LOS_AllTaskCpuUsage(CPUP_INFO_S *cpupInfo, UINT16 mode) {
+    u32 i = 0;
+    u32 n = 0;
+
+    (void)mode;
+    if (cpupInfo == 0) {
+        return 0u;
+    }
+    while (i < (u32)C6OS_MAX_TASKS) {
+        u32 id = 0;
+        u32 prio = 0;
+        u32 st = 0;
+        cpupInfo[i].usStatus = 0u;
+        cpupInfo[i].uwUsage = 0u;
+        if (os_task_info(i, &id, &prio, &st, 0, 0u) != 0u) {
+            cpupInfo[i].usStatus = (UINT16)st;
+            cpupInfo[i].uwUsage = cpup_of(id);
+            n++;
+        }
+        i++;
+    }
+    return n;
+}
+
+UINT32 LOS_CpupUsageMonitor(CPUP_TYPE_E type, CPUP_MODE_E mode, UINT32 taskID) {
+    (void)mode;
+    if (type == SYS_CPU_USAGE) {
+        return LOS_SysCpuUsage();
+    }
+    return LOS_TaskCpuUsage(taskID);
+}
