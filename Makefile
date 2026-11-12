@@ -16,7 +16,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(patsubst $(BUILD)/c99/%.c,$(BUILD)/obj/%.o,$(S3_C)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o
 
-.PHONY: all s3 clean toolchain-info backup-flash flash image-info
+.PHONY: all s3 check-host clean toolchain-info backup-flash flash image-info
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -69,6 +69,25 @@ backup-flash: $(BUILD)/backup/flash-16MB.bin
 flash: $(BUILD)/c6os.bin $(BUILD)/backup/flash-16MB.bin
 	sudo -n esptool --chip esp32s3 --port $(PORT) write-flash 0x0 $(BUILD)/c6os.bin
 
+# ---- host 参考机（c6 -> LLVM IR -> clang/lld + libtcc1 + sim port） ----
+BUILDH := build/host
+HOSTBIN := $(BUILDH)/t_smoke
+
+$(BUILDH)/t_smoke.ll: tests/t_smoke.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/port_sim.o: port/sim/port_sim.c
+	@mkdir -p $(BUILDH)
+	gcc -Iinclude -c $< -o $@
+
+$(HOSTBIN): $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o \
+		-L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN)
+	./$(HOSTBIN)
+
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"
 	@$(C6CC) -v 2>&1 | head -1 || true
@@ -77,4 +96,4 @@ toolchain-info:
 	@esptool version | head -1
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) $(BUILDH)

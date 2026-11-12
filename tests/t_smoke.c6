@@ -1,0 +1,17 @@
+#include "c6os/port.h"
+
+/* host 冒烟：验证 c6 -> LLVM IR -> clang/lld + libtcc1 + sim port 的链路。 */
+int main(void) {
+    u32 a = 1;
+    u32 b = 2;
+
+    port_init();
+    port_puts("c6os host smoke\n");
+
+    if (a + b != 3) {
+        port_puts("FAIL: add\n");
+        return 1;
+    }
+    port_puts("PASS\n");
+    return 0;
+}
