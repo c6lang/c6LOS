@@ -6,7 +6,13 @@ UINT32 LOS_TaskCreate(UINT32 *taskId, TSK_INIT_PARAM_S *initParam) {
     u32 stack = 4096u;
 
     if (taskId == 0 || initParam == 0 || initParam->pfnTaskEntry == 0) {
-        return LOS_ERRNO_TSK_INVALID;
+        return LOS_ERRNO_TSK_PTR_NULL;
+    }
+    if ((UINT32)initParam->usTaskPrio >= 32u) {
+        return LOS_ERRNO_TSK_PRIOR_ERROR;
+    }
+    if (initParam->uwStackSize > 65536u) {
+        return LOS_ERRNO_TSK_STKSZ_TOO_LARGE;
     }
     if (initParam->uwStackSize > 4096u) {
         stack = initParam->uwStackSize;
@@ -22,7 +28,7 @@ UINT32 LOS_TaskCreate(UINT32 *taskId, TSK_INIT_PARAM_S *initParam) {
 
 UINT32 LOS_TaskDelete(UINT32 taskId) {
     if (os_task_delete((u32)taskId) != 0) {
-        return LOS_ERRNO_TSK_INVALID;
+        return LOS_ERRNO_TSK_ID_INVALID;
     }
     return LOS_OK;
 }

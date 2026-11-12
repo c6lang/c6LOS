@@ -17,7 +17,7 @@ UINT32 LOS_MuxCreate(UINT32 *muxId) {
     u32 i = 0;
 
     if (muxId == 0) {
-        return LOS_ERRNO_MUX_INVALID;
+        return LOS_ERRNO_MUX_PTR_NULL;
     }
     while (i < LOS_MUX_MAX) {
         if (g_used[i] == 0u) {

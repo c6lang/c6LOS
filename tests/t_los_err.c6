@@ -31,18 +31,18 @@ static void checker(void *arg) {
         g_fail = 4u;
         return;
     }
-    if (LOS_TaskCreate(&h, 0) != LOS_ERRNO_TSK_INVALID) {
+    if (LOS_TaskCreate(&h, 0) != LOS_ERRNO_TSK_PTR_NULL) {
         g_fail = 5u;
         return;
     }
     p.pcName = "x";
     p.pfnTaskEntry = noop;
     p.usTaskPrio = 200u;
-    if (LOS_TaskCreate(&h, &p) != LOS_ERRNO_TSK_NO_MEMORY) {
+    if (LOS_TaskCreate(&h, &p) != LOS_ERRNO_TSK_PRIOR_ERROR) {
         g_fail = 6u;
         return;
     }
-    if (LOS_TaskDelete(0xFFFFu) != LOS_ERRNO_TSK_INVALID) {
+    if (LOS_TaskDelete(0xFFFFu) != LOS_ERRNO_TSK_ID_INVALID) {
         g_fail = 7u;
         return;
     }

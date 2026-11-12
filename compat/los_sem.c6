@@ -20,7 +20,7 @@ UINT32 LOS_SemCreate(UINT16 count, UINT32 *handle) {
     u32 i = 0;
 
     if (handle == 0) {
-        return LOS_ERRNO_SEM_INVALID;
+        return LOS_ERRNO_SEM_PTR_NULL;
     }
     while (i < LOS_SEM_MAX) {
         if (g_used[i] == 0u) {

@@ -64,7 +64,10 @@ UINT32 LOS_QueueCreate(const char *name, UINT16 len, UINT32 *queueId,
 
     (void)name;
     (void)flags;
-    if (queueId == 0 || maxMsgSize == 0u || maxMsgSize > LOS_Q_MSG) {
+    if (queueId == 0) {
+        return LOS_ERRNO_QUEUE_PTR_NULL;
+    }
+    if (maxMsgSize == 0u || maxMsgSize > LOS_Q_MSG) {
         return LOS_ERRNO_QUEUE_INVALID;
     }
     if (cap > LOS_Q_SLOTS) {
@@ -115,7 +118,7 @@ UINT32 LOS_QueueWrite(UINT32 queueId, const void *buf, UINT32 len, UINT32 timeou
         return LOS_ERRNO_QUEUE_INVALID;
     }
     if (n > g_q_msg[queueId - 1u] || n > LOS_Q_MSG) {
-        return LOS_ERRNO_QUEUE_INVALID;
+        return LOS_ERRNO_QUEUE_WRITE_SIZE_TOO_BIG;
     }
     slot = slot_alloc();
     if (slot == 0) {

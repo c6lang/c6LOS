@@ -17,7 +17,7 @@ UINT32 LOS_EventInit(UINT32 *eventId) {
     u32 i = 0;
 
     if (eventId == 0) {
-        return LOS_ERRNO_EVENT_INVALID;
+        return LOS_ERRNO_EVENT_PTR_NULL;
     }
     while (i < LOS_EVENT_MAX) {
         if (g_used[i] == 0u) {
