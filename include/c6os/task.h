@@ -39,6 +39,7 @@ void os_task_yield(void);
 void os_task_delay(u32 ticks);
 void os_sched_tick(void);
 int os_task_delete(u32 id);
+int os_task_join(u32 id, u32 timeout);
 int os_task_block(void *obj, u32 timeout, u8 kind);
 int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg);
 u32 os_task_wait_bits(void);

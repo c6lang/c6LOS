@@ -137,6 +137,18 @@ int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     return g_cur->wait_result;
 }
 
+int os_task_join(u32 id, u32 timeout) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return 0;
+    }
+    if (id == os_task_self()) {
+        return -1;
+    }
+    return os_task_block_arg((void *)t, timeout, 8u, id);
+}
+
 int os_task_block(void *obj, u32 timeout, u8 kind) {
     return os_task_block_arg(obj, timeout, kind, 0);
 }
@@ -213,6 +225,22 @@ void os_task_restore(u32 id) {
     }
 }
 
+static void os_task_wake_join(u32 id) {
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        OsTask *t = &g_tasks[i];
+        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_kind == 8u &&
+            t->wait_arg == id) {
+            t->wait_obj = 0;
+            t->wait_result = 0;
+            t->delay_left = 0;
+            t->state = (u8)OS_TASK_READY;
+        }
+        i++;
+    }
+}
+
 void os_sched_tick(void) {
     u32 i = 0;
 
@@ -286,7 +314,9 @@ void os_task_delay(u32 ticks) {
 
 void os_task_exit(void) {
     if (g_cur != 0) {
+        u32 id = g_cur->id;
         g_cur->state = (u8)OS_TASK_DEAD;
+        os_task_wake_join(id);
     }
     port_task_yield();
 }

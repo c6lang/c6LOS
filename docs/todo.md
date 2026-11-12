@@ -92,7 +92,7 @@
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 进行中（delay + 虚拟 tick host PASS；suspend 未做） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
-| M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 未开始 |
+| M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
 | M1-8 上下文切换 | S3 陷阱帧 a0–a15/pc/ps/sar/lbeg/lend/lcount/f0–f15/fcr/fsr | S3-4：两任务交替打印 1000 次无错 | 进行中（sim ucontext 两任务 PASS；S3 陷阱帧未接） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。

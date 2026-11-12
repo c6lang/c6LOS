@@ -1,0 +1,46 @@
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+static u32 bid = 0;
+
+static void tb(void *arg) {
+    os_task_delay(1);
+    order[n] = 'B';
+    n++;
+}
+
+static void ta(void *arg) {
+    int r = os_task_join(bid, 0);
+    if (r == 0) {
+        order[n] = 'J';
+        n++;
+    }
+}
+
+int main(void) {
+    int aid = 0;
+
+    aid = os_task_create("a", ta, 0, 1, 4096);
+    if (aid <= 0) {
+        return 1;
+    }
+    bid = (u32)os_task_create("b", tb, 0, 2, 4096);
+    if (bid == 0u) {
+        return 2;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (order[0] != 'B' || order[1] != 'J' || order[2] != '\0') {
+        port_puts("FAIL: join ");
+        port_puts(order);
+        port_puts("\n");
+        return 3;
+    }
+    if (os_task_join(bid, 0) != 0) {
+        return 4;
+    }
+    port_puts("PASS: join\n");
+    return 0;
+}
