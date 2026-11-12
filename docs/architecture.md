@@ -69,7 +69,7 @@ ILP32。c6 代码内部自洽（所有偏移由同一个前端计算），危险
 | `long`/`size_t` 跨边界 | **禁止**：c6 里是 64 位，C 侧是 32 位 |
 | 按值结构体跨边界 | **禁止**：布局不同 |
 | `long double` | **禁止**：需要软浮点/compiler-rt |
-| `printf`/`qsort` 等 libc 原型 | **禁止**：`size_t`/`va_list` 不匹配；内核自带 `kprintf` |
+| `printf`/`qsort` 等 libc 原型 | **禁止**：`size_t`/`va_list` 不匹配；`kprintf` 放在 `rt/kprintf.c`（C + va_list），c6 侧只留 `kputc/kputs` |
 
 制度：`tools/lint-ilp32.sh` 扫描 kernel/app/include；`tests/abi32.c6` 在 qemu-riscv32
 上专项验证（指针数组、结构体内的指针、函数指针、回调、`u64` 运算、切片、泛型队列）；
@@ -252,6 +252,8 @@ ISR 禁止：`pend`/`delay`/`delete`/`mem_alloc`/`kprintf`（panic 除外）。
 - S3 默认控制台：**USB-Serial/JTAG**（USB_SERIAL_JTAG FIFO 轮询写，插同一根 USB 线即可）；
   备选 UART0（GPIO43/44，115200）。sim：stdout/管道。
 - `kprintf`：自研最小格式化（`%d %u %x %s %c %p %llu`，宽度/补零），不依赖 f-string，不分配。
+  实现放在 `rt/kprintf.c`：c6 后端的 `va_arg` 在 LLVM IR 路径上实测不可靠（host 输出错位），
+  由 C 侧接收 `va_list` 并回调 c6 的 `kputc/kputs`；目标侧同一份 C 由 xtensa-gcc 编译。
 - 环形日志 4KB，panic 时同步刷出并打印陷阱帧（pc/sp/ps/a0-a15/任务名）。
 - shell 在最低优先级任务里跑，命令表用 `interface ShellCmd`。
 

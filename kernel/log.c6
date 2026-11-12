@@ -1,0 +1,17 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/log.h"
+
+/* 只保留字符/字符串输出；格式化在 rt/kprintf.c（C + va_list），
+ * 因为 c6 后端的 va_arg 在 LLVM IR 路径上不可靠。 */
+
+void kputc(int c) {
+    port_putc(c);
+}
+
+void kputs(const char *s) {
+    while (*s != '\0') {
+        port_putc((int)*s);
+        s++;
+    }
+}

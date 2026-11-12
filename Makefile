@@ -85,8 +85,25 @@ $(HOSTBIN): $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_smoke.ll $(BUILDH)/port_sim.o \
 		-L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN)
+$(BUILDH)/log.ll: kernel/log.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/kprintf.o: rt/kprintf.c
+	@mkdir -p $(BUILDH)
+	gcc -Iinclude -c $< -o $@
+
+$(BUILDH)/t_log.ll: tests/t_log.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_log: $(BUILDH)/t_log.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_log.ll $(BUILDH)/log.ll \
+		$(BUILDH)/kprintf.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
+check-host: $(HOSTBIN) $(BUILDH)/t_log
 	./$(HOSTBIN)
+	./$(BUILDH)/t_log
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"

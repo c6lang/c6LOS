@@ -28,7 +28,7 @@
 | M0-2 `port/s3/memmap.h` | IRAM `0x40370000+448K`、DRAM `0x3FC88000+480K`、栈顶 | S3-2：打印段用量/栈顶/`sizeof(TCB)` | 完成（link.ld + image-info 段地址核对） |
 | M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 进行中（FIFO 写已实现，无输出） |
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（骨架已提交，陷阱帧未实现） |
-| M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 未开始 |
+| M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 进行中（格式化已 host 断言 PASS；环形日志待做） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 未开始 |
 | M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke 已 PASS；rv32/x86 待接） |
 
@@ -52,6 +52,9 @@
   USB 反复重枚举、`/dev/ttyACM0` 消失；需按住 BOOT 再复位进入下载模式后重烧。
 - host 参考机冒烟已通过：`c6 --emit-llvm` → `clang/lld` + `libtcc1` + `port/sim`，
   输出 `c6os host smoke` / `PASS`（`make check-host`）。
+- `kprintf` host 断言 PASS（`%d/%u/%x/%X/%s/%c/%p`、宽度/补零）。c6 的 `va_arg`
+  在 LLVM IR 路径输出错位，故格式化实现移到 `rt/kprintf.c`（C），c6 侧保留
+  `kputc/kputs`；目标侧同一份 C 交 xtensa-gcc。
 
 ---
 
