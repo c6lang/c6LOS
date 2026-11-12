@@ -193,7 +193,7 @@
 | M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 |
-| M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 |
+| M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
 
 **M8 验收**：10 分钟长稳 + 双核 demo + 文档复现。
 
@@ -402,3 +402,7 @@
   `0xC6A50001`，删除/回收清 0，`os_task_get` 同时校验 state+magic；`t_task2`
   删除后 `os_task_get(id)==0`。另修 `check-host` 漏列 7 个测试依赖的问题，
   `make clean` 后 34 项全 PASS；新增 `make check-all = check-host + x86 + rv32`。
+
+- **M8-5 上板文档**：新增 `docs/board-s3.md`，记录本板实测的下载模式、`--before usb-reset`
+  / `--after hard-reset`、115200 raw 串口、VECBASE/PMS/PS.UM、TIMG0 看门狗、陷阱分流，
+  以及“原厂备份丢失、回滚需整片官方固件”的风险。
