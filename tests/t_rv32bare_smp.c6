@@ -7,10 +7,13 @@ extern void port_bare_exit(u32 code);
 static volatile u32 g_a = 0;
 static volatile u32 g_b = 0;
 static volatile u32 g_ready = 0;
+static volatile u32 g_core_a = 0xFFFFFFFFu;
+static volatile u32 g_core_b = 0xFFFFFFFFu;
 
 static void task_a(void *arg) {
     u32 i = 0;
     (void)arg;
+    g_core_a = port_core_id();
     while (i < 2000u) {
         g_a = g_a + 1u;
         i++;
@@ -21,6 +24,10 @@ static void task_a(void *arg) {
 static void task_b(void *arg) {
     u32 i = 0;
     (void)arg;
+    /* 创建在核 0，运行后迁移到核 1，验证动态绑核。 */
+    (void)os_task_set_core(os_task_self(), 1u);
+    os_task_yield();
+    g_core_b = port_core_id();
     while (i < 2000u) {
         g_b = g_b + 1u;
         i++;
@@ -33,7 +40,7 @@ void os_main(void) {
 
     if (me == 0u) {
         (void)os_task_create_on(0u, "a", task_a, 0, 1u, 2048u);
-        (void)os_task_create_on(1u, "b", task_b, 0, 1u, 2048u);
+        (void)os_task_create_on(0u, "b", task_b, 0, 1u, 2048u);
         g_ready = 1u;
     } else {
         while (g_ready == 0u) {
@@ -47,8 +54,8 @@ void os_main(void) {
             port_puts("FAIL: smp task a\n");
             port_bare_exit(1u);
         }
-        if (g_b == 2000u) {
-            port_puts("PASS: smp task b\n");
+        if (g_b == 2000u && g_core_a == 0u && g_core_b == 1u) {
+            port_puts("PASS: smp task b (migrated to core 1)\n");
             port_bare_exit(0u);
         }
         port_puts("FAIL: smp task b\n");

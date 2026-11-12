@@ -145,6 +145,19 @@ u32 os_task_core(u32 id) {
     return (u32)t->core;
 }
 
+int os_task_set_core(u32 id, u32 core) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0 || core >= (u32)C6OS_MAX_CORES) {
+        return -1;
+    }
+    if (t->state == (u8)OS_TASK_DEAD || t->state == (u8)OS_TASK_FREE) {
+        return -1;
+    }
+    t->core = (u8)core;
+    return 0;
+}
+
 int os_task_delete(u32 id) {
     OsTask *t = os_task_get(id);
 
