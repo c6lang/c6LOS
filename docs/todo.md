@@ -523,3 +523,7 @@
 
 - **M7-3 帧缓冲→QSPI**：`s3_lcd_blit(fb,w,h)` 设窗口后用 `0x32` 逐像素发
   RGB565；`t_s3_lcd` 先填色再 blit 8×8 红块，等电池/上电后看屏验证。
+
+- **S3 IRQ 嵌套用例（待上电）**：`t_s3_irqnest` 任务里 `port_irq_save()` 后忙等
+  5000 万次（>1s），要求 tick 冻结；`port_irq_restore()` 后 `os_task_delay(2)`
+  要求 tick 恢复前进。镜像 build/s3in 已构建。

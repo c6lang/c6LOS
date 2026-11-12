@@ -1,0 +1,39 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+static u32 g_ok = 0;
+
+static void worker(void *arg) {
+    u32 t0 = (u32)os_tick_get();
+    u32 t1 = 0;
+    u32 t2 = 0;
+    u32 s = 0;
+    u32 i = 0;
+
+    s = port_irq_save();
+    while (i < 50000000u) { i++; }
+    t1 = (u32)os_tick_get();
+    port_irq_restore(s);
+    os_task_delay(2u);
+    t2 = (u32)os_tick_get();
+    if (t1 == t0 && t2 > t1) {
+        g_ok = 1u;
+    }
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 irq nest\n");
+    if (os_task_create("w", worker, 0, 1u, 4096u) <= 0) {
+        port_puts("FAIL: create\n");
+        return;
+    }
+    os_task_start();
+    if (g_ok == 1u) {
+        port_puts("PASS: s3 irq nest\n");
+    } else {
+        port_puts("FAIL: s3 irq nest\n");
+    }
+}
