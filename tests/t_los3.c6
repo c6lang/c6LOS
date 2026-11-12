@@ -1,0 +1,58 @@
+#include "los/los_task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+static UINT32 g_a;
+
+static VOID ta(VOID *arg) {
+    order[n] = 'A';
+    n++;
+    LOS_TaskSuspend(LOS_TaskIDGet());
+    order[n] = 'a';
+    n++;
+    LOS_TaskDelay(2u);
+    order[n] = 'd';
+    n++;
+}
+
+static VOID tb(VOID *arg) {
+    order[n] = 'B';
+    n++;
+    LOS_TaskResume(g_a);
+    LOS_TaskYield();
+}
+
+int main(void) {
+    UINT32 a = 0;
+    UINT32 b = 0;
+    TSK_INIT_PARAM_S pa = {0};
+    TSK_INIT_PARAM_S pb = {0};
+
+    pa.pfnTaskEntry = ta;
+    pa.pArgs = 0;
+    pa.usTaskPrio = 1u;
+    pa.uwStackSize = 8192u;
+    pa.pcName = "a";
+    pb.pfnTaskEntry = tb;
+    pb.pArgs = 0;
+    pb.usTaskPrio = 2u;
+    pb.uwStackSize = 8192u;
+    pb.pcName = "b";
+
+    if (LOS_TaskCreate(&a, &pa) != 0u || LOS_TaskCreate(&b, &pb) != 0u) {
+        port_puts("FAIL: los create\n");
+        return 1;
+    }
+    g_a = a;
+    os_task_start();
+    order[n] = '\0';
+    if (order[0] != 'A' || order[1] != 'B' || order[2] != 'a' || order[3] != 'd') {
+        port_puts("FAIL: los order ");
+        port_puts(order);
+        port_puts("\n");
+        return 2;
+    }
+    port_puts("PASS: LOS_Task\n");
+    return 0;
+}

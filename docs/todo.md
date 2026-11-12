@@ -146,7 +146,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M5-1 `include/los/*.h` | 类型/宏/原型与 LiteOS-M 对齐 | 用 LiteOS 示例头可编译 |
-| M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 |
+| M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 | 进行中（Task 新增：Create/Delay/Suspend/Resume/Delete/Yield `t_los3` PASS；Sem/Mux/Event/Queue 已 PASS；Membox/Mem/Swtmr 待做） |
 | M5-3 错误码映射 | `OS_*` → `LOS_*` | 映射表 100% 覆盖 |
 | M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 |
 
