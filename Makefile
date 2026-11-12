@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick rv32 run-rv32
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick rv32 run-rv32 rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -553,6 +553,73 @@ $(RV32)/console.o: port/rv32/console.c
 	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
 
 $(RV32)/hello: $(RV32)/start.o $(RV32)/console.o $(RV32)/hello.o
+	clang $(RV32CFLAGS) -fuse-ld=lld -static -o $@ $^
+
+
+RV32S_DIR  ?= $(RV32)/sched
+RV32S_C6   ?= tests/t_rv32_sched.c6 kernel/task.c6 kernel/tick.c6 \
+              kernel/timer.c6 kernel/log.c6 kernel/panic.c6
+RV32S_LL   := $(addprefix $(RV32S_DIR)/ir/,$(notdir $(RV32S_C6:.c6=.ll)))
+RV32S_OBJ  := $(addprefix $(RV32S_DIR)/obj/,$(notdir $(RV32S_C6:.c6=.o))) \
+              $(RV32S_DIR)/obj/start.o $(RV32S_DIR)/obj/console.o \
+              $(RV32S_DIR)/obj/ctx.o $(RV32S_DIR)/obj/ctx_asm.o \
+              $(RV32S_DIR)/obj/kprintf.o $(RV32S_DIR)/obj/libc.o
+
+rv32-sched: $(RV32S_DIR)/sched
+
+rv32-tick:
+	$(MAKE) RV32S_DIR=$(RV32)/tick \
+		RV32S_C6="tests/t_rv32_tick.c6 kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/log.c6 kernel/panic.c6" \
+		$(RV32)/tick/sched
+
+run-rv32-tick: rv32-tick
+	qemu-riscv32 $(RV32)/tick/sched
+
+run-rv32-sched: rv32-sched
+	qemu-riscv32 $(RV32S_DIR)/sched
+
+$(RV32S_DIR)/ir/stamp: $(RV32S_C6)
+	@mkdir -p $(RV32S_DIR)/ir
+	for f in $^; do \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $(RV32S_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
+		sed -e 's|^target datalayout = .*|target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"|' \
+		    -e 's|^target triple = .*|target triple = "riscv32-unknown-linux-gnu"|' \
+		    $(RV32S_DIR)/ir/$$(basename $$f .c6).raw.ll > $(RV32S_DIR)/ir/$$(basename $$f .c6).ll || exit 1; \
+	done
+	@touch $@
+
+$(RV32S_DIR)/ir/%.ll: $(RV32S_DIR)/ir/stamp
+	@test -f $@
+
+$(RV32S_DIR)/obj/%.o: $(RV32S_DIR)/ir/%.ll $(RV32S_DIR)/ir/stamp
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32S_DIR)/obj/start.o: port/rv32/start.S
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32S_DIR)/obj/console.o: port/rv32/console.c
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32S_DIR)/obj/ctx.o: port/rv32/ctx.c
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32S_DIR)/obj/ctx_asm.o: port/rv32/ctx.S
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32S_DIR)/obj/kprintf.o: rt/kprintf.c
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -Iinclude -Irt -c -o $@ $<
+
+$(RV32S_DIR)/obj/libc.o: rt/x86_libc.c
+	@mkdir -p $(RV32S_DIR)/obj
+	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32S_DIR)/sched: $(RV32S_OBJ)
 	clang $(RV32CFLAGS) -fuse-ld=lld -static -o $@ $^
 
 

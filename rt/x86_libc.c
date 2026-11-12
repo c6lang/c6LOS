@@ -40,3 +40,40 @@ void *memset(void *dst, int c, unsigned long n)
     }
     return dst;
 }
+
+/* 32 位目标没有 __udivdi3/__umoddi3，内核 tick 换算会引用。 */
+unsigned long long __udivdi3(unsigned long long a, unsigned long long b)
+{
+    unsigned long long q = 0;
+    unsigned long long r = 0;
+    int i;
+
+    if (b == 0ull) {
+        return 0ull;
+    }
+    for (i = 63; i >= 0; i--) {
+        r = (r << 1) | ((a >> i) & 1ull);
+        if (r >= b) {
+            r -= b;
+            q |= (1ull << i);
+        }
+    }
+    return q;
+}
+
+unsigned long long __umoddi3(unsigned long long a, unsigned long long b)
+{
+    unsigned long long r = 0;
+    int i;
+
+    if (b == 0ull) {
+        return 0ull;
+    }
+    for (i = 63; i >= 0; i--) {
+        r = (r << 1) | ((a >> i) & 1ull);
+        if (r >= b) {
+            r -= b;
+        }
+    }
+    return r;
+}

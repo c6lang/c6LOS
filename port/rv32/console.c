@@ -41,8 +41,26 @@ void port_puts(const char *s)
     }
 }
 
+extern void os_sched_tick(void);
+
+static u32 g_last_time;
+
+static u32 rdtime32(void)
+{
+    u32 v;
+
+    __asm__ __volatile__("csrr %0, time" : "=r"(v));
+    return v;
+}
+
 void port_idle(void)
 {
+    u32 now = rdtime32();
+
+    if ((u32)(now - g_last_time) >= 1000000u) {
+        g_last_time = now;
+        os_sched_tick();
+    }
 }
 
 void port_panic_halt(void)
