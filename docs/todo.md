@@ -542,3 +542,7 @@
   的真陷阱路径，不是协作 tick。
 - **risc6 用户态回归**：现有 `rv32 hello/sched/tick` 全部在 risc6 上跑通：
   hello 1776 条 / sched 36318 条 / tick 1,876,629 条指令，输出与 qemu-riscv32 一致。
+
+- **risc6 回归入口**：新增 `make check-sim`，依次跑 rv32 user 的 hello/sched
+  和 bare MTIP tick；当前输出 hello `insns=1776`、sched `36318`、bare tick
+  `263076`，均 rc=0。risc6 不支持多核，所以 M8-2 双核仍只能上板。
