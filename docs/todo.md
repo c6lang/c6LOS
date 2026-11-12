@@ -104,7 +104,7 @@
 | 任务 | 细节 | 验收 | 状态 |
 |---|---|---|---|
 | M2-1 tick 计数/换算 | `u64` tick、ms↔tick 向上取整 | 边界（0/1/1000ms）正确 | 完成（计数/换算 host PASS；`ms→tick` 已改向上取整，0/1/101ms 边界断言通过） |
-| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 未开始（当前线性扫描） |
+| M2-2 超时队列 | 按 deadline 有序插入/摘除 | 乱序插入 100 个，出队有序 | 完成（`kernel/timeout.c6` 有序数组 + u32 回绕比较；`t_timeout` 乱序 100 个、取消、到期弹出 PASS） |
 | M2-3 软定时器 | 一次/周期、启动/停止/删除 | 周期计数误差 ≤1 tick/100 次 | 完成（一次/周期/启停 host PASS；S3 实测一次 100 tick 于第 100 tick 命中） |
 | M2-4 抖动测量 | `CCOUNT` 记录 ISR 进出 | 打印 min/max/P99 | 未开始 |
 | M2-5 虚拟时钟 | host/sim `os_test_tick(n)` | L1 无 wall-clock 依赖 | 完成（`port_virtual_tick` + `os_sched_tick` 虚拟推进） |
@@ -302,3 +302,8 @@
   `ca≈1.18M cb≈1.19M` / `PASS: x86 preempt`。
   两个关键坑：抢占路径不回 `iret`，必须在切回调度器后 `sti`；切换前把
   `g_in_task` 清零，避免在调度器栈上再次抢占写坏任务上下文。
+
+- **M2-2 有序超时队列（2026-11）**：`os_timeout_add/cancel/pop_expired` 用绝对
+  deadline 有序插入（`(i32)(a-b)` 处理 u32 回绕）；`os_sched_tick` 只弹到期项，
+  不再线性递减 `delay_left`。阻塞/延时/唤醒/删除都同步取消，减少 M3-5 的双归属窗口。
+  host `t_timeout`：100 个乱序插入后 deadline 单调、取消中间项、到期全弹出 PASS。
