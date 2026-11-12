@@ -1,0 +1,17 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern u32 s3_gpio_loop_sel(u32 p, u32 sel);
+static void put(u32 v) { port_putc((int)('0' + (v % 10u))); }
+
+void os_main(void) {
+    u32 p = 42u;
+    u32 s = 0;
+
+    port_init();
+    port_puts("mux scan\n");
+    while (s < 8u) {
+        port_puts("s="); put(s); port_puts(" v="); put(s3_gpio_loop_sel(p, s)); port_puts("\n");
+        s++;
+    }
+}

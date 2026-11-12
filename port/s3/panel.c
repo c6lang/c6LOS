@@ -1,6 +1,7 @@
 /* Waveshare ESP32-S3-LCD-1.85 QSPI 探针（bit-bang，单线读 ID）。
  * PCLK=40 CS=21 D0=46 D1=45 D2=42 D3=41。 */
 #include "c6os/types.h"
+#include "c6os/port.h"
 
 #define GPIO_BASE 0x60004000u
 #define GPIO_OUT_W1TS (GPIO_BASE + 0x08u)
@@ -159,6 +160,42 @@ static void delay_loop(u32 n)
 {
     volatile u32 i = 0;
     while (i < n) { i++; }
+}
+
+u32 s3_gpio_loop(u32 p);
+
+u32 s3_gpio_loop_sel(u32 p, u32 sel)
+{
+    volatile u32 *mux = (volatile u32 *)(0x60009000u + p * 4u);
+    u32 v = *mux;
+
+    v = (v & ~(7u << 12)) | ((sel & 7u) << 12);
+    v = (v | (1u << 9)) & ~(1u << 7);
+    *mux = v;
+    return s3_gpio_loop(p);
+}
+
+u32 s3_gpio_loop(u32 p)
+{
+    u32 hi = 0;
+    u32 lo = 1;
+
+    pin_out(p);
+    pin_hi(p);
+    rd_delay();
+    if (p < 32u) {
+        hi = (*(volatile u32 *)GPIO_BASE >> p) & 1u;
+    } else {
+        hi = (*(volatile u32 *)GPIO_IN1 >> (p - 32u)) & 1u;
+    }
+    pin_lo(p);
+    rd_delay();
+    if (p < 32u) {
+        lo = (*(volatile u32 *)GPIO_BASE >> p) & 1u;
+    } else {
+        lo = (*(volatile u32 *)GPIO_IN1 >> (p - 32u)) & 1u;
+    }
+    return (hi << 1) | lo;
 }
 
 void s3_backlight_test(void)

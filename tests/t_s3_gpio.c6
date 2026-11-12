@@ -1,0 +1,22 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern u32 s3_gpio_loop(u32 p);
+
+static void put(u32 v) { port_putc((int)('0' + (v % 10u))); }
+
+void os_main(void) {
+    u32 pins[8] = {46u, 45u, 42u, 41u, 40u, 21u, 10u, 11u};
+    int i = 0;
+
+    port_init();
+    port_puts("gpio loop\n");
+    while (i < 8) {
+        port_puts("p=");
+        put(pins[i] / 10u); put(pins[i] % 10u);
+        port_puts(" v=");
+        put(s3_gpio_loop(pins[i]));
+        port_puts("\n");
+        i++;
+    }
+}
