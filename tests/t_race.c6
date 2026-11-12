@@ -3,7 +3,7 @@
 #include "c6os/tick.h"
 #include "c6os/port.h"
 
-#define RACE_N 10000u
+#define RACE_N 100000u
 
 static OsSem g_sem;
 static u32 g_ok = 0;
