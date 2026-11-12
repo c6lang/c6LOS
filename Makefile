@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
-           $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o
+           $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o $(BUILD)/obj/core1.o
 
 .PHONY: all s3 s3-src-check check-all s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
@@ -65,6 +65,10 @@ $(BUILD)/obj/c6rt.o: rt/c6rt.c
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
 $(BUILD)/obj/ctx.o: port/s3/ctx.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/core1.o: port/s3/core1.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
