@@ -4,6 +4,8 @@
 
 extern int s3_core1_start(void);
 extern u32 s3_core1_count(void);
+extern int s3_core1_send(u32 cmd);
+extern u32 s3_core1_ack(void);
 
 static u32 g_core0 = 0;
 
@@ -19,6 +21,16 @@ void os_main(void) {
     port_init();
     port_puts("c6os two-core test\n");
     s3_core1_start();
+    {
+        u32 k = 1;
+        while (k <= 100u) {
+            if (s3_core1_send(k) != 0) {
+                port_puts("FAIL: ipi\n");
+                return;
+            }
+            k++;
+        }
+    }
     if (os_task_create("w", worker, 0, 1u, 4096u) <= 0) {
         port_puts("FAIL: create\n");
         return;
@@ -44,7 +56,7 @@ void os_main(void) {
         while (i > 0) { i--; port_putc((int)b[i]); }
     }
     port_puts("\n");
-    if (g_core0 != 0u && s3_core1_count() != 0u) {
+    if (g_core0 != 0u && s3_core1_count() != 0u && s3_core1_ack() == 100u) {
         port_puts("PASS: two-core\n");
     } else {
         port_puts("FAIL: two-core\n");

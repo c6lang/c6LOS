@@ -190,7 +190,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 完成（host `t_stress` 10^6 次 6.9s；S3 `t_s3_stress` 25000 轮创建/延时/回收，00:20:11→00:29:59 约 9m48s，`PASS: s3 stress`，无 panic） |
-| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。每核就绪队列/IPI/负载均衡未做） |
+| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。core1 侧已加命令/应答邮箱（`s3_core1_send/ack`），`t_s3_twocore` 连发 100 条命令并同时跑 core0 任务；镜像 build/s3tc 已构建，等上电验证。每核就绪队列/负载均衡未做） |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 | 跳过（可选；内核核心不使用浮点，S3 启动未使能 FPU） |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 | 跳过（可选；屏驱动未点亮，帧缓冲仍在内部 RAM） |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
@@ -513,3 +513,7 @@
 
 - **M7-4 任务表/日志行**：`os_dash_task_row(g,y,id,prio,state,name)` 画
   id/prio/状态/名字，`os_dash_log` 画灰色日志行；`t_dash` 追加两行渲染断言。
+
+- **M8-2 core1 邮箱（待上电）**：core1 循环里比较 `g_core1_cmd/ack`，core0
+  `s3_core1_send()` 自旋等应答；`t_s3_twocore` 发 100 条命令，同时 core0
+  20 万次任务循环，要求 `ack==100` 且两核计数非 0。

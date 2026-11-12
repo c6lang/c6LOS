@@ -9,6 +9,8 @@
 
 static u8 g_core1_stack[4096] __attribute__((aligned(16)));
 static volatile u32 g_core1_count;
+static volatile u32 g_core1_cmd;
+static volatile u32 g_core1_ack;
 
 static void core1_entry(void)
 {
@@ -17,6 +19,9 @@ static void core1_entry(void)
     __asm__ __volatile__("wsr %0, vecbase; isync" : : "r"(&_vecbase));
     while (1) {
         g_core1_count++;
+        if (g_core1_cmd != g_core1_ack) {
+            g_core1_ack = g_core1_cmd;
+        }
     }
 }
 
@@ -40,6 +45,25 @@ int s3_core1_start(void)
     SYS_CORE1_CTRL0 = v;
     __asm__ __volatile__("memw");
     return 0;
+}
+
+int s3_core1_send(u32 cmd)
+{
+    u32 guard = 0;
+
+    g_core1_cmd = cmd;
+    while (g_core1_ack != cmd) {
+        guard++;
+        if (guard > 2000000u) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+u32 s3_core1_ack(void)
+{
+    return g_core1_ack;
 }
 
 u32 s3_core1_count(void)
