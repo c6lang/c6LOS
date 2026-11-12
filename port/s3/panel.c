@@ -16,6 +16,7 @@
 #define PIN_CS 21u
 #define PIN_CLK 40u
 #define PIN_D0 46u
+#define PIN_D1 45u
 #define PIN_SCL 10u
 #define PIN_SDA 11u
 
@@ -83,7 +84,7 @@ static u8 rx_byte(void)
     while (i >= 0) {
         pin_hi(PIN_CLK);
         rd_delay();
-        v = (u8)((v << 1) | (u8)((*(volatile u32 *)GPIO_IN1 >> (PIN_D0 - 32u)) & 1u));
+        v = (u8)((v << 1) | (u8)((*(volatile u32 *)GPIO_IN1 >> (PIN_D1 - 32u)) & 1u));
         rd_delay();
         pin_lo(PIN_CLK);
         i--;
@@ -154,6 +155,12 @@ static void tca_write(u8 reg, u8 val)
     i2c_stop();
 }
 
+static void delay_loop(u32 n)
+{
+    volatile u32 i = 0;
+    while (i < n) { i++; }
+}
+
 static void panel_reset(void)
 {
     pin_out(PIN_SCL);
@@ -162,16 +169,16 @@ static void panel_reset(void)
     pin_pullup(PIN_SDA);
     tca_write(0x03u, 0xFBu);   /* EXIO2 输出 */
     tca_write(0x01u, 0x00u);
-    port_delay_ms(300u);
+    delay_loop(2000000u);
     tca_write(0x01u, 0x04u);
-    port_delay_ms(300u);
+    delay_loop(2000000u);
 }
 
 void s3_panel_probe(u8 out[3])
 {
     int i = 0;
 
-    panel_reset();
+    /* panel_reset();  TODO: TCA9554 复位路径会卡住，先不调用 */
     pin_out(PIN_CS);
     pin_out(PIN_CLK);
     pin_hi(PIN_CS);
@@ -192,7 +199,8 @@ void s3_panel_probe(u8 out[3])
     tx_byte(0x00u);
     tx_byte(0x00u);
 
-    pin_in(PIN_D0);
+    pin_in(PIN_D1);
+    pin_pullup(PIN_D1);
     while (i < 3) {
         out[i] = rx_byte();
         i++;

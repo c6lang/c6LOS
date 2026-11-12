@@ -177,7 +177,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已加 GPIO10/11/D0 内部上拉），待确认面板复位/引脚或改 4-line 命令） |
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已改读 D1/IO1 并加上拉，仍 0；TCA9554 复位路径会卡住，暂不调用。下一步确认板型/复位） |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 用帧缓冲绘制 tick/任务数/堆用量的彩色数字行，`t_dash` host PASS；任务表/日志滚动与真实屏刷新待做） |
 
