@@ -176,6 +176,15 @@ void port_init(void)
     s3_irq_init();
 }
 
+void port_reboot(void)
+{
+    /* RTC_CNTL_OPTIONS0.SW_SYS_RST */
+    *(volatile u32 *)(0x60008000u) |= (1u << 31);
+    for (;;) {
+        __asm__ __volatile__("waiti 0");
+    }
+}
+
 void port_panic_halt(void)
 {
     for (;;) {

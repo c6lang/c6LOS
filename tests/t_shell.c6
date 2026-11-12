@@ -47,6 +47,7 @@ int main(void) {
     (void)os_shell_exec("ps");
     (void)os_shell_exec("free");
     (void)os_shell_exec("help");
+    (void)os_shell_exec("date");
     (void)os_shell_exec("bogus");
     {
         u8 enc[32] = {0};
@@ -56,7 +57,7 @@ int main(void) {
     }
     out = port_sim_capture_end();
     if (has(out, "tick=") == 0 || has(out, "worker") == 0 ||
-        has(out, "used=") == 0 || has(out, "help tick") == 0 ||
+        has(out, "used=") == 0 || has(out, "help tick") == 0 || has(out, "uptime_ms=") == 0 ||
         has(out, "unknown: bogus") == 0) {
         port_puts("FAIL: shell output\n");
         return 2;

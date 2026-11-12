@@ -76,6 +76,13 @@ void port_idle(void)
     __asm__ __volatile__("hlt");
 }
 
+void port_reboot(void)
+{
+    for (;;) {
+        __asm__ __volatile__("cli; hlt");
+    }
+}
+
 void port_panic_halt(void)
 {
     __asm__ __volatile__("cli");

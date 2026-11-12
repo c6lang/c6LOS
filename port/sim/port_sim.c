@@ -34,6 +34,10 @@ void port_init(void)
 {
 }
 
+void port_reboot(void)
+{
+}
+
 static u32 g_irq_nest;
 
 u32 port_irq_save(void)

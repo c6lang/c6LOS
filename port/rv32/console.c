@@ -68,6 +68,12 @@ void port_idle(void)
     }
 }
 
+void port_reboot(void)
+{
+    for (;;) {
+    }
+}
+
 void port_panic_halt(void)
 {
     sys_exit(1);

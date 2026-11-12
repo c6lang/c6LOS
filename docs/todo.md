@@ -176,7 +176,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`，date/reboot 待做） |
+| M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 进行中（`rt/shell.c` 行解析 + help/tick/ps/free/log/date/reboot + `rt/cobs.c` 编解码，host 捕获断言 PASS；S3 USB-Serial/JTAG 的 OUT 端点读数已接 `port_getc()` 但主机写入尚未触发 `SERIAL_OUT_EP_DATA_AVAIL`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 |
@@ -388,3 +388,7 @@
   默认 S3 构建加入 `rt/shell.c`、`rt/cobs.c`、`kernel/heap.c6`，`t_s3_shell`
   可构建并输出 banner；但主机 `os.write("help\r")` 后设备侧未观察到 OUT 数据，
   `t_s3_irq` 仍 PASS，说明中断/调度未被破坏。下一步查 CDC OUT 端点使能时序。
+
+- **M7-1 命令补齐（host PASS）**：新增 `date`（tick→ms uptime）与 `reboot`
+  （`port_reboot()`，S3 置 `RTC_CNTL_OPTIONS0.SW_SYS_RST`，host no-op）。
+  `t_shell` 断言 `uptime_ms=`，命令表覆盖 help/tick/ps/free/log/date/reboot。

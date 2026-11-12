@@ -49,7 +49,7 @@ static void cmd_help(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    port_puts("help tick ps free log\n");
+    port_puts("help tick ps free log date reboot\n");
 }
 
 static void cmd_tick(int argc, char **argv)
@@ -122,6 +122,23 @@ static void cmd_free(int argc, char **argv)
     port_puts("\n");
 }
 
+static void cmd_date(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    port_puts("uptime_ms=");
+    out_u32((u32)os_ticks_to_ms(os_tick_get()));
+    port_puts("\n");
+}
+
+static void cmd_reboot(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    port_puts("reboot\n");
+    port_reboot();
+}
+
 static void cmd_log(int argc, char **argv)
 {
     (void)argc;
@@ -140,6 +157,8 @@ static const ShellCmd g_cmds[] = {
     {"ps", cmd_ps},
     {"free", cmd_free},
     {"log", cmd_log},
+    {"date", cmd_date},
+    {"reboot", cmd_reboot},
 };
 
 static int split(char *s, char *argv[], int max)
