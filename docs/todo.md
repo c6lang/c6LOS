@@ -63,6 +63,8 @@
   每次切换检查栈底 `0xC6C0DEAD`，损坏走 `os_panic("task stack overflow")`。
 - M3-1/M3-2 host PASS：信号量阻塞/唤醒（顺序 `BA`）、超时返回 `-2`（`T`）、
   互斥量递归与所有权移交（顺序 `AaB`）。
+- M3-4 host PASS：事件 ANY 掩码 `0x2` 唤醒、ALL 掩码 `0x3` 两位置齐才唤醒、
+  `os_event_clear` 后 `os_event_get` 只剩另一位。
 - panic/环形日志 host 测试 PASS：`os_panic("boom")` 打印 `*** PANIC: boom ***`，
   回放 4KB 环里的 `boot ok`，再进 `--- halt ---`（sim 的 `port_panic_halt` 返回）。
 
@@ -106,7 +108,7 @@
 | M3-1 信号量 | 计数、FIFO、超时、ISR post | 3 等待者按优先级唤醒 | 进行中（pend/post/超时 host PASS；多等待者优先级唤醒待测） |
 | M3-2 互斥量 | 递归、所有权移交、ISR 禁 pend | 递归 3 层解锁正确 | 进行中（递归 + 所有权移交 host PASS；ISR 禁 pend 待接） |
 | M3-3 优先级继承 | `max(base, 等待者)`、链式重算 | 3 任务传递链反转对照通过 | 未开始 |
-| M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 未开始 |
+| M3-4 事件 | 32 位、AND/OR、清除、读后清 | 4 组组合断言 | 完成（ANY/ALL/clear，host 断言 PASS；读后清待加） |
 | M3-5 等待节点双归属 | 对象 pend 链 + 超时队列原子摘除 | post/超时/删除三方竞争 10^5 次无双重入队 | 进行中（单等待节点 + 超时扫描已接；双归属链/竞争压测待做） |
 
 **M3 验收**：反转对照组（无 PI vs 有 PI）延迟差 ≥5×；超时路径无泄漏。

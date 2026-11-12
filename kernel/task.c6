@@ -120,17 +120,55 @@ int os_task_delete(u32 id) {
     return 0;
 }
 
-int os_task_block(void *obj, u32 timeout, u8 kind) {
+int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg) {
     if (g_cur == 0) {
         return -1;
     }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
+    g_cur->wait_arg = arg;
+    g_cur->wait_bits = 0;
     g_cur->wait_result = 0;
     g_cur->delay_left = timeout;
     g_cur->state = (u8)OS_TASK_BLOCKED;
     port_task_yield();
     return g_cur->wait_result;
+}
+
+int os_task_block(void *obj, u32 timeout, u8 kind) {
+    return os_task_block_arg(obj, timeout, kind, 0);
+}
+
+u32 os_task_wait_bits(void) {
+    if (g_cur == 0) {
+        return 0;
+    }
+    return g_cur->wait_bits;
+}
+
+int os_task_wake_event(void *obj, u32 bits) {
+    u32 i = 0;
+    int woke = 0;
+
+    while (i < (u32)C6OS_MAX_TASKS) {
+        OsTask *t = &g_tasks[i];
+        if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
+            (t->wait_kind == 4u || t->wait_kind == 5u)) {
+            u32 m = t->wait_arg;
+            int all = (t->wait_kind == 5u);
+            int hit = all ? ((bits & m) == m) : ((bits & m) != 0u);
+            if (hit) {
+                t->wait_bits = bits & m;
+                t->wait_obj = 0;
+                t->wait_result = 0;
+                t->delay_left = 0;
+                t->state = (u8)OS_TASK_READY;
+                woke++;
+            }
+        }
+        i++;
+    }
+    return woke;
 }
 
 int os_task_wake_first(void *obj, u8 kind, int result) {
