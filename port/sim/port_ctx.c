@@ -10,6 +10,7 @@ extern void os_task_exit(void);
 
 typedef struct {
     ucontext_t uc;
+    void *raw;
     void *stack;
     u32 stack_size;
     void (*entry)(void *);
@@ -31,11 +32,13 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
 {
     SimCtx *c = (SimCtx *)calloc(1, sizeof(*c));
     u32 sz = (stack_size < 4096u) ? 4096u : stack_size;
+    u32 alloc = sz + 65536u;   /* 溢出测试留安全垫，避免踩坏宿主堆 */
 
     if (c == 0) {
         return 0;
     }
-    c->stack = malloc(sz);
+    c->raw = malloc(alloc);
+    c->stack = (u8 *)c->raw + 65536u;
     if (c->stack == 0) {
         free(c);
         return 0;
@@ -44,7 +47,7 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     c->entry = entry;
     c->arg = arg;
     if (getcontext(&c->uc) != 0) {
-        free(c->stack);
+        free(c->raw);
         free(c);
         return 0;
     }
@@ -65,7 +68,7 @@ void port_task_ctx_free(void *ctx)
     if (c == 0) {
         return;
     }
-    free(c->stack);
+    free(c->raw);
     free(c);
 }
 

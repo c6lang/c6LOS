@@ -1,0 +1,38 @@
+#include "c6os/task.h"
+#include "c6os/panic.h"
+#include "c6os/port.h"
+
+static u32 g_gone = 0;
+
+static u32 smash(u32 depth) {
+    u8 buf[64] = {0};
+    u32 i = 0;
+
+    while (i < 64u) {
+        buf[i] = (u8)(depth + i);
+        i++;
+    }
+    if (depth == 0u) {
+        return buf[0];
+    }
+    return smash(depth - 1u) + buf[63];
+}
+
+static void deep(void *arg) {
+    (void)smash(180u);
+    os_task_yield();
+    g_gone = 1u;
+}
+
+int main(void) {
+    if (os_task_create("deep", deep, 0, 1u, 8192u) <= 0) {
+        return 1;
+    }
+    os_task_start();
+    if (os_panic_count() == 0u) {
+        port_puts("FAIL: no stack panic\n");
+        return 2;
+    }
+    port_puts("PASS: stack sentinel\n");
+    return 0;
+}

@@ -91,7 +91,7 @@
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
 | M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 完成（x86 裸机 PIT 100Hz 抢占：`ca≈cb≈1.18M` / `PASS: x86 preempt`；协作 sim 仍按 yield 轮转） |
-| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
+| M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 完成（`t_overflow` 深递归覆盖哨兵，输出 `*** PANIC: task stack overflow ***` 后 `PASS`；sim 栈前留 64KB 安全垫） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
 | M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；x86-64 已接完整陷阱帧抢占 `PASS: x86 preempt`；S3 抢占待接） |
 
