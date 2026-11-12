@@ -20,7 +20,7 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
-.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick
+.PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick rv32 run-rv32
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -520,6 +520,40 @@ $(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin
 	dd if=/dev/zero of=$@ bs=1M count=1 status=none
 	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
 	dd if=$(X86S_DIR)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+
+
+# ---- rv32 参考目标（c6 -> LLVM IR，qemu-riscv32 user-mode） ----
+RV32        := build/rv32
+RV32CFLAGS  := --target=riscv32-unknown-linux-gnu -march=rv32imac -mabi=ilp32 \
+               -nostdlib -ffreestanding
+RV32_MAIN   ?= tests/t_rv32_hello.c6
+
+rv32: $(RV32)/hello
+
+run-rv32: rv32
+	qemu-riscv32 $(RV32)/hello
+
+$(RV32)/hello_x86.ll: $(RV32_MAIN)
+	@mkdir -p $(RV32)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(RV32)/hello.ll: $(RV32)/hello_x86.ll
+	sed -e 's|^target datalayout = .*|target datalayout = "e-m:e-p:32:32-i64:64-n32-S128"|' \
+	    -e 's|^target triple = .*|target triple = "riscv32-unknown-linux-gnu"|' $< > $@
+
+$(RV32)/hello.o: $(RV32)/hello.ll
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32)/start.o: port/rv32/start.S
+	@mkdir -p $(RV32)
+	clang $(RV32CFLAGS) -c -o $@ $<
+
+$(RV32)/console.o: port/rv32/console.c
+	@mkdir -p $(RV32)
+	clang $(RV32CFLAGS) -Iinclude -c -o $@ $<
+
+$(RV32)/hello: $(RV32)/start.o $(RV32)/console.o $(RV32)/hello.o
+	clang $(RV32CFLAGS) -fuse-ld=lld -static -o $@ $^
 
 
 clean:

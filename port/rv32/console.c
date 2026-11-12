@@ -1,0 +1,66 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+static long sys_write(long fd, const void *buf, unsigned long n)
+{
+    register long a0 __asm__("a0") = fd;
+    register long a1 __asm__("a1") = (long)buf;
+    register long a2 __asm__("a2") = (long)n;
+    register long a7 __asm__("a7") = 64;
+
+    __asm__ __volatile__("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a7) : "memory");
+    return a0;
+}
+
+static void sys_exit(long code)
+{
+    register long a0 __asm__("a0") = code;
+    register long a7 __asm__("a7") = 93;
+
+    __asm__ __volatile__("ecall" : : "r"(a0), "r"(a7) : "memory");
+    for (;;) {
+    }
+}
+
+void port_init(void)
+{
+}
+
+void port_putc(int ch)
+{
+    char c = (char)ch;
+
+    (void)sys_write(1, &c, 1);
+}
+
+void port_puts(const char *s)
+{
+    while (*s != '\0') {
+        port_putc((int)*s);
+        s++;
+    }
+}
+
+void port_idle(void)
+{
+}
+
+void port_panic_halt(void)
+{
+    sys_exit(1);
+}
+
+void port_mark(u32 v)
+{
+    (void)v;
+}
+
+u32 port_virtual_tick(void)
+{
+    return 0;
+}
+
+void port_delay_ms(u32 ms)
+{
+    (void)ms;
+}

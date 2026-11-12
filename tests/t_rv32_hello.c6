@@ -1,0 +1,8 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os rv32 boot\n");
+    port_puts("PASS: rv32 hello\n");
+}

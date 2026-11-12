@@ -30,7 +30,7 @@
 | M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（`os_panic`/`os_panic_frame` + 日志回放已 host PASS；S3 陷阱入口未接） |
 | M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 完成（4KB 环形日志 + `rt/kprintf.c`，host 断言 PASS） |
 | M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 完成（S3 实测 `elapsed=100` / `PASS: tick`；40MHz XTAL 下 400k cycles/tick） |
-| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke PASS；x86-64 裸机 hello/sched/tick 三个 qemu 用例全 PASS；rv32 待接） |
+| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 进行中（host smoke PASS；x86-64 裸机 hello/sched/tick 三个 qemu 用例全 PASS；rv32 user-mode hello PASS） |
 
 **M0 验收**：三参考目标打印 banner；S3 上串口有 banner + tick 计数；`make s3` size 在预算内。
 
@@ -285,3 +285,7 @@
   推进一 tick，`os_task_delay(100)` 实测 `elapsed=100` / `PASS: x86 tick`。
   裸机无中断源，`port_idle` 用 `pause` 忙等而不是 `hlt`（否则永不唤醒）。
   引导扇区一次读 255 扇区（0x10000–0x2FDFF），覆盖 ~100KB 的内核载荷。
+
+- **rv32 参考目标（2026-11）**：`make run-rv32` 用 qemu-riscv32 user-mode，c6 IR 的
+  `target triple/datalayout` 由构建规则改写成 riscv32（c6 本身只产出 x86-64 IR），
+  串口走 `write(1,...)` 系统调用，输出 `c6os rv32 boot` / `PASS: rv32 hello`。
