@@ -161,6 +161,37 @@ static void delay_loop(u32 n)
     while (i < n) { i++; }
 }
 
+void s3_backlight_test(void)
+{
+    pin_out(42u);
+    pin_out(5u);
+    pin_lo(5u);
+
+    port_puts("BL42 on\n");
+    pin_hi(42u);
+    delay_loop(3000000u);
+    pin_lo(42u);
+    port_puts("BL5 on\n");
+    pin_hi(5u);
+    delay_loop(3000000u);
+    pin_lo(5u);
+    port_puts("BL off\n");
+}
+
+u32 s3_i2c_probe(u8 addr)
+{
+    int ack = 0;
+
+    pin_out(PIN_SCL);
+    pin_out(PIN_SDA);
+    pin_pullup(PIN_SCL);
+    pin_pullup(PIN_SDA);
+    i2c_start();
+    ack = i2c_write((u8)(addr << 1));
+    i2c_stop();
+    return ack != 0 ? 1u : 0u;
+}
+
 static void panel_reset(void)
 {
     pin_out(PIN_SCL);
@@ -172,6 +203,67 @@ static void panel_reset(void)
     delay_loop(2000000u);
     tca_write(0x01u, 0x04u);
     delay_loop(2000000u);
+}
+
+#define PIN_LCD_CS 41u
+#define PIN_LCD_DC 40u
+#define PIN_LCD_RST 45u
+#define PIN_LCD_CLK 21u
+#define PIN_LCD_SDA 47u
+
+static void lcd_tx_bit(u32 b)
+{
+    if (b != 0u) { pin_hi(PIN_LCD_SDA); } else { pin_lo(PIN_LCD_SDA); }
+    rd_delay();
+    pin_hi(PIN_LCD_CLK);
+    rd_delay();
+    pin_lo(PIN_LCD_CLK);
+}
+
+static void lcd_tx_byte(u8 b)
+{
+    int i = 7;
+    while (i >= 0) { lcd_tx_bit((b >> i) & 1u); i--; }
+}
+
+static u8 lcd_rx_byte(void)
+{
+    u8 v = 0;
+    int i = 7;
+
+    while (i >= 0) {
+        pin_hi(PIN_LCD_CLK);
+        rd_delay();
+        v = (u8)((v << 1) | (u8)((*(volatile u32 *)GPIO_IN1 >> (PIN_LCD_SDA - 32u)) & 1u));
+        rd_delay();
+        pin_lo(PIN_LCD_CLK);
+        i--;
+    }
+    return v;
+}
+
+void s3_st7789_probe(u8 out[4])
+{
+    int i = 0;
+
+    pin_out(PIN_LCD_CS);
+    pin_out(PIN_LCD_DC);
+    pin_out(PIN_LCD_RST);
+    pin_out(PIN_LCD_CLK);
+    pin_out(PIN_LCD_SDA);
+    pin_hi(PIN_LCD_CS);
+    pin_lo(PIN_LCD_CLK);
+    pin_hi(PIN_LCD_RST);
+    delay_loop(200000u);
+
+    pin_lo(PIN_LCD_CS);
+    pin_lo(PIN_LCD_DC);
+    lcd_tx_byte(0x04u);
+    pin_hi(PIN_LCD_DC);
+    pin_in(PIN_LCD_SDA);
+    pin_pullup(PIN_LCD_SDA);
+    while (i < 4) { out[i] = lcd_rx_byte(); i++; }
+    pin_hi(PIN_LCD_CS);
 }
 
 void s3_panel_probe(u8 out[3])

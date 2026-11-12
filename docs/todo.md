@@ -177,7 +177,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已改读 D1/IO1 并加上拉，仍 0；TCA9554 复位路径会卡住，暂不调用。下一步确认板型/复位） |
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已改读 D1/IO1 并加上拉仍 0；ST7789 面包板引脚 21/47/40/41/45 读 0x04 也全 0；I2C 10/11 扫描所有地址都“ACK”，说明无上拉/引脚不对；GPIO42、GPIO5 背光均不亮）。下一步需确认板子型号/屏幕 FPC 丝印与背光/复位真实引脚 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 数字/冒号/大写字母/符号字体与 `char/text(scale)`，`t_gfx` host PASS；完整 8×16 字库与 SPI 面板刷新待做） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 用帧缓冲绘制 tick/任务数/堆用量的彩色数字行，`t_dash` host PASS；任务表/日志滚动与真实屏刷新待做） |
 
@@ -462,3 +462,13 @@
   QSPI：CS 拉低→0x0B+00 04 00→8 dummy→单线读 3 字节，返回全 0；
   已尝试 TCA9554 0x20 配置 EXIO2 输出并 0/1 复位，仍为 0。下一步用示波器/
   确认板型（微雪 ST77916 QSPI vs 面包板 ST7789 SPI）与复位极性。
+
+- **面板硬件识别受阻（真板）**：两条候选路径都试过：
+  1) 微雪 ST77916 QSPI（PCLK40/CS21/D0 46/D1 45/D2 42/D3 41）：
+     0x0B+00 04 00+8 dummy，**从 D1/IO1 单线读**，复位 TCA9554(0x20)
+     会卡住（暂禁用），读回 `00 00 00`。
+  2) 面包板 ST7789 SPI（SCLK21/SDA47/DC40/CS41/RST45）：
+     0x04 后读 4 字节，全 0（可能模块未接 SDO）。
+  3) 背光测试：GPIO42 高 2s、GPIO5 高 2s，屏幕均不亮。
+  结论：当前只能确认“ID 读路径/背光/复位都不在已试引脚上”，需要屏幕 FPC
+  丝印或板子型号照片；在此之前 M7-2/3/4 的真实点亮无法继续。

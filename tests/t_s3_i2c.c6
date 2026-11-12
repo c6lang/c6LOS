@@ -1,0 +1,26 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern u32 s3_i2c_probe(u8 addr);
+
+static void ph(u8 v) {
+    static const char h[] = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+void os_main(void) {
+    u8 a[4] = {0x20u, 0x38u, 0x40u, 0x5Du};
+    int i = 0;
+
+    port_init();
+    port_puts("i2c scan\n");
+    while (i < 4) {
+        port_puts("a=");
+        ph(a[i]);
+        port_puts(" ack=");
+        port_putc((int)('0' + (s3_i2c_probe(a[i]) & 1u)));
+        port_puts("\n");
+        i++;
+    }
+}

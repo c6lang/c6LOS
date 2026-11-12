@@ -1,0 +1,10 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern void s3_backlight_test(void);
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os backlight test\\n");
+    s3_backlight_test();
+}

@@ -1,0 +1,23 @@
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+extern void s3_st7789_probe(u8 out[4]);
+
+static void ph(u8 v) {
+    static const char h[] = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+void os_main(void) {
+    u8 id[4] = {0};
+
+    port_init();
+    port_puts("c6os st7789 id\n");
+    s3_st7789_probe(id);
+    port_puts("id=");
+    ph(id[0]); port_putc(' ');
+    ph(id[1]); port_putc(' ');
+    ph(id[2]); port_putc(' ');
+    ph(id[3]); port_puts("\n");
+}
