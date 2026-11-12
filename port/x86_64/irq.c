@@ -110,6 +110,14 @@ void port_isr_exit(void)
     }
 }
 
+u64 port_cycles(void)
+{
+    u32 lo = 0;
+    u32 hi = 0;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((u64)hi << 32) | (u64)lo;
+}
+
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
 {
     if (p == 0) {

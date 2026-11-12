@@ -21,6 +21,13 @@ void s3_mark(u32 idx, u32 v)
 
 static volatile u32 g_isr_nest[C6OS_MAX_CORES] = {0};
 
+u64 port_cycles(void)
+{
+    u32 v = 0;
+    __asm__ __volatile__("rsr %0, ccount" : "=r"(v));
+    return (u64)v;
+}
+
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
 {
     if (p == 0) {

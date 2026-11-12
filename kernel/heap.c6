@@ -1,6 +1,6 @@
 #include "c6os/heap.h"
 
-#define HEAP_MAGIC 0xC6E50006u
+#define HEAP_MAGIC OS_HEAP_MAGIC
 #define HEAP_BLK_MAGIC 0xB10C6E5Au
 #define HDR_SIZE 16u
 #define ALIGN8(x) (((x) + 7u) & ~7u)

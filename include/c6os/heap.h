@@ -3,6 +3,8 @@
 
 #include "c6os/types.h"
 
+#define OS_HEAP_MAGIC 0xC6E50006u
+
 /* 简单 best-fit 堆：块头 16B，双向线性扫描，释放时与相邻空闲块合并。
  * 单核、关中断使用；M5 再接 per-CPU 锁与统计。 */
 typedef struct OsHeap {

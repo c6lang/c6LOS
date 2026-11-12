@@ -85,6 +85,13 @@ void port_mark(u32 v)
     (void)v;
 }
 
+u64 port_cycles(void)
+{
+    u32 v = 0;
+    __asm__ __volatile__("rdcycle %0" : "=r"(v));
+    return (u64)v;
+}
+
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
 {
     if (p == 0) {

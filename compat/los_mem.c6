@@ -35,7 +35,7 @@ UINT32 LOS_MemInit(VOID *pool, UINT32 size) {
     while (i < LOS_MEM_MAX) {
         if (g_pools[i].used == 0u) {
             os_heap_init(&g_pools[i].heap, pool, (u32)size);
-            if (g_pools[i].heap.magic != 0xC6E50006u) {
+            if (g_pools[i].heap.magic != OS_HEAP_MAGIC) {
                 return 3u;
             }
             g_pools[i].pool = pool;

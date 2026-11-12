@@ -25,6 +25,7 @@ u32 port_in_isr(void);
 void port_isr_enter(void);
 void port_isr_exit(void);
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 new);
+u64 port_cycles(void);
 u32 port_irq_save(void);
 void port_irq_restore(u32 state);
 void os_test_set_isr(u32 v);

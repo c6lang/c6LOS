@@ -201,8 +201,8 @@ int os_task_set_core(u32 id, u32 core) {
     if (t == 0 || core >= (u32)C6OS_MAX_CORES) {
         return -1;
     }
-    if (t->state == (u8)OS_TASK_DEAD || t->state == (u8)OS_TASK_FREE) {
-        return -1;
+    if (t->state != (u8)OS_TASK_RUNNING && t->state != (u8)OS_TASK_SUSP) {
+        return -1; /* READY/BLOCKED 任务不允许跨核搬家（避免双核同时选中） */
     }
     t->core = (u8)core;
     return 0;
@@ -222,12 +222,13 @@ int os_task_delete(u32 id) {
         port_task_yield();
         return 0;
     }
+    /* 先让其他核不再选中它，再释放 ctx。 */
+    t->state = (u8)OS_TASK_FREE;
+    t->magic = 0u;
     if (t->ctx != 0) {
         port_task_ctx_free(t->ctx);
         t->ctx = 0;
     }
-    t->state = (u8)OS_TASK_FREE;
-    t->magic = 0u;
     return 0;
 }
 
@@ -339,7 +340,6 @@ u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     if (best == 0) {
         return 0;
     }
-    port_puts("U");
     unblock(best, result);
     return best->id;
 }
