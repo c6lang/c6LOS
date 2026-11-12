@@ -1,0 +1,9 @@
+#include "c6os/port.h"
+
+/* M0：只验证启动链与控制台。调度器在 M1 接入。 */
+void os_main(void) {
+    for (;;) {
+        port_puts("c6os: alive\n");
+        port_delay_ms(500);
+    }
+}

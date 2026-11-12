@@ -1,0 +1,57 @@
+/* ESP32-S3 控制台：USB-Serial/JTAG（默认）。
+ * 寄存器（IDF soc/esp32s3/register/soc/usb_serial_jtag_reg.h）：
+ *   EP1_REG      +0x00  RDWR_BYTE：写 = 压 TX FIFO
+ *   EP1_CONF_REG +0x04  bit1 SERIAL_IN_EP_DATA_FREE，bit0 WR_DONE
+ * 基址 0x60038000（TRM）。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define S3_USB_JTAG_BASE 0x60038000u
+#define S3_USB_EP1      (*(volatile u32 *)(S3_USB_JTAG_BASE + 0x00u))
+#define S3_USB_EP1_CONF (*(volatile u32 *)(S3_USB_JTAG_BASE + 0x04u))
+
+void port_putc(int ch)
+{
+    while ((S3_USB_EP1_CONF & (1u << 1)) == 0u) {
+        /* 等 TX FIFO 有空间 */
+    }
+    S3_USB_EP1 = (u32)(ch & 0xff);
+    S3_USB_EP1_CONF = 1u;
+}
+
+void port_puts(const char *s)
+{
+    while (*s != '\0') {
+        port_putc((int)*s);
+        s++;
+    }
+}
+
+void port_delay_ms(u32 ms)
+{
+    volatile u32 i;
+    while (ms != 0u) {
+        for (i = 0; i < 40000u; i++) {
+            __asm__ __volatile__("" ::: "memory");
+        }
+        ms--;
+    }
+}
+
+void port_idle(void)
+{
+    __asm__ __volatile__("waiti 0");
+}
+
+void port_init(void)
+{
+    volatile u32 i;
+
+    /* 等主机枚举 CDC-ACM；40MHz 下约 0.5s。 */
+    for (i = 0; i < 20000000u; i++) {
+        __asm__ __volatile__("" ::: "memory");
+    }
+
+    port_puts("c6os s3 boot\n");
+}

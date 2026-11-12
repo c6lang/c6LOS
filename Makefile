@@ -1,0 +1,80 @@
+# c6LOS —— ESP32-S3 构建
+# 用法：make C6_ROOT=/path/to/c6 s3
+
+C6_ROOT ?= $(HOME)/superc
+C6CC    := $(C6_ROOT)/tcc/c6
+XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
+XTGCC   := $(XTP)gcc
+XTFLAGS := -mabi=call0 -Os -ffreestanding -fno-builtin -fno-common \
+           -mlongcalls -mtext-section-literals -Wall -Wextra
+PORT    ?= /dev/ttyACM0
+
+BUILD   := build/s3
+S3_C6   := kernel/os.c6 kernel/panic.c6
+S3_C    := $(patsubst kernel/%.c6,$(BUILD)/c99/%.c,$(S3_C6))
+S3_OBJ  := $(BUILD)/obj/start.o \
+           $(patsubst $(BUILD)/c99/%.c,$(BUILD)/obj/%.o,$(S3_C)) \
+           $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o
+
+.PHONY: all s3 clean toolchain-info backup-flash flash image-info
+.PRECIOUS: $(S3_C)
+.SECONDARY:
+
+all: s3
+
+s3: $(BUILD)/c6os.bin
+
+$(BUILD)/c99/.stamp: $(S3_C6)
+	@mkdir -p $(BUILD)/c99
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -c -o $(BUILD)/c99/ $(S3_C6)
+	@touch $@
+
+$(BUILD)/c99/%.c: $(BUILD)/c99/.stamp ;
+
+$(BUILD)/obj/%.o: $(BUILD)/c99/%.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/console.o: port/s3/console.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/c6rt.o: rt/c6rt.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/start.o: port/s3/start.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
+
+$(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
+	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/link.ld \
+		-o $@ $(S3_OBJ) -lgcc
+	$(XTP)size $@
+
+$(BUILD)/c6os.bin: $(BUILD)/c6os.elf
+	esptool --chip esp32s3 elf2image --ram-only-header --flash-mode dio \
+		--flash-size 16MB --flash-freq 40m -o $@ $<
+
+image-info: $(BUILD)/c6os.bin
+	esptool --chip esp32s3 image-info $<
+
+$(BUILD)/backup/flash-16MB.bin:
+	@mkdir -p $(BUILD)/backup
+	@echo "备份原厂 16MB flash ..."
+	sudo -n esptool --chip esp32s3 --port $(PORT) read-flash 0 0x1000000 $@
+
+backup-flash: $(BUILD)/backup/flash-16MB.bin
+
+flash: $(BUILD)/c6os.bin $(BUILD)/backup/flash-16MB.bin
+	sudo -n esptool --chip esp32s3 --port $(PORT) write-flash 0x0 $(BUILD)/c6os.bin
+
+toolchain-info:
+	@echo "C6_ROOT = $(C6_ROOT)"
+	@$(C6CC) -v 2>&1 | head -1 || true
+	@$(XTGCC) --version | head -1
+	@$(XTP)ld --version | head -1
+	@esptool version | head -1
+
+clean:
+	rm -rf $(BUILD)

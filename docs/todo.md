@@ -12,7 +12,7 @@
 | P0-1 | 安装 Xtensa 工具链 | `~/.c6os/toolchain/xtensa-esp-elf`（16.1.0） | `xtensa-esp32s3-elf-gcc --version`；`-mabi=call0` 可编（`-mcpu=esp32s3`/`-msoft-float` 均不支持） | 完成 |
 | P0-2 | esptool | 5.6.0（系统 pip） | `esptool version`；能连 `/dev/ttyACM0` | 完成 |
 | P0-3 | 硬件实测 | README「已知硬件」 | chip-id / flash-id / PSRAM 8MB / MAC | 完成 |
-| P0-4 | 原厂 flash 备份 | `build/backup/flash-16MB.bin` + sha256 | 读回 16MB，可回滚 | 未开始 |
+| P0-4 | 原厂 flash 备份 | `build/backup/flash-16MB.bin` + sha256 | 读回 16MB，可回滚 | 完成（sha256 `fa1a3fcb…8dfe`） |
 | P0-5 | 屏型号/引脚确认 | `boards/xiaozhi-s3-spi.h` | RDDID 或卖家资料确认 IC + 引脚 | 阻塞（待板卡资料） |
 | P0-6 | 仓库骨架 + 设计文档 | README + docs/5 篇 | 文档评审通过 | 完成 |
 
@@ -22,17 +22,28 @@
 
 ## M0 骨架（启动/控制台/panic/idle）
 
-| 任务 | 细节 | 验收 |
-|---|---|---|
-| M0-1 `port/s3/start.S` | 关 WDT、设 SP、清 bss、设 VECBASE、跳 `port_init` | S3-1：串口打印 `c6os s3 boot` |
-| M0-2 `port/s3/memmap.h` | IRAM `0x40370000+448K`、DRAM `0x3FC88000+480K`、栈顶 | S3-2：打印段用量/栈顶/`sizeof(TCB)` |
-| M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 |
-| M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 |
-| M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 |
-| M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） |
-| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 |
+| 任务 | 细节 | 验收 | 状态 |
+|---|---|---|---|
+| M0-1 `port/s3/start.S` | 关 WDT、设 SP、清 bss、跳 `port_init` | S3-1：串口打印 `c6os s3 boot` | 进行中（镜像已被 ROM 接受，banner 未出） |
+| M0-2 `port/s3/memmap.h` | IRAM `0x40370000+448K`、DRAM `0x3FC88000+480K`、栈顶 | S3-2：打印段用量/栈顶/`sizeof(TCB)` | 完成（link.ld + image-info 段地址核对） |
+| M0-3 控制台 | USB-Serial/JTAG FIFO 轮询写；UART0 备选 | 同一根 USB 线可输入输出 | 进行中（FIFO 写已实现，无输出） |
+| M0-4 `kernel/panic.c6` | 陷阱帧打印（pc/ps/a0–a15/任务名）、宕机循环 | 故意 `os_panic` 能打印完整帧 | 进行中（骨架已提交，陷阱帧未实现） |
+| M0-5 `kernel/log.c6` | 4KB 环形日志、`kprintf` 最小格式化 | `%d/%u/%x/%s/%p/%llu` 正确 | 未开始 |
+| M0-6 空闲任务 + tick 空转 | `port_idle`（`waiti 0`）、CCOMPARE0 100Hz | S3-3：1 秒 100 tick（±1%） | 未开始 |
+| M0-7 参考机 | sim/x86/rv32 三个 port 的 `port_init` 最小实现 | `make check-all` 绿 | 未开始 |
 
 **M0 验收**：三参考目标打印 banner；S3 上串口有 banner + tick 计数；`make s3` size 在预算内。
+
+### M0 实测记录（2026-11）
+
+- `esptool elf2image` 普通头（带 SHA256）烧到 `0x0` → ROM 报
+  `Invalid image block, can't boot.`（`ets_main.c 329`）。
+- 改用 `--ram-only-header --flash-freq 40m` 后 ROM 接受镜像：只打印
+  `ESP-ROM:esp32s3-20210327` 后静默，说明已跳进 `_start`，但控制台未出字。
+- 原厂 16MB flash 已备份到 `build/s3/backup/flash-16MB.bin`
+  （sha256 `fa1a3fcb…8dfe`，build/ 被 git 忽略）。
+- 下一步：核对 USB-Serial/JTAG 时钟/PHY（`SYSTEM_PERIP_CLK_EN1` bit10、
+  `CONF0` bit14）与主机重枚举；必要时用 ROM `ets_printf` 做对照。
 
 ---
 

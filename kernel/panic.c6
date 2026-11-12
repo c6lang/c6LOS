@@ -1,0 +1,10 @@
+#include "c6os/port.h"
+
+void os_panic(const char *msg) {
+    port_puts("PANIC: ");
+    port_puts(msg);
+    port_puts("\n");
+    for (;;) {
+        port_idle();
+    }
+}
