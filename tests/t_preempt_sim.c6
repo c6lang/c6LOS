@@ -1,0 +1,65 @@
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+#include "c6os/port.h"
+
+static u32 ca = 0;
+static u32 cb = 0;
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+static void ta(void *arg) {
+    u32 end = (u32)os_tick_get() + 20u;
+    while ((u32)os_tick_get() < end) {
+        ca++;
+        if ((ca & 0x3FFu) == 0u) {
+            os_test_tick_isr();
+        }
+    }
+}
+
+static void tb(void *arg) {
+    u32 end = (u32)os_tick_get() + 20u;
+    while ((u32)os_tick_get() < end) {
+        cb++;
+        if ((cb & 0x3FFu) == 0u) {
+            os_test_tick_isr();
+        }
+    }
+}
+
+int main(void) {
+    if (os_task_create("a", ta, 0, 1u, 8192u) <= 0 ||
+        os_task_create("b", tb, 0, 1u, 8192u) <= 0) {
+        return 1;
+    }
+    os_task_start();
+    port_puts("ca=");
+    put_u32(ca);
+    port_puts(" cb=");
+    put_u32(cb);
+    port_puts("\n");
+    if (ca > 0u && cb > 0u) {
+        port_puts("PASS: sim preempt\n");
+        return 0;
+    }
+    port_puts("FAIL: sim preempt\n");
+    return 2;
+}

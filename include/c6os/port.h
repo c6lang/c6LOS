@@ -21,6 +21,7 @@ u32 port_task_stack_ok(void *ctx);
 u32 port_virtual_tick(void);
 u32 port_in_isr(void);
 void os_test_set_isr(u32 v);
+void os_test_tick_isr(void);
 
 void port_putc(int ch);
 void port_puts(const char *s);

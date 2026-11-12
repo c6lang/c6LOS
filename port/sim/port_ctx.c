@@ -20,6 +20,13 @@ typedef struct {
 static SimCtx *g_cur;
 static SimCtx *g_pending;
 static ucontext_t g_sched;
+void port_enter_task(void)
+{
+}
+
+void port_leave_task(void)
+{
+}
 
 static void tramp(void)
 {

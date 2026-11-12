@@ -315,3 +315,8 @@
   `CCOMPARE0 = CCOUNT + 400000`、`INTENABLE |= (1<<6)`，handler 保存 a0–a15/EPC1/PS，
   用 `wsr PS + rsync + rfe` 返回。`make ... S3_MAIN=tests/t_s3_irq.c6 s3` 实测
   `PASS: s3 irq tick`（纯忙等任务里 tick 仍推进 5 个）。`port_idle` 改为 `waiti 0`。
+
+- **模拟器 tick 抢占注入（host sim PASS）**：`os_test_tick_isr()` = `os_sched_tick()` +
+  `port_task_yield()`，由忙等任务每 1024 次迭代调用一次，等价于在任意指令边界收到
+  定时器中断后立刻重调度；`t_preempt_sim` 两个同优先级任务都拿到时间片
+  （`ca=10240 cb=11264`），输出 `PASS: sim preempt`。

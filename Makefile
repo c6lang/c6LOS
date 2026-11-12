@@ -401,6 +401,18 @@ $(BUILDH)/t_los3: $(BUILDH)/t_los3.ll $(BUILDH)/los_task.ll $(BUILDH)/task.ll $(
 		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
 		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
+$(BUILDH)/t_preempt_sim.ll: tests/t_preempt_sim.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_preempt_sim: $(BUILDH)/t_preempt_sim.ll $(BUILDH)/task.ll $(BUILDH)/timeout.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_preempt_sim.ll $(BUILDH)/task.ll \
+		$(BUILDH)/timeout.ll $(BUILDH)/tick.ll $(BUILDH)/timer.ll \
+		$(BUILDH)/panic.ll $(BUILDH)/log.ll $(BUILDH)/kprintf.o \
+		$(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
 $(BUILDH)/t_stress.ll: tests/t_stress.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
@@ -507,7 +519,12 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_los2
 	./$(BUILDH)/t_join
 	./$(BUILDH)/t_suspend
-	./$(BUILDH)/t_timeout $(BUILDH)/t_pi_chain $(BUILDH)/t_isr $(BUILDH)/t_overflow $(BUILDH)/t_stress
+	./$(BUILDH)/t_timeout
+	./$(BUILDH)/t_pi_chain
+	./$(BUILDH)/t_isr
+	./$(BUILDH)/t_overflow
+	./$(BUILDH)/t_stress
+	./$(BUILDH)/t_preempt_sim
 	./$(BUILDH)/t_los3
 	./$(BUILDH)/t_los4
 	./$(BUILDH)/t_task2
