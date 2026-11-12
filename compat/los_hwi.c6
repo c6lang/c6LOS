@@ -1,0 +1,33 @@
+#include "los/los_hwi.h"
+#include "c6os/hwi.h"
+
+UINT32 LOS_HwiCreate(UINT32 irq, UINT16 prio, UINT32 mode,
+                     HWI_PROC_FUNC fn, void *arg) {
+    (void)prio;
+    (void)mode;
+    if (os_hwi_create((u32)irq, (OsHwiHandler)fn, arg) != 0) {
+        return LOS_ERRNO_HWI_NO_MEMORY;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_HwiDelete(UINT32 irq) {
+    if (os_hwi_delete((u32)irq) != 0) {
+        return LOS_ERRNO_HWI_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_HwiEnable(UINT32 irq) {
+    if (os_hwi_enable((u32)irq, 1u) != 0) {
+        return LOS_ERRNO_HWI_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_HwiDisable(UINT32 irq) {
+    if (os_hwi_enable((u32)irq, 0u) != 0) {
+        return LOS_ERRNO_HWI_INVALID;
+    }
+    return LOS_OK;
+}

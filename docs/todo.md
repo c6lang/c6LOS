@@ -163,7 +163,7 @@
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 | 进行中（`kernel/hwi.c6` 32 槽注册表 + enable/delete/dispatch；`t_hwi` 3 个 IRQ 共存/参数/禁用/重复注册 PASS；S3 外设路由与 LOS_Hwi 包装待接） |
+| M6-1 向量表 | `HwiCreate/Delete`、优先级、使能 | 3 个外设中断共存 | 完成（`kernel/hwi.c6` 32 槽注册表 + `compat/los_hwi.c6` 双 API；`t_hwi` 3 个 IRQ 共存/参数/禁用/重复注册/删除 + LOS_Hwi 全 PASS） |
 | M6-2 下半部 | ISR → 任务唤醒延迟 | S3-5：延迟 < 100µs |
 | M6-3 嵌套/关中断 | `port_irq_save/restore` 嵌套计数 | 嵌套 5 层恢复正确 | 完成（`t_irq_nest` 5 层深度 0→4→0，`PASS: irq nest`；sim 计数、x86 RFLAGS.IF、S3 `rsil/wsr ps`、rv32 用户态 no-op） |
 | M6-4 ISR 安全 API | post/set/put/resume 白名单 | ISR 里误用阻塞 API 必 panic | 完成（`os_task_block_arg`/`os_task_delay` 检查 `port_in_isr` 并 panic；`t_isr` 输出两条 PANIC 后 PASS） |
@@ -370,3 +370,6 @@
 - **M6-1 Hwi 注册表（host PASS）**：`os_hwi_create/delete/enable/dispatch/count`
   维护 32 个中断槽；`t_hwi` 注册 IRQ 2/5/9，分别带不同 arg 触发，验证计数、
   禁用后不触发、重复注册失败、删除后计数下降，输出 `PASS: hwi 3 irq`。
+
+- **M6-1 LOS_Hwi 双 API（host PASS）**：新增 `LOS_HwiCreate/Delete/Enable/Disable`，
+  映射到 `os_hwi_*`；`t_hwi` 追加 LOS 路径，3 个 IRQ 共存与禁用/删除全部 PASS。

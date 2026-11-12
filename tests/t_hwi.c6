@@ -1,5 +1,6 @@
 #include "c6os/hwi.h"
 #include "c6os/port.h"
+#include "los/los_hwi.h"
 
 static u32 c1 = 0;
 static u32 c2 = 0;
@@ -43,6 +44,12 @@ int main(void) {
     if (os_hwi_delete(9u) != 0 || os_hwi_count() != 2u) {
         port_puts("FAIL: hwi delete\n");
         return 7;
+    }
+    if (LOS_HwiCreate(11u, 1u, 0u, h1, (void *)4u) != LOS_OK ||
+        LOS_HwiDisable(11u) != LOS_OK || LOS_HwiEnable(11u) != LOS_OK ||
+        LOS_HwiDelete(11u) != LOS_OK) {
+        port_puts("FAIL: LOS hwi\n");
+        return 8;
     }
     port_puts("PASS: hwi 3 irq\n");
     return 0;

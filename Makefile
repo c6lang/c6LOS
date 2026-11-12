@@ -251,9 +251,13 @@ $(BUILDH)/t_hwi.ll: tests/t_hwi.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
-$(BUILDH)/t_hwi: $(BUILDH)/t_hwi.ll $(BUILDH)/hwi.ll $(BUILDH)/port_sim.o
+$(BUILDH)/los_hwi.ll: compat/los_hwi.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_hwi: $(BUILDH)/t_hwi.ll $(BUILDH)/hwi.ll $(BUILDH)/los_hwi.ll $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_hwi.ll $(BUILDH)/hwi.ll \
-		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+		$(BUILDH)/los_hwi.ll $(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
 $(BUILDH)/t_race.ll: tests/t_race.c6
 	@mkdir -p $(BUILDH)
