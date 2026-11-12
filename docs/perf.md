@@ -20,7 +20,7 @@
 
 | 操作 | cycles/op |
 |---|---:|
-| `os_task_yield`（含调度器一次切换） | 9,057 |
+| `os_task_yield`（单遍 sched_pick 后） | 8,923 |
 | `os_sem_post` + `os_sem_pend`（无竞争） | 771 |
 | `os_queue_put` + `os_queue_get`（8 slot） | 1,905 |
 | `os_heap_alloc(32)` + `os_heap_free`（best-fit→first-fit 后） | 956 |
@@ -32,7 +32,7 @@
 
 | 操作 | cycles/op | 指令/op（约） |
 |---|---:|---:|
-| `os_task_yield`（含一次切换） | 618,699 | 9,667 |
+| `os_task_yield`（单遍 sched_pick 后） | 466,051 | 7,282 |
 | `os_sem_post` + `os_sem_pend` | 297,430 | 4,647 |
 | `os_queue_put` + `os_queue_get` | 823,517 | 12,867 |
 | `os_heap_alloc(32)` + `os_heap_free`（first-fit） | 3,665,463 | 57,273 |
@@ -85,7 +85,7 @@ host 没有真实定时器中断，tick 是显式调用的，因此不代表硬�
 
 ## 7. 解释与后续
 
-1. **上下文切换**：host 约 9k TSC cycles，risc6 bare 约 9.7k 指令；S3 目标是 <3µs，需用 CCOUNT 在真板复测（当前硬件不在线）。
+1. **上下文切换**：host 约 8.9k TSC cycles，risc6 bare 约 7.3k 指令（单遍就绪扫描后）；S3 目标是 <3µs，需用 CCOUNT 在真板复测（当前硬件不在线）。
 2. **sem 唤醒**：host 18.6k cycles、risc6 21k 指令；risc6 的唤醒包含两次调度器扫描，是当前实时性主路径。
 3. **tick 抖动**：risc6 完整周期约 0.94% 偏差；S3 历史 avg 偏差 0.26%，但 max 异常高，建议在启用长临界区/队列压力下重跑。
 4. **heap**：单次分配释放是最大开销，建议改为按 size class 的空闲链表；这属于性能优化，不影响当前安全修复。
