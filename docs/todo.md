@@ -93,7 +93,7 @@
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |
-| M1-8 上下文切换 | S3 陷阱帧 a0–a15/pc/ps/sar/lbeg/lend/lcount/f0–f15/fcr/fsr | S3-4：两任务交替打印 1000 次无错 | 进行中（sim ucontext 两任务 PASS；S3 陷阱帧未接） |
+| M1-8 上下文切换 | S3 call0 协作上下文（a0–a15/sp）；抢占陷阱帧后续补 | S3-4：两任务交替打印 1000 次无错 | 进行中（S3 实测 `order: ABab` / `PASS: sched`；抢占/陷阱帧未接） |
 
 **M1 验收**：≥15 条断言；S3 上两任务交替；x86 裸机 1000 次切换寄存器一致。
 
@@ -232,3 +232,10 @@
   `SHA-256 comparison failed ... Attempting to boot anyway`，不影响启动；后续改成
   带 SHA256 的普通镜像即可消除。
 - 注意：本板按 RESET 会让 USB 直接掉线不回来，验证请用**拔插 USB**（重新上电）。
+
+- **S3 协作调度实测（2026-11）**：`tests/t_s3_sched.c6` 两任务 A/B 交替 `yield`，串口输出
+  `order: ABab` / `PASS: sched`。`port/s3/ctx.c` + `ctx.S` 用静态 4KB 栈池，call0 保存
+  `a0–a15 + sp`；`port_task_switch` 必须先把目标任务写入 `g_s3_cur`，否则每次切换都从
+  任务入口重启（表现为 `order[]` 越界 `StoreProhibited`）。
+- S3 测试镜像构建：
+  `make BUILD=build/s3test S3_MAIN=tests/t_s3_sched.c6 S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6" s3`

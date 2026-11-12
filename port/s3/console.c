@@ -121,9 +121,3 @@ u32 port_virtual_tick(void)
 {
     return 0u;
 }
-
-u32 port_task_stack_ok(void *ctx)
-{
-    (void)ctx;
-    return 1u;
-}

@@ -10,11 +10,15 @@ XTFLAGS := -mabi=call0 -Os -ffreestanding -fno-builtin -fno-common \
 PORT    ?= /dev/ttyACM0
 
 BUILD   := build/s3
-S3_C6   := kernel/os.c6 kernel/panic.c6 kernel/log.c6
-S3_C    := $(patsubst kernel/%.c6,$(BUILD)/c99/%.c,$(S3_C6))
+S3_MAIN ?= kernel/os.c6
+S3_EXTRA_C6 ?=
+S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(S3_EXTRA_C6)
+S3_NAMES := $(notdir $(S3_C6))
+S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
 S3_OBJ  := $(BUILD)/obj/start.o \
-           $(patsubst $(BUILD)/c99/%.c,$(BUILD)/obj/%.o,$(S3_C)) \
-           $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o
+           $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
+           $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
+           $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o
 
 .PHONY: all s3 s3-min check-host clean toolchain-info backup-flash flash image-info
 .PRECIOUS: $(S3_C)
@@ -47,6 +51,14 @@ $(BUILD)/obj/kprintf.o: rt/kprintf.c
 $(BUILD)/obj/c6rt.o: rt/c6rt.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/ctx.o: port/s3/ctx.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
 
 $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj
