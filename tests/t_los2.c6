@@ -62,6 +62,14 @@ int main(void) {
     if (LOS_EventDelete(eid) != LOS_OK) {
         return 16;
     }
+    LOS_TaskLock();
+    LOS_TaskUnlock();
+    if (LOS_TaskPriGet(999u) != 0xFFFFFFFFu) {
+        return 17;
+    }
+    if (LOS_TaskPriSet(999u, 1u) == LOS_OK) {
+        return 18;
+    }
     port_puts("PASS: LOS_Queue/Mux/Event\n");
     return 0;
 }

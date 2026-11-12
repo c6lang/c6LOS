@@ -12,7 +12,7 @@
 | 目标 | M0–M8 内核核心 + LOS_* 双 API 子集 | 面向 MCU 的完整轻量内核 |
 | 主要验证 | x86-64 host、risc6 RV32 bare、ESP32-S3 真板 | Cortex-M/RISC-V/Xtensa 等多架构；OpenHarmony 设备 |
 | 代码规模 | S3 镜像 text 21,091B / data 5,760B / bss 34,720B（含任务栈、日志、shell、gfx） | 非裁剪内核核心约 6–10KB ROM（社区估算）；完整 bundle 可达 300KB ROM/100KB RAM；Mini 系统最低 128KiB RAM |
-| API 面 | 42 个 LOS_* 函数（task/sem/mux/event/queue/membox/mem/swtmr/hwi/tick） | 完整 LiteOS-M API（任务锁/优先级设置、队列 copy/query、mem realloc/align、event poll、tickless 等） |
+| API 面 | 50 个 LOS_* 函数（task/sem/mux/event/queue/membox/mem/swtmr/hwi/tick；含 task lock/prio/switch count） | 完整 LiteOS-M API（队列 copy/query、mem realloc/align、event poll、CPUP、tickless 等） |
 
 ## 2. 功能矩阵
 
@@ -38,7 +38,8 @@
 c6LOS 的 `LOS_*` 是**子集兼容**，不是 drop-in 替换：
 
 - 已有：`LOS_TaskCreate/Delete/Delay/Suspend/Resume/Yield/IDGet/Count`，`LOS_Sem*`，`LOS_Mux*`，`LOS_Event*`，`LOS_Queue*`，`LOS_Membox*`，`LOS_Mem*`，`LOS_Swtmr*`，`LOS_Hwi*`，`LOS_Tick*`。
-- 缺失/简化：`LOS_TaskLock/Unlock`、`LOS_TaskPriSet/Get`、`LOS_TaskSwitchInfoGet`、CPUP、`LOS_QueueReadCopy/WriteCopy/Query`、`LOS_MemRealloc/AllocAlign`、`LOS_EventPoll`、`LOS_HwiTrigger`、完整 `LOS_ERRNO_*` 映射、tickless/低功耗接口。
+- 已补：`LOS_TaskLock/Unlock`、`LOS_TaskPriSet/Get`、`LOS_CurTaskPriSet`、`LOS_TaskSwitchInfoGet`（返回累计切换次数，LiteOS-M 的完整 `TaskSwitchInfo` 结构尚未复刻）。
+- 仍缺失/简化：CPUP、`LOS_QueueReadCopy/WriteCopy/Query`、`LOS_MemRealloc/AllocAlign`、`LOS_EventPoll`、`LOS_HwiTrigger`、完整 `LOS_ERRNO_*` 映射、tickless/低功耗接口。
 - 错误码：c6LOS 大多返回 0/-1/-2/-3，再映射到少量 LOS 错误码；LiteOS-M 的细粒度错误码（如 `LOS_ERRNO_QUEUE_READ_SIZE_TOO_SMALL`）没有完整复刻。
 - 语义：`LOS_QueueRead` 在 LiteOS-M 返回消息地址，`LOS_QueueReadCopy` 才复制；c6LOS 的 `LOS_QueueRead` 是复制语义，**同名不同义**，移植时要注意。
 

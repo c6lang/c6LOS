@@ -16,6 +16,8 @@ static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
+static volatile u32 g_sched_lock[C6OS_MAX_CORES] = {0};
+static volatile u32 g_switch_count = 0;
 
 void os_task_set_mutex_release_hook(void (*fn)(u32 id)) {
     g_mutex_release_hook = fn;
@@ -170,6 +172,33 @@ int os_task_create(const char *name, OsTaskEntry entry, void *arg,
     return os_task_create_on(0u, name, entry, arg, prio, stack_size);
 }
 
+int os_task_set_prio(u32 id, u32 prio) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0 || prio >= (u32)C6OS_PRIOS) {
+        return -1;
+    }
+    t->prio = (u8)prio;
+    t->base_prio = (u8)prio;
+    if (t == g_cur) {
+        os_task_yield();
+    }
+    return 0;
+}
+
+u32 os_task_get_prio(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return 0xFFFFFFFFu;
+    }
+    return (u32)t->prio;
+}
+
+u32 os_task_switch_count(void) {
+    return g_switch_count;
+}
+
 u32 os_task_core(u32 id) {
     OsTask *t = os_task_get(id);
 
@@ -233,8 +262,13 @@ int os_task_delete(u32 id) {
 }
 
 int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+
     if (g_cur == 0 || port_in_isr() != 0u) {
         return -1;
+    }
+    if (g_sched_lock[core] != 0u) {
+        return -4; /* 调度锁内不允许阻塞 */
     }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
@@ -450,9 +484,10 @@ void os_sched_tick(void) {
 
 void *os_sched_preempt_ctx(void) {
     OsTask *t = 0;
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
 
-    if (g_cur == 0) {
-        return 0;
+    if (g_cur == 0 || g_sched_lock[core] != 0u) {
+        return g_cur != 0 ? g_cur->ctx : 0;
     }
     if (g_cur->state == (u8)OS_TASK_RUNNING) {
         make_ready(g_cur);
@@ -486,6 +521,7 @@ void os_task_start_core(u32 core) {
         }
         g_cur_arr[me] = t;
         t->state = (u8)OS_TASK_RUNNING;
+        g_switch_count = g_switch_count + 1u;
         port_enter_task();
         port_task_switch(t->ctx);
         port_leave_task();
@@ -508,8 +544,24 @@ void os_task_start(void) {
     os_task_start_core(0u);
 }
 
+void os_task_lock(void) {
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+
+    g_sched_lock[core] = g_sched_lock[core] + 1u;
+}
+
+void os_task_unlock(void) {
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+
+    if (g_sched_lock[core] != 0u) {
+        g_sched_lock[core] = g_sched_lock[core] - 1u;
+    }
+}
+
 void os_task_yield(void) {
-    if (g_cur == 0) {
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+
+    if (g_cur == 0 || g_sched_lock[core] != 0u) {
         return;
     }
     make_ready(g_cur);

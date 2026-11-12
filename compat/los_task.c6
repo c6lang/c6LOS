@@ -51,6 +51,33 @@ UINT32 LOS_TaskYield(VOID) {
     return LOS_OK;
 }
 
+VOID LOS_TaskLock(VOID) {
+    os_task_lock();
+}
+
+VOID LOS_TaskUnlock(VOID) {
+    os_task_unlock();
+}
+
+UINT32 LOS_TaskPriSet(UINT32 taskId, UINT16 taskPrio) {
+    if (os_task_set_prio((u32)taskId, (u32)taskPrio) != 0) {
+        return LOS_ERRNO_TSK_INVALID;
+    }
+    return LOS_OK;
+}
+
+UINT32 LOS_CurTaskPriSet(UINT16 taskPrio) {
+    return LOS_TaskPriSet(os_task_self(), taskPrio);
+}
+
+UINT32 LOS_TaskPriGet(UINT32 taskId) {
+    return os_task_get_prio((u32)taskId);
+}
+
+UINT32 LOS_TaskSwitchInfoGet(VOID) {
+    return os_task_switch_count();
+}
+
 UINT32 LOS_TaskIDGet(VOID) {
     return (UINT32)os_task_self();
 }

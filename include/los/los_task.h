@@ -23,6 +23,12 @@ UINT32 LOS_TaskDelay(UINT32 tick);
 UINT32 LOS_TaskSuspend(UINT32 taskId);
 UINT32 LOS_TaskResume(UINT32 taskId);
 UINT32 LOS_TaskYield(VOID);
+VOID LOS_TaskLock(VOID);
+VOID LOS_TaskUnlock(VOID);
+UINT32 LOS_TaskPriSet(UINT32 taskId, UINT16 taskPrio);
+UINT32 LOS_CurTaskPriSet(UINT16 taskPrio);
+UINT32 LOS_TaskPriGet(UINT32 taskId);
+UINT32 LOS_TaskSwitchInfoGet(VOID);
 UINT32 LOS_TaskIDGet(VOID);
 UINT32 LOS_TaskCount(VOID);
 
