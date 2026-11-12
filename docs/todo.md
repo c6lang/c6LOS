@@ -89,7 +89,7 @@
 | M1-1 TCB/对象池 | `struct OsTask`、16 槽静态池、magic 校验 | 创建/删除 1000 次无泄漏 | 进行中（create/delete 1000 次 host PASS；magic 待加） |
 | M1-2 就绪位图 | `u32 ready_bit` + 32 环形链、`clz` 选最高 | 位图单测 32 组 | 进行中（位图 + 软件 ctz 已接；32 组单测待加） |
 | M1-3 创建/删除 | `os_task_create/delete`；自删除进 reap 链 | 自删除任务栈延迟回收 | 进行中（delete + 调度器延迟释放已实现；自删除测试待加） |
-| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 进行中（delay + 虚拟 tick host PASS；suspend 未做） |
+| M1-4 挂起/恢复/延时 | `suspend_cnt`、`delay` 入超时队列 | 挂起计数嵌套正确 | 完成（`t_suspend` 嵌套 2→1→0 + 自挂起/他人恢复 PASS；delay 虚拟 tick PASS） |
 | M1-5 时间片 | 10 tick 轮转，同优先级 FIFO | 两任务交替计数 1:1 | 进行中（同优先级轮转 host PASS；tick 时间片未接） |
 | M1-6 栈哨兵 | 栈底 `0xC6C0DEAD`、每次切换检查 | 溢出必 panic 且打印任务名 | 进行中（哨兵写入 + 每次切换检查；溢出注入测试待做） |
 | M1-7 join | `os_task_join(timeout)` | 先 join 后退出、超时、删除后 join 三种路径 | 进行中（先 join 后退出 host PASS；超时/删除后 join 待测） |

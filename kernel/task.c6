@@ -14,6 +14,14 @@ static u32 g_rr = 0;
 static u32 g_ready_bit = 0;
 static OsTask *g_cur = 0;
 
+static void make_ready(OsTask *t) {
+    if (t->suspend_cnt > 0u) {
+        t->state = (u8)OS_TASK_SUSP;
+    } else {
+        t->state = (u8)OS_TASK_READY;
+    }
+}
+
 static u32 ctz32(u32 x) {
     u32 n = 0;
 
@@ -176,7 +184,7 @@ int os_task_wake_event(void *obj, u32 bits) {
                 t->wait_obj = 0;
                 t->wait_result = 0;
                 t->delay_left = 0;
-                t->state = (u8)OS_TASK_READY;
+                make_ready(t);
                 woke++;
             }
         }
@@ -205,8 +213,48 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
     best->wait_obj = 0;
     best->wait_result = result;
     best->delay_left = 0;
-    best->state = (u8)OS_TASK_READY;
+    make_ready(best);
     return 1;
+}
+
+int os_task_suspend(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return -1;
+    }
+    t->suspend_cnt = t->suspend_cnt + 1u;
+    if (t->suspend_cnt == 1u) {
+        if (t->state == (u8)OS_TASK_READY || t->state == (u8)OS_TASK_RUNNING) {
+            t->state = (u8)OS_TASK_SUSP;
+            if (t == g_cur) {
+                port_task_yield();
+            }
+        }
+    }
+    return 0;
+}
+
+int os_task_resume(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0 || t->suspend_cnt == 0u) {
+        return -1;
+    }
+    t->suspend_cnt = t->suspend_cnt - 1u;
+    if (t->suspend_cnt == 0u && t->state == (u8)OS_TASK_SUSP) {
+        t->state = (u8)OS_TASK_READY;
+    }
+    return 0;
+}
+
+int os_task_suspend_count(u32 id) {
+    OsTask *t = os_task_get(id);
+
+    if (t == 0) {
+        return -1;
+    }
+    return (int)t->suspend_cnt;
 }
 
 void os_task_boost(u32 id, u32 prio) {
@@ -235,7 +283,7 @@ static void os_task_wake_join(u32 id) {
             t->wait_obj = 0;
             t->wait_result = 0;
             t->delay_left = 0;
-            t->state = (u8)OS_TASK_READY;
+            make_ready(t);
         }
         i++;
     }
@@ -251,7 +299,7 @@ void os_sched_tick(void) {
             if (g_tasks[i].delay_left == 0u) {
                 g_tasks[i].wait_obj = 0;
                 g_tasks[i].wait_result = -2;
-                g_tasks[i].state = (u8)OS_TASK_READY;
+                make_ready(&g_tasks[i]);
             }
         }
         i++;
@@ -277,7 +325,7 @@ void os_task_start(void) {
         t->state = (u8)OS_TASK_RUNNING;
         port_task_switch(t->ctx);
         if (t->state == (u8)OS_TASK_RUNNING) {
-            t->state = (u8)OS_TASK_READY;
+            make_ready(t);
         }
         if (t->state == (u8)OS_TASK_DEAD) {
             port_task_ctx_free(t->ctx);
@@ -295,7 +343,7 @@ void os_task_yield(void) {
     if (g_cur == 0) {
         return;
     }
-    g_cur->state = (u8)OS_TASK_READY;
+    make_ready(g_cur);
     port_task_yield();
 }
 

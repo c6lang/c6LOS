@@ -332,6 +332,18 @@ $(BUILDH)/t_los2: $(BUILDH)/t_los2.ll $(BUILDH)/los_queue.ll $(BUILDH)/los_mux.l
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
+$(BUILDH)/t_suspend.ll: tests/t_suspend.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_suspend: $(BUILDH)/t_suspend.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_suspend.ll $(BUILDH)/task.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
+		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
 $(BUILDH)/t_join.ll: tests/t_join.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
@@ -344,7 +356,7 @@ $(BUILDH)/t_join: $(BUILDH)/t_join.ll $(BUILDH)/task.ll $(BUILDH)/tick.ll \
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join $(BUILDH)/t_suspend
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
@@ -361,6 +373,7 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_los
 	./$(BUILDH)/t_los2
 	./$(BUILDH)/t_join
+	./$(BUILDH)/t_suspend
 
 s3-min: $(BUILD)/min.bin
 

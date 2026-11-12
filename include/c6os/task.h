@@ -12,6 +12,7 @@ typedef void (*OsTaskEntry)(void *);
 #define OS_TASK_RUNNING 2u
 #define OS_TASK_DEAD 3u
 #define OS_TASK_BLOCKED 4u
+#define OS_TASK_SUSP 5u
 
 typedef struct OsTask {
     void *ctx;                 /* port 上下文（不透明） */
@@ -28,6 +29,7 @@ typedef struct OsTask {
     void *wait_obj;            /* 等待对象 */
     int wait_result;           /* 0=OK，-2=超时，-3=删除 */
     u32 wait_arg;              /* 事件掩码等 */
+    u32 suspend_cnt;
     u32 wait_bits;             /* 事件唤醒时返回的位 */
     char name[C6OS_NAME_MAX];
 } OsTask;
@@ -40,6 +42,9 @@ void os_task_delay(u32 ticks);
 void os_sched_tick(void);
 int os_task_delete(u32 id);
 int os_task_join(u32 id, u32 timeout);
+int os_task_suspend(u32 id);
+int os_task_resume(u32 id);
+int os_task_suspend_count(u32 id);
 int os_task_block(void *obj, u32 timeout, u8 kind);
 int os_task_block_arg(void *obj, u32 timeout, u8 kind, u32 arg);
 u32 os_task_wait_bits(void);

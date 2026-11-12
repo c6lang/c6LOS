@@ -1,0 +1,59 @@
+#include "c6os/task.h"
+#include "c6os/port.h"
+
+static char order[16] = {0};
+static u32 n = 0;
+static int g_a = 0;
+
+static void ta(void *arg) {
+    order[n] = 'A';
+    n++;
+    os_task_suspend(os_task_self());
+    order[n] = 'a';
+    n++;
+}
+
+static void tb(void *arg) {
+    order[n] = 'B';
+    n++;
+    if (os_task_resume(g_a) != 0) {
+        order[n] = '!';
+        n++;
+    }
+    os_task_yield();
+}
+
+int main(void) {
+    int a = 0;
+    int b = 0;
+
+    a = os_task_create("a", ta, 0, 1u, 8192u);
+    b = os_task_create("b", tb, 0, 2u, 8192u);
+    if (a <= 0 || b <= 0) {
+        return 1;
+    }
+    g_a = a;
+    /* 嵌套 suspend 计数：2 -> 1 -> 0 */
+    if (os_task_suspend((u32)a) != 0 || os_task_suspend((u32)a) != 0) {
+        return 2;
+    }
+    if (os_task_suspend_count((u32)a) != 2) {
+        return 3;
+    }
+    if (os_task_resume((u32)a) != 0 || os_task_suspend_count((u32)a) != 1) {
+        return 4;
+    }
+    if (os_task_resume((u32)a) != 0 || os_task_suspend_count((u32)a) != 0) {
+        return 5;
+    }
+    os_task_start();
+    order[n] = '\0';
+    if (order[0] != 'A' || order[1] != 'B' || order[2] != 'a') {
+        port_puts("FAIL: suspend order ");
+        port_puts(order);
+        port_puts("\n");
+        return 6;
+    }
+    port_puts("PASS: suspend\n");
+    return 0;
+}
