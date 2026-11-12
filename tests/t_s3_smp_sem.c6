@@ -1,0 +1,51 @@
+/* S3 双核：core1 任务阻塞在信号量，core0 post 后核 1 调度器唤醒它。 */
+#include "c6os/types.h"
+#include "c6os/task.h"
+#include "c6os/sem.h"
+#include "c6os/port.h"
+
+extern int s3_core1_start_mode(u32 mode);
+
+static OsSem g_sem;
+static volatile u32 g_c1_count;
+static volatile u32 g_c1_prid;
+
+static void c1_task(void *arg) {
+    (void)arg;
+    (void)os_sem_pend(&g_sem, 0u);
+    g_c1_prid = port_core_id();
+    g_c1_count++;
+    while (1) {
+        os_task_yield();
+    }
+}
+
+static void c0_task(void *arg) {
+    u32 guard = 0;
+    (void)arg;
+    (void)os_sem_post(&g_sem);
+    while (g_c1_count == 0u) {
+        guard++;
+        if (guard > 2000000u) {
+            port_puts("FAIL: s3 smp sem timeout\n");
+            port_reboot();
+        }
+        os_task_yield();
+    }
+    if (g_c1_prid == 1u) {
+        port_puts("PASS: s3 smp cross-core sem\n");
+    } else {
+        port_puts("FAIL: s3 smp sem prid\n");
+    }
+    port_reboot();
+}
+
+void os_main(void) {
+    port_init();
+    port_puts("c6os s3 smp sem test\n");
+    (void)os_sem_init(&g_sem, 0u, 1u);
+    (void)os_task_create_on(1u, "c1", c1_task, 0, 1u, 2048u);
+    (void)os_task_create_on(0u, "c0", c0_task, 0, 1u, 2048u);
+    (void)s3_core1_start_mode(1u);
+    os_task_start_core(0u);
+}
