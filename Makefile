@@ -349,6 +349,22 @@ $(BUILDH)/los_task.ll: compat/los_task.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
+$(BUILDH)/t_los_err.ll: tests/t_los_err.c6
+	@mkdir -p $(BUILDH)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
+
+$(BUILDH)/t_los_err: $(BUILDH)/t_los_err.ll $(BUILDH)/los_sem.ll $(BUILDH)/los_task.ll \
+		$(BUILDH)/los_queue.ll $(BUILDH)/sem.ll $(BUILDH)/queue.ll \
+		$(BUILDH)/task.ll $(BUILDH)/timeout.ll $(BUILDH)/tick.ll \
+		$(BUILDH)/timer.ll $(BUILDH)/panic.ll $(BUILDH)/log.ll \
+		$(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o $(BUILDH)/port_sim.o
+	clang -fuse-ld=lld -o $@ $(BUILDH)/t_los_err.ll $(BUILDH)/los_sem.ll \
+		$(BUILDH)/los_task.ll $(BUILDH)/los_queue.ll $(BUILDH)/sem.ll \
+		$(BUILDH)/queue.ll $(BUILDH)/task.ll $(BUILDH)/timeout.ll \
+		$(BUILDH)/tick.ll $(BUILDH)/timer.ll $(BUILDH)/panic.ll \
+		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
+		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
+
 $(BUILDH)/los_membox.ll: compat/los_membox.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
@@ -521,7 +537,7 @@ $(BUILDH)/t_join: $(BUILDH)/t_join.ll $(BUILDH)/task.ll $(BUILDH)/timeout.ll $(B
 		$(BUILDH)/log.ll $(BUILDH)/kprintf.o $(BUILDH)/port_ctx.o \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join $(BUILDH)/t_suspend $(BUILDH)/t_los3 $(BUILDH)/t_timeout $(BUILDH)/t_los4 $(BUILDH)/t_task2
+check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUILDH)/t_sched $(BUILDH)/t_task $(BUILDH)/t_ipc $(BUILDH)/t_event $(BUILDH)/t_queue $(BUILDH)/t_membox $(BUILDH)/t_heap $(BUILDH)/t_timer $(BUILDH)/t_prio $(BUILDH)/t_los $(BUILDH)/t_los2 $(BUILDH)/t_join $(BUILDH)/t_suspend $(BUILDH)/t_los3 $(BUILDH)/t_timeout $(BUILDH)/t_los4 $(BUILDH)/t_task2 $(BUILDH)/t_los_err
 	./$(HOSTBIN)
 	./$(BUILDH)/t_log
 	./$(BUILDH)/t_panic
@@ -550,6 +566,7 @@ check-host: $(HOSTBIN) $(BUILDH)/t_log $(BUILDH)/t_panic $(BUILDH)/t_tick $(BUIL
 	./$(BUILDH)/t_los3
 	./$(BUILDH)/t_los4
 	./$(BUILDH)/t_task2
+	./$(BUILDH)/t_los_err
 
 s3-min: $(BUILD)/min.bin
 

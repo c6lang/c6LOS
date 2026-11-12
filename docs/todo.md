@@ -147,7 +147,7 @@
 |---|---|---|
 | M5-1 `include/los/*.h` | 类型/宏/原型与 LiteOS-M 对齐 | 用 LiteOS 示例头可编译 |
 | M5-2 `compat/los_*.c6` | `LOS_Task/Sem/Mux/Event/Queue/Membox/Mem/Tick/Swtmr` | 每个对象两条路径结果一致 | 完成（Task/Sem/Mux/Event/Queue/Membox/Mem/Swtmr 均有 host PASS：`t_los`/`t_los2`/`t_los3`/`t_los4`） |
-| M5-3 错误码映射 | `OS_*` → `LOS_*` | 映射表 100% 覆盖 |
+| M5-3 错误码映射 | `OS_*` → `LOS_*` | 映射表 100% 覆盖 | 完成（`t_los_err`：Sem 非法句柄/超时/重复删除、Task 空参/非法优先级/非法 ID、Queue 非法句柄，全部命中 `LOS_ERRNO_*`） |
 | M5-4 一致性测试 | 同一断言集跑原生/兼容 | 输出逐行一致 |
 
 **M5 验收**：`make check-host API=both` 双份全绿；LiteOS 风格 demo 可跑。
@@ -351,3 +351,7 @@
 - **M1-2 就绪位图 32 组（host PASS）**：`t_prio32` 先同时挂 31/5/10 三个就绪任务，
   验证 `ctz32(ready_bit)` 选最高优先级得到 5→10→31；再对 0..31 每个优先级单独
   创建/运行一次，全部命中。
+
+- **M5-3 错误码映射（host PASS）**：`t_los_err` 在任务上下文里逐项断言
+  `LOS_ERRNO_SEM_INVALID/TIMEOUT`、`LOS_ERRNO_TSK_INVALID/NO_MEMORY`、
+  `LOS_ERRNO_QUEUE_INVALID`，输出 `PASS: LOS error mapping`。

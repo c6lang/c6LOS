@@ -1,0 +1,69 @@
+#include "los/los_sem.h"
+#include "los/los_task.h"
+#include "los/los_queue.h"
+#include "c6os/port.h"
+#include "c6os/task.h"
+
+static void noop(void *arg) {
+}
+
+static u32 g_fail = 0;
+
+static void checker(void *arg) {
+    UINT32 h = 0;
+    UINT32 q = 0;
+    TSK_INIT_PARAM_S p = {0};
+    UINT8 buf[8] = {0};
+
+    if (LOS_SemCreate(0u, &h) != LOS_OK) {
+        g_fail = 1u;
+        return;
+    }
+    if (LOS_SemPend(0xFFFFu, 1u) != LOS_ERRNO_SEM_INVALID) {
+        g_fail = 2u;
+        return;
+    }
+    if (LOS_SemPend(h, 1u) != LOS_ERRNO_SEM_TIMEOUT) {
+        g_fail = 3u;
+        return;
+    }
+    if (LOS_SemDelete(h) != LOS_OK || LOS_SemDelete(h) != LOS_ERRNO_SEM_INVALID) {
+        g_fail = 4u;
+        return;
+    }
+    if (LOS_TaskCreate(&h, 0) != LOS_ERRNO_TSK_INVALID) {
+        g_fail = 5u;
+        return;
+    }
+    p.pcName = "x";
+    p.pfnTaskEntry = noop;
+    p.usTaskPrio = 200u;
+    if (LOS_TaskCreate(&h, &p) != LOS_ERRNO_TSK_NO_MEMORY) {
+        g_fail = 6u;
+        return;
+    }
+    if (LOS_TaskDelete(0xFFFFu) != LOS_ERRNO_TSK_INVALID) {
+        g_fail = 7u;
+        return;
+    }
+    if (LOS_QueueRead(0xFFFFu, buf, 1u, 0u) != LOS_ERRNO_QUEUE_INVALID) {
+        g_fail = 8u;
+        return;
+    }
+    (void)q;
+}
+
+int main(void) {
+    if (os_task_create("chk", checker, 0, 1u, 8192u) <= 0) {
+        port_puts("FAIL: create\n");
+        return 1;
+    }
+    os_task_start();
+    if (g_fail != 0u) {
+        port_putc((int)('0' + (g_fail % 10u)));
+        port_puts(" FAIL: LOS error mapping\n");
+        return 2;
+    }
+    port_puts("PASS: LOS error mapping\n");
+    return 0;
+}
