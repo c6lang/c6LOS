@@ -10,27 +10,6 @@ extern void port_set_cur_ctx(void *ctx);
 extern void port_irq_fill(u32 frame_sp);
 extern void *os_sched_preempt_ctx(void);
 
-static void (*g_hook)(void);
-static u32 g_isr_cc;
-
-void s3_irq_set_hook(void (*fn)(void))
-{
-    g_hook = fn;
-}
-
-u32 s3_irq_cc(void)
-{
-    return g_isr_cc;
-}
-
-u32 s3_ccount_now(void)
-{
-    u32 cc = 0;
-
-    __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
-    return cc;
-}
-
 #define S3_IRQ_HZ 100u
 #define S3_XTAL_HZ 40000000u
 
@@ -142,7 +121,6 @@ void *s3_timer_irq(u32 frame_sp)
     u32 cc = 0;
 
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
-    g_isr_cc = cc;
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
