@@ -276,9 +276,9 @@ void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch)
     /* 通道复位 + 自动回写 owner（循环播放必需，否则喂完一轮就停，只能听到"噗"） */
     wr(&GDMA_OUT_CONF0(ch), 1u);       /* out_rst=1 */
     wr(&GDMA_OUT_CONF0(ch), 0u);       /* out_rst=0 */
-    /* auto_wrback(bit2) | outdscr_burst_en(bit4) | out_data_burst_en(bit5)
-     * —— IDF 的 gdma_hal 会把这几位都打开，缺了容易报描述符错误 */
-    wr(&GDMA_OUT_CONF0(ch), (1u << 2) | (1u << 4) | (1u << 5));
+    /* 照 IDF gdma_hal_ahb_v1 的 set_strategy/enable_burst：
+     *   auto_wrback(2) | eof_mode(3) | outdscr_burst(4) | data_burst(5) | check_owner(12) */
+    wr(&GDMA_OUT_CONF0(ch), (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 12));
 
     /* I2S0 用 GDMA 触发号 3；把通道接到 I2S0，装描述符并启动 */
     wr(&GDMA_OUT_PERI_SEL(ch), 3u);
