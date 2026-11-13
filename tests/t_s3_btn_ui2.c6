@@ -1,17 +1,13 @@
-/* t_s3_btn_ui2.c6 —— 按键面板 GUI 跑在独立任务里（双任务版）：
- *   btn_task：5~10ms 轮询按键，计事件、标脏行，然后 os_sem_post 唤醒 GUI
- *   gui_task：os_sem_pend 等信号，只重绘"脏"的行，并且把一行的 blit 拆成
- *             上下两段、中间 os_task_yield() 让出 CPU —— 这样长传输期间按键
- *             任务照样能被调度，不会漏按键。
- * 屏上每行：名字 + L=<原始电平> B=<基线> DOWN/UP + n=<次数>
+/* t_s3_btn_ui2.c6 —— 按键面板 GUI 跑在独立任务（两个任务版，生产写法）：
+ *   btn_task：10ms 轮询按键，计事件、状态变化时标脏行
+ *   gui_task：20ms 检查脏位，只重绘变化的那一行（分 8 行一块上屏，块间 yield）
+ * 不做任何"心跳刷新"——屏只在真有变化时才写，尽量减少面板负载。
  */
 
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/gfx.h"
 #include "c6os/task.h"
-#include "c6os/sem.h"
-#include "c6os/tick.h"
 
 #define W 240u
 #define H 240u
@@ -26,21 +22,11 @@ u32 s3_btn_idle_level(u32 i);
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
-void s3_lcd_fill(u16 color);
-void s3_lcd_resync(void);
-u32 s3_reg32(u32 addr);
-void s3_reg_wr(u32 addr, u32 v);
-#define PCNT_BASE 0x60017000u
 void s3_lcd_bl(u32 on);
-void s3_lcd_set_bb_pad(u32 units);
-void s3_lcd_set_bb_fast(u32 on);
 void s3_lcd_delay(u32 n);
-u32 port_irq_save(void);
-void port_irq_restore(u32 ps);
 
 static u16 g_fb[W * H] = {0};
 static OsGfx g;
-static OsSem g_sem;
 static volatile u32 g_cnt[3];
 static volatile u32 g_dirty[3];
 static volatile u32 g_polls;
@@ -56,26 +42,6 @@ static void pu32(u32 v)
     if (v == 0u) { port_putc('0'); return; }
     while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
     while (i > 0) { i--; port_putc((int)b[i]); }
-}
-
-/* PCNT 数 SCLK(GPIO9) 边沿，用来判断引脚是不是还在翻转 */
-static void pcnt_pin(u32 pin)
-{
-    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
-    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
-    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
-    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
-}
-
-static void pcnt_sclk_init(void)
-{
-    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
-    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
-    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
-    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (9u & 0x3Fu) | (1u << 6));
-    s3_reg_wr(0x60009000u + 0x04u + 4u * 9u, s3_reg32(0x60009000u + 0x04u + 4u * 9u) | (1u << 9));
-    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
-    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
 }
 
 static void u2s(char *out, u32 v)
@@ -115,27 +81,20 @@ static void draw_row(u32 i)
     os_gfx_text16(&g, 182, y + 26, s, 0xFFFFu);
 }
 
-/* 把一行分两段刷，中间 yield，避免长时间独占 CPU */
 static void flush_row(u32 i)
 {
     int y = 26 + (int)i * ROW_H;
-    u32 ps = 0;
+    u32 yy = (u32)y;
+    u32 left = (u32)(ROW_H - 4);
 
     draw_row(i);
-    /* 不关中断：按 8 行一块上屏（每块 ~3840B ≈ 6ms），块间 yield，
-     * 单次占用 CPU 不超过一个 tick 周期，避免丢 tick */
-    {
-        u32 yy = (u32)y;
-        u32 left = (u32)(ROW_H - 4);
-        while (left > 0u) {
-            u32 n = (left > 8u) ? 8u : left;
-            s3_lcd_blit_rect(g_fb, W, 0u, yy, W, n);
-            yy += n;
-            left -= n;
-            os_task_yield();
-        }
+    while (left > 0u) {              /* 每块 8 行 ≈ 6ms，块间让出 CPU */
+        u32 n = (left > 8u) ? 8u : left;
+        s3_lcd_blit_rect(g_fb, W, 0u, yy, W, n);
+        yy += n;
+        left -= n;
+        os_task_yield();
     }
-    (void)ps;
 }
 
 static void btn_task(void *arg)
@@ -143,94 +102,35 @@ static void btn_task(void *arg)
     (void)arg;
     for (;;) {
         u32 i = 0;
-        u32 hit = 0;
 
         s3_btn_poll();
         g_polls++;
         while (i < 3u) {
             if (s3_btn_take_event(i) != 0u) {
                 g_cnt[i]++;
-                hit = 1u;
                 pstr("press ");
                 pu32(i);
                 pstr(" n=");
                 pu32(g_cnt[i]);
                 pstr("\n");
             }
-            /* 只有"状态或计数变了"才让 GUI 重绘这一行 */
             if (s3_btn_pressed(i) != g_last_down[i] || g_cnt[i] != g_last_cnt[i]) {
                 g_dirty[i] = 1u;
                 g_last_down[i] = s3_btn_pressed(i);
                 g_last_cnt[i] = g_cnt[i];
-                hit = 1u;
             }
             i++;
         }
-        if (hit != 0u) { (void)os_sem_post(&g_sem); }
-        if ((g_polls % 100u) == 0u) {
-            pstr("btn alive polls=");
-            pu32(g_polls);
-            pstr(" tick=");
-            pu32((u32)os_tick_get());
-            pstr("\n");
-        }
-        os_task_delay(1u);      /* 10ms */
+        os_task_delay(1u);          /* 10ms */
     }
 }
 
 static void gui_task(void *arg)
 {
-    u32 hb = 0;
-
     (void)arg;
-    pstr("gui entered\n");
     for (;;) {
         u32 i = 0;
 
-        /* 不用信号量：直接每 20ms 看一次脏位（更稳，也不依赖唤醒语义） */
-        if ((hb % 50u) == 0u) {
-            pstr("gui alive hb=");
-            pu32(hb);
-            pstr("\n");
-        }
-        hb++;
-        /* 心跳：每 ~500ms 重画底部一行，证明"画+上屏"这条路本身是通的 */
-        if ((hb % 25u) == 0u) {
-            char t[12] = {0};
-            u32 ps = 0;
-            os_gfx_fill_rect(&g, 0, 200, (int)W, 40, 0x0000u);
-            os_gfx_text16(&g, 6, 204, "GUI hb=", 0x07FFu);
-            u2s(t, hb);
-            os_gfx_text16(&g, 70, 204, t, 0x07FFu);
-            if ((hb % 25u) == 0u) {
-                /* 不清零，直接看累计值（SDA=GPIO10） */
-                pstr("sda_edges=");
-                pu32(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFFFu);
-                pstr("\n");
-            }
-            {
-                u32 c0 = (u32)port_cycles();
-                u32 yy = 200u;
-                u32 left = 40u;
-                while (left > 0u) {
-                    u32 n = (left > 8u) ? 8u : left;
-                    s3_lcd_blit_rect(g_fb, W, 0u, yy, W, n);
-                    yy += n;
-                    left -= n;
-                    os_task_yield();
-                }
-                c0 = (u32)port_cycles() - c0;
-                pstr("hb blit cycles=");
-                pu32(c0 / 1000u);
-                pstr("k gfx w=");
-                pu32(g.w);
-                pstr(" h=");
-                pu32(g.h);
-                pstr(" fb=");
-                pu32((u32)g.fb);
-                pstr("\n");
-            }
-        }
         while (i < 3u) {
             if (g_dirty[i] != 0u) {
                 g_dirty[i] = 0u;
@@ -241,7 +141,7 @@ static void gui_task(void *arg)
             }
             i++;
         }
-        os_task_delay(2u);      /* 20ms */
+        os_task_delay(2u);          /* 20ms */
     }
 }
 
@@ -254,25 +154,19 @@ void os_main(void)
     s3_lcd_init();
     s3_lcd_bl(1u);
     os_gfx_init(&g, g_fb, W, H);
-    (void)os_sem_init(&g_sem, 0u, 4u);
-    pcnt_sclk_init();
-    pcnt_pin(10u);      /* 之后一直累计数 SDA(GPIO10) 的边沿 */
 
-    /* 首帧：整屏画一次 */
     os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x00000000u);
     os_gfx_text16(&g, 6, 4, "C6OS BUTTONS", 0x07FFu);
     i = 0;
     while (i < 3u) {
         draw_row(i);
-        g_dirty[i] = 0u;
         i++;
     }
-    os_gfx_text16(&g, 6, 212, "GUI in its own task", 0xF81Fu);
+    os_gfx_text16(&g, 6, 212, "GUI task + polling", 0xF81Fu);
     s3_lcd_blit(g_fb, W, H);
     pstr("init done\n");
 
-    /* 诊断：先不建按键任务，只跑 GUI，看屏幕还会不会停 */
-    /* (void)os_task_create("btn", btn_task, 0, 3u, 3072u); */
+    (void)os_task_create("btn", btn_task, 0, 3u, 3072u);
     (void)os_task_create("gui", gui_task, 0, 2u, 4096u);
     os_task_start();
 
