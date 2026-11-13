@@ -61,10 +61,12 @@ void s3_i2s_init(u32 sample_rate)
     /* 时钟：源=PLL_160M(sel=1)，mclk = 160MHz/(div)，bck = mclk/(bck_div)
      * 目标 BCLK = sample_rate*32：div=104 → 1.538MHz，bck_div=1 → 769kHz ≈ 24kHz */
     wr(&I2S_TX_CLKM_DIV, (1u << 9));      /* 小数分频 y=1 基准，整数模式 */
+    /* 时钟源先用 XTAL 40MHz（一定在跑，排除 PLL 依赖）：
+     * 40MHz/26 = 1.538MHz mclk，bck_div=1 → 769kHz ≈ 24kHz×32 */
     wr(&I2S_TX_CLKM, (1u << 29)           /* CLK_EN —— 少它整个 I2S 没有时钟 */
-                     | (2u << 27)          /* TX_CLK_SEL = 2 (PLL_160M) */
+                     | (0u << 27)          /* TX_CLK_SEL = 0 (XTAL 40MHz) */
                      | (1u << 26)          /* TX_CLK_ACTIVE */
-                     | 104u);              /* TX_CLKM_DIV_NUM：160M/104 -> 1.54MHz */
+                     | 26u);               /* TX_CLKM_DIV_NUM */
     /* TX_CONF1：16bit(15) | bck_div=1 | left align */
     wr(&I2S_TX_CONF1, (15u << 13) | (1u << 7) | (1u << 30));
     /* TX_CONF：立体声(chan_mod=0) + MSB first + 左对齐 + 启动 */
