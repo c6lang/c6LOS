@@ -35,7 +35,15 @@ static void pu32(u32 v)
 static void hi_task(void *arg)
 {
     (void)arg;
-    for (;;) { g_hi++; }
+    pstr("hi entered\n");
+    for (;;) {
+        g_hi++;
+        if ((g_hi % 200000u) == 0u) {
+            pstr("hi alive n=");
+            pu32(g_hi);
+            pstr("\n");
+        }
+    }
 }
 
 static void blit_task(void *arg)

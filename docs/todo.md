@@ -695,7 +695,15 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   `port_task_switch` 保存/恢复的 EPC 与 frame，以及 `s3_timer_irq` 里
   `port_irq_fill`(frame) 对被打断帧的处理（bit-bang 循环在任务态，帧应在任务栈上）。
 
-- **更正：blit 期间"任务不被调度"的真实现象**（实测数据：
+- **再更正（最终结论）：抢占在 blit 期间是正常的**。给 `hi_task` 加上入口打印后，
+  同一测试实测 `hi_delta=494153`（blit 期间另一个任务跑了 49 万次），
+  `tick_delta=72 / sw_try=73 / sw_done=73`。之前的 `hi_delta=0` 是那段
+  `for(;;) g_hi++;` 紧循环被优化/测量方式导致的假象，**不是内核 bug**。
+  也就是说 GUI 完全可以跑在独立任务里、靠 tick 抢占保持按键响应；
+  之前"按键不灵"的真实原因是测试里**每 10ms 把所有行标脏**导致 GUI 不停重绘
+  （已改成只在状态变化时标脏，`tests/t_s3_btn_ui2.c6` 真板验证响应正常）。
+
+- **（历史记录，已被上面取代）blit 期间"任务不被调度"的现象**（实测数据：
   `blit cycles=29080k tick_delta=72 hi_delta=0`）——
   tick 正常（364ms 内 72 个 ≈198Hz ✓ 与 rearm 的 400000 cycles@80MHz 一致），
   **但同优先级的另一个任务一次都没被调度到（hi_delta=0）**，
