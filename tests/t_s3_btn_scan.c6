@@ -15,7 +15,7 @@ static int skip(u32 p)
 {
     return (p == 0u || p == 7u || p == 8u || p == 9u || p == 10u ||
             p == 13u || p == 14u || p == 15u || p == 16u || p == 18u ||
-            p == 21u || p == 39u || p == 40u);
+            p == 21u || p == 39u || p == 40u || p == 19u || p == 20u);
 }
 
 static void puts_(const char *s)

@@ -1,0 +1,140 @@
+/* t_s3_pinmon.c6 —— 全车引脚变化监视器：每 50ms 扫 GPIO_IN(0..31) 与
+ * GPIO_IN1(32..48)，把最近变化的 6 个脚（脚号 + 新电平）画在屏上。
+ * 不配置任何脚（不碰 IO_MUX），只读。用来找出按键到底接在哪。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+#define GPIO_IN  (*(volatile u32 *)0x6000403Cu)
+#define GPIO_IN1 (*(volatile u32 *)0x60004040u)
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static u32 g_log_pin[6];
+static u32 g_log_lvl[6];
+static u32 g_log_n;
+
+static void pstr(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void u2s(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+}
+
+static void draw(void)
+{
+    u32 i = 0;
+
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+    os_gfx_text16(&g, 6, 4, "PIN MONITOR", 0x07FFu);
+    os_gfx_text16(&g, 6, 24, "changed:", 0xFFE0u);
+
+    while (i < 6u) {
+        int y = 46 + (int)i * 26;
+        char s[12] = {0};
+        if (i < g_log_n) {
+            os_gfx_text16(&g, 6, y, "gpio", 0xFFFFu);
+            u2s(s, g_log_pin[i]);
+            os_gfx_text16(&g, 50, y, s, 0x07E0u);
+            os_gfx_text16(&g, 100, y, "=", 0xFFFFu);
+            s[0] = (char)('0' + (g_log_lvl[i] & 1u));
+            s[1] = '\0';
+            os_gfx_text16(&g, 116, y, s, 0xF800u);
+        }
+        i++;
+    }
+    s3_lcd_blit(g_fb, W, H);
+}
+
+static void push(u32 pin, u32 lvl)
+{
+    u32 i = 5;
+
+    while (i > 0u) {
+        g_log_pin[i] = g_log_pin[i - 1u];
+        g_log_lvl[i] = g_log_lvl[i - 1u];
+        i--;
+    }
+    g_log_pin[0] = pin;
+    g_log_lvl[0] = lvl;
+    if (g_log_n < 6u) { g_log_n++; }
+
+    pstr("gpio");
+    pu32(pin);
+    pstr(" -> ");
+    pu32(lvl);
+    pstr("\n");
+}
+
+void os_main(void)
+{
+    u32 prev0 = 0;
+    u32 prev1 = 0;
+
+    pstr("c6os pin monitor\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+
+    prev0 = GPIO_IN;
+    prev1 = GPIO_IN1;
+    draw();
+
+    for (;;) {
+        u32 v0 = GPIO_IN;
+        u32 v1 = GPIO_IN1;
+        u32 d0 = v0 ^ prev0;
+        u32 d1 = v1 ^ prev1;
+        u32 i = 0;
+        u32 hit = 0;
+
+        while (i < 32u) {
+            if (((d0 >> i) & 1u) != 0u) {
+                push(i, (v0 >> i) & 1u);
+                hit = 1u;
+            }
+            i++;
+        }
+        i = 0;
+        while (i < 17u) {
+            if (((d1 >> i) & 1u) != 0u) {
+                push(32u + i, (v1 >> i) & 1u);
+                hit = 1u;
+            }
+            i++;
+        }
+        prev0 = v0;
+        prev1 = v1;
+        if (hit != 0u) { draw(); }
+        s3_lcd_delay(200000u);      /* 50ms */
+    }
+}

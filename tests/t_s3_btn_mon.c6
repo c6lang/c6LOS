@@ -1,0 +1,130 @@
+/* t_s3_btn_mon.c6 —— 屏上实时 GPIO 监视器：GPIO0/40/39 的原始电平 + 变化次数，
+ * 任何变化立刻重绘。不碰 IO_MUX（39/40 的 IO_MUX 是 JTAG 专用寄存器）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+#define GPIO_IN (*(volatile u32 *)0x6000403Cu)
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u32 g_pin[3] = {0u, 40u, 39u};
+static u32 g_lvl[3];
+static u32 g_cnt[3];
+
+static void pstr(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void u2s(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+}
+
+static void draw(void)
+{
+    u32 i = 0;
+
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+    os_gfx_text16(&g, 6, 4, "GPIO MONITOR", 0x07FFu);
+
+    while (i < 3u) {
+        int y = 26 + (int)i * 60;
+        char s[12] = {0};
+        u32 v = g_lvl[i];
+
+        if (v != 0u) { os_gfx_fill_rect(&g, 0, y, (int)W, 54, 0x0010u); }
+        if (i == 0u) { os_gfx_text16(&g, 6, y + 4, "G0  BOOT", 0xFFFFu); }
+        if (i == 1u) { os_gfx_text16(&g, 6, y + 4, "G40 VOL+", 0xFFFFu); }
+        if (i == 2u) { os_gfx_text16(&g, 6, y + 4, "G39 VOL-", 0xFFFFu); }
+
+        s[0] = (char)('0' + (v & 1u));
+        s[1] = '\0';
+        os_gfx_text16(&g, 6, y + 26, "level=", 0xFFE0u);
+        os_gfx_text16(&g, 70, y + 26, s, 0xFFE0u);
+        {
+            char t[12] = {0};
+            u2s(t, g_cnt[i]);
+            os_gfx_text16(&g, 106, y + 26, "n=", 0xFFE0u);
+            os_gfx_text16(&g, 130, y + 26, t, 0xFFFFu);
+        }
+        i++;
+    }
+    os_gfx_text16(&g, 6, 212, "PRESS KEYS NOW", 0xF81Fu);
+    s3_lcd_blit(g_fb, W, H);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 dirty = 1;
+
+    pstr("c6os gpio monitor\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+
+    i = 0;
+    while (i < 3u) {
+        g_lvl[i] = (GPIO_IN >> g_pin[i]) & 1u;
+        g_cnt[i] = 0u;
+        i++;
+    }
+    pstr("levels: ");
+    pu32(g_lvl[0]);
+    pu32(g_lvl[1]);
+    pu32(g_lvl[2]);
+    pstr("\n");
+
+    draw();
+
+    for (;;) {
+        i = 0;
+        while (i < 3u) {
+            u32 v = (GPIO_IN >> g_pin[i]) & 1u;
+            if (v != g_lvl[i]) {
+                g_lvl[i] = v;
+                g_cnt[i]++;
+                dirty = 1u;
+                pstr("pin ");
+                pu32(g_pin[i]);
+                pstr(" -> ");
+                pu32(v);
+                pstr("\n");
+            }
+            i++;
+        }
+        if (dirty != 0u) {
+            dirty = 0u;
+            draw();
+        }
+        s3_lcd_delay(200000u);
+    }
+}

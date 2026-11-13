@@ -44,9 +44,20 @@ void s3_btn_init(void)
 
     while (i < BTN_N) {
         volatile u32 *mux = (volatile u32 *)IO_MUX(g_btn_pin[i]);
-        u32 v = *mux;
-        /* 不改 MCU_SEL：复位默认值就能做数字输入（实测 39 号脚不动它才读得到
-         * 按键；改成 1 反而断开数字输入通路）。 */
+        u32 v;
+        /* 只处理 0..21：这区间 IO_MUX 是线性地址 0x60009000+0x04+4p。
+         * GPIO39/40 的 IO_MUX 是 JTAG 的 MTCK/MTDO 专用寄存器，不在这条线性
+         * 表里——按线性地址写会写到别的寄存器上（就是音量键不工作的原因）。
+         * 保持默认即可做数字输入。 */
+        if (g_btn_pin[i] > 21u) {
+            g_btn_idle[i] = btn_level(i);
+            g_btn_down[i] = 0u;
+            g_btn_cnt[i] = 0u;
+            g_btn_event[i] = 0u;
+            i++;
+            continue;
+        }
+        v = *mux;
         v = v | (1u << 9);                    /* FUN_IE  输入使能 */
         if (g_btn_pin[i] == 0u) {
             v = v | (1u << 8);                /* BOOT：内部上拉，按下接地（低有效） */
