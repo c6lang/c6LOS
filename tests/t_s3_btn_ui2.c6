@@ -28,6 +28,8 @@ void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_fill(u16 color);
 void s3_lcd_bl(u32 on);
+void s3_lcd_set_bb_pad(u32 units);
+void s3_lcd_set_bb_fast(u32 on);
 void s3_lcd_delay(u32 n);
 u32 port_irq_save(void);
 void port_irq_restore(u32 ps);
@@ -178,8 +180,15 @@ static void gui_task(void *arg)
             os_gfx_text16(&g, 70, 204, t, 0x07FFu);
             {
                 u32 c0 = (u32)port_cycles();
-                /* 心跳直接整屏填色（交叉两种颜色），用来判断面板本身还活着没有 */
-                s3_lcd_fill(((hb / 25u) & 1u) != 0u ? 0x0010u : 0x0200u);
+                u32 yy = 200u;
+                u32 left = 40u;
+                while (left > 0u) {
+                    u32 n = (left > 8u) ? 8u : left;
+                    s3_lcd_blit_rect(g_fb, W, 0u, yy, W, n);
+                    yy += n;
+                    left -= n;
+                    os_task_yield();
+                }
                 c0 = (u32)port_cycles() - c0;
                 pstr("hb blit cycles=");
                 pu32(c0 / 1000u);
