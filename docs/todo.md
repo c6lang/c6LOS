@@ -711,3 +711,34 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   下一步：查 `os_sched_preempt_ctx()` 在同优先级下的轮转（`make_ready(g_cur)` 后
   `sched_pick` 是否真的换到另一个任务），以及 `g_sched_lock[core]` 是否被意外置位。
   临时可用方案：GUI 分块 blit + `os_task_yield()`（tests/t_s3_btn_ui2.c6 已验证可用）。
+
+## 本轮收尾状态（S3 真板）
+
+**已完成并真板验证**
+1. **面板 ST7789 240×240 点亮**：显示我们自己的画面（纯色/8 色竖条/8×16 文字/
+   仪表盘/实时 FPS 表）。通路是 GPIO bit-bang（本板硬件 SPI 的 SCLK 打不出边沿，
+   已用 PCNT 与目视双重确认），整屏 ≈29.1M cycles ≈5.7fps。
+   关键修复：`cmd()` 与像素数据必须走**同一条** bit-bang 通路（分派放在 `spi_xfer`）。
+2. **三个按键全部可用**（BOOT/VOL+/VOL-）：两个真 bug —— ①GPIO≥32 的电平在
+   `GPIO_IN1`；②39/40 的 IO_MUX `MCU_SEL` 必须保持 0（设成 GPIO 功能就读不到）。
+   屏上按键面板支持局部刷新，GUI 也能跑在独立任务里（tick 抢占正常，
+   实测 blit 期间另一任务跑了 49 万次）。
+3. **按要求用上游源码现场编译验证**：IDF v6.0.1 + xiaozhi v2.5.0，
+   `CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_WIFI=y`（默认板型是 BREAD_COMPACT_WIFI，
+   编出来会黑屏）；编出的固件烧板后屏亮、三个键正常（用户确认）。
+4. 平台侧修复：RTC 超级看门狗每 3.5s 复位、`volatile` 忙等 memw 卡死、
+   `port_core_id()`（PRID 是脏值）导致 tick 不前进、`ctx.S` 双核共用保存区
+   → 双核 SMP 三个用例 PASS。
+
+**未完成**
+- **喇叭**：I2S 时钟/引脚/格式全部正常（BCLK 实测有边沿），GDMA 通道、触发号(3)、
+  `OUT_LINK/OUT_PERI_SEL/OUT_CONF0`、`lldesc` 环链都按 IDF 抄了，但
+  `OUT_INT_RAW` 的 `OUT_DSCR_ERR` 一直亮、DMA 不喂数据（只出一声"噗"）。
+  下一步建议：直接搬 IDF 的 `gdma_hal_ahb_v1.c` + `gdma_ll.h` 进内核调用，
+  或核对 `out.link.addr` 20 位字段的地址基准（怀疑 DMA 侧 DRAM 基址不是 0x3FC00000）。
+- **mic**：同上（I2S1，SCK=5/WS=4/DIN=6）。
+- **WiFi + lwIP**：环境已就绪（IDF v6.0.1 源码 `/media/winger/inst_26/esp/esp-idf`、
+  工具链 `/media/winger/inst_26/esp/tools`、上游固件 `/media/winger/inst_26/esp/xiaozhi`），
+  下一步：把 esp_wifi 闭源库 + lwIP 源码 + FreeRTOS 垫片接进 c6LOS。
+- 内核：单核任务间 `os_sem_pend(timeout=0)` / `os_sem_post` 的唤醒路径待查
+  （跨核 sem 用例是 PASS 的）。
