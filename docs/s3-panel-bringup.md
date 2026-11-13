@@ -94,8 +94,17 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
   复位后可用 `esptool read-mem` 读回（注意 RTC 内存里有几个字不稳定，
   只用 0/2/3/9 号验证过；启动阶段 ROM 也会用一部分）。
 - **复位原因**：`0x60008038 & 0x3F`；`0x60008018` 是 STATE0。
-- **SPI 回环**：`s3_spi_loopback()` 把 `FSPIQ` 输入映射到 MOSI 同一根 pad
-  做全双工读回（需要 `USER.DOUTDIN=1`）。
+- **SPI 读通路（已知未打通）**：想做 `RDDID(0x04)` 读回面板 ID 来自证
+  "面板是否应答"，但 S3 的 SPI2 接收侧在本板始终读回 0xFF，已排除：
+  ①`FSPIQ_IN_IDX=102` 映射寄存器没错（`GPIO_BASE+0x154+4*102`，
+  bit[5:0]=pad、bit6=`sig_in_sel` 使能，最初漏了 bit6）；
+  ②`USER.DOUTDIN=1`、`USR_MISO` 已置；
+  ③正对照证明 pad 电平与 `GPIO_IN_REG` 都对——`tests/t_s3_lcd_id.c6` 把 SDA
+  当普通 GPIO 驱动 0/1 时 `in=00/01`，但同一时刻 `rx=ffffffff`。
+  即 MCU 侧 GPIO 读没问题，是 SPI2 的 MISO/RX FIFO 通路（或 FIFO 读取时机）
+  还没对；在打通之前**不能用读 ID 判断面板死活**，只能靠人眼看屏。
+  `s3_spi_loopback()` 是同一用途的早期尝试（把 `FSPIQ` 接到 MOSI 同一 pad），
+  结论相同。
 
 ## 5. 当前状态
 

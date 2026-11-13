@@ -406,6 +406,126 @@ void s3_lcd_fill(u16 color)
     }
 }
 
+/* 读面板的 RDDID(0x04)：ST7789 应答 0x85 0x85 0x52（前面可能先来一个 dummy
+ * 字节）。这是"面板到底有没有在听"的客观证据，不需要人眼。
+ *
+ * 关键三点：
+ *   1) SDA 是双向脚：命令阶段由 MCU 驱动，读阶段必须把 pad 的输出关掉
+ *      （OUT_SEL_CFG 里去掉 OEN_ALWAYS + GPIO_ENA 清位），否则两边抢总线；
+ *   2) GPIO 输入矩阵要真的打开：IN_SEL 寄存器 bit6=sig_in_sel，
+ *      bit[5:0]=pad 号，把 FSPIQ(102) 选到 SDA 那根 pad；
+ *   3) IO_MUX 里 FUN_IE 置位。
+ */
+int s3_lcd_read_id(u8 *out, u32 n)
+{
+    u32 i;
+    u32 w;
+    u32 nw;
+    u32 guard;
+    volatile u32 *mux = (volatile u32 *)IO_MUX_REG(PIN_SDA);
+
+    if (n == 0u || n > 4u) { return -1; }
+
+    /* 输入通路：pad 输入使能 + FSPIQ 选到 SDA */
+    *mux = *mux | (1u << 9);
+    *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = (PIN_SDA & 0x3Fu) | (1u << 6);
+
+    /* 命令字节 0x04（DC=0），SDA 由 MCU 驱动 */
+    lo(PIN_DC);
+    {
+        static const u8 c = 0x04u;
+        spi_xfer(&c, 1u);
+    }
+    /* 读阶段：放开 SDA（三态），DC=1 */
+    *(volatile u32 *)GPIO_OUT_SEL(PIN_SDA) = SIG_GPIO_OUT;
+    *(volatile u32 *)GPIO_ENA_W1TC = (1u << PIN_SDA);
+    hi(PIN_DC);
+
+    for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_MS_DLEN = n * 8u - 1u;
+    SPI2_CMD = SPI_CMD_UPDATE;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -3; }
+    }
+    SPI2_CMD = SPI_CMD_USR;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -4; }
+    }
+    nw = (n + 3u) / 4u;
+    for (i = 0; i < nw; i++) {
+        w = SPI2_W(i);
+        out[i * 4u] = (u8)(w >> 24);
+        if (i * 4u + 1u < n) { out[i * 4u + 1u] = (u8)(w >> 16); }
+        if (i * 4u + 2u < n) { out[i * 4u + 2u] = (u8)(w >> 8); }
+        if (i * 4u + 3u < n) { out[i * 4u + 3u] = (u8)w; }
+    }
+    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    *(volatile u32 *)GPIO_OUT_SEL(PIN_SDA) = SIG_GPIO_OUT | OEN_ALWAYS;
+    return 0;
+}
+
+/* 调试用：把一根脚设成普通 GPIO 输出并给电平 / 读回输入电平。 */
+void s3_pin_out(u32 pin)
+{
+    plain_out(pin);
+}
+
+void s3_pin_set(u32 pin, u32 v)
+{
+    if (v != 0u) { hi(pin); } else { lo(pin); }
+}
+
+u32 s3_pin_get(u32 pin)
+{
+    return (*(volatile u32 *)(GPIO_BASE + 0x3Cu) >> pin) & 1u;
+}
+
+/* 只收不发地读一根 pad 的电平（FSPIQ 输入矩阵 + SPI 时钟），用于确认
+ * 输入通路本身是好的：把 pad 用普通 GPIO 驱动成 0/1，读回应分别是 0x00/0xFF。 */
+int s3_spi_read_pin(u32 pin, u8 *rx, u32 n)
+{
+    u32 i;
+    u32 w;
+    u32 nw;
+    u32 guard;
+    volatile u32 *mux = (volatile u32 *)IO_MUX_REG(pin);
+
+    if (n == 0u || n > SPI_CHUNK) { return -1; }
+    *mux = *mux | (1u << 9);
+    *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = (pin & 0x3Fu) | (1u << 6);
+
+    for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_MS_DLEN = n * 8u - 1u;
+    SPI2_CMD = SPI_CMD_UPDATE;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -2; }
+    }
+    SPI2_CMD = SPI_CMD_USR;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -3; }
+    }
+    nw = (n + 3u) / 4u;
+    for (i = 0; i < nw; i++) {
+        w = SPI2_W(i);
+        rx[i * 4u] = (u8)(w >> 24);
+        if (i * 4u + 1u < n) { rx[i * 4u + 1u] = (u8)(w >> 16); }
+        if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
+        if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
+    }
+    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    return 0;
+}
+
 /* LOOPBACK 自检：把 FSPIQ（SPI 的 MISO 输入）映射到与 MOSI 同一根 pad，
  * 全双工发一段数据再读回 RX FIFO。读回等于发出 → 主控确实在 MOSI 上打数据；
  * 读回全 0 → 主控没把数据送出去（配置问题），与面板无关。 */
@@ -421,7 +541,9 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
 
     /* pad 输入通路打开（FUN_IE），并把 FSPIQ 的输入选到这根 pad */
     *mux = *mux | (1u << 9);
-    *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = pin & 0x3Fu;
+    /* IN_SEL 寄存器：bit[5:0]=func_sel（选哪个 pad），bit6=sig_in_sel（使能）。
+     * 之前漏了 bit6，输入通路没打开，读回来永远是 0xFF。 */
+    *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = (pin & 0x3Fu) | (1u << 6);
 
     for (i = 0; i < SPI_CHUNK / 4u; i++) {
         SPI2_W(i) = 0u;
