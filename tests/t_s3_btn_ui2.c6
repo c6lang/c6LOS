@@ -27,6 +27,10 @@ void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_fill(u16 color);
+void s3_lcd_resync(void);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+#define PCNT_BASE 0x60017000u
 void s3_lcd_bl(u32 on);
 void s3_lcd_set_bb_pad(u32 units);
 void s3_lcd_set_bb_fast(u32 on);
@@ -52,6 +56,26 @@ static void pu32(u32 v)
     if (v == 0u) { port_putc('0'); return; }
     while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
     while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* PCNT 数 SCLK(GPIO9) 边沿，用来判断引脚是不是还在翻转 */
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static void pcnt_sclk_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (9u & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * 9u, s3_reg32(0x60009000u + 0x04u + 4u * 9u) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
 }
 
 static void u2s(char *out, u32 v)
@@ -178,6 +202,12 @@ static void gui_task(void *arg)
             os_gfx_text16(&g, 6, 204, "GUI hb=", 0x07FFu);
             u2s(t, hb);
             os_gfx_text16(&g, 70, 204, t, 0x07FFu);
+            if ((hb % 25u) == 0u) {
+                /* 不清零，直接看累计值（SDA=GPIO10） */
+                pstr("sda_edges=");
+                pu32(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFFFu);
+                pstr("\n");
+            }
             {
                 u32 c0 = (u32)port_cycles();
                 u32 yy = 200u;
@@ -225,6 +255,8 @@ void os_main(void)
     s3_lcd_bl(1u);
     os_gfx_init(&g, g_fb, W, H);
     (void)os_sem_init(&g_sem, 0u, 4u);
+    pcnt_sclk_init();
+    pcnt_pin(10u);      /* 之后一直累计数 SDA(GPIO10) 的边沿 */
 
     /* 首帧：整屏画一次 */
     os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x00000000u);

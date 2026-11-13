@@ -994,3 +994,17 @@ void s3_reg_wr(u32 addr, u32 v)
 {
     *(volatile u32 *)addr = v;
 }
+
+/* 兜底：面板若因供电抖动自己复位（表现为画面定格、仍保留旧图），
+ * 定期重发一遍初始化即可恢复。只发命令，不重做上电延时。 */
+void s3_lcd_resync(void)
+{
+    s3_lcd_cmd(0x11u);          /* SLPOUT */
+    s3_lcd_delay(500000u);
+    s3_lcd_cmd(0x3Au); s3_lcd_dat(0x55u);   /* COLMOD 16bit */
+    s3_lcd_cmd(0x36u); s3_lcd_dat(0x70u);   /* MADCTL */
+    s3_lcd_cmd(0x21u);          /* INVON */
+    s3_lcd_cmd(0x13u);          /* NORON */
+    s3_lcd_cmd(0x29u);          /* DISPON */
+    s3_lcd_delay(200000u);
+}
