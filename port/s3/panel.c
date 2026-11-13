@@ -22,6 +22,15 @@ static void wr(volatile u32 *r, u32 v) { *r = v; }
 static void hi(u32 p) { wr((volatile u32 *)GPIO_OUT_W1TS, 1u << p); }
 static void lo(u32 p) { wr((volatile u32 *)GPIO_OUT_W1TC, 1u << p); }
 static void out(u32 p) { wr((volatile u32 *)GPIO_ENA_W1TS, 1u << p); }
+
+static void mux_gpio(u32 p)
+{
+    volatile u32 *mux = (volatile u32 *)(0x60009000u + p * 4u);
+    u32 v = *mux;
+    v = (v & ~(7u << 12)) | (1u << 8) | (2u << 10);
+    v = v & ~(1u << 9);
+    *mux = v;
+}
 static void dly(u32 n) { volatile u32 i = 0; while (i < n) { i++; } }
 
 static void spi_byte(u8 b)
@@ -91,17 +100,12 @@ static void init_seq(void)
 
 void s3_lcd_init(void)
 {
+    mux_gpio(PIN_SDA); mux_gpio(PIN_SCL); mux_gpio(PIN_DC);
+    mux_gpio(PIN_CS); mux_gpio(PIN_RST); mux_gpio(PIN_BL);
     out(PIN_SDA); out(PIN_SCL); out(PIN_DC); out(PIN_CS); out(PIN_RST); out(PIN_BL);
     hi(PIN_CS); hi(PIN_DC); hi(PIN_SCL); lo(PIN_SDA); lo(PIN_RST); lo(PIN_BL);
     init_seq();
     hi(PIN_BL);
-    window(0u, 0u, LCD_W, LCD_H);
-    dat_start();
-    {
-        u32 n = LCD_W * LCD_H;
-        while (n != 0u) { dat16(0x0000u); n--; }
-    }
-    dat_end();
 }
 
 void s3_lcd_fill(u16 color)
