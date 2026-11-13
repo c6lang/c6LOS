@@ -1,48 +1,48 @@
-#include "c6os/types.h"
+#include "c6os/port.h"
 #include "c6os/task.h"
 #include "c6os/heap.h"
 #include "c6os/shell.h"
-#include "c6os/port.h"
 
-static u8 g_mem[4096] = {0};
+static u8 g_mem[1024] = {0};
 static OsHeap g_heap;
-static u8 g_acc[128] = {0};
-static u32 g_n = 0;
+static char g_line[80] = {0};
 
 static void shell_task(void *arg) {
+    u32 n = 0;
+    (void)arg;
     os_shell_bind_heap(&g_heap);
+    port_puts("shell ready\nshell> ");
     while (1) {
         int c = port_getc();
-
         if (c < 0) {
-            os_task_delay(1u);
+            port_delay_ms(5u);
             continue;
         }
-        if (c == 0) {
-            if (g_n > 0u) {
-                (void)os_shell_exec_frame(g_acc, g_n);
+        if (c == '\r' || c == '\n') {
+            port_puts("\n");
+            g_line[n] = '\0';
+            if (n > 0u) {
+                (void)os_shell_exec(g_line);
             }
-            g_n = 0;
-        } else if (c == '\r' || c == '\n') {
-            g_acc[g_n] = 0;
-            if (g_n > 0u) {
-                (void)os_shell_exec((const char *)g_acc);
-            }
-            g_n = 0;
-        } else if (g_n < 120u) {
-            g_acc[g_n] = (u8)c;
-            g_n++;
+            n = 0;
+            port_puts("shell> ");
+        } else if (c == 8 || c == 127) {
+            if (n > 0u) { n--; port_puts("\b \b"); }
+        } else if (n + 1u < sizeof(g_line)) {
+            g_line[n] = (char)c;
+            n++;
+            port_putc(c);
         }
     }
 }
 
 void os_main(void) {
-    port_init();
-    port_puts("c6os s3 shell test\n");
     os_sys_heap_init(g_mem, (u32)sizeof(g_mem));
-    if (os_task_create("sh", shell_task, 0, 1u, 4096u) <= 0) {
-        port_puts("FAIL: create\n");
+    os_shell_bind_heap(&g_heap);
+    if (os_task_create("shell", shell_task, 0, 2u, 4096u) <= 0) {
+        port_puts("FAIL: shell create\n");
         return;
     }
     os_task_start();
+    for (;;) { }
 }

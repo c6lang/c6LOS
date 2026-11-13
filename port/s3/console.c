@@ -112,31 +112,13 @@ static u32 g_rx_left[C6OS_MAX_CORES] = {0};
 
 int port_getc(void)
 {
-    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
-    u32 *left = &g_rx_left[core];
-    volatile u32 *st = (volatile u32 *)(0x6003803Cu);
-    volatile u32 *ist = (volatile u32 *)(0x6003800Cu);
-    volatile u32 *iclr = (volatile u32 *)(0x60038014u);
-    volatile u32 *word = (volatile u32 *)(0x60038000u);
+    volatile u32 *st = (volatile u32 *)(0x6003800Cu);
+    volatile u8 *byte = (volatile u8 *)(0x60038000u);
 
-    if (left == 0u) {
-        if ((*ist & 0x4u) == 0u) {
-            return -1;
-        }
-        *left = (*st >> 16) & 0x7Fu;
-        if (*left == 0u) {
-            *iclr = 0x4u;
-            return -1;
-        }
+    if ((*st & 0x4u) == 0u) {
+        return -1;
     }
-    *left = *left - 1u;
-    {
-        int c = (int)(*word & 0xFFu);
-        if (*left == 0u) {
-            *iclr = 0x4u;
-        }
-        return c;
-    }
+    return (int)(*byte);
 }
 
 void port_puts(const char *s)
