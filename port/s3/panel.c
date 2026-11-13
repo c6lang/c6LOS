@@ -35,10 +35,12 @@ static u32 g_spi_base = 0x60025000u;   /* 默认 SPI3 */
 #define SPI2_CLOCK     (*(volatile u32 *)(SPI2_BASE + 0x0Cu))
 #define SPI2_USER      (*(volatile u32 *)(SPI2_BASE + 0x10u))
 #define SPI2_USER1     (*(volatile u32 *)(SPI2_BASE + 0x14u))
+#define SPI2_SLAVE     (*(volatile u32 *)(SPI2_BASE + 0xE0u))
 #define SPI2_USER2     (*(volatile u32 *)(SPI2_BASE + 0x18u))
 #define SPI2_MS_DLEN   (*(volatile u32 *)(SPI2_BASE + 0x1Cu))
 #define SPI2_MISC      (*(volatile u32 *)(SPI2_BASE + 0x20u))
 #define SPI2_W(n)      (*(volatile u32 *)(SPI2_BASE + 0x98u + 4u * (n)))
+#define SPI2_DMA_CONF  (*(volatile u32 *)(SPI2_BASE + 0x30u))
 
 #define SPI_CMD_USR      (1u << 24)
 #define SPI_CMD_UPDATE   (1u << 23)
@@ -72,6 +74,15 @@ void s3_lcd_use_spi3(u32 on)
         g_sig_d = 103u;
         g_sig_cs = 110u;
     }
+}
+
+/* 上游 xiaozhi 用 pclk_hz = 80MHz = APB 频率，IDF 的 spi_ll_master_cal_clock
+ * 在这种情况下置 CLK_EQU_SYSCLK(bit31)，SCLK 直接等于系统时钟。 */
+static u32 g_equ_sysclk = 0;
+
+void s3_lcd_set_equ_sysclk(u32 on)
+{
+    g_equ_sysclk = on;
 }
 
 u32 s3_lcd_get_spi_host(void)
@@ -386,7 +397,13 @@ static void cmd(u8 c)
     dbg_hex((u32)c);
     dbg("\n");
     bb_dc(0u);
-    spi_xfer(&c, 1u);
+    /* 必须和 dat() 走同一条通路：bit-bang 模式下命令字节也必须用 GPIO 打，
+     * 否则命令全走（这块板子上不出的）硬件 SPI，面板一条命令都收不到。 */
+    if (g_bitbang != 0u) {
+        bb_write(&c, 1u);
+    } else {
+        spi_xfer(&c, 1u);
+    }
 }
 
 static void dat(const u8 *p, u32 n)
@@ -451,20 +468,27 @@ static void spi_init(void)
      * **必须满足 H+L=N**（这里 2+2=4）。写成 CLKCNT_L=3 时 H+L=6>N=4，
      * 低电平相位被吃掉 → SCLK 卡在常高：事务照样按分频"耗时"，MOSI 也在
      * 移数据，但面板收不到时钟，屏幕只有背光。复位默认 0x3041 才是对的。 */
-    clk = 0x00003041u;
+    clk = (g_equ_sysclk != 0u) ? 0x80003041u : 0x00003041u;
     dbg("clock_want=");
     dbg_hex(clk);
     dbg("\n");
     SPI2_CLOCK = clk;
     dbg_reg(" clock_now=", SPI2_CLOCK);
 
-    SPI2_CTRL = 0u;                     /* MSB first */
+    /* 以下按 IDF spi_ll_master_init + spi_hal_init 逐项对齐（之前漏掉的）：
+     * USER1 的 cs_setup/cs_hold 清 0、SLAVE 整个清 0（含 dma_seg_magic_value）、
+     * DMA_CONF 的 seg_trans 清使能、MOSI 空闲电平 d_pol=0。 */
+    SPI2_USER1 = 0u;
+    SPI2_SLAVE = 0u;
+    SPI2_DMA_CONF = (1u << 1) | (1u << 2);   /* tx/rx_seg_trans_clr_en=1 */
+    SPI2_CTRL = 0u;                     /* MSB first，d_pol=0（MOSI 空闲低） */
     /* 原厂是 SPI mode 3：CK_IDLE_EDGE(CK 空闲电平)=1 + CK_OUT_EDGE=1，
      * 正好也是 ST7789 手册要求的 CPOL=1/CPHA=1。 */
     SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
     /* CS 常低（ST7789 靠 DC 区分命令/数据，CS 一直有效是合法的，也避免
      * 命令字节和参数分属两次事务时面板接口状态机被 CS 打断）。 */
-    SPI2_MISC = SPI_CK_IDLE_EDGE | SPI_CS_KEEP_ACTIVE;
+    SPI2_MISC = (g_equ_sysclk != 0u) ? (SPI_CK_IDLE_EDGE)          /* 照 IDF：不常低 CS */
+                                      : (SPI_CK_IDLE_EDGE | SPI_CS_KEEP_ACTIVE);
 
     /* 注意：bit-bang 模式下这里不能把引脚接回 SPI 矩阵，否则后面的
      * GPIO_OUT 写不到 pad 上（init 序列就得用 bit-bang 打出去）。 */

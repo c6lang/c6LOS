@@ -189,6 +189,15 @@ SPI3/LCD_CAM 的 i80 通路。
 - 本工具链 **u64 除法 ABI 不匹配**，测试里 `(u64)/1000` 会打出
   `TRAP cause=0`（IllegalInstruction）；先转 u32 再除。
 
+## 4.7 只有背光的真正原因（本轮定位）
+
+`cmd()`（命令字节）走的是**硬件 SPI** `spi_xfer()`，而 `dat()`（参数/像素）走
+`spi_write()`（bit-bang 时才分派到 GPIO）。也就是说切到 bit-bang 之后，**所有
+命令字节仍然从打不出时钟的硬件 SPI 出去**——面板一条命令都没收到，只有一堆
+参数/像素数据。表现完全就是"背光亮、屏全黑"。
+
+修法：`cmd()` 和 `dat()` 走同一条通路（`g_bitbang` 时都用 `bb_write`）。
+
 ## 5. 当前状态
 
 - `make C6_ROOT=... BUILD=build/s3lcd S3_MAIN=tests/t_s3_lcd.c6 s3` →
