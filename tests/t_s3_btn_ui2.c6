@@ -192,7 +192,13 @@ static void gui_task(void *arg)
                 c0 = (u32)port_cycles() - c0;
                 pstr("hb blit cycles=");
                 pu32(c0 / 1000u);
-                pstr("k\n");
+                pstr("k gfx w=");
+                pu32(g.w);
+                pstr(" h=");
+                pu32(g.h);
+                pstr(" fb=");
+                pu32((u32)g.fb);
+                pstr("\n");
             }
         }
         while (i < 3u) {
@@ -233,7 +239,8 @@ void os_main(void)
     s3_lcd_blit(g_fb, W, H);
     pstr("init done\n");
 
-    (void)os_task_create("btn", btn_task, 0, 3u, 3072u);
+    /* 诊断：先不建按键任务，只跑 GUI，看屏幕还会不会停 */
+    /* (void)os_task_create("btn", btn_task, 0, 3u, 3072u); */
     (void)os_task_create("gui", gui_task, 0, 2u, 4096u);
     os_task_start();
 

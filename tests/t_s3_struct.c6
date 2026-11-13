@@ -1,0 +1,54 @@
+/* t_s3_struct.c6 —— 最小验证 c6 的结构体字段访问：填 4 个不同值再读回，
+ * 看是否有字段互相串位（曾在 OsGfx 上看到 g.h 读成 g.cells 的值）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+typedef struct {
+    u16 *fb;
+    u32 w;
+    u32 h;
+    u32 cells;
+} Probe;
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void s3_lcd_delay(u32 n);
+
+void os_main(void)
+{
+    Probe p = {0};
+    u32 i = 0;
+
+    p.fb = (u16 *)0x11111110u;
+    p.w = 240u;
+    p.h = 241u;
+    p.cells = 57600u;
+
+    pstr("struct: fb=");
+    pu32((u32)p.fb);
+    pstr(" w=");
+    pu32(p.w);
+    pstr(" h=");
+    pu32(p.h);
+    pstr(" cells=");
+    pu32(p.cells);
+    pstr("\n");
+
+    if (p.w == 240u && p.h == 241u && p.cells == 57600u) {
+        pstr("PASS: struct fields ok\n");
+    } else {
+        pstr("FAIL: struct fields shifted\n");
+    }
+    for (;;) { s3_lcd_delay(4000000u); i++; }
+}
