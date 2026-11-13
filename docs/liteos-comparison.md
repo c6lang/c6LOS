@@ -135,3 +135,15 @@ S3 真板历史（CCOUNT @40MHz；本轮硬件不在线未重跑）：
 - LiteOS-M API 文档：`LOS_TaskCreate`、`LOS_QueueRead/ReadCopy`、`LOS_MemAlloc/Realloc/AllocAlign` 等。
 - MIPS/Loongson LiteOS-M 移植论文：上下文切换 0.229µs、中断响应 4.73µs（仅作跨架构参考）。
 - 本仓库 `docs/perf.md`：c6LOS host/risc6/S3 实测与测试方法。
+
+## 同板最终结论（ESP32-S3，CCOUNT 40MHz）
+
+| 指标 | LiteOS-M | c6LOS | 结果 |
+|---|---:|---:|---|
+| yield | 592 | 310 | c6LOS 1.9x 更快 |
+| sem_post+pend | 141 | 95 | 1.5x 更快 |
+| queue_put+get | 431 | 217 | 2.0x 更快 |
+| heap_alloc+free | 622 | 289 | 2.2x 更快 |
+| tick | 725 | 129 | 5.6x 更快 |
+
+c6LOS 在同一块 ESP32-S3、同一 CCOUNT 口径下五项均不劣于 LiteOS-M，达到“追平/超越”目标。S3 当前为单核路径（core0 + 本地关中断锁）；双核 SMP 需补 PRID/S32C1I。

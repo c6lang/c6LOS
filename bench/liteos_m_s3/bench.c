@@ -20,7 +20,8 @@ static void pu(unsigned int v) {
 static unsigned int cyc(void) { unsigned int v; __asm__ __volatile__("rsr %0, ccount" : "=r"(v)); return v; }
 static void rep(const char *name, unsigned int d) { ps(name); ps(": "); pu(d / N); ps(" cycles/op\n"); }
 
-static unsigned int g_yield, g_sem, g_queue, g_heap;
+static unsigned int g_yield, g_sem, g_queue, g_heap, g_tick;
+extern VOID OsTickHandler(VOID);
 static UINT32 g_semid = 0;
 static UINT32 g_qid = 0;
 
@@ -50,10 +51,13 @@ static VOID *benchTask(UINT32 arg) {
     }
     t1 = cyc(); g_heap = t1 - t0;
 
+    t0 = cyc(); for (i = 0; i < N; i++) { OsTickHandler(); } t1 = cyc(); g_tick = t1 - t0;
+
     rep("yield", g_yield);
     rep("sem_post+pend", g_sem);
     rep("queue_put+get", g_queue);
     rep("heap_alloc+free", g_heap);
+    rep("tick", g_tick);
     ps("LiteOS-M perf done\n");
     *(volatile unsigned int *)MMIO_EXIT = 0u;
     while (1) {}

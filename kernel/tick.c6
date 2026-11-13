@@ -12,6 +12,11 @@ void os_tick_advance(u32 n) {
     g_ticks = g_ticks + (u64)n;
 }
 
+u32 os_tick_advance1(void) {
+    g_ticks = g_ticks + 1u;
+    return (u32)g_ticks;
+}
+
 u32 os_tick_hz(void) {
     return (u32)C6OS_TICK_HZ;
 }

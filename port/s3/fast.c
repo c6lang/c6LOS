@@ -10,6 +10,15 @@
 #define Q_WAIT_GET 6u
 #define Q_WAIT_PUT 7u
 
+static inline u32 fl_lock(void) {
+    u32 ps;
+    __asm__ __volatile__("rsil %0, 15" : "=r"(ps));
+    return ps;
+}
+static inline void fl_unlock(u32 ps) {
+    __asm__ __volatile__("wsr %0, ps; rsync" : : "r"(ps) : "memory");
+}
+
 int os_sem_init(OsSem *s, u32 initial, u32 max) {
     if (s == 0 || initial > max) return -1;
     s->count = initial;
@@ -22,10 +31,10 @@ int os_sem_init(OsSem *s, u32 initial, u32 max) {
 int os_sem_destroy(OsSem *s) {
     u32 st;
     if (s == 0 || s->magic != SEM_MAGIC) return -1;
-    st = os_obj_lock();
+    st = fl_lock();
     os_task_wake_all(s, -3);
     s->count = 0; s->max = 0; s->magic = 0; s->waiters = 0;
-    os_obj_unlock(st);
+    fl_unlock(st);
     return 0;
 }
 
@@ -33,16 +42,16 @@ int os_sem_pend(OsSem *s, u32 timeout) {
     u32 st;
     int r;
     if (s == 0 || s->magic != SEM_MAGIC) return -1;
-    st = os_obj_lock();
-    if (s->magic != SEM_MAGIC) { os_obj_unlock(st); return -1; }
+    st = fl_lock();
+    if (s->magic != SEM_MAGIC) { fl_unlock(st); return -1; }
     if (s->count > 0u) {
         s->count--;
-        os_obj_unlock(st);
+        fl_unlock(st);
         return 0;
     }
     s->waiters++;
     r = os_task_block_prepare(s, timeout, 1u, 0u);
-    os_obj_unlock(st);
+    fl_unlock(st);
     if (r != 0) { s->waiters--; return r; }
     r = os_task_block_wait();
     s->waiters--;
@@ -52,14 +61,14 @@ int os_sem_pend(OsSem *s, u32 timeout) {
 int os_sem_post(OsSem *s) {
     u32 st;
     if (s == 0 || s->magic != SEM_MAGIC) return -1;
-    st = os_obj_lock();
-    if (s->magic != SEM_MAGIC) { os_obj_unlock(st); return -1; }
+    st = fl_lock();
+    if (s->magic != SEM_MAGIC) { fl_unlock(st); return -1; }
     if (s->waiters == 0u) {
         if (s->count < s->max) s->count++;
     } else if (os_task_wake_first(s, 1u, 0) == 0) {
         if (s->count < s->max) s->count++;
     }
-    os_obj_unlock(st);
+    fl_unlock(st);
     return 0;
 }
 
@@ -104,33 +113,33 @@ static void q_read(OsQueue *q, u32 idx, void *dst) {
 int os_queue_destroy(OsQueue *q) {
     u32 st;
     if (q == 0 || q->magic != QUEUE_MAGIC) return -1;
-    st = os_obj_lock();
+    st = fl_lock();
     os_task_wake_all(q, -3);
     q->buf = 0; q->item_size = 0; q->cap = 0;
     q->head = 0; q->tail = 0; q->count = 0;
     q->magic = 0; q->waiters_get = 0; q->waiters_put = 0;
-    os_obj_unlock(st);
+    fl_unlock(st);
     return 0;
 }
 
 int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
     if (q == 0 || q->magic != QUEUE_MAGIC || item == 0) return -1;
     for (;;) {
-        u32 st = os_obj_lock();
+        u32 st = fl_lock();
         int r;
-        if (q->magic != QUEUE_MAGIC || q->cap == 0u) { os_obj_unlock(st); return -1; }
+        if (q->magic != QUEUE_MAGIC || q->cap == 0u) { fl_unlock(st); return -1; }
         if (q->count != q->cap) {
             q_write(q, q->tail, item);
             q->tail++;
             if (q->tail == q->cap) q->tail = 0;
             q->count++;
             if (q->waiters_get != 0u) (void)os_task_wake_first(q, Q_WAIT_GET, 0);
-            os_obj_unlock(st);
+            fl_unlock(st);
             return 0;
         }
         q->waiters_put++;
         r = os_task_block_prepare(q, timeout, Q_WAIT_PUT, 0u);
-        os_obj_unlock(st);
+        fl_unlock(st);
         if (r != 0) { q->waiters_put--; return r; }
         r = os_task_block_wait();
         q->waiters_put--;
@@ -145,21 +154,21 @@ int os_queue_put(OsQueue *q, void *item, u32 timeout) {
 int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
     if (q == 0 || q->magic != QUEUE_MAGIC || out == 0) return -1;
     for (;;) {
-        u32 st = os_obj_lock();
+        u32 st = fl_lock();
         int r;
-        if (q->magic != QUEUE_MAGIC || q->cap == 0u) { os_obj_unlock(st); return -1; }
+        if (q->magic != QUEUE_MAGIC || q->cap == 0u) { fl_unlock(st); return -1; }
         if (q->count != 0u) {
             q_read(q, q->head, out);
             q->head++;
             if (q->head == q->cap) q->head = 0;
             q->count--;
             if (q->waiters_put != 0u) (void)os_task_wake_first(q, Q_WAIT_PUT, 0);
-            os_obj_unlock(st);
+            fl_unlock(st);
             return 0;
         }
         q->waiters_get++;
         r = os_task_block_prepare(q, timeout, Q_WAIT_GET, 0u);
-        os_obj_unlock(st);
+        fl_unlock(st);
         if (r != 0) { q->waiters_get--; return r; }
         r = os_task_block_wait();
         q->waiters_get--;

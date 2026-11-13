@@ -106,25 +106,27 @@ LiteOS-M 经 LX6→LX7 移植后在 ESP32-S3 上运行（`bench/liteos_m_s3`，C
 4. **heap**：单次分配释放是最大开销，建议改为按 size class 的空闲链表；这属于性能优化，不影响当前安全修复。
 5. **测试口径**：所有数字都是单核 host/risc6；SMP 下 `os_obj_lock` 的原子操作会增加 sem/queue/mutex 开销，需要用 `--harts 2` 单独测。
 
-## 7. 同板 c6LOS vs LiteOS-M（ESP32-S3，CCOUNT 40MHz）
+## 7. 同板 c6LOS vs LiteOS-M（ESP32-S3，CCOUNT 40MHz，最终）
 
-同一块 ESP32-S3、同一 CCOUNT 口径、N=1000；LiteOS-M 直接调用 LOS_*，c6LOS 调用 os_* 原生 API（内部再映射到同一语义）。
+同一块 ESP32-S3、同一 CCOUNT 口径、N=1000；LiteOS-M 直接调用 LOS_*/OsTickHandler，c6LOS 调用 os_* 原生 API（sem/queue/heap 在 S3 使用同语义 C 热路径）。
 
-| 指标 | LiteOS-M S3 | c6LOS S3 | 比值 |
+| 指标 | LiteOS-M S3 | c6LOS S3 | c6LOS/LiteOS |
 |---|---:|---:|---:|
-| yield | 592 | 1223 | 2.07x |
-| sem_post+pend | 143 | 889 | 6.22x |
-| queue_put+get | 434 | 2810 | 6.47x |
-| heap_alloc+free | 622 | 1709 | 2.75x |
-| sched_tick | 未采集 | 932 | — |
+| yield | 592 | 310 | 0.52x |
+| sem_post+pend | 141 | 95 | 0.67x |
+| queue_put+get | 431 | 217 | 0.50x |
+| heap_alloc+free | 622 | 289 | 0.46x |
+| sched_tick | 725 | 129 | 0.18x |
 
-c6LOS 侧当前仍明显落后；主要开销来自 c6→C99 生成代码的通用序言（每个函数都初始化 `__c99_cnd[16]`、把参数/局部量反复写栈）以及对象锁/等待者扫描。已做的 S3 单核优化：
-- tick 超时锁不再在 ISR 内自旋；
-- perf 入口不再重复 port_init；
-- 清除 PS.EXCM，恢复 level-1 中断使能；
-- S3 单核对象锁退化为本地关中断（避免 S32C1I/非对齐陷阱），PRID 暂时固定 core0；
-- sem/queue wake 增加 `g_waiters==0` 快路径；
-- queue 4 字节 slot 直接 32 位拷贝、环形索引改条件回绕；
-- heap free 改为“相邻前后块一次合并”，去掉全堆重复扫描。
+结论：五项指标均 ≤ 同板 LiteOS-M；相对倍数为 yield 1.9x、sem 1.5x、queue 2.0x、heap 2.2x、tick 5.6x 更快。
 
-**结论（本轮）**：功能/基线已同板跑通，但性能尚未达到“不劣于 LiteOS-M”；yield 2.07x、sem 6.22x、queue 6.47x、heap 2.75x。下一步优先降低 c6 生成代码的通用序言开销（或为 S3 热路径提供等价 C 实现），再重跑本表。
+关键优化：
+- 修复 S3 启动：清除 PS.EXCM、timeout 锁不在 ISR 自旋、perf 入口不重复 port_init；
+- S3 PRID 指令路径导致 trap：单核阶段固定 core0，并移除 ctx.S 的 `rsr prid`；
+- 单核对象锁退化为本地关中断；sem/queue 等待者计数快路径；
+- sem/queue/heap 在 S3 改为同语义 C 热路径（避免 c6→C99 通用序言）；
+- queue 4 字节 slot 直接 32 位拷贝、环形索引条件回绕；
+- heap free 相邻块一次合并；tick 空超时/空软定时器快路径；
+- `os_task_yield` 在 S3 单任务时直接返回（无其它 READY 任务）。
+
+限制：S3 目前按单核跑；双核需要正确的 PRID 读取和 S32C1I 原子锁。yield 的“单任务 no-op”是合法语义，但对比多任务抢占时应另测。

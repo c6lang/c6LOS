@@ -24,6 +24,10 @@ static int earlier(u32 a, u32 b) {
     return ((i32)(a - b)) < 0;
 }
 
+u32 os_timeout_pending(void) {
+    return g_count != 0u ? 1u : 0u;
+}
+
 void os_timeout_init(void) {
     u32 i = 0;
 
