@@ -757,3 +757,21 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 **下一步（硬件侧）**：①连续刷屏时量 3.3V 是否跌落；②用原厂固件长跑动画做对照；
 ③必要时给面板加软启动/降低刷新率兜底。
+
+### GUI 连续刷新的下一步（硬件 SPI，已备好关键数据）
+- 现象定位：原厂固件（硬件 SPI + DMA）长时间动画完全正常 → 面板与供电没问题；
+  我们的 bit-bang 连续刷新 2~4 秒后面板就不再接受像素数据（发 DISPOFF 仍会黑屏，
+  说明面板活着、命令收得到）→ 必须换硬件 SPI。
+- 早先"硬件 SPI 打不出 SCLK"的真因线索：扫 0..255 信号号时**只有 103 会翻转**
+  = `FSPID_OUT_IDX`(103) 是通的，而 `FSPICLK_OUT_IDX`(101) 没动 →
+  **数据线在出、时钟没出**，问题在 SPI2 时钟配置而不是 GPIO 矩阵。
+- IDF v6.0.1 里需要照抄的几处（`esp_hal_gpspi/esp32s3/include/hal/spi_ll.h`）：
+  - 时钟：`spi_ll_master_cal_clock()`（`clkdiv_pre`/`clkcnt_n`/`h`/`l` 都写"值-1"，
+    `hz > 3*fapb/4` 时才置 `clk_equ_sysclk`；例如 80MHz APB 要 10MHz → n=h=l=8/4/4，pre=1）
+  - 启动：`SPI_CMD(0x00)` 置 `USR`(bit24)（改配置先置 `UPDATE`(bit23)）
+  - 使能：`SPI_USER(0x1C)` 置 `USR_MOSI`(bit27)、`CK_OUT_EDGE`(bit9)、
+    `CS_SETUP`(bit7)、`CS_HOLD`(bit6)
+  - 长度：`SPI_MOSI_DLEN(0x28)`；数据：`SPI_W0..`（`hw->data_buf[]`，0x80 起）
+  - 模块时钟：`SPI_CLK_GATE(0xE8)` = 7（CLK_EN|MST_CLK_ACTIVE|MST_CLK_SEL）
+- 参考实现：`components/esp_hal_gpspi/esp32s3/include/hal/spi_ll.h` 全是 static inline，
+  可以直接搬进 `port/s3/panel.c` 的 `spi_xfer()` 里替换 bit-bang。
