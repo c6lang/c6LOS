@@ -1,0 +1,66 @@
+/* t_s3_btn.c6 —— 三个按键（BOOT=0 / VOL+=40 / VOL-=39）真板测试：
+ * 主循环每 10ms 采样一次，按下边沿打印一行，并同时打印当前按住状态。
+ * 同时把背光当作"心跳"：每按一次 BOOT 就翻转背光，方便肉眼确认。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void s3_btn_init(void);
+void s3_btn_poll(void);
+u32 s3_btn_pressed(u32 i);
+u32 s3_btn_take_event(u32 i);
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u32 n = 0;
+    u32 bl = 1;
+
+    puts_("c6os buttons\n");
+    s3_btn_init();
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done, press BOOT/UP/DOWN\n");
+
+    for (;;) {
+        s3_btn_poll();
+
+        if (s3_btn_take_event(0u) != 0u) {
+            puts_("BOOT down");
+            bl = (bl == 0u) ? 1u : 0u;
+            s3_lcd_bl(bl);
+            puts_(" (backlight=");
+            put_u32_(bl);
+            puts_(")\n");
+        }
+        if (s3_btn_take_event(1u) != 0u) { puts_("VOL+ down\n"); }
+        if (s3_btn_take_event(2u) != 0u) { puts_("VOL- down\n"); }
+
+        if ((n % 200u) == 0u) {
+            puts_("held=");
+            put_u32_(s3_btn_pressed(0u));
+            put_u32_(s3_btn_pressed(1u));
+            put_u32_(s3_btn_pressed(2u));
+            puts_("\n");
+        }
+        n++;
+        s3_lcd_delay(400000u);      /* 约 10ms */
+    }
+}

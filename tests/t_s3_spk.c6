@@ -1,0 +1,66 @@
+/* t_s3_spk.c6 —— 喇叭测试：I2S0 输出 1kHz 方波 1 秒、静音 1 秒，循环。
+ * 同时用 PCNT 数 BCLK(GPIO15) 边沿并打印，客观确认 I2S 时钟在跑。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+
+void s3_i2s_init(u32 sample_rate);
+void s3_i2s_tone(u32 freq, u32 samples, u32 sample_rate);
+void s3_i2s_silence(u32 samples);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_bclk(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+    /* GPIO15(BCLK) → PCNT 单元0 通道0 */
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (15u & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * 15u,
+              s3_reg32(0x60009000u + 0x04u + 4u * 15u) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+void os_main(void)
+{
+    u32 n = 0;
+
+    puts_("c6os speaker test\n");
+    s3_i2s_init(24000u);
+    puts_("i2s init done\n");
+
+    for (;;) {
+        pcnt_bclk();
+        puts_("tone 1kHz... ");
+        s3_i2s_tone(1000u, 24000u, 24000u);     /* 1 秒 */
+        puts_("bclk_edges=");
+        put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
+        puts_("\n");
+
+        s3_i2s_silence(24000u);
+        s3_lcd_delay(2000000u);
+        n++;
+    }
+}
