@@ -612,3 +612,8 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   先动它们会毁掉被打断任务的寄存器（表现为随机 `TRAP cause=1c`/LoadStoreAlignment）；
   ③切换路径**不能** `callx0` 进 C 函数（windowed 风格调用约定不转窗口，a12-a15 被冲掉，
   第一次改就因此让目标 ctx 变脏指针）。这三条已写进 `port/s3/ctx.S` 的注释。
+
+- **S3 面板初始化延时不够（按手册重算）**：`dly()` 实测 5 cycles/单位
+  （`dly(1200000)` 只有 6.0M cycles ≈ 75ms），而 ST7789 要求复位释放/SWRESET/
+  SLPOUT 之后各 ≥120ms，原来三条都只等 75ms——命令发太早面板会直接不理。
+  改成 `DLY_120MS`=3000000（≈187ms）、`DLY_20MS`=1000000（≈31ms）。

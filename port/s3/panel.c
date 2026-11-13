@@ -426,27 +426,36 @@ static void spi_init(void)
     dbg_reg(" slave=", *(volatile u32 *)(SPI2_BASE + 0xE0u));
 }
 
+/* dly() 的实测定标：**5 个 CPU 周期 / 单位**（80MHz 下 1 单位 = 62.5ns）。
+ *   dly(1200000) 只有 6.0M cycles ≈ 75ms —— 不够 ST7789 要求的 120ms！
+ * ST7789 手册要求：复位释放后 ≥120ms 才能发 SWRESET，SWRESET 后 ≥120ms，
+ * SLPOUT 后 ≥120ms 才能发后续命令，DISPON 后再等 ≥20ms。
+ * 命令发太早面板会直接不理（表现为只有背光），所以这里统一用 3000000
+ * （15M cycles ≈ 187ms）留够余量。 */
+#define DLY_120MS 3000000u   /* 187ms */
+#define DLY_20MS  500000u    /* 31ms  */
+
 static void init_seq(void)
 {
     static const u8 b2[] = {0x55u};
     static const u8 b1[] = {0x00u};
 
     s3_mark(9u, 0x1003u);
-    lo(PIN_RST); dly(200000u);
-    hi(PIN_RST); dly(1200000u);
+    lo(PIN_RST); dly(200000u);           /* 12.5ms 复位低 */
+    hi(PIN_RST); dly(DLY_120MS);         /* 复位释放后等 >=120ms */
     s3_mark(9u, 0x1004u);
     dbg("rst done\n");
 
-    cmd(0x01u); dly(1200000u);           /* SWRESET */
+    cmd(0x01u); dly(DLY_120MS);          /* SWRESET */
     s3_mark(9u, 0x1005u);
-    cmd(0x11u); dly(1200000u);           /* SLPOUT */
+    cmd(0x11u); dly(DLY_120MS);          /* SLPOUT */
     s3_mark(9u, 0x1006u);
     cmd(0x3Au); dat(b2, 1u);             /* COLMOD 16bpp */
     cmd(0x36u); dat(b1, 1u);             /* MADCTL */
     cmd(0x21u);                          /* INVON */
     cmd(0x13u);                          /* NORON */
     dbg("cmds ok\n");
-    cmd(0x29u); dly(200000u);            /* DISPON */
+    cmd(0x29u); dly(DLY_20MS);           /* DISPON */
 }
 
 /* 给 c6 测试用的忙等延时（c6 不支持 inline asm，而 volatile 计数会插 memw）。 */
