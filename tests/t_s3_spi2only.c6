@@ -1,0 +1,93 @@
+/* t_s3_spi2only.c6 —— 只测硬件 SPI2 本身：不碰面板，连发 64 字节缓冲，
+ * 用 PCNT 分别数 SCLK(GPIO9) 与 MOSI(GPIO10) 的边沿，判断 SPI 是否真的在
+ * 往引脚上输出时钟和数据。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+
+void s3_lcd_use_spi2hw(u32 div);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+/* 由 panel.c 导出，单独发一笔（64B 上限） */
+void s3_spi2_send(const u8 *p, u32 n);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static u8 g_buf[64] = {0};
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 d = 0;
+    u32 m = 0;
+
+    pstr("c6os spi2 only test\n");
+    i = 0;
+    while (i < 64u) { g_buf[i] = (u8)(0xA5u ^ (i * 7u)); i++; }
+
+    s3_lcd_use_spi2hw(4u);
+    pstr("hw spi configured\n");
+
+    pcnt_init();
+
+    pcnt_pin(9u);                       /* 数 SCLK */
+    i = 0;
+    while (i < 1000u) { s3_spi2_send(g_buf, 64u); i++; }
+    s3_lcd_delay(100000u);
+    d = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pcnt_pin(10u);                      /* 数 MOSI */
+    i = 0;
+    while (i < 1000u) { s3_spi2_send(g_buf, 64u); i++; }
+    s3_lcd_delay(100000u);
+    m = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pstr("regs: gate=");
+    pu32(s3_reg32(0x600240E8u));
+    pstr(" clock=");
+    pu32(s3_reg32(0x6002400Cu));
+    pstr(" user=");
+    pu32(s3_reg32(0x60024010u));
+    pstr(" cmd=");
+    pu32(s3_reg32(0x60024000u));
+    pstr(" outsel9=");
+    pu32(s3_reg32(0x60004554u + 4u * 9u));
+    pstr("\n");
+    pstr("1000x64B: sclk=");
+    pu32(d);
+    pstr(" mosi=");
+    pu32(m);
+    pstr("\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}
