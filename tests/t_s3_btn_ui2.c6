@@ -1,0 +1,171 @@
+/* t_s3_btn_ui2.c6 —— 按键面板 GUI 跑在独立任务里（双任务版）：
+ *   btn_task：5~10ms 轮询按键，计事件、标脏行，然后 os_sem_post 唤醒 GUI
+ *   gui_task：os_sem_pend 等信号，只重绘"脏"的行，并且把一行的 blit 拆成
+ *             上下两段、中间 os_task_yield() 让出 CPU —— 这样长传输期间按键
+ *             任务照样能被调度，不会漏按键。
+ * 屏上每行：名字 + L=<原始电平> B=<基线> DOWN/UP + n=<次数>
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/task.h"
+#include "c6os/sem.h"
+#include "c6os/tick.h"
+
+#define W 240u
+#define H 240u
+#define ROW_H 60
+
+void s3_btn_init(void);
+void s3_btn_poll(void);
+u32 s3_btn_pressed(u32 i);
+u32 s3_btn_take_event(u32 i);
+u32 s3_btn_level(u32 i);
+u32 s3_btn_idle_level(u32 i);
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+static OsSem g_sem;
+static volatile u32 g_cnt[3];
+static volatile u32 g_dirty[3];
+static volatile u32 g_polls;
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void u2s(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+}
+
+static void draw_row(u32 i)
+{
+    int y = 26 + (int)i * ROW_H;
+    char s[12] = {0};
+    u32 down = s3_btn_pressed(i);
+    u16 bg = (down != 0u) ? 0xF800u : 0x0010u;
+
+    os_gfx_fill_rect(&g, 0, y, (int)W, ROW_H - 4, bg);
+    if (i == 0u) { os_gfx_text16(&g, 6, y + 4, "BOOT  GPIO0", 0xFFFFu); }
+    if (i == 1u) { os_gfx_text16(&g, 6, y + 4, "VOL+  GPIO40", 0xFFFFu); }
+    if (i == 2u) { os_gfx_text16(&g, 6, y + 4, "VOL-  GPIO39", 0xFFFFu); }
+
+    os_gfx_text16(&g, 6, y + 26, (down != 0u) ? "DOWN" : "UP  ", 0xFFFFu);
+    s[0] = (char)('0' + (s3_btn_level(i) & 1u));
+    s[1] = '\0';
+    os_gfx_text16(&g, 52, y + 26, "L=", 0xFFE0u);
+    os_gfx_text16(&g, 74, y + 26, s, 0xFFE0u);
+    s[0] = (char)('0' + (s3_btn_idle_level(i) & 1u));
+    os_gfx_text16(&g, 100, y + 26, "B=", 0xFFE0u);
+    os_gfx_text16(&g, 122, y + 26, s, 0xFFE0u);
+    os_gfx_text16(&g, 158, y + 26, "n=", 0xFFFFu);
+    u2s(s, g_cnt[i]);
+    os_gfx_text16(&g, 182, y + 26, s, 0xFFFFu);
+}
+
+/* 把一行分两段刷，中间 yield，避免长时间独占 CPU */
+static void flush_row(u32 i)
+{
+    int y = 26 + (int)i * ROW_H;
+    draw_row(i);
+    s3_lcd_blit_rect(g_fb, W, 0u, (u32)y, W, (u32)((ROW_H - 4) / 2));
+    os_task_yield();
+    s3_lcd_blit_rect(g_fb, W, 0u, (u32)(y + (ROW_H - 4) / 2), W, (u32)((ROW_H - 4) / 2));
+    os_task_yield();
+}
+
+static void btn_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        u32 i = 0;
+        u32 hit = 0;
+
+        s3_btn_poll();
+        g_polls++;
+        while (i < 3u) {
+            if (s3_btn_take_event(i) != 0u) {
+                g_cnt[i]++;
+                hit = 1u;
+                pstr("press ");
+                pu32(i);
+                pstr(" n=");
+                pu32(g_cnt[i]);
+                pstr("\n");
+            }
+            g_dirty[i] = 1u;    /* GUI 会按需重绘（内容没变就不刷） */
+            i++;
+        }
+        (void)os_sem_post(&g_sem);
+        os_task_delay(1u);      /* 10ms */
+    }
+}
+
+static void gui_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        u32 i = 0;
+
+        (void)os_sem_pend(&g_sem, 0u);
+        while (i < 3u) {
+            if (g_dirty[i] != 0u) {
+                g_dirty[i] = 0u;
+                flush_row(i);
+            }
+            i++;
+        }
+    }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+
+    pstr("c6os buttons (two tasks)\n");
+    s3_btn_init();
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+    (void)os_sem_init(&g_sem, 0u, 4u);
+
+    /* 首帧：整屏画一次 */
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x00000000u);
+    os_gfx_text16(&g, 6, 4, "C6OS BUTTONS", 0x07FFu);
+    i = 0;
+    while (i < 3u) {
+        draw_row(i);
+        g_dirty[i] = 0u;
+        i++;
+    }
+    os_gfx_text16(&g, 6, 212, "GUI in its own task", 0xF81Fu);
+    s3_lcd_blit(g_fb, W, H);
+    pstr("init done\n");
+
+    (void)os_task_create("btn", btn_task, 0, 3u, 3072u);
+    (void)os_task_create("gui", gui_task, 0, 2u, 4096u);
+    os_task_start();
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

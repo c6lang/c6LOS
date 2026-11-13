@@ -1,0 +1,76 @@
+/* t_s3_preempt_blit.c6 —— 验证"长 blit 期间照样有时间片抢占"：
+ *   hi 任务（高优先级）死循环累加 g_hi
+ *   blit 任务（低优先级）做 3 次整屏 blit
+ * 如果抢占有效，blit 期间 g_hi 仍会持续增长（打印每次 blit 期间的增长量）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/task.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+static volatile u32 g_hi;
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void hi_task(void *arg)
+{
+    (void)arg;
+    for (;;) { g_hi++; }
+}
+
+static void blit_task(void *arg)
+{
+    u32 i = 0;
+
+    (void)arg;
+    while (i < 3u) {
+        u32 before = g_hi;
+        u64 t0 = port_cycles();
+        s3_lcd_blit(g_fb, W, H);
+        t0 = port_cycles() - t0;
+        pstr("blit cycles=");
+        pu32((u32)(t0 / 1000u));
+        pstr("k hi_delta=");
+        pu32(g_hi - before);
+        pstr("\n");
+        i++;
+    }
+    pstr("done\n");
+    for (;;) { os_task_delay(100u); }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+
+    pstr("c6os preempt during blit\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x07E0u);
+    os_gfx_text16(&g, 6, 6, "PREEMPT TEST", 0x0000u);
+
+    (void)os_task_create("hi", hi_task, 0, 4u, 2048u);
+    (void)os_task_create("blit", blit_task, 0, 2u, 4096u);
+    os_task_start();
+    for (;;) { i++; }
+}
