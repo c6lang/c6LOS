@@ -87,6 +87,9 @@ u32 os_jitter_p99(void)
     return 15u * 2000u;
 }
 
+volatile u32 g_sw_try;
+volatile u32 g_sw_done;
+
 static void s3_timer_rearm(void)
 {
     u32 cc = 0;
@@ -174,9 +177,11 @@ void *s3_timer_irq(u32 frame_sp)
             return 0;
         }
         next = os_sched_preempt_ctx();
+        g_sw_try = g_sw_try + 1u;
         if (next == 0 || next == cur) {
             return 0;
         }
+        g_sw_done = g_sw_done + 1u;
         port_set_cur_ctx(next);
         return next;
     }
