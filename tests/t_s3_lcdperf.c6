@@ -1,0 +1,110 @@
+/* t_s3_lcdperf.c6 —— 硬件 SPI 通路的帧预算拆解：
+ *   a) 绘图（gfx 全屏填充 + 文字）花多少
+ *   b) 上屏（SPI，CPU 逐 64 字节喂 FIFO）花多少，@20MHz / @40MHz
+ * 用途：决定下一步优化该动绘图还是该上 DMA。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_set_clock(u32 clk);
+
+static u16 g_fb[W * H];
+static OsGfx g;
+
+static void puts_(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void draw_frame(u32 t)
+{
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+    os_gfx_fill_rect(&g, 10, (int)(t % 200u), 100, 30, 0xF800u);
+    os_gfx_text16(&g, 6, 6, "PERF", 0xFFFFu);
+}
+
+/* 跑 n 次 f()，返回单次平均 cycles */
+static u32 avg10(void (*fn)(u32), u32 n)
+{
+    u32 i = 0;
+    u64 t0 = port_cycles();
+    while (i < n) { fn(i); i++; }
+    /* 注意：本工具链 u64 除法 ABI 不匹配会 TRAP，先转 u32 再除 */
+    return (u32)(port_cycles() - t0) / n;
+}
+
+static void fn_draw(u32 i) { draw_frame(i); }
+static void fn_blit(u32 i) { (void)i; s3_lcd_blit(g_fb, W, H); }
+
+void os_main(void)
+{
+    u32 cyc_draw = 0;
+    u32 cyc_blit20 = 0;
+    u32 cyc_blit40 = 0;
+
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+    draw_frame(0u);
+
+    /* a) 绘图 */
+    cyc_draw = avg10(fn_draw, 10u);
+
+    /* b) 上屏 @20MHz（0x3043：N=4/H=2/L=4） */
+    s3_lcd_set_clock(0x00003043u);
+    cyc_blit20 = avg10(fn_blit, 10u);
+
+    /* c) 上屏 @40MHz（0x1001：N=2/H=1/L=2） */
+    s3_lcd_set_clock(0x00001001u);
+    cyc_blit40 = avg10(fn_blit, 10u);
+
+    /* d) 分频扫描：每块（64 字节 = 512 bit）耗时随 N 线性增长，
+     *    斜率 = 512*N/src_clk，截距 = 每块的固定开销。 */
+    {
+        u32 nn[4] = {4u, 8u, 16u, 32u};
+        u32 j = 0;
+        puts_("per-chunk: ");
+        while (j < 4u) {
+            u32 v = nn[j];
+            u32 h = v / 2u;
+            u32 clk = (((v - 1u) & 0x3Fu) << 12) | (((h - 1u) & 0x3Fu) << 6) | ((v - 1u) & 0x3Fu);
+            u32 c = 0;
+            s3_lcd_set_clock(clk);
+            c = avg10(fn_blit, 4u);
+            put_u32_(v);
+            puts_(":");
+            put_u32_(c / 1800u);
+            puts_(" ");
+            j++;
+        }
+        puts_("\n");
+    }
+
+    s3_lcd_set_clock(0x00003043u);
+    s3_lcd_blit(g_fb, W, H);
+
+    puts_("draw=");
+    put_u32_(cyc_draw / 1000u);
+    puts_("k/f\nblit20=");
+    put_u32_(cyc_blit20 / 1000u);
+    puts_("k/f\nblit40=");
+    put_u32_(cyc_blit40 / 1000u);
+    puts_("k/f\ndone\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

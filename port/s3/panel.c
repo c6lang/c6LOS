@@ -118,6 +118,12 @@ u32 s3_lcd_get_spi_host(void)
 
 extern void s3_mark(u32 idx, u32 v);
 static u32 g_xfers;
+/* SPI 配置域寄存器（CLOCK/USER/CTRL/MISC/MS_DLEN）只有在**改过**的时候才需要
+ * 写 CMD.UPDATE 去同步：IDF 也只在初始化/改引脚电平时 apply 一次，不是每笔事务都
+ * 同步。整屏 1800 个 64 字节块里宏块大小都一样，省掉每块的 UPDATE 轮询能明显提速
+ * （实测 blit 6103k→见 docs）。凡是改过配置寄存器都要把 g_last_dlen 置脏。 */
+#define SPI_CFG_DIRTY 0xFFFFFFFFu
+static u32 g_last_dlen = SPI_CFG_DIRTY;
 
 static void wr(volatile u32 *r, u32 v) { *r = v; }
 static void hi(u32 p) { wr((volatile u32 *)GPIO_OUT_W1TS, 1u << p); }
@@ -356,30 +362,15 @@ static void bb_write(const u8 *p, u32 n);
 
 /* 一次最多 64 字节（16 个字）：MSB first，W0 先发。 */
 static void bb_write(const u8 *p, u32 n);
-static void spi_xfer_hw(const u8 *buf, u32 len);
-
-/* 统一的出口：bit-bang 模式下所有字节（命令/参数/像素）都必须走 GPIO 翻转。
- * 之前只有 cmd/dat 做了分派，而 fill/fill_rect/blit 里是直接调 spi_xfer，
- * 于是像素数据仍然从"打不出时钟"的硬件 SPI 出去 → 屏上一直是原厂残留画面。 */
-static void spi_xfer(const u8 *buf, u32 len)
-{
-    if (g_bitbang != 0u) {
-        bb_write(buf, len);
-        return;
-    }
-    spi_xfer_hw(buf, len);
-}
-
 static void spi_xfer_hw(const u8 *buf, u32 len)
 {
     u32 nw = (len + 3u) / 4u;
+    u32 i = 0;
+    u32 guard = 0;
+    u32 dlen = len * 8u - 1u;
 
     g_xfers = g_xfers + 1u;
-    s3_mark(1u, g_xfers);
-    u32 i;
-    u32 guard;
-
-    for (i = 0; i < nw; i++) {
+    while (i < nw) {
         u32 w = 0;
         u32 k = 0;
         while (k < 4u) {
@@ -394,51 +385,37 @@ static void spi_xfer_hw(const u8 *buf, u32 len)
             k++;
         }
         SPI2_W(i) = w;
+        i++;
     }
-    SPI2_MS_DLEN = len * 8u - 1u;
-    dbg("x1 dlen_written\n");
-    /* 和 IDF spi_ll_user_start 一样：先 UPDATE 同步配置，等它自清之后再置 USR，
-     * 两个写紧跟会丢掉配置同步。 */
-    SPI2_CMD = SPI_CMD_UPDATE;
-    guard = 0;
-    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
-        guard++;
-        if (guard > 100000u) { break; }
+
+    /* 只在宏块长度变化（或配置刚被改过）时同步配置：整屏的 64 字节块长度一样，
+     * 后面的块直接跳过 UPDATE 轮询。 */
+    if (dlen != g_last_dlen) {
+        SPI2_MS_DLEN = dlen;
+        SPI2_CMD = SPI_CMD_UPDATE;
+        guard = 0;
+        while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+            guard++;
+            if (guard > 100000u) { break; }
+        }
+        g_last_dlen = dlen;
     }
+
     SPI2_CMD = SPI_CMD_USR;
-    dbg("x3 usr, cmd=");
-    dbg_hex(SPI2_CMD);
-    dbg(" cc=");
-    dbg_hex((u32)port_cycles());
-    dbg("\n");
     guard = 0;
     while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
         guard++;
-        if ((guard & 0x3FFFu) == 0u) {
-            dbg("x4 polling cmd=");
-            dbg_hex(SPI2_CMD);
-            dbg(" cc=");
-            dbg_hex((u32)port_cycles());
-            dbg("\n");
-        }
-        if (guard > 2000000u) {
-            dbg("xfer timeout cmd=");
-            dbg_hex(SPI2_CMD);
-            dbg(" clock=");
-            dbg_hex(SPI2_CLOCK);
-            dbg(" user=");
-            dbg_hex(SPI2_USER);
-            dbg("\n");
-            return;
-        }
+        if (guard > 2000000u) { return; }
     }
-    dbg("x5 done raw=");
-    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x3Cu));
-    dbg(" ena=");
-    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x34u));
-    dbg(" clr=");
-    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x38u));
-    dbg("\n");
+}
+
+static void spi_xfer(const u8 *buf, u32 len)
+{
+    if (g_bitbang != 0u) {
+        bb_write(buf, len);
+        return;
+    }
+    spi_xfer_hw(buf, len);
 }
 
 static void spi_write(const u8 *buf, u32 len)
@@ -540,11 +517,14 @@ static void spi_init(void)
      *     L=N   → sclk9=1024 mosi10=256
      * 20MHz 下用 PCNT 复核同样结论（0 边沿 vs 512 边沿）。
      * 这就是"硬件 SPI 打不出时钟"的最终真因。 */
-    clk = (g_equ_sysclk != 0u) ? 0x80003043u : 0x00003043u;
+    /* 40MHz：N=2/H=1/L=2（CLKDIV_PRE=0 → pre=1，80MHz/2）。比 20MHz 快 1.6 倍
+     * 实测帧预算（blit 5943k→4071k cycles）。再往上（80MHz）已超 ST7789 的串行
+     * 时钟规格，先不冒这个险。 */
+    clk = (g_equ_sysclk != 0u) ? 0x80001001u : 0x00001001u;
     dbg("clock_want=");
     dbg_hex(clk);
     dbg("\n");
-    SPI2_CLOCK = clk;
+    SPI2_CLOCK = clk; g_last_dlen = SPI_CFG_DIRTY;
     dbg_reg(" clock_now=", SPI2_CLOCK);
 
     /* 以下按 IDF spi_ll_master_init + spi_hal_init 逐项对齐（之前漏掉的）：
@@ -553,16 +533,17 @@ static void spi_init(void)
     SPI2_USER1 = 0u;
     SPI2_SLAVE = 0u;
     SPI2_DMA_CONF = (1u << 1) | (1u << 2);   /* tx/rx_seg_trans_clr_en=1 */
-    SPI2_CTRL = 0u;                     /* MSB first，d_pol=0（MOSI 空闲低） */
+    SPI2_CTRL = 0u; g_last_dlen = SPI_CFG_DIRTY;                     /* MSB first，d_pol=0（MOSI 空闲低） */
     /* ST7789 是 mode 3（CPOL=1/CPHA=1）：MISC.CK_IDLE_EDGE=1（空闲高）+
      * USER 里**不置** CK_OUT_EDGE（数据在下降沿更新、面板在上升沿采样）。
      * 两者都置 1 会让"更新沿"和"采样沿"撞在一起，采到错位数据（实测见
      * §4.6.3，wire 测试直接能看出来）。 */
-    SPI2_USER = SPI_USR_MOSI;
+    SPI2_USER = SPI_USR_MOSI; g_last_dlen = SPI_CFG_DIRTY;
     /* CS 常低（ST7789 靠 DC 区分命令/数据，CS 一直有效是合法的，也避免
      * 命令字节和参数分属两次事务时面板接口状态机被 CS 打断）。 */
     SPI2_MISC = (g_equ_sysclk != 0u) ? (SPI_CK_IDLE_EDGE)          /* 照 IDF：不常低 CS */
                                       : (SPI_CK_IDLE_EDGE | SPI_CS_KEEP_ACTIVE);
+    g_last_dlen = SPI_CFG_DIRTY;
 
     /* 注意：bit-bang 模式下这里不能把引脚接回 SPI 矩阵，否则后面的
      * GPIO_OUT 写不到 pad 上（init 序列就得用 bit-bang 打出去）。 */
@@ -742,7 +723,7 @@ int s3_lcd_read_id(u8 *out, u32 n)
     hi(PIN_DC);
 
     for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN; g_last_dlen = SPI_CFG_DIRTY;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -765,7 +746,7 @@ int s3_lcd_read_id(u8 *out, u32 n)
         if (i * 4u + 2u < n) { out[i * 4u + 2u] = (u8)(w >> 16); }
         if (i * 4u + 3u < n) { out[i * 4u + 3u] = (u8)(w >> 24); }
     }
-    SPI2_USER = SPI_USR_MOSI;
+    SPI2_USER = SPI_USR_MOSI; g_last_dlen = SPI_CFG_DIRTY;
     *(volatile u32 *)GPIO_OUT_SEL(PIN_SDA) = SIG_GPIO_OUT | OEN_ALWAYS;
     return 0;
 }
@@ -801,7 +782,7 @@ int s3_spi_read_pin(u32 pin, u8 *rx, u32 n)
     *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = (pin & 0x3Fu) | (1u << 6);
 
     for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN; g_last_dlen = SPI_CFG_DIRTY;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -823,7 +804,7 @@ int s3_spi_read_pin(u32 pin, u8 *rx, u32 n)
         if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
         if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
     }
-    SPI2_USER = SPI_USR_MOSI;
+    SPI2_USER = SPI_USR_MOSI; g_last_dlen = SPI_CFG_DIRTY;
     return 0;
 }
 
@@ -858,7 +839,7 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
         if (i * 4u + 3u < n) { w |= (u32)tx[i * 4u + 3u]; }
         SPI2_W(i) = w;
     }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN; g_last_dlen = SPI_CFG_DIRTY;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -879,12 +860,12 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
         if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
         if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
     }
-    SPI2_USER = SPI_USR_MOSI;
+    SPI2_USER = SPI_USR_MOSI; g_last_dlen = SPI_CFG_DIRTY;
     return 0;
 }
 
 /* 给自检用例用：改分频 / 直接发一段数据 / 读回 CLOCK 与 CLK_GATE 寄存器。 */
-void s3_lcd_set_clock(u32 clk) { SPI2_CLOCK = clk; }
+void s3_lcd_set_clock(u32 clk) { SPI2_CLOCK = clk; g_last_dlen = SPI_CFG_DIRTY; }
 u32 s3_lcd_get_clock(void) { return SPI2_CLOCK; }
 u32 s3_lcd_get_gate(void) { return *(volatile u32 *)(SPI2_BASE + 0xE8u); }
 void s3_lcd_dat_raw(const u8 *p, u32 n) { hi(PIN_DC); spi_write(p, n); }
@@ -975,7 +956,7 @@ void s3_spi_begin(void)
     /* 注意不能置 CLK_EQU_SYSCLK(bit31)，置了分频就被忽略（跑 80MHz）。
      * 125kHz：半周期 4us，远大于软件采样间隔，避免采样混叠。 */
     /* 125kHz：CLKDIV_PRE=9（前置 10 分频），N=63、H=32、L=N=63（L 必须等于 N）。 */
-    SPI2_CLOCK = (9u << 18) | (63u << 12) | (31u << 6) | 63u;
+    SPI2_CLOCK = (9u << 18) | (63u << 12) | (31u << 6) | 63u; g_last_dlen = SPI_CFG_DIRTY;
     SPI2_MS_DLEN = SPI_CHUNK * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) { }
@@ -990,7 +971,7 @@ int s3_spi_end(void)
         guard++;
         if (guard > 4000000u) { return -1; }
     }
-    SPI2_CLOCK = 0x00003043u;
+    SPI2_CLOCK = 0x00001001u; g_last_dlen = SPI_CFG_DIRTY;   /* 回到 40MHz 常态 */
     return 0;
 }
 
