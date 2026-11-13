@@ -133,7 +133,7 @@ void os_main(void) {
 }
 #elif defined(C6OS_S3)
 void os_main(void) {
-    port_init();
+    /* start.S 已经调用 port_init；这里不能再初始化一次 USB/中断。 */
     port_delay_ms(5000);
     (void)run();
     port_reboot();
