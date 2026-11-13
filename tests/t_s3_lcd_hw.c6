@@ -1,0 +1,94 @@
+/* t_s3_lcd_hw.c6 —— 强制走硬件 SPI（GPSPI2 + GPIO 矩阵），其余与 kiosk 相同：
+ * 纯色红→绿→蓝→8 色竖条+文字循环，串口打印当前通路。
+ * 用来判定硬件 SPI 到底能不能驱动这块面板（能用则帧率可提到 ~40fps+）。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u64 t0 = 0;
+    u32 cyc = 0;
+
+    puts_("c6os lcd HARDWARE SPI\n");
+    s3_lcd_use_bitbang(0u);          /* 走硬件 SPI */
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done (hw spi)\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "HW SPI", 0x0000u);
+    os_gfx_text16(&g, 6, 30, "ST7789 240X240", 0x0000u);
+
+    for (;;) {
+        t0 = port_cycles();
+        s3_lcd_fill(0xF800u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("1 red   ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x07E0u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("2 green ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x001Fu);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("3 blue  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_blit(g_fb, W, H);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("4 bars  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(12000000u);
+    }
+}
