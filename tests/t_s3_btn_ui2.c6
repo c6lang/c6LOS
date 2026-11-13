@@ -24,6 +24,8 @@ void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_bl(u32 on);
 void s3_lcd_delay(u32 n);
+void s3_lcd_hard_reset(void);
+
 
 static u16 g_fb[W * H] = {0};
 static OsGfx g;
@@ -127,9 +129,25 @@ static void btn_task(void *arg)
 
 static void gui_task(void *arg)
 {
+    u32 hb = 0;
+
     (void)arg;
     for (;;) {
         u32 i = 0;
+
+        hb++;
+        if ((hb % 100u) == 50u) { s3_lcd_hard_reset(); pstr("hard reset\n"); }
+        if ((hb % 100u) == 0u) {
+            char t2[12] = {0};
+            os_gfx_fill_rect(&g, 0, 200, (int)W, 40, 0x0000u);
+            os_gfx_text16(&g, 6, 204, "HB=", 0x07FFu);
+            u2s(t2, hb);
+            os_gfx_text16(&g, 46, 204, t2, 0x07FFu);
+            s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
+            pstr("hb ");
+            pu32(hb);
+            pstr("\n");
+        }
 
         while (i < 3u) {
             if (g_dirty[i] != 0u) {

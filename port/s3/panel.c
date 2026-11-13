@@ -313,11 +313,13 @@ static void bb_write_fast(const u8 *p, u32 n);
 
 static void bb_write(const u8 *p, u32 n)
 {
-    /* 每笔传输给一个 CS 脉冲：ST7789 靠 DC 区分命令/数据，CS 常低时一旦被干扰
-     * 打乱接口状态机就再也恢复不了（表现为"跑一会儿画面定格"）。 */
+    /* 每笔传输给一个 CS 脉冲，并保证 CS 建立/保持时间：ST7789 要求 CS 上升沿
+     * 之后至少 ~10ns，但连续高速刷时给足余量更稳（面板能"喘口气"）。 */
     if (g_bitbang != 0u) {
         wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_CS);
+        dly(20);
         wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_CS);
+        dly(20);
     }
     if (g_bb_fast != 0u) { bb_write_fast(p, n); return; }
     u32 i;
@@ -660,6 +662,7 @@ void s3_lcd_pixels(const u16 *px, u32 n)
             u32 bytes = k * 2u;
             hi(PIN_DC);
             spi_xfer(buf, bytes);
+            if (g_bitbang != 0u) { dly(40); }   /* 块间小间隔，别让面板连轴转 */
         }
         i += k;
     }
@@ -919,6 +922,7 @@ void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
             u32 bytes = k * 2u;
             hi(PIN_DC);
             spi_xfer(buf, bytes);
+            if (g_bitbang != 0u) { dly(40); }   /* 块间小间隔，别让面板连轴转 */
         }
         i += k;
     }
@@ -1007,4 +1011,17 @@ void s3_lcd_resync(void)
     s3_lcd_cmd(0x13u);          /* NORON */
     s3_lcd_cmd(0x29u);          /* DISPON */
     s3_lcd_delay(200000u);
+}
+
+/* 彻底复位面板：拉 RST + 重跑初始化表（软件兜底，用于面板接口状态卡死时） */
+void s3_lcd_hard_reset(void)
+{
+    plain_out(PIN_RST);
+    hi(PIN_RST);
+    dly(200000u);
+    lo(PIN_RST);
+    dly(600000u);
+    hi(PIN_RST);
+    dly(3000000u);
+    init_seq();
 }
