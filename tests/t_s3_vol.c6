@@ -64,14 +64,14 @@ static void cfg39_40(void)
 
     /* GPIO39 (MTCK)：GPIO 功能 + 上拉输入 */
     v = IOMUX_MTCK;
-    v = (v & ~(7u << 12)) | (1u << 12);
+    v = (v & ~(7u << 12)) | (0u << 12);   /* 试 MCU_SEL=0（早期扫描里这样能读到变化） */
     v = v | (1u << 9) | (1u << 8);
     v = v & ~(1u << 7);
     IOMUX_MTCK = v;
 
     /* GPIO40 (MTDO)：GPIO 功能 + 上拉输入 */
     v = IOMUX_MTDO;
-    v = (v & ~(7u << 12)) | (1u << 12);
+    v = (v & ~(7u << 12)) | (0u << 12);
     v = v | (1u << 9) | (1u << 8);
     v = v & ~(1u << 7);
     IOMUX_MTDO = v;
