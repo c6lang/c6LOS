@@ -18,11 +18,12 @@
   - `utils/los_debug.c`、`los_error.c`、`los_hook.c`
   - securec 的 `memcpy_s.c`/`memset_s.c`/`strncpy_s.c`
 - 说明“源码可编译”这一关已过；尚未完成 S3 启动、向量、时钟/中断和链接。
-- 已进一步完成 **最小可构建基线**：`bench/liteos_m_s3/` 提供 S3 target_config、windowed start.S、LiteOS 向量/链接脚本、USB 控制台和 demo 任务；`make` 生成 `build/liteos_s3.elf`（text 23,956B / data 35,152B / bss 17,336B），`make image` 生成 `build/liteos_s3.bin`（esptool 校验通过，entry `_start`、vector 位于 0x403C9000）。
+- 已进一步完成 **最小可构建基线**：`bench/liteos_m_s3/` 提供 S3 target_config、windowed start.S、LiteOS 向量/链接脚本、USB 控制台和 demo 任务；`make` 生成 `build/liteos_s3.elf`（text 23,956B / data 35,152B / bss 17,336B），`make image` 生成 `build/liteos_s3.bin`（当前 27,200B，esptool 校验通过，entry `_start`、vector 位于 0x403C9000；heap 放到 BSS，避免 ROM 加载段与 0x3fceb170 冲突）。
 - c6LOS 侧已生成同口径 S3 镜像：`build/s3perf`（`tests/t_perf.c6`，CCOUNT 微基准）和 `build/s3rt`（`tests/t_rt.c6`，唤醒/切换/tick 抖动），与 `bench/liteos_m_s3` 的 `bench.c` 使用同一组操作和 CCOUNT 口径。
 - 因 t_rt 的 BSS 比默认镜像多几十字节，S3 链接期栈保护从 8KB 调整为 7.75KB（`_bss_end + 0x1F00 <= 0x3FCEF000`）；仍保留约 7.7KB 主栈余量。
 - 新增 `bench/check_s3_images.py` 静态预检：校验 c6LOS 默认/perf/rt 与 LiteOS-M bench 四个 S3 镜像的入口、`_vecbase/_init_start`(0x403C9000)、向量段 VMA、BSS 与栈顶边界；当前四项全部 `OK`，输出 `PASS: s3 static preflight`。
-- 还未上板，因此启动/中断/tick/demo 打印均未验证；这是下一步。
+- **真板已跑通**：ESP32-S3 USB-Serial/JTAG 输出 `LiteOS-M S3 boot`、`kernel init rc=00000000`、`bench start rc=00000000`，并输出 `yield: 592`、`sem_post+pend: 143`、`queue_put+get: 434`、`heap_alloc+free: 622` cycles/op（CCOUNT 40MHz）。c6LOS 默认镜像也已在同板输出 `c6os s3 boot` / `c6os: alive`。
+- 当前问题：c6LOS S3 `t_perf` 镜像只输出 `c6os s3 boot`，未输出 `after init`/bench；同板 c6LOS perf 数字尚未采集，正在排查其启动/输出路径。
 
 ## 3. 仍需移植的部分
 
