@@ -65,6 +65,14 @@ fcntl.ioctl(fd, 0x5416, struct.pack('i', 0x006))   # DTR|RTS
 - 输入：`port_getc()` 用 **32 位**读 `EP1_REG`（8 位读恒为 0），按
   `OUT_EP1_ST[22:16]` 批次计数出队，读完清 `INT_CLR` bit2；真板 shell
   `help/tick/ps/free` 已全部正常。
+- 核 ID：**`rsr.prid` 在这颗 S3 上读回来的不是 0/1**（实测 core0=0xCDCD、
+  core1=0xABAB，每核稳定但都是垃圾值），所以 `port_core_id()` 不能直接
+  `prid & 1`。做法是 `port_core_bind_self()`：每个核在入口（core0 在
+  `port_init`、core1 在 `core1_entry`）把自己的 PRID 值登记进 `g_prid_base[]`，
+  之后按值查表返回下标。注意 `os_sched_tick()` 里有「非 0 号核直接返回」的
+  SMP 保护，核 ID 错了会表现为 **tick 永不递增**（很像定时器坏了）。
+- RTC 慢速内存（0x50000000）mark 在这块板子上**不可靠**（2/3/7 号字读到过
+  垃圾），诊断优先用串口打印。
 - 看门狗：除 RTC_WDT（`0x60008098=0`）外，还必须关 **RTC 超级看门狗 SWD**
   （`0x600080B8=0x8F1D312A` → `0x600080B4 |= 1<<30` → `0x600080B8=0`），
   否则每 ~3.5s 被整片复位，串口只出几行（复位原因 0x12 = SYS_SUPER_WDT）。
