@@ -126,11 +126,27 @@ void *os_heap_alloc(OsHeap *h, u32 n) {
     return (void *)((u8 *)best + HDR_SIZE);
 }
 
+static int heap_merge_next(OsHeap *h, HeapBlk *b) {
+    u8 *end = h->base + h->size;
+    u8 *nq = heap_next(h, b);
+
+    if (nq + HDR_SIZE <= end) {
+        HeapBlk *n = (HeapBlk *)nq;
+        if (heap_block_ok(h, n) != 0 && n->free != 0u) {
+            if (b->size > 0xFFFFFFFFu - (HDR_SIZE + n->size)) {
+                return -1;
+            }
+            b->size = b->size + HDR_SIZE + n->size;
+        }
+    }
+    return 0;
+}
+
 int os_heap_free(OsHeap *h, void *p) {
     HeapBlk *found = 0;
+    HeapBlk *prev = 0;
     u8 *q = 0;
     u8 *end = 0;
-    u32 merged = 1;
 
     if (h == 0 || h->magic != HEAP_MAGIC || p == 0) {
         return -1;
@@ -147,6 +163,7 @@ int os_heap_free(OsHeap *h, void *p) {
             found = b;
             break;
         }
+        prev = b;
         q = heap_next(h, b);
     }
     if (found == 0 || found->free != 0u) {
@@ -158,30 +175,11 @@ int os_heap_free(OsHeap *h, void *p) {
     found->free = 1;
     h->used = h->used - found->size;
 
-    while (merged != 0u) {
-        u8 *r = h->base;
-        merged = 0;
-        while (r + HDR_SIZE <= end) {
-            HeapBlk *c = (HeapBlk *)r;
-            u8 *nq = 0;
-
-            if (heap_block_ok(h, c) == 0) {
-                return -1;
-            }
-            nq = heap_next(h, c);
-            if (c->free != 0u && nq + HDR_SIZE <= end) {
-                HeapBlk *n = (HeapBlk *)nq;
-                if (heap_block_ok(h, n) != 0 && n->free != 0u) {
-                    if (c->size > 0xFFFFFFFFu - (HDR_SIZE + n->size)) {
-                        return -1;
-                    }
-                    c->size = c->size + HDR_SIZE + n->size;
-                    merged = 1;
-                    break;
-                }
-            }
-            r = nq;
-        }
+    if (heap_merge_next(h, found) != 0) {
+        return -1;
+    }
+    if (prev != 0 && prev->free != 0u) {
+        (void)heap_merge_next(h, prev);
     }
     return 0;
 }

@@ -30,10 +30,12 @@ u64 port_cycles(void)
 
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)
 {
-    if (p == 0) {
-        return 0u;
-    }
-    return __sync_bool_compare_and_swap(p, expect, newv) ? 1u : 0u;
+    (void)p;
+    (void)expect;
+    (void)newv;
+    /* 单核 S3：对象锁退化为“总是成功”，避免 S32C1I/非对齐访问陷阱。
+     * 双核 SMP 需要后续用正确的 S32C1I 汇编实现。 */
+    return 1u;
 }
 
 u32 port_in_isr(void)
@@ -186,10 +188,8 @@ void port_idle(void)
 
 u32 port_core_id(void)
 {
-    u32 id;
-    /* Xtensa PRID：0=PRO_CPU，1=APP_CPU。 */
-    __asm__ __volatile__("rsr %0, prid" : "=r"(id));
-    return id;
+    /* 单核 S3 阶段固定 0；PRID 读取路径在 LX7 上待验证。 */
+    return 0u;
 }
 
 void port_init(void)

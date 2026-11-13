@@ -28,13 +28,20 @@ static volatile u32 g_obj_lock = 0;
 u32 os_obj_lock(void) {
     u32 st = port_irq_save();
 
+#if defined(C6OS_S3)
+    /* 单核 S3：关中断即可保护对象；避免每次 CAS 的函数调用开销。 */
+    return st;
+#else
     while (port_atomic_cas(&g_obj_lock, 0u, 1u) == 0u) {
     }
     return st;
+#endif
 }
 
 void os_obj_unlock(u32 state) {
+#if !defined(C6OS_S3)
     g_obj_lock = 0;
+#endif
     port_irq_restore(state);
 }
 
@@ -57,7 +64,12 @@ static void make_ready(OsTask *t) {
     }
 }
 
+static u32 g_waiters = 0;
+
 static void unblock(OsTask *t, int result) {
+    if (t->state == (u8)OS_TASK_BLOCKED && g_waiters > 0u) {
+        g_waiters = g_waiters - 1u;
+    }
     t->wait_obj = 0;
     t->wait_result = result;
     t->delay_left = 0;
@@ -285,6 +297,7 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         return -3;
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;
+    g_waiters = g_waiters + 1u;
     return 0;
 }
 
@@ -342,6 +355,9 @@ int os_task_wake_event(void *obj, u32 bits) {
     u32 i = 0;
     int woke = 0;
 
+    if (g_waiters == 0u) {
+        return 0;
+    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -364,6 +380,9 @@ u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     u32 i = 0;
     OsTask *best = 0;
 
+    if (g_waiters == 0u) {
+        return 0u;
+    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -388,6 +407,9 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
 void os_task_wake_all(void *obj, int result) {
     u32 i = 0;
 
+    if (g_waiters == 0u) {
+        return;
+    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj) {
@@ -549,6 +571,7 @@ void os_task_start_core(u32 core) {
 }
 
 void os_task_start(void) {
+    g_waiters = 0;
     os_task_start_core(0u);
 }
 

@@ -27,22 +27,34 @@ int os_queue_init(OsQueue *q, void **storage, u32 cap) {
 static void slot_write(OsQueue *q, u32 idx, const void *src) {
     u8 *d = q->buf + idx * q->item_size;
     const u8 *s = (const u8 *)src;
-    u32 i = 0;
 
-    while (i < q->item_size) {
-        d[i] = s[i];
-        i++;
+    if (q->item_size == 4u) {
+        *(u32 *)d = *(const u32 *)s;
+        return;
+    }
+    {
+        u32 i = 0;
+        while (i < q->item_size) {
+            d[i] = s[i];
+            i++;
+        }
     }
 }
 
 static void slot_read(OsQueue *q, u32 idx, void *dst) {
     const u8 *s = q->buf + idx * q->item_size;
     u8 *d = (u8 *)dst;
-    u32 i = 0;
 
-    while (i < q->item_size) {
-        d[i] = s[i];
-        i++;
+    if (q->item_size == 4u) {
+        *(u32 *)d = *(const u32 *)s;
+        return;
+    }
+    {
+        u32 i = 0;
+        while (i < q->item_size) {
+            d[i] = s[i];
+            i++;
+        }
     }
 }
 
@@ -79,7 +91,10 @@ int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
         }
         if (q->count != q->cap) {
             slot_write(q, q->tail, item);
-            q->tail = (q->tail + 1u) % q->cap;
+            q->tail = q->tail + 1u;
+            if (q->tail == q->cap) {
+                q->tail = 0u;
+            }
             q->count = q->count + 1u;
             (void)os_task_wake_first(q, Q_WAIT_GET, 0);
             os_obj_unlock(st);
@@ -115,7 +130,10 @@ int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
         }
         if (q->count != 0u) {
             slot_read(q, q->head, out);
-            q->head = (q->head + 1u) % q->cap;
+            q->head = q->head + 1u;
+            if (q->head == q->cap) {
+                q->head = 0u;
+            }
             q->count = q->count - 1u;
             (void)os_task_wake_first(q, Q_WAIT_PUT, 0);
             os_obj_unlock(st);

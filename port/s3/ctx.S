@@ -41,7 +41,7 @@ port_task_switch:
     /* a2 = 目标任务 ctx */
     mov     a4, a2
     l32r    a3, .Lg_sched
-    rsr     a5, prid
+    movi    a5, 0
     movi    a6, 76
     mull    a5, a5, a6
     add     a3, a3, a5
@@ -71,7 +71,7 @@ port_task_switch:
     s32i    a1, a3, 64
 
     l32r    a3, .Lg_cur
-    rsr     a5, prid
+    movi    a5, 0
     slli    a5, a5, 2
     add     a3, a3, a5
     s32i    a4, a3, 0
@@ -82,7 +82,7 @@ port_task_switch:
     .type   port_task_yield, @function
 port_task_yield:
     l32r    a4, .Lg_cur
-    rsr     a5, prid
+    movi    a5, 0
     slli    a5, a5, 2
     add     a4, a4, a5
     l32i    a4, a4, 0
@@ -112,7 +112,7 @@ port_task_yield:
     s32i    a1, a4, 64
 
     l32r    a3, .Lg_sched
-    rsr     a5, prid
+    movi    a5, 0
     movi    a6, 76
     mull    a5, a5, a6
     add     a3, a3, a5

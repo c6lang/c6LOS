@@ -105,3 +105,26 @@ LiteOS-M 经 LX6→LX7 移植后在 ESP32-S3 上运行（`bench/liteos_m_s3`，C
 3. **tick 抖动**：risc6 完整周期约 0.94% 偏差；S3 历史 avg 偏差 0.26%，但 max 异常高，建议在启用长临界区/队列压力下重跑。
 4. **heap**：单次分配释放是最大开销，建议改为按 size class 的空闲链表；这属于性能优化，不影响当前安全修复。
 5. **测试口径**：所有数字都是单核 host/risc6；SMP 下 `os_obj_lock` 的原子操作会增加 sem/queue/mutex 开销，需要用 `--harts 2` 单独测。
+
+## 7. 同板 c6LOS vs LiteOS-M（ESP32-S3，CCOUNT 40MHz）
+
+同一块 ESP32-S3、同一 CCOUNT 口径、N=1000；LiteOS-M 直接调用 LOS_*，c6LOS 调用 os_* 原生 API（内部再映射到同一语义）。
+
+| 指标 | LiteOS-M S3 | c6LOS S3 | 比值 |
+|---|---:|---:|---:|
+| yield | 592 | 1223 | 2.07x |
+| sem_post+pend | 143 | 889 | 6.22x |
+| queue_put+get | 434 | 2810 | 6.47x |
+| heap_alloc+free | 622 | 1709 | 2.75x |
+| sched_tick | 未采集 | 932 | — |
+
+c6LOS 侧当前仍明显落后；主要开销来自 c6→C99 生成代码的通用序言（每个函数都初始化 `__c99_cnd[16]`、把参数/局部量反复写栈）以及对象锁/等待者扫描。已做的 S3 单核优化：
+- tick 超时锁不再在 ISR 内自旋；
+- perf 入口不再重复 port_init；
+- 清除 PS.EXCM，恢复 level-1 中断使能；
+- S3 单核对象锁退化为本地关中断（避免 S32C1I/非对齐陷阱），PRID 暂时固定 core0；
+- sem/queue wake 增加 `g_waiters==0` 快路径；
+- queue 4 字节 slot 直接 32 位拷贝、环形索引改条件回绕；
+- heap free 改为“相邻前后块一次合并”，去掉全堆重复扫描。
+
+**结论（本轮）**：功能/基线已同板跑通，但性能尚未达到“不劣于 LiteOS-M”；yield 2.07x、sem 6.22x、queue 6.47x、heap 2.75x。下一步优先降低 c6 生成代码的通用序言开销（或为 S3 热路径提供等价 C 实现），再重跑本表。
