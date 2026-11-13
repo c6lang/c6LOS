@@ -10,6 +10,7 @@ int os_sem_init(OsSem *s, u32 initial, u32 max) {
     s->count = initial;
     s->max = max;
     s->magic = SEM_MAGIC;
+    s->waiters = 0;
     return 0;
 }
 

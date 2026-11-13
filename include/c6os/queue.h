@@ -11,6 +11,8 @@ typedef struct OsQueue {
     u32 tail;
     u32 count;
     u32 magic;
+    u32 waiters_get;
+    u32 waiters_put;
 } OsQueue;
 
 int os_queue_init(OsQueue *q, void **storage, u32 cap);

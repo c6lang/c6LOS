@@ -17,6 +17,8 @@ int os_queue_init_ex(OsQueue *q, void *storage, u32 cap, u32 item_size) {
     q->tail = 0;
     q->count = 0;
     q->magic = QUEUE_MAGIC;
+    q->waiters_get = 0;
+    q->waiters_put = 0;
     return 0;
 }
 

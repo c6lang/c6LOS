@@ -7,6 +7,7 @@ typedef struct OsSem {
     u32 count;
     u32 max;
     u32 magic;
+    u32 waiters;
 } OsSem;
 
 int os_sem_init(OsSem *s, u32 initial, u32 max);
