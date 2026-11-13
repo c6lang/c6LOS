@@ -1,0 +1,71 @@
+/* t_s3_in1.c6 —— 验证 GPIO_IN1(0x60004040) 读取是否可用：
+ * 把 GPIO40/39 当普通输出驱动高/低，再分别读 GPIO_IN1，期望跟随变化。
+ * （我们之前判断音量键"读不到"，前提是 GPIO_IN1 读取正确——先证这个前提。）
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define GPIO_IN   (*(volatile u32 *)0x6000403Cu)
+#define GPIO_IN1  (*(volatile u32 *)0x60004040u)
+#define GPIO_OUT1 (*(volatile u32 *)0x60004010u)   /* GPIO32..53 输出 */
+#define GPIO_ENA1 (*(volatile u32 *)0x60004030u)   /* GPIO32..53 输出使能 */
+#define IO_MUX39  (*(volatile u32 *)0x600090A0u)
+#define IO_MUX40  (*(volatile u32 *)0x600090A4u)
+#define OUT_SEL40 (*(volatile u32 *)(0x60004000u + 0x554u + 4u * 40u))
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void s3_lcd_delay(u32 n);
+
+void os_main(void)
+{
+    u32 lvl_hi = 0;
+    u32 lvl_lo = 0;
+    u32 v = 0;
+
+    pstr("c6os GPIO_IN1 test\n");
+
+    /* GPIO40 当普通 GPIO 输出 */
+    v = IO_MUX40;
+    v = (v & ~(7u << 12)) | (1u << 12);      /* MCU_SEL=1 = GPIO */
+    v = v | (1u << 9);                        /* FUN_IE 输入也开 */
+    v = v & ~((1u << 8) | (1u << 7));         /* 关上下拉 */
+    IO_MUX40 = v;
+    OUT_SEL40 = 0x100u;                       /* 走 GPIO_OUT */
+    GPIO_ENA1 = GPIO_ENA1 | (1u << 8);        /* pin40 -> ENABLE1 bit8 */
+
+    pstr("iomux40="); pu32(IO_MUX40);
+    pstr(" ena1="); pu32(GPIO_ENA1);
+
+    /* 驱动高 */
+    GPIO_OUT1 = GPIO_OUT1 | (1u << 8);
+    s3_lcd_delay(20000u);
+    lvl_hi = (GPIO_IN1 >> 8) & 1u;
+
+    /* 驱动低 */
+    GPIO_OUT1 = GPIO_OUT1 & ~(1u << 8);
+    s3_lcd_delay(20000u);
+    lvl_lo = (GPIO_IN1 >> 8) & 1u;
+
+    pstr(" drive_hi_in1="); pu32(lvl_hi);
+    pstr(" drive_lo_in1="); pu32(lvl_lo);
+    pstr("\n");
+
+    if (lvl_hi == 1u && lvl_lo == 0u) {
+        pstr("PASS: GPIO_IN1 readable\n");
+    } else {
+        pstr("FAIL: GPIO_IN1 not tracking\n");
+    }
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

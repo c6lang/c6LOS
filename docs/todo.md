@@ -637,3 +637,13 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   无任何电平变化（BOOT=GPIO0 正常）。
   另外修掉一个真 bug：GPIO≥32 的电平在 `GPIO_IN1`(0x60004040)，之前用
   `GPIO_IN >> pin` 是移位越界（未定义行为），读出来是垃圾。
+
+- **S3 GPIO 分组坑（重要）**：`GPIO_OUT/ENABLE/IN` 只到 GPIO31；**GPIO32..53 在
+  `GPIO_OUT1`/`GPIO_ENABLE1`/`GPIO_IN1`**。之前读 GPIO39/40 用 `GPIO_IN >> pin`
+  是移位越界（未定义行为），恒得 0 —— 音量键"读不到"的一部分原因就在这里。
+  已用 `tests/t_s3_in1.c6` 验证：把 GPIO40 当输出驱动高/低，`GPIO_IN1` 能正确
+  跟随（`PASS: GPIO_IN1 readable`）。
+  另外对照 IDF 源码（`espressif__button/button_gpio.c` 的 `gpio_config` +
+  `gpio_ll_pullup_en/input_enable`）确认：按键就是"输入 + 内部上拉 + 低有效"，
+  写的是 MTCK/MTDO 那两个 IO_MUX，与我们的写法一致；仍待查的是为什么同样的
+  配置在我们固件里读到恒 0（怀疑与 JTAG TAP 对 MTDO 的驱动/释放时机有关）。

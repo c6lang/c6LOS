@@ -65,6 +65,12 @@ fcntl.ioctl(fd, 0x5416, struct.pack('i', 0x006))   # DTR|RTS
 - 输入：`port_getc()` 用 **32 位**读 `EP1_REG`（8 位读恒为 0），按
   `OUT_EP1_ST[22:16]` 批次计数出队，读完清 `INT_CLR` bit2；真板 shell
   `help/tick/ps/free` 已全部正常。
+- **GPIO ≥32 的寄存器分组**（踩过）：`GPIO_OUT`(0x04)/`GPIO_ENABLE`(0x20)/`GPIO_IN`(0x3C)
+  只覆盖 GPIO0..31；GPIO32..53 要用 **`GPIO_OUT1`(0x60004010)、
+  `GPIO_ENABLE1`(0x60004030)、`GPIO_IN1`(0x60004040)**。之前用 `GPIO_IN >> 39`
+  读音量键是移位越界（未定义行为），读出来恒 0，白白排了很久。
+- **IO_MUX 不是全线性**：GPIO0..21 是 `0x60009000+0x04+4p`，但 GPIO39/40 是
+  JTAG 的 MTCK/MTDO 专用寄存器（`0x600090A0/0xA4`），GPIO33..37 又是另一组。
 - 核 ID：**`rsr.prid` 在这颗 S3 上读回来的不是 0/1**（实测 core0=0xCDCD、
   core1=0xABAB，每核稳定但都是垃圾值），所以 `port_core_id()` 不能直接
   `prid & 1`。做法是 `port_core_bind_self()`：每个核在入口（core0 在
