@@ -1,0 +1,85 @@
+/* t_s3_spi2hw.c6 —— 硬件 SPI2(FSPI) 通路自测：
+ *   1) 先用 bit-bang 跑完面板初始化
+ *   2) 切到硬件 SPI2（20MHz），整屏刷红/绿/蓝
+ *   3) 用 PCNT 数 SCLK(GPIO9) 与 MOSI(GPIO10) 边沿，确认时钟/数据都出来了
+ * 判定：屏上出现纯色 = 硬件 SPI 通了（这就是解决"连续刷新定格"的关键）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_use_spi2hw(u32 div);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+void os_main(void)
+{
+    u32 d = 0;
+    u32 m = 0;
+
+    pstr("c6os spi2 hardware test\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    pstr("panel init (bitbang) done\n");
+
+    s3_lcd_use_spi2hw(4u);      /* 80MHz/4 = 20MHz */
+    pstr("switched to hw spi\n");
+
+    pcnt_init();
+    pcnt_pin(9u);
+    s3_lcd_fill(0xF800u);       /* 红 */
+    s3_lcd_delay(200000u);
+    d = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pcnt_pin(10u);
+    s3_lcd_fill(0x07E0u);       /* 绿 */
+    s3_lcd_delay(200000u);
+    m = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pstr("sclk_edges=");
+    pu32(d);
+    pstr(" mosi_edges=");
+    pu32(m);
+    pstr("\n");
+
+    /* 之后两种颜色交替，肉眼可判"硬件 SPI 能不能连续刷" */
+    for (;;) {
+        s3_lcd_fill(0x001Fu);   /* 蓝 */
+        s3_lcd_delay(300000u);
+        s3_lcd_fill(0xFFE0u);   /* 黄 */
+        s3_lcd_delay(300000u);
+    }
+}

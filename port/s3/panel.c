@@ -192,6 +192,7 @@ static void bb_dc(u32 level);
  * docs/s3-panel-bringup.md §4.5，PCNT 实测 0 边沿而 MOSI 有 256），
  * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
 static u32 g_bitbang = 1;
+static u32 g_hwspi;
 static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
 static u32 g_bb_fast = 1;     /* 默认用整字写 GPIO_OUT 的快速内层循环（快 2.2x） */
 static u32 g_dc_inv = 0;      /* DC 极性取反（有些板子反相） */
@@ -311,8 +312,11 @@ static void bb_write_fast(const u8 *p, u32 n)
 
 static void bb_write_fast(const u8 *p, u32 n);
 
+static void hw_xfer(const u8 *p, u32 n);
+
 static void bb_write(const u8 *p, u32 n)
 {
+    if (g_hwspi != 0u) { hw_xfer(p, n); return; }
     /* 每笔传输给一个 CS 脉冲，并保证 CS 建立/保持时间：ST7789 要求 CS 上升沿
      * 之后至少 ~10ns，但连续高速刷时给足余量更稳（面板能"喘口气"）。 */
     if (g_bitbang != 0u) {
@@ -1024,4 +1028,77 @@ void s3_lcd_hard_reset(void)
     hi(PIN_RST);
     dly(3000000u);
     init_seq();
+}
+
+/* ================= 硬件 SPI2(FSPI) 通路 =================
+ * S3 GPSPI2 寄存器偏移（曾用错 0x18/0x1C 导致"时钟不出来"）：
+ *   CMD 0x00(USR bit24) / CTRL 0x08 / CLOCK 0x0C / USER 0x10 /
+ *   MS_DLEN 0x1C / W0 0x98 / CLK_GATE 0xE8
+ * GPIO 矩阵输出号：FSPICLK=101、FSPID=103、FSPICS0=110
+ */
+#define SPI2_BASE   0x60024000u
+#define SPI2_CMD    (SPI2_BASE + 0x00u)
+#define SPI2_CTRL   (SPI2_BASE + 0x08u)
+#define SPI2_CLOCK  (SPI2_BASE + 0x0Cu)
+#define SPI2_USER   (SPI2_BASE + 0x10u)
+#define SPI2_DLEN   (SPI2_BASE + 0x1Cu)
+#define SPI2_W0     (SPI2_BASE + 0x98u)
+#define SPI2_GATE   (SPI2_BASE + 0xE8u)
+
+
+
+static u32 rd_reg(u32 a)
+{
+    return *(volatile u32 *)a;
+}
+
+/* div: CLKCNT_N（80MHz/div） */
+void s3_lcd_use_spi2hw(u32 div)
+{
+    u32 n = div;
+    u32 h = div / 2u;
+
+    if (n < 2u) { n = 2u; }
+    if (n > 64u) { n = 64u; }
+    if (h == 0u) { h = 1u; }
+
+    wr((volatile u32 *)0x600C0018u, rd_reg(0x600C0018u) | (1u << 6));   /* SPI2 clk en */
+    wr((volatile u32 *)0x600C0020u, rd_reg(0x600C0020u) & ~(1u << 6));  /* 释放复位 */
+    wr((volatile u32 *)SPI2_GATE, 7u);                                  /* CLK_EN|MST_ACTIVE|SEL */
+    /* CLOCK: pre-1=0(即 pre=1), n-1, h-1, l-1 */
+    wr((volatile u32 *)SPI2_CLOCK, (((n - 1u) & 0x3Fu) << 12) |
+                                   (((h - 1u) & 0x3Fu) << 6) |
+                                   ((h - 1u) & 0x3Fu));
+    wr((volatile u32 *)SPI2_CTRL, 0u);                    /* MSB first */
+    wr((volatile u32 *)SPI2_USER, (1u << 27) |            /* USR_MOSI */
+                                  (1u << 7) | (1u << 6)); /* CS_SETUP/CS_HOLD */
+
+    /* 应用配置：IDF 的 spi_ll_apply_config 是置 UPDATE(bit23) 并等它自清 */
+    wr((volatile u32 *)SPI2_CMD, (1u << 23));
+    while ((rd_reg(SPI2_CMD) & (1u << 23)) != 0u) { }
+
+    /* 引脚走 GPIO 矩阵：SCLK=GPIO9←101，MOSI=GPIO10←103，CS 用普通 GPIO */
+    matrix_out(PIN_SCLK, 101u);
+    matrix_out(PIN_SDA, 103u);
+    g_hwspi = 1u;
+}
+
+static void hw_xfer(const u8 *p, u32 n)
+{
+    u32 i = 0;
+
+    if (n == 0u) { return; }
+    while (i < n) {
+        u32 w = 0;
+        u32 k = 0;
+        while (k < 4u && i + k < n) {
+            w |= ((u32)p[i + k]) << (24u - 8u * k);
+            k++;
+        }
+        wr((volatile u32 *)(SPI2_W0 + 4u * (i / 4u)), w);
+        i += 4u;
+    }
+    wr((volatile u32 *)SPI2_DLEN, (n * 8u) - 1u);
+    wr((volatile u32 *)SPI2_CMD, (1u << 24));       /* USR=1 启动 */
+    while ((rd_reg(SPI2_CMD) & (1u << 24)) != 0u) { }  /* 等传输完成 */
 }
