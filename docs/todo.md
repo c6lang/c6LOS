@@ -658,3 +658,19 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   `/media/winger/inst_26/esp/tools`、上游固件 `/media/winger/inst_26/esp/xiaozhi`
   （已验证：按 `CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_WIFI=y` 编译出的固件，
   真板屏亮 + 三个按键都正常）。
+
+- **I2S 发声/收音的实现要点（已从 IDF v6.0.1 源码抄到，供下一步复用）**：
+  ESP32-S3 的 I2S 数据搬运走 **GDMA**：
+  ① 开时钟：`SYSTEM_PERIP_CLK_EN1.dma_clk_en`（`gdma_ll_enable_bus_clock`）；
+  ② 每通道寄存器组 `dev->channel[ch]`（`gdma_struct.h`）：
+     `out.link.addr` = 描述符地址、`out.link.start` = 1 启动、
+     `out.peri_sel.sel` = 外设触发号（I2S 用 `GDMA_MAKE_TRIGGER(GDMA_TRIG_PERIPH_I2S, 2)`，
+     见 IDF `i2s_common.c:802`）；RX 方向对应 `in.link.addr` / `in.link.start` / `in.peri_sel`；
+  ③ 描述符沿用 `lldesc_t`：w0 = size[11:0]/length[23:12]/offset[28:24]/sosf/eof/owner，
+     w1 = buf 指针，w2 = next 描述符指针；TX 需要 owner=1、eof=1；
+  ④ I2S 侧只负责时钟与格式（`TX_CLKM_CONF` 的 CLK_EN(bit29)+TX_CLK_ACTIVE(bit26)+
+     时钟源；`TX_CONF1` 的 bits_mod/bck_div；`TX_CONF` 的 tx_start/left_align/msb_first），
+     以及 `RXEOF_NUM`。
+  ⑤ 麦克风侧是 I2S1（`DR_REG_I2S1_BASE`=0x6002D000，引脚 SCK=5/WS=4/DIN=6），
+     与喇叭（I2S0，BCLK=15/WS=16/DOUT=7）分开。
+  做到这里就能实现"按 BOOT 录一段、再按回放"。
