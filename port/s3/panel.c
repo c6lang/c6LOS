@@ -129,10 +129,18 @@ static void plain_out(u32 p)
     wr((volatile u32 *)GPIO_ENA_W1TS, 1u << p);
 }
 
+/* 把外设信号（101=FSPICLK / 103=FSPID / 110=FSPICS0）接到某根 pad 上。
+ *
+ * 两个都要做，少一个 pad 就是"高阻+内部上拉"，示波器/回读都只会看到 1：
+ *   1) GPIO_FUNCx_OUT_SEL_CFG.func_sel = 信号号；
+ *   2) 输出使能 GPIO_ENABLE_REG 对应位置 1（IDF 的 gpio_set_direction(OUTPUT)
+ *      做的就是这件事）。只写 oen_sel 位不等于把 pad 打开。
+ */
 static void matrix_out(u32 p, u32 sig)
 {
     mux_gpio(p);
-    *(volatile u32 *)GPIO_OUT_SEL(p) = (sig & 0x1FFu) | OEN_ALWAYS;
+    *(volatile u32 *)GPIO_OUT_SEL(p) = sig & 0x1FFu;
+    *(volatile u32 *)GPIO_ENA_W1TS = 1u << p;
 }
 
 /* ---- SPI 传输 --------------------------------------------------------- */
@@ -276,8 +284,12 @@ static void spi_init(void)
 
     /* 源选 80MHz PLL（MST_CLK_SEL=1），分频 N+1=4 → 20MHz：
      * CLKDIV_PRE=0（bits21:18）、CLKCNT_N=3（17:12）、CLKCNT_H=1（11:6）、
-     * CLKCNT_L=3（5:0）、CLK_EQU_SYSCLK=0（bit31）。 */
-    clk = 0x00003043u;
+     * CLKCNT_L=1（5:0）、CLK_EQU_SYSCLK=0（bit31）。
+     *
+     * **必须满足 H+L=N**（这里 2+2=4）。写成 CLKCNT_L=3 时 H+L=6>N=4，
+     * 低电平相位被吃掉 → SCLK 卡在常高：事务照样按分频"耗时"，MOSI 也在
+     * 移数据，但面板收不到时钟，屏幕只有背光。复位默认 0x3041 才是对的。 */
+    clk = 0x00003041u;
     dbg("clock_want=");
     dbg_hex(clk);
     dbg("\n");
@@ -652,4 +664,66 @@ void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
     if (h > LCD_H) { h = LCD_H; }
     window(0u, 0u, w, h);
     s3_lcd_pixels(fb, w * h);
+}
+
+/* 调试：打开 pad 输入使能（FUN_IE）后读 GPIO_IN，用来检查输出脚的静态电平。 */
+u32 s3_pin_level(u32 pin)
+{
+    volatile u32 *mux = (volatile u32 *)IO_MUX_REG(pin);
+
+    *mux = *mux | (1u << 9);
+    return (*(volatile u32 *)(GPIO_BASE + 0x3Cu) >> pin) & 1u;
+}
+
+/* 调试：起一次慢速（2MHz）64 字节传输后立刻返回，让调用方在传输进行中
+ * 采样某根 pad 的电平——相当于给 SPI 做了个"逻辑分析仪"。 */
+void s3_spi_begin(void)
+{
+    u32 i;
+
+    for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0x55555555u; }
+    /* 注意不能置 CLK_EQU_SYSCLK(bit31)，置了分频就被忽略（跑 80MHz）。
+     * 125kHz：半周期 4us，远大于软件采样间隔，避免采样混叠。 */
+    /* 125kHz：CLKDIV_PRE=9（前置 10 分频），N=63(H=32,L=32 → H+L=N)。 */
+    SPI2_CLOCK = (9u << 18) | (63u << 12) | (31u << 6) | 31u;
+    SPI2_MS_DLEN = SPI_CHUNK * 8u - 1u;
+    SPI2_CMD = SPI_CMD_UPDATE;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) { }
+    SPI2_CMD = SPI_CMD_USR;
+}
+
+int s3_spi_end(void)
+{
+    u32 guard = 0;
+
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if (guard > 4000000u) { return -1; }
+    }
+    SPI2_CLOCK = 0x00003041u;
+    return 0;
+}
+
+/* 事务是否还在进行（USR 位） */
+u32 s3_spi_busy(void)
+{
+    return SPI2_CMD & SPI_CMD_USR;
+}
+
+/* 读 SPI2 的 MISC/USER/CLOCK，便于确认配置是否写进去了 */
+u32 s3_spi_reg(u32 off)
+{
+    return *(volatile u32 *)(SPI2_BASE + off);
+}
+
+/* 调试：读 IO_MUX（含 MCU_SEL/FUN_IE/FUN_WPU）与 GPIO_OUT_SEL_CFG 原始值。 */
+u32 s3_reg32(u32 addr)
+{
+    return *(volatile u32 *)addr;
+}
+
+/* 调试：直接读写任意寄存器（排查 SPI 配置用） */
+void s3_reg_wr(u32 addr, u32 v)
+{
+    *(volatile u32 *)addr = v;
 }

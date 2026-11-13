@@ -53,29 +53,43 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
 
 ## 3. 踩过的坑（每条都曾经让屏幕一片黑）
 
-1. **`SPI_CLK_GATE` 少 bit0（`SPI_CLK_EN`，"enable clk gate"，复位值 0）**
+1. **GPIO 矩阵输出没打开输出使能（本项是"只有背光"的真正原因）**
+   `GPIO_FUNCx_OUT_SEL_CFG` 只写了 `func_sel=101/103/110`，没置 `GPIO_ENABLE_REG`
+   对应位。结果 SCLK/MOSI/CS 三根脚一直是 **高阻 + 内部上拉**：回读恒为 1、
+   面板一个字节都收不到，而 SPI 事务本身照常完成（`CMD.USR` 自清、耗时随分频
+   变化、数据在移位），看上去一切正常。IDF 里 `gpio_set_direction(OUTPUT)`
+   做的就是置 `GPIO_ENABLE_REG`。修好后回读立刻变化：
+   CS 从 1 变 0、MOSI 采样出现 0/1 交替。
+   自检办法：`tests/t_s3_lcd_pins.c6` 读 pad 电平，`tests/t_s3_sigscan.c6`
+   扫 0..127 号输出信号看哪个在翻转。
+2. **`SPI_CLK_GATE` 少 bit0（`SPI_CLK_EN`，"enable clk gate"，复位值 0）**
    → 模块时钟被门控：写 `CMD.USR` 读回仍是 0，总线不出时钟，面板一个字节都
    收不到；但轮询"立刻通过"，非常像正常工作。这是最坑的一条。
-2. **`volatile` 忙等循环会把 CPU 卡死（memw 内存屏障）**
+3. **`volatile` 忙等循环会把 CPU 卡死（memw 内存屏障）**
    GCC 给每个 volatile 访存插 `memw`。SPI 事务之后只要有一条 APB 事务没回，
    下一条 `memw` 就永久等待：表现为串口突然静默、定时器中断也不再来，
    看起来像"整机死机/复位"。修法：面板驱动里的延时用不带 volatile 的
    `nop` 循环（`port/s3/panel.c: dly()`）。
-3. **RTC 超级看门狗（SWD）没有关** → ROM/esptool 装了几秒超时，应用不关就
+4. **RTC 超级看门狗（SWD）没有关** → ROM/esptool 装了几秒超时，应用不关就
    每 ~3.5 秒整片复位一次：串口只能看到头几行、USB 每隔几秒重新枚举，
    极易误判成"CPU 停摆"。判断方法：读 `RTC_CNTL_RESET_STATE_REG`
    （`0x60008038`）低 6 位，`0x12` = SYS_SUPER_WDT。修法见 `port/s3/console.c`
    `port_init()`：`0x600080B8=0x8F1D312A`（解锁）→ `0x600080B4 |= 1<<30`
    （`SWD_DISABLE`）→ `0x600080B8=0`。
-4. **RTC WDT**（`0x60008098` WDTCONFIG0，写保护钥匙 `0x50D83AA1` @ `0x600080B0`）
+5. **RTC WDT**（`0x60008098` WDTCONFIG0，写保护钥匙 `0x50D83AA1` @ `0x600080B0`）
    同样要清 0。
-5. **SPI mode**：原厂 `spi_mode=3`，即 `MISC.CK_IDLE_EDGE=1` +
+6. **SPI mode**：原厂 `spi_mode=3`，即 `MISC.CK_IDLE_EDGE=1` +
    `USER.CK_OUT_EDGE=1`；写成 mode 0 面板时序虽然勉强能认，但没有理由不对齐。
-6. **CS**：ST7789 串口靠 DC 区分命令/参数，`MISC.CS_KEEP_ACTIVE=1` 让 CS 常低，
+7. **CS**：ST7789 串口靠 DC 区分命令/参数，`MISC.CS_KEEP_ACTIVE=1` 让 CS 常低，
    避免命令字节与参数分属两次事务时接口状态机被打断。
-7. **DMA/TRANS_DONE 中断**：本内核 level-1 向量只按 `EXCCAUSE==4` 分流
+8. **DMA/TRANS_DONE 中断**：本内核 level-1 向量只按 `EXCCAUSE==4` 分流
    （分不清定时器和外设），所以 SPI2 中断必须 `DMA_INT_ENA=0` 且每次事务后清
    `DMA_INT_CLR`，否则会被当成定时器中断反复重入。
+
+8. **`SPI_CLOCK` 的 H+L 必须等于 N**：`CLKCNT_N/H/L` 是"计数减一"，高电平
+   拍数 H 与低电平拍数 L 之和必须等于一个周期的拍数 N（H+L=N）。写成
+   `CLKCNT_N=3, CLKCNT_H=1, CLKCNT_L=3` 时 H+L=6≠N=4，占空比不成立。复位
+   默认值 `0x3041`（N=4/H=2/L=2，20MHz）才是自洽的。
 
 ## 4. 自检手段（不依赖眼睛）
 
@@ -94,6 +108,12 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
   复位后可用 `esptool read-mem` 读回（注意 RTC 内存里有几个字不稳定，
   只用 0/2/3/9 号验证过；启动阶段 ROM 也会用一部分）。
 - **复位原因**：`0x60008038 & 0x3F`；`0x60008018` 是 STATE0。
+- **pad 电平回读**：输出脚也能读——置该脚 IO_MUX 的 `FUN_IE`(bit9) 后读
+  `GPIO_IN_REG`(`GPIO_BASE+0x3C`)。这是发现"输出使能没打开"的关键手段。
+- **传输中采样**：`s3_spi_begin()` 起一次慢速（125kHz）传输后立刻返回，
+  调用方在 `CMD.USR` 仍为 1 期间反复读 pad 电平，等于给 SPI 做了个逻辑分析仪：
+  实测 CS=0/2000（确实选中）、MOSI 996/2000（在翻转）。**SCLK(信号 101)
+  至今采到恒高**，与"数据在动"矛盾，属未解疑点（见下）。
 - **SPI 读通路（已知未打通）**：想做 `RDDID(0x04)` 读回面板 ID 来自证
   "面板是否应答"，但 S3 的 SPI2 接收侧在本板始终读回 0xFF，已排除：
   ①`FSPIQ_IN_IDX=102` 映射寄存器没错（`GPIO_BASE+0x154+4*102`，

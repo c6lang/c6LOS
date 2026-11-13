@@ -1,0 +1,81 @@
+/* t_s3_lcd_pins.c6 —— 把 SPI 输出脚的 pad 电平读回来，确认信号通路：
+ *   CS(14) 应为 0（常低）、DC(8) 命令阶段 0 / 数据阶段 1、
+ *   SCLK(9) mode3 空闲应为 1、MOSI(10) 无固定值、BL(13)/RST(18) 应为 1。
+ */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_cmd(u32 c);
+void s3_lcd_dat(u32 v);
+void s3_lcd_bl(u32 on);
+u32 s3_pin_level(u32 pin);
+void s3_pin_out(u32 pin);
+void s3_pin_set(u32 pin, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_(const char *name, u32 pin)
+{
+    puts_(name);
+    port_putc('=');
+    port_putc((int)('0' + s3_pin_level(pin)));
+    puts_(" ");
+}
+
+void os_main(void)
+{
+    puts_("c6os lcd pins\n");
+
+    /* 先看硬件默认电平（未初始化） */
+    puts_("idle: ");
+    put_("sclk", 9u);
+    put_("mosi", 10u);
+    put_("cs", 14u);
+    put_("dc", 8u);
+    put_("bl", 13u);
+    put_("rst", 18u);
+    puts_("\n");
+
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+
+    puts_("after init: ");
+    put_("sclk", 9u);
+    put_("mosi", 10u);
+    put_("cs", 14u);
+    put_("dc", 8u);
+    put_("bl", 13u);
+    put_("rst", 18u);
+    puts_("\n");
+
+    /* 命令阶段后（DC 应为 0），再发参数（DC 应为 1） */
+    s3_lcd_cmd(0x00u);
+    puts_("cmd: ");
+    put_("cs", 14u);
+    put_("dc", 8u);
+    put_("sclk", 9u);
+    puts_("\n");
+
+    s3_lcd_dat(0x00u);
+    s3_lcd_dat(0x00u);
+    s3_lcd_dat(0x00u);
+    s3_lcd_dat(0x00u);
+    puts_("dat: ");
+    put_("cs", 14u);
+    put_("dc", 8u);
+    put_("sclk", 9u);
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_(".");
+    }
+}
