@@ -1,0 +1,119 @@
+/* t_s3_lcd_kiosk.c6 —— 无人值守演示：一轮里把三件事都证明一遍
+ *   1) 纯色 红/绿/蓝   → 面板点亮（M7-2）
+ *   2) 8 色竖条 + 文字 → 帧缓冲/字体上屏（M7-3）
+ *   3) 仪表盘一帧      → 数字/DASH 渲染（M7-4）
+ * 每步 1.2 秒，循环。串口同步打印当前步骤与耗时。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/dash.h"
+#include "c6os/tick.h"
+#include "c6os/task.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+u32 s3_lcd_get_gate(void);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u64 t0 = 0;
+    u32 cyc = 0;
+
+    puts_("c6os lcd kiosk\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done gate=");
+    put_u32_(s3_lcd_get_gate());
+    puts_("\n");
+
+    /* 预先画好竖条 + 文字帧 */
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "C6OS", 0x0000u);
+    os_gfx_text16(&g, 6, 30, "ST7789 240X240", 0x0000u);
+    os_gfx_text16(&g, 6, 54, "BITBANG OK", 0x0000u);
+
+    for (;;) {
+        t0 = port_cycles();
+        s3_lcd_fill(0xF800u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("1 red   ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x07E0u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("2 green ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x001Fu);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("3 blue  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(9000000u);
+
+        t0 = port_cycles();
+        s3_lcd_blit(g_fb, W, H);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("4 bars  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(12000000u);
+
+        /* 仪表盘一帧 */
+        os_dash_render(&g, (u32)os_tick_get(), (u32)os_task_count(), 0u);
+        os_dash_task_row(&g, 70, 1u, 1u, 'R', "shell");
+        os_dash_task_row(&g, 86, 2u, 1u, 'R', "dash");
+        os_dash_log(&g, 110, "C6OS DASH");
+        os_dash_log(&g, 126, "ST7789 240X240");
+        t0 = port_cycles();
+        s3_lcd_blit(g_fb, W, H);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("5 dash  ");
+        put_u32_(cyc);
+        puts_("k-cyc tick=");
+        put_u32_((u32)os_tick_get());
+        puts_("\n");
+        s3_lcd_delay(16000000u);
+    }
+}
