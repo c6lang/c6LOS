@@ -9,7 +9,10 @@
 
 void s3_btn_init(void);
 void s3_lcd_delay(u32 n);
+u32 s3_btn_pressed(u32 i);
+void s3_btn_poll(void);
 u32 s3_reg32(u32 addr);
+u32 s3_btn_idle_level(u32 i);
 
 static void puts_(const char *s)
 {
@@ -33,9 +36,18 @@ void os_main(void)
     puts_(" iomux39="); put_u32_(s3_reg32(0x600090A0u));
     puts_(" iomux40="); put_u32_(s3_reg32(0x600090A4u));
     puts_("\n");
+    puts_("idle: gpio0=");
+    put_u32_(s3_btn_idle_level(0u));
+    puts_(" gpio40=");
+    put_u32_(s3_btn_idle_level(1u));
+    puts_(" gpio39=");
+    put_u32_(s3_btn_idle_level(2u));
+    puts_("\n");
 
     for (;;) {
-        u32 v = GPIO_IN;
+        u32 v;
+        s3_btn_poll();
+        v = GPIO_IN;
         puts_("gpio0=");
         put_u32_((v >> 0) & 1u);
         puts_(" gpio39=");
@@ -43,6 +55,13 @@ void os_main(void)
         puts_(" gpio40=");
         put_u32_((v >> 40) & 1u);
         puts_("\n");
-        s3_lcd_delay(1200000u);     /* 约 300ms */
+        puts_("   drv0=");
+        put_u32_(s3_btn_pressed(0u));
+        puts_(" drv1=");
+        put_u32_(s3_btn_pressed(1u));
+        puts_(" drv2=");
+        put_u32_(s3_btn_pressed(2u));
+        puts_("\n");
+        s3_lcd_delay(200000u);      /* 约 50ms */
     }
 }

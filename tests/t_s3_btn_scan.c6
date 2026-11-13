@@ -1,0 +1,96 @@
+/* t_s3_btn_scan.c6 —— 扫全车 GPIO 电平变化：把所有脚设成上拉输入（已经配置成
+ * 输出的面板脚不动），每 10ms 读一次 GPIO_IN/GPIO_IN1，谁变了就打印谁。
+ * 用来找出音量键到底接在哪根脚上（上游 config.h 写的是 40/39）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define GPIO_IN   (*(volatile u32 *)0x6000403Cu)
+#define GPIO_IN1  (*(volatile u32 *)0x60004040u)
+#define IO_MUX(p) (0x60009000u + 0x04u + 4u * (p))
+
+/* 面板/按键已用的脚，扫的时候跳过（0,7,8,9,10,13,14,15,16,18,21,39,40） */
+static int skip(u32 p)
+{
+    return (p == 0u || p == 7u || p == 8u || p == 9u || p == 10u ||
+            p == 13u || p == 14u || p == 15u || p == 16u || p == 18u ||
+            p == 21u || p == 39u || p == 40u);
+}
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+void os_main(void)
+{
+    u32 prev0 = 0;
+    u32 prev1 = 0;
+    u32 p = 0;
+
+    puts_("c6os gpio scan (press VOL+/VOL- now)\n");
+
+    /* 把 1..48 里没用到的脚都设成上拉输入 */
+    p = 1u;
+    while (p < 49u) {
+        if (skip(p) == 0) {
+            volatile u32 *mux = (volatile u32 *)IO_MUX(p);
+            u32 v = *mux;
+            v = (v & ~(7u << 12)) | (1u << 12);
+            v = v | (1u << 9) | (1u << 8);
+            v = v & ~(1u << 7);
+            *mux = v;
+        }
+        p++;
+    }
+    /* 39/40 也打印，方便对照 */
+    prev0 = GPIO_IN;
+    prev1 = GPIO_IN1;
+
+    for (;;) {
+        u32 v0 = GPIO_IN;
+        u32 v1 = GPIO_IN1;
+        u32 d0 = v0 ^ prev0;
+        u32 d1 = v1 ^ prev1;
+        u32 i = 0;
+
+        while (i < 32u) {
+            if (((d0 >> i) & 1u) != 0u) {
+                puts_("gpio");
+                put_u32_(i);
+                puts_(" -> ");
+                put_u32_((v0 >> i) & 1u);
+                puts_("\n");
+            }
+            i++;
+        }
+        i = 0;
+        while (i < 17u) {
+            if (((d1 >> i) & 1u) != 0u) {
+                puts_("gpio");
+                put_u32_(32u + i);
+                puts_(" -> ");
+                put_u32_((v1 >> i) & 1u);
+                puts_("\n");
+            }
+            i++;
+        }
+        prev0 = v0;
+        prev1 = v1;
+        s3_lcd_delay(100000u);      /* 约 2.5ms */
+    }
+}

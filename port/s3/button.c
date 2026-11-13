@@ -45,10 +45,18 @@ void s3_btn_init(void)
     while (i < BTN_N) {
         volatile u32 *mux = (volatile u32 *)IO_MUX(g_btn_pin[i]);
         u32 v = *mux;
-        v = (v & ~(7u << 12)) | (1u << 12);   /* MCU_SEL=1 = GPIO */
+        /* 不改 MCU_SEL：复位默认值就能做数字输入（实测 39 号脚不动它才读得到
+         * 按键；改成 1 反而断开数字输入通路）。 */
         v = v | (1u << 9);                    /* FUN_IE  输入使能 */
-        v = v | (1u << 8);                    /* FUN_WPU 上拉 */
-        v = v & ~(1u << 7);                   /* 关下拉 */
+        if (g_btn_pin[i] == 0u) {
+            v = v | (1u << 8);                /* BOOT：内部上拉，按下接地（低有效） */
+            v = v & ~(1u << 7);
+        } else {
+            /* VOL+/VOL-：板上是外部下拉、按下接高（实测 GPIO39 按下变 1），
+             * 所以开内部下拉、关内部上拉，避免上下拉打架。 */
+            v = v & ~(1u << 8);
+            v = v | (1u << 7);
+        }
         *mux = v;
         g_btn_idle[i] = btn_level(i);
         g_btn_down[i] = 0u;
