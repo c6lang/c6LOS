@@ -39,25 +39,15 @@
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
-    /* a2 = 目标任务 ctx
-     * 双核各用 g_sched[core]/g_s3_cur[core]：核号必须问 port_core_id()
-     * （PRID 在这颗 S3 上是垃圾值，不能直接 `prid & 1`）。
-     * call0 ABI 里 a12-a15 是 callee-saved，用它跨调用保住参数。 */
-    mov     a13, a2                 /* 保住 ctx 参数 */
-    rsr     a5, prid                /* 本核 PRID（值本身是脏的，但每核不同） */
-    l32r    a3, .Lprid_base
-    l32i    a6, a3, 0
-    movi    a12, 0
-    beq     a5, a6, 1f
-    movi    a12, 1
-1:
-    mov     a4, a13                 /* a4 = 目标任务 ctx */
-    l32r    a3, .Lg_sched
-    movi    a6, 76
-    mull    a5, a12, a6
-    add     a3, a3, a5
-
-    /* 保存调度器：在调度器栈上压一个陷阱帧，恢复 PC 用 a0（call0 返回地址）。 */
+    /* 双核各用 g_sched[core]/g_s3_cur[core]。
+     *
+     * 顺序很关键：**必须先把现场（a0..a15/EPC/PS）原样压栈**，再去算本核
+     * 下标——算下标要用 a3/a5/a6/a12 这些寄存器，先动它们会把被打断任务的
+     * 寄存器值毁掉（现象是随机的 TRAP，如 cause 28）。
+     *
+     * 核号不能问 port_core_id()：切换路径上一次 `callx0` 进 C 函数不转窗口，
+     * 会把 a12-a15 冲掉；这里直接读 PRID 和 g_prid_base[0] 比较（PRID 本身
+     * 在这颗 S3 上是脏值，但两核不同且稳定）。 */
     addi    a1, a1, -80
     s32i    a0, a1, 0
     s32i    a2, a1, 4
@@ -79,8 +69,22 @@ port_task_switch:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
+
+    /* 现场已保存，下面随便用寄存器 */
+    rsr     a5, prid
+    l32r    a3, .Lprid_base
+    l32i    a6, a3, 0
+    movi    a12, 0
+    beq     a5, a6, 1f
+    movi    a12, 1
+1:
+    movi    a6, 76
+    mull    a5, a12, a6
+    l32r    a3, .Lg_sched
+    add     a3, a3, a5
     s32i    a1, a3, 64
 
+    l32i    a4, a1, 4               /* 目标任务 ctx（参数先前存在帧里） */
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5

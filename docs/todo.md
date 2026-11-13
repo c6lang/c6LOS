@@ -190,7 +190,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 完成（host `t_stress` 10^6 次 6.9s；S3 `t_s3_stress` 25000 轮创建/延时/回收，00:20:11→00:29:59 约 9m48s，`PASS: s3 stress`，无 panic） |
-| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（**真板 core1 裸核 PASS**：`tests/t_s3_core1.c6` → `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / `PASS: core1`；**内核双核调度仍 trap**：`tests/t_s3_smp.c6` 打印 `ids=1,2` → `start core1` → `core0 sched` 后 `*** TRAP cause=0000001c pc=403cb476 ps=00060500`（cause 28 = LoadStoreAlignment，pc 落在 `os_task_start_core` 内），下一步按 pc 逐条核对生成代码。已修的部分：`port/s3/ctx.S` 的 `port_task_switch`/`port_task_yield` 原来把核槽位写死成 0（双核共用同一份保存区），现在在汇编里直接比 `g_prid_base[0]` 得到本核下标；**注意不能在切换路径上 `callx0` 进 C 函数**——本工具 C 是 windowed 风格调用约定，`callx0` 不转窗口会把 a12–a15 冲掉（第一次改就因此让 a4 变脏指针、L32I 报 cause 28）。单核回归已跑：`t_s3_lcd` 仍 `PASS: s3 lcd`。core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。core1 侧已加命令/应答邮箱（`s3_core1_send/ack`），`t_s3_twocore` 连发 100 条命令并同时跑 core0 任务；镜像 build/s3tc 已构建，等上电验证；`port_core_id` 改用 Xtensa `rsr prid`，core1 入口回读 `s3_core1_prid()`，`t_s3_core1` 要求 `prid=1` 才 PASS（镜像 build/s3c1 已构建，待上电）。S3 core1 已能进入内核调度器：`port/s3/ctx.c|ctx.S` 的 `g_sched/g_s3_cur` 改为按 `prid` 分核数组，`s3_core1_start_mode(1)` 让 core1 调 `os_task_start_core(1)`；`tests/t_s3_smp.c6` 两核各跑一个 yield 任务并校验 `prid=1`（镜像 build/s3smp 已构建，待上电；`tests/t_s3_smp_sem.c6` 再验跨核 sem，镜像 build/s3smpsem）；S3 侧真 IPI 未做，核 1 `port_idle` 改忙轮询以看到别核投递（核 0 仍 `waiti`）；risc6 参考机已补 `--harts 2` 参考机 SMP 冒烟：`os_task_create_on` 静态绑核 + 每 hart 独立 `g_cur_ctx/g_sched_sp/陷阱保存区/启动栈`，`make check-sim` → `PASS: smp task a/b`；任务都建在核 0，空闲核用 `balance_pull` 自动拉走一个（`os_core_ready` 观测），两任务分别落在核 0/核 1，`PASS: smp task b (one task balanced to core 1)`，417512 条指令；`os_task_set_core` 也支持显式迁核；跨核同步 `t_rv32bare_smp_sem`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒，`PASS: smp cross-core sem`，80223 条指令） |
+| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | **真板通过**（`tests/t_s3_core1.c6`：core1 裸核计数 → `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / `PASS: core1`；`tests/t_s3_smp.c6`：两核各跑一个 yield 任务 → `PASS: s3 smp core1 scheduler`；`tests/t_s3_smp_sem.c6`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒 → `PASS: s3 smp cross-core sem`。本轮修掉的三处：①`port/s3/ctx.S` 的 `port_task_switch`/`port_task_yield` 把核槽位写死成 0（双核共用同一份保存区）；②`port_task_switch` 必须**先压帧再算核号**，否则算下标用的 a3/a5/a6/a12 会毁掉被打断任务的寄存器（现象是随机 `TRAP cause=1c`）；③切换路径不能 `callx0` 进 C 函数（本工具 C 是 windowed 风格调用约定，callx0 不转窗口会冲掉 a12-a15），所以核号在汇编里直接读 PRID 与 `g_prid_base[0]` 比较。回归：`t_s3_lcd` 仍 `PASS: s3 lcd`、`t_s3_dash` tick 稳定递增。risc6 参考机侧另有 `--harts 2` 的 SMP 冒烟（`make check-sim`，`PASS: smp task a/b`、`PASS: smp cross-core sem`）。S3 真 IPI 仍未做（核 1 用忙轮询 `port_idle` 观测别核投递） |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 | 跳过（可选；内核核心不使用浮点，S3 启动未使能 FPU） |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 | 跳过（可选；屏驱动未点亮，帧缓冲仍在内部 RAM） |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
@@ -599,3 +599,10 @@
   `t_s3_core1` 也正确报 `core_id=0`/`prid=1`。
   教训：RTC 慢速内存 mark（0x50000000）在这块板子上不可靠（2/3/7 号字读到过
   垃圾值），诊断要用串口打印，别只信 mark。
+
+- **M8-2 双核内核调度真板 PASS（本轮）**：三处修复后 `t_s3_smp` / `t_s3_smp_sem` 均通过。
+  ①`ctx.S` 的核槽位写死成 `g_sched[0]` → 改成读 PRID 与 `g_prid_base[0]` 比较取下标；
+  ②`port_task_switch` 里"保存现场"和"算核号"的顺序：**必须先压帧**，算核号要用 a3/a5/a6/a12，
+  先动它们会毁掉被打断任务的寄存器（表现为随机 `TRAP cause=1c`/LoadStoreAlignment）；
+  ③切换路径**不能** `callx0` 进 C 函数（windowed 风格调用约定不转窗口，a12-a15 被冲掉，
+  第一次改就因此让目标 ctx 变脏指针）。这三条已写进 `port/s3/ctx.S` 的注释。
