@@ -625,3 +625,15 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   ①面板/排线本身；②这块屏的 SDA 只做输入（回读全不出值，见 §4.4）；
   ③屏需要本驱动之外的初始化（当前已按 ST7789 手册与各家开板示例补齐延时 +
   porch/gate/VCOM/gamma 表）。
+
+- **音量键（VOL+/VOL-）结论：硬件常闭/未装，不是软件问题**。证据链：
+  ①上游 `78/xiaozhi-esp32`（v2.5.0 与 main 一致）`xingzhi-cube-1.54tft-wifi`
+  定义 `VOLUME_UP=GPIO40 / VOLUME_DOWN=GPIO39`，且 `Button(gpio, active_high=false)`
+  → `iot_button` 的 `gpio_config.active_level=0, disable_pull=false`，即**内部上拉、
+  按下接地**；②我们按同样配置（IO_MUX 用 39/40 的真实地址 0x600090A0/0xA4，
+  MCU_SEL=1 + FUN_IE + FUN_WPU）实测**恒为 0**，按上游语义等于"一直按住"；
+  ③原厂固件开机日志 `Set output volume to 80/90/100`（8.1s/9.3s/11.0s）正是
+  "VOL+ 恒按下、应用不断加音量"的表现；④全车 GPIO 0..48 变化扫描，按物理键
+  无任何电平变化（BOOT=GPIO0 正常）。
+  另外修掉一个真 bug：GPIO≥32 的电平在 `GPIO_IN1`(0x60004040)，之前用
+  `GPIO_IN >> pin` 是移位越界（未定义行为），读出来是垃圾。
