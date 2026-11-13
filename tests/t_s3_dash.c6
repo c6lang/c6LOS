@@ -107,7 +107,7 @@ void os_main(void) {
     port_puts(" core=");
     put_u32(port_core_id());
     port_puts("\n");
-    s3_lcd_init();
+    s3_lcd_init();          /* 驱动默认已走 bit-bang */
     os_gfx_init(&g, g_fb, W, H);
 
     (void)os_task_create("w1", worker, 0, 3u, 2048u);

@@ -149,7 +149,10 @@ static void matrix_out(u32 p, u32 sig)
  * 256 个上升沿、SCLK 0 个），所以留一条纯 GPIO 翻转的通路：把 SCLK/SDA 从
  * GPIO 矩阵摘回普通 GPIO 输出，按 mode 3 手动打时钟。慢，但能证明面板与接线
  * 本身是好的（也是 SPI 时钟修好前的可用兜底）。 */
-static u32 g_bitbang = 0;
+/* 默认走 bit-bang：SPI2 的 SCLK 输出在这块板子上打不出边沿（见
+ * docs/s3-panel-bringup.md §4.5，PCNT 实测 0 边沿而 MOSI 有 256），
+ * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
+static u32 g_bitbang = 1;
 
 void s3_lcd_use_bitbang(u32 on)
 {
@@ -166,6 +169,51 @@ void s3_lcd_use_bitbang(u32 on)
         matrix_out(PIN_SDA, SIG_FSPID);
         matrix_out(PIN_CS, SIG_FSPICS0);
     }
+}
+
+static void bb_write(const u8 *p, u32 n);
+
+/* bit-bang 模式下读回：SDA 是普通 GPIO，可以在时钟上升沿采样。
+ * 用来做 RDDID(0x04) —— 面板应答 0x85 0x85 0x52 就说明它真的在听。
+ * 注意：读之前必须把 SDA 的输出关掉（清 GPIO_ENABLE），否则两边抢总线。 */
+int s3_lcd_read_id_bb(u8 *out, u32 n)
+{
+    u32 i;
+    u32 b;
+    u32 v;
+
+    if (g_bitbang == 0u || n == 0u || n > 8u) { return -1; }
+
+    /* 命令字节 0x04（DC=0） */
+    lo(PIN_DC);
+    {
+        static const u8 c = 0x04u;
+        bb_write(&c, 1u);
+    }
+    hi(PIN_DC);
+
+    /* 放开 SDA（三态），改成输入 */
+    wr((volatile u32 *)GPIO_ENA_W1TC, 1u << PIN_SDA);
+    *(volatile u32 *)IO_MUX_REG(PIN_SDA) |= (1u << 9);   /* FUN_IE */
+
+    i = 0;
+    while (i < n) {
+        v = 0u;
+        b = 0;
+        while (b < 8u) {
+            /* 下降沿面板换数据，在低电平期间采样，再抬时钟 */
+            wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_SCLK);
+            v = (v << 1) | ((*(volatile u32 *)(GPIO_BASE + 0x3Cu) >> PIN_SDA) & 1u);
+            wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_SCLK);
+            b++;
+        }
+        out[i] = (u8)v;
+        i++;
+    }
+
+    /* 收回 SDA 输出 */
+    wr((volatile u32 *)GPIO_ENA_W1TS, 1u << PIN_SDA);
+    return 0;
 }
 
 static void bb_write(const u8 *p, u32 n)

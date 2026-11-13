@@ -180,7 +180,8 @@
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**当前驱动有两条通路**：GPSPI2 硬件 SPI（数据通路已验证：MOSI 256 边沿/64B）与
 bit-bang 兜底（PCNT 实测 512 边沿/64B、整屏填色 5.16M cycles ≈ 15fps）；
 **硬件 SPI 的 SCLK 输出实测打不出边沿**（同一时刻 MOSI 有 256 个、SCLK 0 个，
-GPIO9 软件翻转能数到 99，测量链路正常），所以演示镜像先用 bit-bang。
+GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c` 现在**默认走 bit-bang**（`g_bitbang=1`），demo/dash/`t_s3_lcd`
+全用它；`s3_lcd_use_bitbang(0)` 可切回硬件 SPI 做实验。
 详见 `docs/s3-panel-bringup.md` §4.5。**剩余：面板实际成像需人眼确认**，`tests/t_s3_lcd_demo.c6` 会自动轮播 红/绿/8 色竖条+文字/蓝 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 5.16M cycles、帧缓冲全屏 blit 5.81M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈14fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | **真板通过**（`rt/dash.c` 绘制 tick/任务数/堆用量 + 任务行；`t_dash` host PASS；`tests/t_s3_dash.c6` 在 S3 上建 dash 任务，每帧 6.69M cycles（首帧含字体，≈5.9fps）画进 240×240 帧缓冲再 blit 上屏，串口同步打印同一组数字：`tick=57/83/109... tasks=3`，tick 稳定递增 ≈26/帧，说明定时器→调度器→dash 任务整条链路在真板成立。屏上成像仍需人眼确认） |

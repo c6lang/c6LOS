@@ -146,9 +146,10 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
 的完整初始化序列（尤其 `SPI_SLAVE_REG`/`SPI_CTRL` 里可能另有门控位），或换
 SPI3/LCD_CAM 的 i80 通路。
 
-### bit-bang 兜底通路（当前默认演示用）
+### bit-bang 兜底通路（**驱动默认路径**）
 
-`s3_lcd_use_bitbang(1)` 把 SCLK/SDA/CS 从 GPIO 矩阵摘回普通 GPIO，用
+`g_bitbang` 默认 1：所有用例（demo、dash、t_s3_lcd）都走这条。`s3_lcd_use_bitbang(1)`
+把 SCLK/SDA/CS 从 GPIO 矩阵摘回普通 GPIO，用
 `GPIO_OUT_W1TS/W1TC` 按 mode 3 手动打时钟。自检：64 字节写出 **512 个 SCLK
 上升沿**（PCNT 计数，正好 64×8）；整屏 240×240 填色 **5.16M cycles ≈ 64ms
 ≈ 15fps**（80MHz 折算），**已经过 M7-3 的 ≥10fps 线**，而且和"硬件 SPI"
