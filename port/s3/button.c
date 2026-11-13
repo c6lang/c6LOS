@@ -140,6 +140,12 @@ u32 s3_btn_take_event(u32 i)
     return v;
 }
 
+/* 原始电平（0/1）与基线电平，调试/显示用 */
+u32 s3_btn_level(u32 i)
+{
+    return (i < BTN_N) ? btn_level(i) : 0u;
+}
+
 u32 s3_btn_idle_level(u32 i)
 {
     return (i < BTN_N) ? g_btn_idle[i] : 0u;

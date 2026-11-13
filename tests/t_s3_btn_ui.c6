@@ -17,6 +17,8 @@ void s3_btn_init(void);
 void s3_btn_poll(void);
 u32 s3_btn_pressed(u32 i);
 u32 s3_btn_take_event(u32 i);
+u32 s3_btn_level(u32 i);
+u32 s3_btn_idle_level(u32 i);
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
@@ -65,13 +67,16 @@ static void draw_row(u32 i, u32 down)
     if (i == 2u) { os_gfx_text16(&g, 6, y + 4, "VOL-  GPIO39", 0xFFFFu); }
 
     os_gfx_text16(&g, 6, y + 26, (down != 0u) ? "DOWN" : "UP  ", 0xFFFFu);
-    s[0] = (char)('0' + (down & 1u));
+    s[0] = (char)('0' + (s3_btn_level(i) & 1u));
     s[1] = '\0';
     os_gfx_text16(&g, 52, y + 26, "L=", 0xFFE0u);
     os_gfx_text16(&g, 74, y + 26, s, 0xFFE0u);
-    os_gfx_text16(&g, 90, y + 26, "n=", 0xFFFFu);
+    s[0] = (char)('0' + (s3_btn_idle_level(i) & 1u));
+    os_gfx_text16(&g, 100, y + 26, "B=", 0xFFE0u);
+    os_gfx_text16(&g, 122, y + 26, s, 0xFFE0u);
+    os_gfx_text16(&g, 150, y + 26, "n=", 0xFFFFu);
     u2s(s, g_cnt[i]);
-    os_gfx_text16(&g, 114, y + 26, s, 0xFFFFu);
+    os_gfx_text16(&g, 174, y + 26, s, 0xFFFFu);
 }
 
 /* 只把某一行刷到屏上 */
