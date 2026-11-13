@@ -79,3 +79,22 @@
 
 哪一步出现颜色/图案，就说明对应假设成立（例如只有 1 有反应 = 时钟太快；
 只有 2 有反应 = DC 反相）。
+
+## 回归扫描（真板，改动收口后一次性跑）
+
+| 用例 | 结果 |
+| --- | --- |
+| `t_s3_irq` | `PASS: s3 irq tick` |
+| `t_s3_preempt` | `PASS: s3 preempt` |
+| `t_s3_sched` | `PASS: sched` |
+| `t_s3_tick` | `PASS: tick` |
+| `t_s3_jitter` | `PASS: s3 jitter` |
+| `t_s3_delay` | `PASS: delay` |
+| `t_s3_lcd` | `PASS: s3 lcd` |
+| `t_s3_dash` | tick 稳定递增（57→83→109…），帧 6.70M cycles |
+| `t_s3_core1` / `t_s3_smp` / `t_s3_smp_sem` | `PASS: core1` / `PASS: s3 smp core1 scheduler` / `PASS: s3 smp cross-core sem` |
+| `t_s3_shell` | `shell ready` / `shell>`，命令可交互 |
+
+一个既有情况（与本轮改动无关）：`t_s3_ipc` 在 S3 下链接不上（需要 mutex/event/sem/
+queue/membox 全套内核模块，而 S3 构建集默认只带 task/tick/timer/timeout/heap）——
+它是 host 用例（`make check-host`），不在 S3 真板测试集里。
