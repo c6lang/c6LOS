@@ -6,6 +6,7 @@
     .literal_position
     .literal .Lg_sched, g_sched
     .literal .Lg_cur,   g_s3_cur
+    .literal .Lprid_base, g_prid_base
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
@@ -38,15 +39,15 @@
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
-    /* a2 = 目标任务 ctx */
-    mov     a4, a2
-    l32r    a3, .Lg_sched
-    movi    a5, 0
-    movi    a6, 76
-    mull    a5, a5, a6
-    add     a3, a3, a5
-
-    /* 保存调度器：在调度器栈上压一个陷阱帧，恢复 PC 用 a0（call0 返回地址）。 */
+    /* 双核各用 g_sched[core]/g_s3_cur[core]。
+     *
+     * 顺序很关键：**必须先把现场（a0..a15/EPC/PS）原样压栈**，再去算本核
+     * 下标——算下标要用 a3/a5/a6/a12 这些寄存器，先动它们会把被打断任务的
+     * 寄存器值毁掉（现象是随机的 TRAP，如 cause 28）。
+     *
+     * 核号不能问 port_core_id()：切换路径上一次 `callx0` 进 C 函数不转窗口，
+     * 会把 a12-a15 冲掉；这里直接读 PRID 和 g_prid_base[0] 比较（PRID 本身
+     * 在这颗 S3 上是脏值，但两核不同且稳定）。 */
     addi    a1, a1, -80
     s32i    a0, a1, 0
     s32i    a2, a1, 4
@@ -68,11 +69,24 @@ port_task_switch:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
+
+    /* 现场已保存，下面随便用寄存器 */
+    rsr     a5, prid
+    l32r    a3, .Lprid_base
+    l32i    a6, a3, 0
+    movi    a12, 0
+    beq     a5, a6, 1f
+    movi    a12, 1
+1:
+    movi    a6, 76
+    mull    a5, a12, a6
+    l32r    a3, .Lg_sched
+    add     a3, a3, a5
     s32i    a1, a3, 64
 
+    l32i    a4, a1, 4               /* 目标任务 ctx（参数先前存在帧里） */
     l32r    a3, .Lg_cur
-    movi    a5, 0
-    slli    a5, a5, 2
+    slli    a5, a12, 2
     add     a3, a3, a5
     s32i    a4, a3, 0
     l32i    a1, a4, 64
@@ -81,9 +95,15 @@ port_task_switch:
     .global port_task_yield
     .type   port_task_yield, @function
 port_task_yield:
+    rsr     a5, prid
+    l32r    a3, .Lprid_base
+    l32i    a6, a3, 0
+    movi    a11, 0
+    beq     a5, a6, 2f
+    movi    a11, 1
+2:
     l32r    a4, .Lg_cur
-    movi    a5, 0
-    slli    a5, a5, 2
+    slli    a5, a11, 2
     add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
@@ -112,9 +132,8 @@ port_task_yield:
     s32i    a1, a4, 64
 
     l32r    a3, .Lg_sched
-    movi    a5, 0
     movi    a6, 76
-    mull    a5, a5, a6
+    mull    a5, a11, a6
     add     a3, a3, a5
     l32i    a1, a3, 64
     RESTORE_FRAME

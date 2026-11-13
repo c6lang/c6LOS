@@ -1,0 +1,83 @@
+/* t_s3_sigscan.c6 —— 扫描 GPIO 输出信号的编号：把每个信号接到 GPIO10，
+ * 起一次慢速 SPI 传输，同时采样这根脚，打印"在翻转"的编号。
+ * 用来确认 FSPICLK 到底是哪个信号号（101 不动、103 会动）。
+ */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_spi_begin(void);
+int s3_spi_end(void);
+u32 s3_spi_busy(void);
+u32 s3_pin_level(u32 pin);
+void s3_pin_out(u32 pin);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void mux_(u32 pin, u32 sig)
+{
+    *(volatile u32 *)(0x60004000u + 0x554u + 4u * pin) = sig & 0x1FFu;
+    *(volatile u32 *)(0x60004000u + 0x24u) = 1u << pin;
+}
+
+void os_main(void)
+{
+    u32 sig = 0;
+    u32 ones = 0;
+    u32 total = 0;
+    u32 n = 0;
+
+    puts_("c6os sigscan\n");
+    s3_lcd_use_bitbang(0u);
+    s3_lcd_init();
+    s3_pin_out(10u);
+    puts_("scan 0..255 on gpio10\n");
+
+    sig = 0;
+    while (sig < 256u) {
+        mux_(10u, sig);
+        ones = 0;
+        total = 0;
+        s3_spi_begin();
+        while (s3_spi_busy() != 0u && total < 2000u) {
+            if (s3_pin_level(10u) != 0u) { ones++; }
+            total++;
+        }
+        (void)s3_spi_end();
+        if (total > 100u && ones > total / 20u && ones < total - total / 20u) {
+            puts_("toggling sig=");
+            put_u32_(sig);
+            puts_(" ones=");
+            put_u32_(ones);
+            puts_("/");
+            put_u32_(total);
+            puts_("\n");
+            n++;
+        }
+        sig++;
+    }
+    puts_("done toggling=");
+    put_u32_(n);
+    puts_("\n");
+    for (;;) {
+        s3_lcd_delay(4000000u);
+    }
+}

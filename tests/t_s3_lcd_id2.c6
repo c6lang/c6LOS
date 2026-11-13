@@ -1,0 +1,62 @@
+/* t_s3_lcd_id2.c6 —— bit-bang 读 RDDID(0x04)，让面板自己证明"我在听"。
+ * 期望 0x85 0x85 0x52（前面可能有一个 dummy 字节）。
+ * 同时做正对照：把 SDA 驱动成 0/1 时读回应为 0x00/0xFF。
+ */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+int s3_lcd_read_id_bb(u8 *out, u32 n);
+void s3_lcd_delay(u32 n);
+
+static u8 g_b[8] = {0};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void hex2_(u32 v)
+{
+    const char *h = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+static void dump_(u32 n)
+{
+    u32 i = 0;
+    while (i < n) { hex2_(g_b[i]); i++; }
+}
+
+void os_main(void)
+{
+    int rc = 0;
+
+    puts_("c6os lcd id bitbang\n");
+    s3_lcd_use_bitbang(1u);
+    s3_lcd_init();
+    puts_("init done\n");
+
+    rc = s3_lcd_read_id_bb(g_b, 5u);
+    puts_("rc=");
+    hex2_((u32)rc & 0xFFu);
+    puts_(" id5=");
+    dump_(5u);
+    puts_("\n");
+
+    /* 第二次读（排除首读的时序问题） */
+    {
+        u32 i = 0;
+        while (i < 8u) { g_b[i] = 0u; i++; }
+    }
+    (void)s3_lcd_read_id_bb(g_b, 5u);
+    puts_("id5b=");
+    dump_(5u);
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+    }
+}

@@ -1,0 +1,53 @@
+/* t_s3_dly.c6 —— 标定 s3_lcd_delay(n) 一个单位是多少 CPU 周期，
+ * 好把 ST7789 要求的 120ms 延时算准（原来 1200000 是否够只有实测知道）。 */
+
+#include "c6os/port.h"
+
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u64 t0 = 0;
+    u64 t1 = 0;
+
+    puts_("c6os delay calibration\n");
+
+    t0 = port_cycles();
+    s3_lcd_delay(1000u);
+    t1 = port_cycles();
+    puts_("dly1000 cycles/10=");
+    put_u32_((u32)(t1 - t0) / 10u);
+    puts_("\n");
+
+    t0 = port_cycles();
+    s3_lcd_delay(100000u);
+    t1 = port_cycles();
+    puts_("dly100000 cycles/100=");
+    put_u32_((u32)(t1 - t0) / 100u);
+    puts_("\n");
+
+    t0 = port_cycles();
+    s3_lcd_delay(1200000u);
+    t1 = port_cycles();
+    puts_("dly1200000 cycles/1000=");
+    put_u32_((u32)(t1 - t0) / 1000u);
+    puts_("  (=us/1000 at 80MHz: /80)\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+    }
+}

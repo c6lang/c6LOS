@@ -1,0 +1,82 @@
+/* t_s3_lcd_id.c6 —— 客观判断面板是否应答：
+ *   1) 正对照：把 SDA 当普通 GPIO 驱动 0/1，用 FSPIQ 输入矩阵读回，验证输入通路；
+ *   2) RDDID(0x04)：ST7789 应回 0x85 0x85 0x52（前面可能有 dummy 字节）。
+ */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+int s3_lcd_read_id(u8 *out, u32 n);
+int s3_spi_read_pin(u32 pin, u8 *rx, u32 n);
+void s3_pin_out(u32 pin);
+void s3_pin_set(u32 pin, u32 v);
+u32 s3_pin_get(u32 pin);
+void s3_lcd_delay(u32 n);
+
+static u8 g_b[4] = {0};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_hex2_(u32 v)
+{
+    const char *h = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+static void dump4_(void)
+{
+    u32 i = 0;
+    while (i < 4u) {
+        put_hex2_(g_b[i]);
+        i++;
+    }
+}
+
+void os_main(void)
+{
+    int rc = 0;
+
+    puts_("c6os lcd id read\n");
+    s3_lcd_init();
+    puts_("init done\n");
+
+    /* 正对照：SDA 当普通 GPIO，驱动低再驱动高 */
+    s3_pin_out(10u);
+    s3_pin_set(10u, 0u);
+    rc = s3_spi_read_pin(10u, g_b, 4u);
+    puts_("low  rc=");
+    put_hex2_((u32)rc & 0xFFu);
+    puts_(" in=");
+    put_hex2_(s3_pin_get(10u));
+    puts_(" rx=");
+    dump4_();
+    s3_pin_set(10u, 1u);
+    rc = s3_spi_read_pin(10u, g_b, 4u);
+    puts_("\nhigh rc=");
+    put_hex2_((u32)rc & 0xFFu);
+    puts_(" in=");
+    put_hex2_(s3_pin_get(10u));
+    puts_(" rx=");
+    dump4_();
+    puts_("\n");
+
+    /* RDDID */
+    rc = s3_lcd_read_id(g_b, 4u);
+    puts_("rddid rc=");
+    put_hex2_((u32)rc & 0xFFu);
+    puts_(" bytes=");
+    dump4_();
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_("\n");
+    }
+}

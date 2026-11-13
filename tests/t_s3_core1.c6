@@ -4,6 +4,9 @@
 extern int s3_core1_start(void);
 extern u32 s3_core1_count(void);
 extern u32 s3_core1_prid(void);
+extern u32 s3_prid_raw(void);
+
+extern u32 port_core_id(void);
 
 static void put_u32(u32 v) {
     char b[12] = {0};
@@ -21,6 +24,11 @@ void os_main(void) {
     port_puts("c6os core1 test\n");
     s3_core1_start();
     while (i < 2000000u) { i++; }
+    port_puts("core0 prid_raw=");
+    put_u32(s3_prid_raw());
+    port_puts(" core_id=");
+    put_u32(port_core_id());
+    port_puts("\n");
     port_puts("core1 count=");
     put_u32(s3_core1_count());
     port_puts(" prid=");

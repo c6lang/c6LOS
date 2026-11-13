@@ -13,10 +13,24 @@
 extern void os_sched_tick(void);
 extern void s3_irq_init(void);
 
-/* 诊断：RTC_CNTL STORE0..7 在复位后保留，esptool read-mem 0x60008050 可读。 */
+/* 诊断：RTC 慢速内存（0x50000000，8KB）在 CPU 复位后保留，卡死时用
+ * `esptool read-mem 0x50000000 0x40` 读回来，就能知道主流程/中断走到哪一步。 */
+/* 诊断标记：RTC 慢速内存（0x50000000 起，IDF 里叫 RTC_DATA_ATTR 那一块），
+ * CPU 复位后保留，卡死时用 esptool read-mem 0x50000000 读回。 */
 void s3_mark(u32 idx, u32 v)
 {
-    *(volatile u32 *)(0x3FCF0000u + idx * 4u) = v;
+    *(volatile u32 *)(0x50000000u + idx * 4u) = v;
+}
+
+/* 读一个内存映射寄存器（c6 那边写指针强转不方便）。 */
+u32 s3_reg(u32 addr)
+{
+    return *(volatile u32 *)addr;
+}
+
+u32 s3_mark_get(u32 idx)
+{
+    return *(volatile u32 *)(0x50000000u + idx * 4u);
 }
 
 static volatile u32 g_isr_nest[C6OS_MAX_CORES] = {0};
@@ -68,7 +82,6 @@ void port_enter_task(void)
 
 void port_mark(u32 v)
 {
-    s3_mark(4u, v);
 }
 
 #define S3_USB_JTAG_BASE 0x60038000u
@@ -87,7 +100,6 @@ void port_putc(int ch)
 {
     u32 guard = 0;
 
-    s3_mark(3u, 0x5555u);
 
     /* 上一笔还没发完（WR_DONE 仍为 1）时再写 FIFO 会被硬件丢弃，
        随后 DATA_FREE 永远不置位，串口在 ~50 字节处整体卡死。 */
@@ -110,15 +122,35 @@ void port_putc(int ch)
 
 static u32 g_rx_left[C6OS_MAX_CORES] = {0};
 
+/* RX：数据必须 **32 位读** EP1_REG（8 位读恒为 0，实测），可读字节数在
+ * OUT_EP1_ST[22:16]；读完清 INT_CLR bit2，否则同一批数据会被反复报告。
+ * 一次中断往往带回 1~3 字节，用 per-core 剩余计数把它们逐字节吐出去。 */
 int port_getc(void)
 {
-    volatile u32 *st = (volatile u32 *)(0x6003800Cu);
-    volatile u8 *byte = (volatile u8 *)(0x60038000u);
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+    u32 *left = &g_rx_left[core];
+    volatile u32 *ist = (volatile u32 *)(S3_USB_JTAG_BASE + 0x0Cu);   /* INT_ST */
+    volatile u32 *iclr = (volatile u32 *)(S3_USB_JTAG_BASE + 0x14u);  /* INT_CLR */
+    volatile u32 *ostat = (volatile u32 *)(S3_USB_JTAG_BASE + 0x3Cu); /* OUT_EP1_ST */
 
-    if ((*st & 0x4u) == 0u) {
-        return -1;
+    if (*left == 0u) {
+        if ((*ist & 0x4u) == 0u) {
+            return -1;
+        }
+        *left = (*ostat >> 16) & 0x7Fu;
+        if (*left == 0u) {
+            *iclr = 0x4u;
+            return -1;
+        }
     }
-    return (int)(*byte);
+    *left = *left - 1u;
+    {
+        int c = (int)(S3_USB_EP1 & 0xFFu);
+        if (*left == 0u) {
+            *iclr = 0x4u;
+        }
+        return c;
+    }
 }
 
 void port_puts(const char *s)
@@ -168,17 +200,56 @@ void port_idle(void)
     __asm__ __volatile__("waiti 0");
 }
 
+u32 s3_prid_raw(void)
+{
+    u32 v = 0u;
+    __asm__ __volatile__("rsr.prid %0" : "=r"(v));
+    return v;
+}
+
+/* PRID 基线：这颗 S3 上 `rsr.prid` 读回来的不是 0/1（实测 core0=0xCDCD、
+ * core1=0xABAB），但**每核稳定且互不相同**，所以启动时让每个核把自己的
+ * PRID 值登记到槽位，之后按值查表就知道"我在哪个核"。 */
+/* ctx.S 里直接拿它做比较：切换路径上不能调用 C 函数——本工具的 C 是 windowed
+ * ABI，`callx0` 进 C 函数不会转窗口，会把 a12-a15 冲掉（曾导致切换时 a4 变成
+ * 脏指针、L32I 触发 LoadStoreAlignment）。 */
+u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+
+void port_core_bind_self(void)
+{
+    u32 v = s3_prid_raw();
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == v) { return; }
+        i++;
+    }
+    i = 0;
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == 0xFFFFFFFFu) {
+            g_prid_base[i] = v;
+            return;
+        }
+        i++;
+    }
+}
+
 u32 port_core_id(void)
 {
-    /* 单核 S3 阶段固定 0；PRID 读取路径在 LX7 上待验证。 */
-    return 0u;
+    u32 v = s3_prid_raw();
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == v) { return i; }
+        i++;
+    }
+    return 0u;   /* 还没登记：按 0 号核处理 */
 }
 
 void port_init(void)
 {
     volatile u32 i;
 
-    s3_mark(0u, 0x1111u);
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);
@@ -186,6 +257,21 @@ void port_init(void)
     *(volatile u32 *)(S3_TIMG0_BASE + 0x48u) = 0u;
     *(volatile u32 *)(S3_TIMG0_BASE + 0x4Cu) = 0u;
     *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0u;
+
+    /* RTC 看门狗同样要关：esptool 的 --after watchdog-reset 会把 RTC_WDT 配好
+     * 再复位，配置留在 RTC 域里，应用不关它就会每隔几秒被整片复位（表现为
+     * 只打印一行 banner 就掉 USB）。 */
+    *(volatile u32 *)0x600080B0u = 0x50D83AA1u;   /* RTC_CNTL_WDTWPROTECT */
+    *(volatile u32 *)0x60008098u = 0u;            /* RTC_CNTL_WDTCONFIG0 */
+    *(volatile u32 *)0x600080B0u = 0u;
+
+    /* 还有 RTC 超级看门狗（SWD）：ROM/esptool 会给它装一个几秒的超时，应用不关
+     * 就每 ~3.5s 被整片复位一次（实测 RTC_CNTL_RESET_CAUSE_PROCPU=0x12
+     * SYS_SUPER_WDT，表现是串口只能看到头几行、每隔几秒 USB 重新枚举）。
+     * SWD_CONF.SWD_DISABLE=bit30，写保护钥匙在 SWD_WPROTECT。 */
+    *(volatile u32 *)0x600080B8u = 0x8F1D312Au;   /* RTC_CNTL_SWD_WPROTECT */
+    *(volatile u32 *)0x600080B4u |= (1u << 30);   /* SWD_DISABLE = 1 */
+    *(volatile u32 *)0x600080B8u = 0u;
 
     /* CPU 复位会把 USB-Serial/JTAG 的枚举打断，应用必须重新使能时钟和 PAD。
      * 只置位时钟、确保退出复位，不做 assert-reset（会再次掉枚举）。 */
@@ -203,14 +289,13 @@ void port_init(void)
     for (i = 0; i < 2000000u; i++) {
         __asm__ __volatile__("" ::: "memory");
     }
-    s3_mark(1u, 0x2222u);
 
     /* 等主机枚举 CDC-ACM；40MHz 下约 0.5s。 */
     for (i = 0; i < 1000000u; i++) {
         __asm__ __volatile__("" ::: "memory");
     }
 
-    s3_mark(2u, 0x3333u);
+    port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
     port_puts("c6os s3 boot\n");
     s3_irq_init();
 }

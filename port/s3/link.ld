@@ -3,7 +3,10 @@ ENTRY(_start)
 MEMORY
 {
   IRAM (rx) : ORIGIN = 0x403C9000, LENGTH = 0x17000
-  DRAM (rw) : ORIGIN = 0x3FCE3000, LENGTH = 0x1D000
+  /* 原来只用 DRAM 顶部 116KB（0x3FCE3000 起）。实测 0x3FCA0000 起、下方留 96KB
+     给 ROM 之后，RAM-only 镜像在 app 运行期可自由读写整段，240x240 RGB565
+     帧缓冲（115200B）因此可以放进内部 RAM。 */
+  DRAM (rw) : ORIGIN = 0x3FCA0000, LENGTH = 0x4F000
 }
 
 SECTIONS

@@ -1,0 +1,91 @@
+/* t_s3_clk13.c6 —— 试 SLAVE_REG.clk_mode_13（{CPOL,CPHA} 支持位）与 CK_IDLE_EDGE
+ * 的组合，用 PCNT 数 SCLK(9)/MOSI(10) 边沿，找能让时钟出脚的组合。 */
+
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define SPI2 0x60024000u
+#define GPIO_BASE 0x60004000u
+#define IO_MUX(p) (0x60009000u + 0x04u + 4u * (p))
+
+void s3_lcd_init(void);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static void pcnt_map(u32 pin)
+{
+    s3_reg_wr(GPIO_BASE + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(IO_MUX(pin), s3_reg32(IO_MUX(pin)) | (1u << 9));
+}
+
+static u32 xfer_count(u32 pin)
+{
+    u32 i = 0;
+    pcnt_map(pin);
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    for (i = 0; i < 16u; i++) { s3_reg_wr(SPI2 + 0x98u + 4u * i, 0x55555555u); }
+    s3_reg_wr(SPI2 + 0x0Cu, (9u << 18) | (63u << 12) | (31u << 6) | 31u);   /* 慢 */
+    s3_reg_wr(SPI2 + 0x1Cu, 64u * 8u - 1u);
+    s3_reg_wr(SPI2 + 0x00u, (1u << 23));
+    while ((s3_reg32(SPI2 + 0x00u) & (1u << 23)) != 0u) { }
+    s3_reg_wr(SPI2 + 0x00u, (1u << 24));
+    while ((s3_reg32(SPI2 + 0x00u) & (1u << 24)) != 0u) { }
+    return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+static void case_(const char *name, u32 misc, u32 slave_extra, u32 user)
+{
+    s3_reg_wr(SPI2 + 0x20u, misc);
+    s3_reg_wr(SPI2 + 0xE0u, 0x02800000u | slave_extra);
+    s3_reg_wr(SPI2 + 0x10u, user);
+    puts_(name);
+    puts_(" sclk=");
+    put_u32_(xfer_count(9u));
+    puts_(" mosi=");
+    put_u32_(xfer_count(10u));
+    puts_("\n");
+}
+
+void os_main(void)
+{
+    puts_("c6os clk13 try\n");
+    s3_lcd_init();
+    pcnt_init();
+
+    case_("idle1 cm13=0", 0x60000000u, 0u,        0x08000200u);
+    case_("idle1 cm13=1", 0x60000000u, (1u << 2), 0x08000200u);
+    case_("idle0 cm13=0", 0x40000000u, 0u,        0x08000200u);
+    case_("idle0 cm13=1", 0x40000000u, (1u << 2), 0x08000200u);
+    case_("idle1 cm13=1 out_edge", 0x60000000u, (1u << 2), 0x08000200u | (1u << 9));
+    case_("idle0 cm13=0 out_edge", 0x40000000u, 0u, 0x08000200u | (1u << 9));
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_(".");
+    }
+}

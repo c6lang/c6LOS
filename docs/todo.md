@@ -177,9 +177,15 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；S3 `port/s3/panel.c` 已按微雪 1.85 引脚 PCLK40/CS21/D0 46/D1 45/D2 42/D3 41 做 QSPI 0x0B+0x04 bit-bang 读 ID，并经 TCA9554(0x20) EXIO2 复位，但实测读回 `00 00 00`（已改读 D1/IO1 并加上拉仍 0；ST7789 面包板引脚 21/47/40/41/45 读 0x04 也全 0；I2C 10/11 扫描所有地址都“ACK”，说明无上拉/引脚不对；GPIO42、GPIO5 背光均不亮）。下一步需确认板子型号/屏幕 FPC 丝印与背光/复位真实引脚 |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS；真实屏刷新待硬件） |
-| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 绘制 tick/任务数/堆用量的彩色数字行、`os_dash_task_row` 任务行、`os_dash_log` 日志行；`t_dash` host PASS；真实屏刷新待硬件恢复） |
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**当前驱动有两条通路**：GPSPI2 硬件 SPI（数据通路已验证：MOSI 256 边沿/64B）与
+bit-bang 兜底（PCNT 实测 512 边沿/64B、整屏填色 5.16M cycles ≈ 15fps）；
+**硬件 SPI 的 SCLK 输出实测打不出边沿**（同一时刻 MOSI 有 256 个、SCLK 0 个，
+GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c` 现在**默认走 bit-bang**（`g_bitbang=1`），demo/dash/`t_s3_lcd`
+全用它；`s3_lcd_use_bitbang(0)` 可切回硬件 SPI 做实验。
+详见 `docs/s3-panel-bringup.md` §4.5。**已由真板确认成像（用户目视：颜色/竖条/文字/仪表盘都对）**，`tests/t_s3_lcd_kiosk.c6`（当前留在板上跑）会
+自动轮播 纯色红/绿/蓝 → 8 色竖条+文字 → 仪表盘一帧，串口同步打印各步耗时与 tick |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 5.16M cycles、帧缓冲全屏 blit 5.81M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈14fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
+| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | **真板通过**（`rt/dash.c` 绘制 tick/任务数/堆用量 + 任务行；`t_dash` host PASS；`tests/t_s3_dash.c6` 在 S3 上建 dash 任务，每帧 6.69M cycles（首帧含字体，≈5.9fps）画进 240×240 帧缓冲再 blit 上屏，串口同步打印同一组数字：`tick=57/83/109... tasks=3`，tick 稳定递增 ≈26/帧，说明定时器→调度器→dash 任务整条链路在真板成立。屏上成像仍需人眼确认） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
 
@@ -190,7 +196,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 完成（host `t_stress` 10^6 次 6.9s；S3 `t_s3_stress` 25000 轮创建/延时/回收，00:20:11→00:29:59 约 9m48s，`PASS: s3 stress`，无 panic） |
-| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。core1 侧已加命令/应答邮箱（`s3_core1_send/ack`），`t_s3_twocore` 连发 100 条命令并同时跑 core0 任务；镜像 build/s3tc 已构建，等上电验证；`port_core_id` 改用 Xtensa `rsr prid`，core1 入口回读 `s3_core1_prid()`，`t_s3_core1` 要求 `prid=1` 才 PASS（镜像 build/s3c1 已构建，待上电）。S3 core1 已能进入内核调度器：`port/s3/ctx.c|ctx.S` 的 `g_sched/g_s3_cur` 改为按 `prid` 分核数组，`s3_core1_start_mode(1)` 让 core1 调 `os_task_start_core(1)`；`tests/t_s3_smp.c6` 两核各跑一个 yield 任务并校验 `prid=1`（镜像 build/s3smp 已构建，待上电；`tests/t_s3_smp_sem.c6` 再验跨核 sem，镜像 build/s3smpsem）；S3 侧真 IPI 未做，核 1 `port_idle` 改忙轮询以看到别核投递（核 0 仍 `waiti`）；risc6 参考机已补 `--harts 2` 参考机 SMP 冒烟：`os_task_create_on` 静态绑核 + 每 hart 独立 `g_cur_ctx/g_sched_sp/陷阱保存区/启动栈`，`make check-sim` → `PASS: smp task a/b`；任务都建在核 0，空闲核用 `balance_pull` 自动拉走一个（`os_core_ready` 观测），两任务分别落在核 0/核 1，`PASS: smp task b (one task balanced to core 1)`，417512 条指令；`os_task_set_core` 也支持显式迁核；跨核同步 `t_rv32bare_smp_sem`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒，`PASS: smp cross-core sem`，80223 条指令） |
+| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | **真板通过**（`tests/t_s3_core1.c6`：core1 裸核计数 → `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / `PASS: core1`；`tests/t_s3_smp.c6`：两核各跑一个 yield 任务 → `PASS: s3 smp core1 scheduler`；`tests/t_s3_smp_sem.c6`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒 → `PASS: s3 smp cross-core sem`。本轮修掉的三处：①`port/s3/ctx.S` 的 `port_task_switch`/`port_task_yield` 把核槽位写死成 0（双核共用同一份保存区）；②`port_task_switch` 必须**先压帧再算核号**，否则算下标用的 a3/a5/a6/a12 会毁掉被打断任务的寄存器（现象是随机 `TRAP cause=1c`）；③切换路径不能 `callx0` 进 C 函数（本工具 C 是 windowed 风格调用约定，callx0 不转窗口会冲掉 a12-a15），所以核号在汇编里直接读 PRID 与 `g_prid_base[0]` 比较。回归：`t_s3_lcd` 仍 `PASS: s3 lcd`、`t_s3_dash` tick 稳定递增。risc6 参考机侧另有 `--harts 2` 的 SMP 冒烟（`make check-sim`，`PASS: smp task a/b`、`PASS: smp cross-core sem`）。S3 真 IPI 仍未做（核 1 用忙轮询 `port_idle` 观测别核投递） |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 | 跳过（可选；内核核心不使用浮点，S3 启动未使能 FPU） |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 | 跳过（可选；屏驱动未点亮，帧缓冲仍在内部 RAM） |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
@@ -546,3 +552,76 @@
 - **risc6 回归入口**：新增 `make check-sim`，依次跑 rv32 user 的 hello/sched
   和 bare MTIP tick；当前输出 hello `insns=1776`、sched `36318`、bare tick
   `263076`，均 rc=0。risc6 已支持 1–4 hart（见 risc6 仓库 E7），M8-2 的每核静态分区已在 `t_rv32bare_smp` 上跑通；真板双核仍待上电。
+
+- **S3 面板改用 GPSPI2 硬件 SPI（真板跑通初始化+整屏刷新）**：
+  `port/s3/panel.c` 从 bit-bang 改为 SPI2 CPU 直写 FIFO（W0..W15，64 字节/次），
+  `t_s3_lcd` 输出 `fill_cycles=5159894`、`blit_cycles=5808687`、`PASS: s3 lcd`。
+  用 SPI 分频档位（/4、/24、/40、EQU_SYSCLK）实测传输耗时线性变化，反算
+  **CPU 跑在 80MHz PLL**（不是 40MHz XTAL），故整屏 blit 约 73ms ≈ **14fps**，
+  过 M7-3 的 ≥10fps 线。详细配方与自检手段见 `docs/s3-panel-bringup.md`。
+
+- **`SPI_CLK_GATE` 必须置 `CLK_EN`(bit0)**：IDF `spi_ll_master_init` 里是
+  `clk_en/mst_clk_active/mst_clk_sel` 三位一起置；只置后两位时模块时钟被门控，
+  写 `CMD.USR` 读回仍是 0、SCLK 不出波形、面板一个字节都收不到，但寄存器轮询
+  "立刻通过"，极易误判成事务正常。同时把 SPI 对齐原厂：mode 3
+  （`MISC.CK_IDLE_EDGE` + `USER.CK_OUT_EDGE`）、`MISC.CS_KEEP_ACTIVE`。
+
+- **`volatile` 忙等会把 CPU 卡死（`memw` 屏障）**：GCC 给每个 volatile 访存插
+  `memw`，SPI 事务后只要有 APB 事务未回，下一条 `memw` 就永久等待——表现为
+  串口突然静默、定时器中断也不再进，看着像"整机死机/复位"。面板驱动内的延时
+  因此改成不带 volatile 的 `nop` 循环。
+
+- **RTC 超级看门狗 SWD 未关 → 每 ~3.5s 整片复位**：读
+  `RTC_CNTL_RESET_STATE_REG`（0x60008038）低 6 位得 `0x12`(SYS_SUPER_WDT)，
+  表现是「串口只出几行 + USB 每隔几秒重新枚举」，此前多轮排查都被它误导。
+  `port/s3/console.c port_init()` 里按 `0x600080B8=0x8F1D312A` →
+  `0x600080B4 |= 1<<30`(SWD_DISABLE) → `0x600080B8=0` 关闭后恢复正常。
+
+- **已修复：`t_s3_irq` 的 tick 推进失败**（原记录为"未解问题"）。根因是
+  `port_core_id()` 读 Xtensa `rsr.prid` 在这颗 S3 上拿到的是垃圾值（core0=0xCDCD、
+  core1=0xABAB），恒等于 1 → `os_sched_tick()` 里"非 0 号核直接返回"的 SMP 保护
+  永远命中 → tick 不前进（ISR 其实在跑）。改成启动时按核登记 PRID 值、查表返回
+  下标后，真板实测：`t_s3_irq` → **`PASS: s3 irq tick`**；`t_s3_dash` 的
+  `tick=57/83/109…` 稳定递增；`t_s3_shell` 正常出 `shell ready` / `shell>`。
+
+- **S3 面板"只有背光"的根因：GPIO 矩阵输出没打开输出使能**（本轮找到并修掉）：
+  只写 `GPIO_FUNCx_OUT_SEL_CFG.func_sel`=101/103/110 而不置 `GPIO_ENABLE_REG`
+  对应位时，SCLK/MOSI/CS 三根脚是高阻+内部上拉（回读恒 1），面板收不到任何
+  字节；而 SPI 事务照常完成（`CMD.USR` 自清、耗时随分频线性变化、移位数据在动），
+  所以此前所有"SPI 正常"的判断都成立却点不亮屏。修好后回读立刻正常：CS=0、
+  MOSI 采样 996/2000、CS 采样 0/2000。诊断手法（读 pad 电平 / 传输中采样 /
+  扫 0..127 号输出信号）见 `docs/s3-panel-bringup.md` §4；顺带修了
+  `SPI_CLOCK` 的 H+L≠N 占空比错误（改回自洽的 0x3041）。
+
+- **`port_core_id()` 一直是错的（PRID 在这颗 S3 上是垃圾值），修好后 tick 才动**：
+  Xtensa `rsr.prid` 在本板读回 core0=`0xCDCD`、core1=`0xABAB`（三种写法一致、
+  每核稳定但都不是 0/1），于是 `port_core_id()` 恒返回 1 → `os_sched_tick()` 里
+  "非 0 号核直接返回" 的 SMP 保护一直命中 → **tick 永远不前进**（面板/仪表盘上
+  `tick=0` 的真凶，不是定时器问题：ISR 实测在跑）。
+  修法：`port_core_bind_self()` 让每个核在入口把自己的 PRID 值登记进
+  `g_prid_base[]` 槽位（core0 在 `port_init`、core1 在 `core1_entry`），
+  `port_core_id()` 按值查表返回下标。修后 `t_s3_dash` 的 tick 正常递增，
+  `t_s3_core1` 也正确报 `core_id=0`/`prid=1`。
+  教训：RTC 慢速内存 mark（0x50000000）在这块板子上不可靠（2/3/7 号字读到过
+  垃圾值），诊断要用串口打印，别只信 mark。
+
+- **M8-2 双核内核调度真板 PASS（本轮）**：三处修复后 `t_s3_smp` / `t_s3_smp_sem` 均通过。
+  ①`ctx.S` 的核槽位写死成 `g_sched[0]` → 改成读 PRID 与 `g_prid_base[0]` 比较取下标；
+  ②`port_task_switch` 里"保存现场"和"算核号"的顺序：**必须先压帧**，算核号要用 a3/a5/a6/a12，
+  先动它们会毁掉被打断任务的寄存器（表现为随机 `TRAP cause=1c`/LoadStoreAlignment）；
+  ③切换路径**不能** `callx0` 进 C 函数（windowed 风格调用约定不转窗口，a12-a15 被冲掉，
+  第一次改就因此让目标 ctx 变脏指针）。这三条已写进 `port/s3/ctx.S` 的注释。
+
+- **S3 面板初始化延时不够（按手册重算）**：`dly()` 实测 5 cycles/单位
+  （`dly(1200000)` 只有 6.0M cycles ≈ 75ms），而 ST7789 要求复位释放/SWRESET/
+  SLPOUT 之后各 ≥120ms，原来三条都只等 75ms——命令发太早面板会直接不理。
+  改成 `DLY_120MS`=3000000（≈187ms）、`DLY_20MS`=1000000（≈31ms）。
+
+- **板上当前状态（收工快照）**：`tests/t_s3_lcd_kiosk.c6` 正在板上循环：
+  纯色红→绿→蓝（各 1.2s）→ 8 色竖条 + `C6OS / ST7789 240X240 / BITBANG OK`
+  文字（1.2s）→ 仪表盘一帧（1.6s，含 tick/tasks/DASH 字样）。串口同步打印
+  `1 red 5168k-cyc … 5 dash 5814k-cyc tick=<n>`，tick 单调递增。
+  若屏幕仍全黑，问题已不在 c6LOS 这一侧的可观测项，而在这三者之一：
+  ①面板/排线本身；②这块屏的 SDA 只做输入（回读全不出值，见 §4.4）；
+  ③屏需要本驱动之外的初始化（当前已按 ST7789 手册与各家开板示例补齐延时 +
+  porch/gate/VCOM/gamma 表）。
