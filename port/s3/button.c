@@ -60,7 +60,10 @@ void s3_btn_init(void)
         if (g_btn_pin[i] > 21u) {
             volatile u32 *m = (volatile u32 *)(0x600090A0u + 4u * (g_btn_pin[i] - 39u));
             u32 w = *m;
-            w = (w & ~(7u << 12)) | (1u << 12);
+            /* 注意：MCU_SEL 保持 0（=MTCK/MTDO 默认功能）。实测把它设成 1(GPIO)
+             * 反而读不到按键（同样的 FUN_IE+FUN_WPU 下引脚恒 0）；保持 0 时
+             * 松开=1、按下=0，正常。 */
+            w = w & ~(7u << 12);
             w = w | (1u << 9) | (1u << 8);
             w = w & ~(1u << 7);
             *m = w;

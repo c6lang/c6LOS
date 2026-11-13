@@ -124,6 +124,13 @@ void os_main(void)
     pstr(" iomux40=");
     pu32(IOMUX_MTDO);
     pstr("\n");
+    pstr("enable1=");
+    pu32(*(volatile u32 *)0x60004030u);
+    pstr(" out1=");
+    pu32(*(volatile u32 *)0x60004010u);
+    pstr(" in1=");
+    pu32(*(volatile u32 *)0x60004040u);
+    pstr("\n");
 
     i = 0;
     while (i < 3u) {
@@ -155,6 +162,16 @@ void os_main(void)
             i++;
         }
         if (dirty != 0u) { dirty = 0u; draw(); }
-        s3_lcd_delay(100000u);      /* 25ms */
+        s3_lcd_delay(4000000u);     /* 约 1s 打印一次 */
+        {
+            u32 in1 = *(volatile u32 *)0x60004040u;
+            pstr("in1=");
+            pu32(in1);
+            pstr(" p39=");
+            pu32((in1 >> 7) & 1u);
+            pstr(" p40=");
+            pu32((in1 >> 8) & 1u);
+            pstr("\n");
+        }
     }
 }
