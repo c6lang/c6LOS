@@ -1,0 +1,116 @@
+/* t_s3_spi3n.c6 —— 用 SPI3(HSPI) 做同样的事，判断是不是 SPI2(FSPI) 特殊：
+ *   SPI3 base 0x60025000，CLK 信号 66、D 信号 68；SCLK→GPIO9，MOSI→GPIO10。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define SPI3       0x60025000u
+
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void wr(u32 a, u32 v) { s3_reg_wr(a, v); }
+static u32 rd(u32 a) { return s3_reg32(a); }
+
+static void pcnt_init(void)
+{
+    wr(0x600C0018u, rd(0x600C0018u) | (1u << 10));
+    wr(0x600C0020u, rd(0x600C0020u) & ~(1u << 10));
+    wr(PCNT_BASE + 0x00u, (1u << 18));
+}
+
+static void pcnt_pin(u32 pin)
+{
+    wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    wr(0x60009000u + 0x04u + 4u * pin, rd(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    wr(PCNT_BASE + 0x60u, 1u);
+    wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static void pin_out(u32 pin, u32 sig)
+{
+    wr(0x60009000u + 0x04u + 4u * pin, (rd(0x60009000u + 0x04u + 4u * pin) & ~7u) | 1u);
+    wr(0x60004000u + 0x554u + 4u * pin, sig & 0x1FFu);
+    if (pin < 32u) { wr(0x60004000u + 0x10u, 1u << pin); }        /* GPIO_ENABLE_W1TS */
+    else { wr(0x60004000u + 0x30u, 1u << (pin - 32u)); }          /* GPIO_ENABLE1_W1TS */
+}
+
+static u8 g_buf[64] = {0};
+
+static void spi3_send(u32 n)
+{
+    u32 i = 0;
+
+    while (i < n) {
+        u32 w = 0;
+        u32 k = 0;
+        while (k < 4u && i + k < n) { w |= ((u32)g_buf[i + k]) << (24u - 8u * k); k++; }
+        wr(SPI3 + 0x98u + 4u * (i / 4u), w);
+        i += 4u;
+    }
+    wr(SPI3 + 0x18u, 0u);
+    wr(SPI3 + 0x1Cu, (n * 8u) - 1u);
+    wr(SPI3 + 0x10u, (1u << 27));
+    wr(SPI3 + 0x0Cu, (3u << 12) | (1u << 6) | 1u);
+    wr(SPI3 + 0xE8u, 7u);
+    wr(SPI3 + 0x00u, (1u << 23));
+    while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
+    wr(SPI3 + 0x00u, (1u << 24));
+    while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 d = 0;
+    u32 m = 0;
+
+    pstr("c6os spi3 test\n");
+    i = 0;
+    while (i < 64u) { g_buf[i] = (u8)(0x5Au ^ (i * 11u)); i++; }
+
+    wr(0x600C0018u, rd(0x600C0018u) | (1u << 16));
+    wr(0x600C0020u, rd(0x600C0020u) & ~(1u << 16));
+    pin_out(9u, 66u);
+    pin_out(10u, 68u);
+    pin_out(45u, 66u);      /* 对照：把 SPI3 时钟也引到 GPIO45 */
+
+    pcnt_init();
+    pcnt_pin(45u);
+    i = 0;
+    while (i < 200u) { spi3_send(64u); i++; }
+    s3_lcd_delay(100000u);
+    d = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pcnt_pin(10u);
+    i = 0;
+    while (i < 200u) { spi3_send(64u); i++; }
+    s3_lcd_delay(100000u);
+    m = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pstr("spi3 200x64B: clk_on_gpio45=");
+    pu32(d);
+    pstr(" mosi=");
+    pu32(m);
+    pstr(" gate=");
+    pu32(rd(SPI3 + 0xE8u));
+    pstr(" clk=");
+    pu32(rd(SPI3 + 0x0Cu));
+    pstr("\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}
