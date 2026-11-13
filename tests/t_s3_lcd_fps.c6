@@ -1,0 +1,137 @@
+/* t_s3_lcd_fps.c6 —— 屏幕上显示实时帧率：
+ * 每帧把 FPS(×10 显示成 xx.x)、单帧毫秒数、tick、以及一个滚动进度条画进
+ * 帧缓冲再 blit，所以屏上的数字就是刚刚测到的整帧耗时（含绘制+上屏）。
+ * 串口同步打印同样的数值，方便对照。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/tick.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* u32 -> 字符串，返回长度 */
+static int u32_str(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return 1; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+    return i;
+}
+
+void os_main(void)
+{
+    u32 frame = 0;
+    u32 fps10 = 0;
+    u32 ms10 = 0;
+    u32 best = 0;
+    u32 worst = 0xFFFFFFFFu;
+
+    puts_("c6os lcd fps meter\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+
+    for (;;) {
+        u64 t0 = 0;
+        u64 t1 = 0;
+        u32 cyc = 0;
+        char s1[16] = {0};
+        char s2[16] = {0};
+        char s3[16] = {0};
+        char s4[16] = {0};
+        int n = 0;
+
+        t0 = port_cycles();
+
+        /* 背景 + 标题 */
+        os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+        os_gfx_text16(&g, 8, 8, "C6OS FPS METER", 0x07FFu);
+
+        /* 帧率：fps*10 → "xx.x" */
+        n = u32_str(s1, fps10 / 10u);
+        s1[n] = '.';
+        s1[n + 1] = (char)('0' + (fps10 % 10u));
+        s1[n + 2] = '\0';
+        os_gfx_text16(&g, 8, 40, "FPS", 0xFFFFu);
+        os_gfx_text16(&g, 60, 40, s1, 0xFFE0u);
+
+        /* 单帧毫秒：ms*10 → "xx.x ms" */
+        n = u32_str(s2, ms10 / 10u);
+        s2[n] = '.';
+        s2[n + 1] = (char)('0' + (ms10 % 10u));
+        s2[n + 2] = '\0';
+        s2[n + 3] = 'm';
+        s2[n + 4] = 's';
+        s2[n + 5] = '\0';
+        os_gfx_text16(&g, 8, 64, "FRAME", 0xFFFFu);
+        os_gfx_text16(&g, 70, 64, s2, 0x07E0u);
+
+        /* tick 与帧号 */
+        n = u32_str(s3, (u32)os_tick_get());
+        os_gfx_text16(&g, 8, 88, "TICK", 0xFFFFu);
+        os_gfx_text16(&g, 60, 88, s3, 0xFFFFu);
+        n = u32_str(s4, frame);
+        os_gfx_text16(&g, 8, 112, "FRAME#", 0xFFFFu);
+        os_gfx_text16(&g, 78, 112, s4, 0xFFFFu);
+
+        os_gfx_text16(&g, 8, 136, "ST7789 240X240", 0xF81Fu);
+        os_gfx_text16(&g, 8, 160, "BITBANG SPI", 0xF81Fu);
+
+        /* 滚动条（每帧移动，证明画面在实时更新） */
+        os_gfx_fill_rect(&g, 8, 190, (int)(W - 16u), 20, 0x001Fu);
+        os_gfx_fill_rect(&g, 8, 190, (int)((frame * 7u) % (W - 16u)), 20, 0x07FFu);
+
+        s3_lcd_blit(g_fb, W, H);
+
+        t1 = port_cycles();
+        cyc = (u32)(t1 - t0);
+        if (cyc != 0u) {
+            fps10 = 800000000u / cyc;      /* 80MHz / cyc * 10，只用 32 位除法 */
+            ms10 = cyc / 8000u;            /* 80MHz：cyc/80=us，/1000=ms，*10 → cyc/8000 */
+        }
+        if (cyc < worst) { worst = cyc; }
+        if (cyc > best) { best = cyc; }
+
+        if ((frame % 10u) == 0u) {
+            puts_("fps10=");
+            put_u32_(fps10);
+            puts_(" ms10=");
+            put_u32_(ms10);
+            puts_(" frame=");
+            put_u32_(frame);
+            puts_("\n");
+        }
+        frame++;
+    }
+}
