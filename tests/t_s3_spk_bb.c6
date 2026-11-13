@@ -55,10 +55,20 @@ void os_main(void)
 
     for (;;) {
         pcnt_pin(15u);
-        s3_i2s_bb_tone(f, 1000u, 24000u);
+        s3_i2s_bb_tone(f, 250u, 24000u);
         puts_("f=");
         put_u32_(f);
-        puts_("Hz bclk_edges=");
+        puts_("Hz bclk=");
+        put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
+
+        pcnt_pin(16u);
+        s3_i2s_bb_tone(f, 50u, 24000u);
+        puts_(" ws=");
+        put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
+
+        pcnt_pin(7u);
+        s3_i2s_bb_tone(f, 50u, 24000u);
+        puts_(" sd=");
         put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
         puts_("\n");
 

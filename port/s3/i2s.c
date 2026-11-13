@@ -152,48 +152,47 @@ static void bb_wait(u32 n)
     while (k != 0u) { k--; }
 }
 
-/* 输出一帧立体声（左/右各 16bit）。半周期约 52 周期 → BCLK 768kHz。 */
+/* 输出一帧：按上游 NoAudioCodecSimplex 的格式
+ *   data_bit_width=32bit、slot_bit_width=AUTO(32)、slot_mode=MONO、
+ *   slot_mask=LEFT、ws_width=32bit、left_align
+ * 即每帧 64 个 BCLK：WS=0 的 32 bit 为左声道（高 16 bit 放样本，低 16 bit 补 0），
+ * WS=1 的 32 bit 为右声道（全 0）。功放只取左声道，所以右声道填 0 即可。 */
 void s3_i2s_bb_frame(u16 left, u16 right)
 {
     u32 sh = bb_shadow();
     u32 v;
     int b;
 
-    /* WS 低 = 左声道 */
-    sh = sh & ~(1u << PIN_WS);
-    BB_GPIO_OUT = sh;                       /* WS 变化 */
-    BB_GPIO_OUT = sh & ~(1u << PIN_BCLK);   /* 先一个 BCLK 低，作为移位延迟 */
-    bb_wait(18u);
-    BB_GPIO_OUT = sh | (1u << PIN_BCLK);
-    bb_wait(18u);
+    (void)right;
 
-    b = 15;
+    /* 左声道：WS=0 */
+    sh = sh & ~(1u << PIN_WS);
+    BB_GPIO_OUT = sh;
+    b = 31;
     while (b >= 0) {
         v = sh;
-        if (((left >> b) & 1u) != 0u) { v = v | (1u << PIN_DOUT); }
-        BB_GPIO_OUT = v & ~(1u << PIN_BCLK);        /* 下降沿换数据 */
-        bb_wait(18u);
-        BB_GPIO_OUT = v | (1u << PIN_BCLK);         /* 上升沿采样 */
-        bb_wait(18u);
+        if (b >= 16) {
+            if (((left >> (b - 16)) & 1u) != 0u) { v = v | (1u << PIN_DOUT); }
+        } else {
+            v = v & ~(1u << PIN_DOUT);      /* 低 16 bit 补 0 */
+        }
+        BB_GPIO_OUT = v & ~(1u << PIN_BCLK);    /* 下降沿换数据 */
+        bb_wait(1u);
+        BB_GPIO_OUT = v | (1u << PIN_BCLK);     /* 上升沿采样 */
+        bb_wait(1u);
         b--;
     }
 
-    /* WS 高 = 右声道 */
-    sh = bb_shadow() | (1u << PIN_WS);
+    /* 右声道：WS=1，整槽 0 */
+    sh = (sh | (1u << PIN_WS)) & ~(1u << PIN_DOUT);
     BB_GPIO_OUT = sh;
-    BB_GPIO_OUT = sh & ~(1u << PIN_BCLK);
-    bb_wait(18u);
-    BB_GPIO_OUT = sh | (1u << PIN_BCLK);
-    bb_wait(18u);
-
-    b = 15;
+    b = 31;
     while (b >= 0) {
         v = sh;
-        if (((right >> b) & 1u) != 0u) { v = v | (1u << PIN_DOUT); }
         BB_GPIO_OUT = v & ~(1u << PIN_BCLK);
-        bb_wait(18u);
+        bb_wait(1u);
         BB_GPIO_OUT = v | (1u << PIN_BCLK);
-        bb_wait(18u);
+        bb_wait(1u);
         b--;
     }
 }
