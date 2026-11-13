@@ -83,5 +83,32 @@ make ... S3_MAIN=tests/t_s3_ipc.c6 s3       # ALL PASS: ipc
 | 复位后掉 USB | 用 `--before usb-reset` / 拔插 USB；本板普通 RESET 不恢复 |
 | 启动约 300ms 被复位 | TIMG0 时钟未使能就关看门狗；确认先置 `SYSTEM_PERIP_CLK_EN0` bit13 |
 | 中断不触发 | 查 VECBASE override、PS.UM、INTENABLE bit6、CCOMPARE0 重装 |
+| 面板初始化后整机停摆（串口静默、连中断计数也停） | 先查板级电源保持脚 GPIO21（原厂启动即拉高），再对齐 SPI mode3/80MHz，见 §8 |
+| SPI2 写 `CMD.USR` 后该位永不自清 | 没置 `SPI_CLK_GATE`（0xE8）的 `MST_CLK_ACTIVE|MST_CLK_SEL`，主控状态机没有时钟 |
 
 原厂 16MB flash 备份已丢失；恢复原厂需官方固件包整片烧写（见 docs/todo.md）。
+
+## 8. ST7789 面板（240×240，M7）
+
+面板驱动在 `port/s3/panel.c`。原厂固件出处与完整板级配置见
+`docs/s3-board-identification.md`「上游固件出处」——上游是开源 XiaoZhi
+（78/xiaozhi-esp32）v2.5.0 的 `main/boards/nologo/xingzhi-cube-1.54tft-wifi`。
+
+| 项 | 值 |
+| --- | --- |
+| 面板 | ST7789 240×240，RGB565，8 位命令/参数，`INVON`(0x21) 必须发 |
+| 引脚 | SCLK=GPIO9，MOSI/SDA=GPIO10，DC=GPIO8，CS=GPIO14，RST=GPIO18，BL=GPIO13 |
+| 上游 SPI | `SPI3_HOST`，**mode 3**，**80MHz**，DMA，单次 ≤115200B（整帧） |
+| 本仓库 SPI | GPSPI2（`0x60024000`）CPU 直写 `W0..W15`，20MHz，无 DMA |
+| 板级电源 | **GPIO21** 需拉高（原厂用 RTC GPIO，关机时拉 0 再 deep sleep） |
+
+硬件 SPI2 的三个硬性前提（踩过的坑）：
+
+1. `SPI_CLK_GATE`（`0xE8`）必须写 `MST_CLK_ACTIVE(bit1)|MST_CLK_SEL(bit2)=1`，
+   否则主控状态机没有时钟，`CMD.USR` 永远不自清（现象：串口停在写 USR 之后）。
+2. 启动一次事务的顺序是 `MS_DLEN → CMD.UPDATE → 等 UPDATE 自清 → CMD.USR`，
+   UPDATE 和 USR 连着写会丢配置同步。
+3. `SYSTEM_PERIP_CLK_EN0` bit6 使能 + bit6 复位释放之后，先清 `DMA_INT_CLR`、
+   再写 `DMA_INT_ENA=0`；本内核的 level-1 向量只按 `EXCCAUSE==4` 分流，其它
+   中断上来会被当成定时器处理并反复重入。
+
