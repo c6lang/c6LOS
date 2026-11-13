@@ -11,6 +11,7 @@
 void s3_i2s_init(u32 sample_rate);
 void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch);
 void s3_i2s_tx_start(void);
+u32 s3_i2s_desc_addr(void);
 void s3_lcd_delay(u32 n);
 u32 s3_reg32(u32 addr);
 void s3_reg_wr(u32 addr, u32 v);
@@ -82,6 +83,12 @@ void os_main(void)
     bclk = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
 
     /* GDMA 状态诊断 */
+    pstr("buf_addr=");
+    pu32((u32)g_buf);
+    pstr(" desc_addr=");
+    pu32((u32)s3_i2s_desc_addr());
+    pstr("\n");
+
     pstr("gdma: outlink=");
     pu32(s3_reg32(0x6003F000u + 0x80u));
     pstr(" conf0=");

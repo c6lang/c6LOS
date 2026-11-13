@@ -251,9 +251,16 @@ static u32 desc_w0(u32 size, u32 length, u32 eof, u32 owner)
 }
 
 /* 用两个描述符组成环形链，指向同一块样本缓冲，启动 I2S0 TX 的 GDMA */
+static I2sDesc g_desc[2];
+
+u32 s3_i2s_desc_addr(void)
+{
+    return (u32)&g_desc[0];
+}
+
 void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch)
 {
-    static I2sDesc d[2];
+    I2sDesc *d = g_desc;
     u32 bytes = frames * 4u;      /* 立体声 16bit = 4 字节/帧 */
 
     s3_gdma_init();
@@ -276,6 +283,8 @@ void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch)
     wr(&GDMA_OUT_LINK(ch), ((u32)&d[0] & 0xFFFFFu));
     wr(&GDMA_OUT_LINK(ch), ((u32)&d[0] & 0xFFFFFu) | (1u << 22));   /* start */
 }
+
+
 
 /* 启动 I2S TX（时钟与格式已在 s3_i2s_init 里配好） */
 void s3_i2s_tx_start(void)
