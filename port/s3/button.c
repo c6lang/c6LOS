@@ -19,13 +19,23 @@
 
 static const u32 g_btn_pin[BTN_N] = {0u, 40u, 39u};
 
+/* 按键极性不统一：BOOT(GPIO0) 是"按下接地"（低有效），而 VOL+/VOL-(GPIO39/40)
+ * 实测常态就是低电平、按下变高（高有效）。所以不写死极性：开机记基线电平，
+ * 偏离基线超过 3 个采样即判定按下。 */
+static u32 g_btn_idle[BTN_N];     /* 基线（松开时的电平） */
 static u32 g_btn_down[BTN_N];     /* 去抖后的状态：1=按下 */
 static u32 g_btn_cnt[BTN_N];
 static u32 g_btn_event[BTN_N];    /* 1=有一次"按下"边沿没取走 */
 
+static u32 btn_level(u32 i)
+{
+    return (GPIO_IN >> g_btn_pin[i]) & 1u;
+}
+
+/* 1=按下（电平偏离基线） */
 static int btn_raw(u32 i)
 {
-    return ((GPIO_IN >> g_btn_pin[i]) & 1u) == 0u;   /* 低电平=按下 */
+    return btn_level(i) != g_btn_idle[i];
 }
 
 void s3_btn_init(void)
@@ -40,6 +50,7 @@ void s3_btn_init(void)
         v = v | (1u << 8);                    /* FUN_WPU 上拉 */
         v = v & ~(1u << 7);                   /* 关下拉 */
         *mux = v;
+        g_btn_idle[i] = btn_level(i);
         g_btn_down[i] = 0u;
         g_btn_cnt[i] = 0u;
         g_btn_event[i] = 0u;
@@ -81,6 +92,11 @@ u32 s3_btn_take_event(u32 i)
     v = g_btn_event[i];
     g_btn_event[i] = 0u;
     return v;
+}
+
+u32 s3_btn_idle_level(u32 i)
+{
+    return (i < BTN_N) ? g_btn_idle[i] : 0u;
 }
 
 u32 s3_btn_count(void)

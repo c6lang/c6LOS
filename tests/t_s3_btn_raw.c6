@@ -1,0 +1,48 @@
+/* t_s3_btn_raw.c6 —— 直接打印 GPIO_IN 里 GPIO0/39/40 的原始电平（0=按下），
+ * 每 300ms 一行，用来确认按键是否真的接到这三根脚、以及上拉是否生效。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define GPIO_IN (*(volatile u32 *)0x6000403Cu)
+
+void s3_btn_init(void);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    puts_("c6os btn raw levels (0=pressed)\n");
+    s3_btn_init();
+    puts_("iomux0=");  put_u32_(s3_reg32(0x60009004u));
+    puts_(" iomux39="); put_u32_(s3_reg32(0x600090A0u));
+    puts_(" iomux40="); put_u32_(s3_reg32(0x600090A4u));
+    puts_("\n");
+
+    for (;;) {
+        u32 v = GPIO_IN;
+        puts_("gpio0=");
+        put_u32_((v >> 0) & 1u);
+        puts_(" gpio39=");
+        put_u32_((v >> 39) & 1u);
+        puts_(" gpio40=");
+        put_u32_((v >> 40) & 1u);
+        puts_("\n");
+        s3_lcd_delay(1200000u);     /* 约 300ms */
+    }
+}
