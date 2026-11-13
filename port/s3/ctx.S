@@ -6,6 +6,7 @@
     .literal_position
     .literal .Lg_sched, g_sched
     .literal .Lg_cur,   g_s3_cur
+    .literal .Lprid_base, g_prid_base
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
@@ -38,12 +39,22 @@
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
-    /* a2 = 目标任务 ctx */
-    mov     a4, a2
+    /* a2 = 目标任务 ctx
+     * 双核各用 g_sched[core]/g_s3_cur[core]：核号必须问 port_core_id()
+     * （PRID 在这颗 S3 上是垃圾值，不能直接 `prid & 1`）。
+     * call0 ABI 里 a12-a15 是 callee-saved，用它跨调用保住参数。 */
+    mov     a13, a2                 /* 保住 ctx 参数 */
+    rsr     a5, prid                /* 本核 PRID（值本身是脏的，但每核不同） */
+    l32r    a3, .Lprid_base
+    l32i    a6, a3, 0
+    movi    a12, 0
+    beq     a5, a6, 1f
+    movi    a12, 1
+1:
+    mov     a4, a13                 /* a4 = 目标任务 ctx */
     l32r    a3, .Lg_sched
-    movi    a5, 0
     movi    a6, 76
-    mull    a5, a5, a6
+    mull    a5, a12, a6
     add     a3, a3, a5
 
     /* 保存调度器：在调度器栈上压一个陷阱帧，恢复 PC 用 a0（call0 返回地址）。 */
@@ -71,8 +82,7 @@ port_task_switch:
     s32i    a1, a3, 64
 
     l32r    a3, .Lg_cur
-    movi    a5, 0
-    slli    a5, a5, 2
+    slli    a5, a12, 2
     add     a3, a3, a5
     s32i    a4, a3, 0
     l32i    a1, a4, 64
@@ -81,9 +91,15 @@ port_task_switch:
     .global port_task_yield
     .type   port_task_yield, @function
 port_task_yield:
+    rsr     a5, prid
+    l32r    a3, .Lprid_base
+    l32i    a6, a3, 0
+    movi    a11, 0
+    beq     a5, a6, 2f
+    movi    a11, 1
+2:
     l32r    a4, .Lg_cur
-    movi    a5, 0
-    slli    a5, a5, 2
+    slli    a5, a11, 2
     add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
@@ -112,9 +128,8 @@ port_task_yield:
     s32i    a1, a4, 64
 
     l32r    a3, .Lg_sched
-    movi    a5, 0
     movi    a6, 76
-    mull    a5, a5, a6
+    mull    a5, a11, a6
     add     a3, a3, a5
     l32i    a1, a3, 64
     RESTORE_FRAME

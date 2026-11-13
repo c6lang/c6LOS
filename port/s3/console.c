@@ -210,7 +210,10 @@ u32 s3_prid_raw(void)
 /* PRID 基线：这颗 S3 上 `rsr.prid` 读回来的不是 0/1（实测 core0=0xCDCD、
  * core1=0xABAB），但**每核稳定且互不相同**，所以启动时让每个核把自己的
  * PRID 值登记到槽位，之后按值查表就知道"我在哪个核"。 */
-static volatile u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+/* ctx.S 里直接拿它做比较：切换路径上不能调用 C 函数——本工具的 C 是 windowed
+ * ABI，`callx0` 进 C 函数不会转窗口，会把 a12-a15 冲掉（曾导致切换时 a4 变成
+ * 脏指针、L32I 触发 LoadStoreAlignment）。 */
+u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
 
 void port_core_bind_self(void)
 {
