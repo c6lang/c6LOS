@@ -694,3 +694,12 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   ——这解释了"重绘期间按键不灵/卡顿"。下一步：核对 `port/s3/ctx.S` 里
   `port_task_switch` 保存/恢复的 EPC 与 frame，以及 `s3_timer_irq` 里
   `port_irq_fill`(frame) 对被打断帧的处理（bit-bang 循环在任务态，帧应在任务栈上）。
+
+- **更正：blit 期间"任务不被调度"的真实现象**（实测数据：
+  `blit cycles=29080k tick_delta=72 hi_delta=0`）——
+  tick 正常（364ms 内 72 个 ≈198Hz ✓ 与 rearm 的 400000 cycles@80MHz 一致），
+  **但同优先级的另一个任务一次都没被调度到（hi_delta=0）**，
+  所以"GUI 卡/丢按键"不是中断风暴，而是**抢占切换在长时间 bit-bang 循环里没生效**。
+  下一步：查 `os_sched_preempt_ctx()` 在同优先级下的轮转（`make_ready(g_cur)` 后
+  `sched_pick` 是否真的换到另一个任务），以及 `g_sched_lock[core]` 是否被意外置位。
+  临时可用方案：GUI 分块 blit + `os_task_yield()`（tests/t_s3_btn_ui2.c6 已验证可用）。
