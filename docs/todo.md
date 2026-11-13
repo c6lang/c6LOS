@@ -674,3 +674,15 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   ⑤ 麦克风侧是 I2S1（`DR_REG_I2S1_BASE`=0x6002D000，引脚 SCK=5/WS=4/DIN=6），
      与喇叭（I2S0，BCLK=15/WS=16/DOUT=7）分开。
   做到这里就能实现"按 BOOT 录一段、再按回放"。
+
+- **喇叭 GDMA 卡点（下一步继续这里）**：I2S 侧完全正常（BCLK 49229 边沿/0.12s、
+  WS/SD 映射都对），GDMA 侧已照 IDF v6 抄到：时钟 `SYS_PERIP_CLK_EN1` bit6、
+  通道步长 0xC0、`OUT_LINK`(+0x80, addr[19:0]+start bit22)、`OUT_PERI_SEL`
+  (+0xA8, sel=3 对应 SOC_GDMA_TRIG_PERIPH_I2S0)、`OUT_CONF0`(+0x60) 的
+  rst(0)/auto_wrback(2)/outdscr_burst(4)/out_data_burst(5)、lldesc 位序
+  （与 `esp_rom_lldesc.h` 一字不差）。描述符地址 0x3FCA9BC4、缓冲 0x3FCA0D90
+  都在 DRAM。但 `OUT_INT_RAW` 的 bit2 = **OUT_DSCR_ERR** 一直亮，DMA 不喂数据
+  （听感只有一声"噗"）。
+  下一步建议：把 IDF `gdma_hal.c` 里 TX 通道的完整初始化抄全（burst size、
+  priority、channel reset 时序、`out_link` 的 addr 字段基准/宽度），或者干脆
+  用 IDF 的 gdma 源码在自己的内核里编一份。
