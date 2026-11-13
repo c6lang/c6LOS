@@ -67,8 +67,9 @@ void os_main(void)
     s3_i2s_init(24000u);
     pstr("i2s init done\n");
 
-    s3_i2s_dma_play(g_buf, FRAMES, 0u);
+    /* 先启动 I2S，再挂 DMA（IDF 的顺序） */
     s3_i2s_tx_start();
+    s3_i2s_dma_play(g_buf, FRAMES, 0u);
     pstr("dma started\n");
 
     pcnt_init();
