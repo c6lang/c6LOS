@@ -26,6 +26,7 @@ u32 s3_btn_take_event(u32 i);
 u32 s3_btn_level(u32 i);
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_bl(u32 on);
 void s3_lcd_delay(u32 n);
 
@@ -35,6 +36,11 @@ static volatile u32 g_cnt[3];
 static volatile u32 g_frame;
 static volatile u32 g_last_frame;
 static u32 g_anim;
+static u32 g_dirty = 1u;   /* 1 = 走脏矩形局部刷新 */
+static u32 g_t_start;
+static u32 g_t_end;
+static u32 g_draw_sum;
+static u32 g_blit_sum;
 
 static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
 
@@ -118,8 +124,37 @@ static void gui_task(void *arg)
 {
     (void)arg;
     for (;;) {
+        u32 c0 = (u32)port_cycles();
+        u32 c1 = 0;
+        u32 c2 = 0;
+
         draw();
-        s3_lcd_blit(g_fb, W, H);
+        c1 = (u32)port_cycles();
+        if (g_dirty != 0u && g_frame != 0u) {   /* 第 0 帧整屏铺一次底，之后只贴脏区 */
+            /* 脏矩形：只贴"移动条占过的区域 + FRAME 数字"两块，其余不动 */
+            s3_lcd_blit_rect(g_fb, W, 6u, 44u, W - 12u, 20u);
+            s3_lcd_blit_rect(g_fb, W, 40u, 22u, 120u, 20u);
+        } else {
+            s3_lcd_blit(g_fb, W, H);
+        }
+        c2 = (u32)port_cycles();
+        if (g_frame == 0u) { g_t_start = c0; g_draw_sum = 0u; g_blit_sum = 0u; }
+        if (g_frame >= 5u && g_frame < 25u) {
+            g_draw_sum += (c1 - c0);
+            g_blit_sum += (c2 - c1);
+            g_t_end = c2;
+        }
+        if (g_frame == 25u) {
+            pstr("avg20 dirty=");
+            pu32(g_dirty);
+            pstr(" draw=");
+            pu32((g_draw_sum / 20u) / 1000u);
+            pstr("k blit=");
+            pu32((g_blit_sum / 20u) / 1000u);
+            pstr("k frame=");
+            pu32(((g_t_end - g_t_start) / 1000u) / 1u);
+            pstr("k/20f\n");
+        }
         g_frame++;
         if ((g_frame % 60u) == 0u) {
             u32 d = g_frame - g_last_frame;

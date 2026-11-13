@@ -863,3 +863,17 @@ S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移�
 
 下一步（性能，不影响正确性）：SPI 时钟 40MHz、上 GDMA 一次推整帧、
 gfx 全屏填充优化；再往后才是原来列的 WiFi/mic/喇叭。
+
+### 【本轮再进一步】上屏改 GDMA + 40MHz
+
+- SPI 时钟 20MHz → **40MHz**（真板目视确认画面干净）。
+- 配置域寄存器加脏标记 + `MS_DLEN` 缓存，整屏 1800 个等长块省掉 1799 次 UPDATE。
+- `s3_lcd_blit_rect` 去掉逐像素除法（`p/w`、`p%w`，一屏 57600 次 `__udivsi3`）。
+- 上屏改 **GDMA**（`port/s3/panel.c` 的 `lcd_dma_*`）。五个坑见
+  `docs/s3-panel-bringup.md` §4.68：描述符 owner 位、`OUT_LINK` 相对 DRAM 基址、
+  `dma_conf` bit19/20 不能设、多拍之间必须各自 UPDATE、CPU 预灌头 4 字节。
+  另有工具链地雷：u32 字节交换会被编译成 `__bswapsi2` 并 TRAP。
+- **实测帧率**：污区局部刷新 469k cycles（5.9ms）/帧，整帧 ≈23ms → **约 33fps**
+  （起点是 5fps）；大面积刷新（>65KB）自动回落 CPU 通路保证画面正确。
+- 还差：整屏 8 拍 DMA 的错位（现用回落规避）、gfx 绘图 1350k 可再优化
+  （全屏填充/文字逐像素写）、SPI 80MHz 未试（超 ST7789 串行时钟规格）。

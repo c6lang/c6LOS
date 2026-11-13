@@ -1,0 +1,470 @@
+/* t_s3_lcddma.c6 —— 用 GDMA 一次把整屏推给面板，替掉"CPU 逐 64 字节喂 FIFO"。
+ *
+ * 复用仓库里已经验证过的 GDMA 管线（见 port/s3/i2s.c 的 I2S TX）：
+ *   GDMA base 0x6003F000，通道步长 0xC0，OUT_LINK=+0x80（addr[19:0]，start=bit22）
+ *   OUT_PERI_SEL=+0xA8，SPI3 的 GDMA 触发号 = 1（SPI2 = 0）
+ *   描述符 lldesc：w0=size[11:0]|length[23:12]|eof[30]|owner[31]，buf，next
+ * SPI 侧：DMA_CONF(0x30) bit28 = dma_tx_ena；单笔事务上限 1<<18 bit = 32768 字节，
+ * 所以 115200 字节的整屏 = 4 笔事务。
+ *
+ * 用例同时测 CPU 通路的整屏耗时做对照，串口打印两边 cycles；屏上是"渐变背景 +
+ * 来回移动的红条 + 帧计数块"，用来目视确认 DMA 真的把数据送上屏了。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define SPI_USER     (*(volatile u32 *)(SPI3_BASE + 0x10u))
+#define SPI_CLOCK    (*(volatile u32 *)(SPI3_BASE + 0x0Cu))
+#define SPI_W(n)     (*(volatile u32 *)(SPI3_BASE + 0x98u + 4u * (n)))
+#define SPI_PIN_IO_MUX(p) (*(volatile u32 *)(0x60009000u + 0x04u + 4u * (p)))
+#define SPI_IN_SEL(sig)   (*(volatile u32 *)(0x60004000u + 0x154u + 4u * (sig)))
+
+#define W 240u
+#define H 240u
+#define SPI3_BASE 0x60025000u
+#define PIN_DC    8u
+
+#define LCD_DRAM_BASE  0x3FC00000u   /* OUT_LINK 的地址字段是相对它的偏移 */
+#define GDMA_BASE      0x6003F000u
+#define GDMA_CH_STRIDE 0xC0u
+#define GDMA_CH        1u
+#define GDMA_OUT_CONF0 (*(volatile u32 *)(GDMA_BASE + GDMA_CH * GDMA_CH_STRIDE + 0x60u))
+#define GDMA_OUT_LINK  (*(volatile u32 *)(GDMA_BASE + GDMA_CH * GDMA_CH_STRIDE + 0x80u))
+#define GDMA_OUT_PERI  (*(volatile u32 *)(GDMA_BASE + GDMA_CH * GDMA_CH_STRIDE + 0xA8u))
+#define GDMA_OUT_RAW   (*(volatile u32 *)(GDMA_BASE + GDMA_CH * GDMA_CH_STRIDE + 0x68u))
+#define GDMA_OUT_CONF1 (*(volatile u32 *)(GDMA_BASE + GDMA_CH * GDMA_CH_STRIDE + 0x64u))
+#define SPI_DMA_CONF   (*(volatile u32 *)(SPI3_BASE + 0x30u))
+/* PERIP_CLK_EN1 / PERIP_RST_EN1（**不是** EN0！弄错会复位别的外设、整机直接不启动） */
+#define SYS_CLK_EN1    (*(volatile u32 *)0x600C001Cu)
+#define SYS_RST_EN1    (*(volatile u32 *)0x600C0024u)
+
+#define SPI_DMA_CONF   (*(volatile u32 *)(SPI3_BASE + 0x30u))
+#define SPI_CMD        (*(volatile u32 *)(SPI3_BASE + 0x00u))
+#define SPI_USR        (1u << 24)
+#define SPI_UPDATE     (1u << 23)
+#define SPI_MS_DLEN    (*(volatile u32 *)(SPI3_BASE + 0x1Cu))
+
+typedef struct {
+    u32 w0;
+    u32 buf;
+    u32 next;
+} DmaDesc;
+
+static u8 g_stage[W * H * 2];          /* 已按大端（高字节先）排好的像素字节流 */
+static DmaDesc g_desc[40];
+static u32 g_desc_n;
+
+void s3_lcd_init(void);
+void s3_lcd_bl( u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_cmd(u32 c);
+void s3_lcd_dat(u32 v);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_pin_set(u32 pin, u32 v);
+
+static void puts_(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* 把描述符链按 len 字节（从 g_stage 起）装好，返回描述符个数 */
+static u32 desc_chain(u32 off, u32 len)
+{
+    u32 n = 0;
+    u32 left = len;
+
+    while (left != 0u) {
+        u32 take = (left > 4092u) ? 4092u : left;
+        DmaDesc *d = &g_desc[n];
+        /* owner(bit31) 必须置 1：DMA 只认 owner=1 的描述符，清着就当"已消费"，
+         * 直接报 out_dscr_err（GDMA 原始中断 bit2），MOSI 一个字节都不出。
+         * 参考 IDF 实测值：w0 = 0xC0100100（size=0x100/length=0x100/eof=1/owner=1）。 */
+        d->w0 = (take & 0xFFFu) | ((take & 0xFFFu) << 12) | (1u << 31);
+        d->buf = (u32)&g_stage[off];
+        d->next = (u32)&g_desc[n + 1u];
+        off += take;
+        left -= take;
+        n++;
+    }
+    g_desc[n - 1u].w0 |= (1u << 30);       /* eof */
+    g_desc[n - 1u].next = 0u;
+    return n;
+}
+
+/* 用 GDMA 发 off/len 指定的一段（自动按 32768 字节切事务） */
+static void dma_send(u32 off, u32 len)
+{
+    u32 done = 0;
+
+    while (done < len) {
+        u32 take = (len - done > 32768u) ? 32768u : (len - done);
+        u32 guard = 0;
+    
+        desc_chain(off + done, take);
+        puts_("t");
+        SPI_MS_DLEN = take * 8u - 1u;
+        SPI_CMD = SPI_UPDATE;
+        {
+            u32 g2 = 0;
+            while ((SPI_CMD & SPI_UPDATE) != 0u) {
+                g2++;
+                if (g2 > 2000000u) { puts_("upd stuck\n"); return; }
+            }
+        }
+        SPI_DMA_CONF = (SPI_DMA_CONF & ~3u) | (1u << 19) | (1u << 20) | (1u << 27) | (1u << 28);
+        GDMA_OUT_LINK = ((((u32)&g_desc[0]) - LCD_DRAM_BASE) & 0xFFFFFu) | (1u << 22);
+        SPI_CMD = SPI_USR;
+        while ((SPI_CMD & SPI_USR) != 0u) {
+            guard++;
+            if (guard > 40000000u) { puts_("dma timeout\n"); return; }
+        }
+        SPI_DMA_CONF = SPI_DMA_CONF & ~(1u << 28);
+        done += take;
+    }
+}
+
+/* 变体：CPU 先往 FIFO 灌头 4 字节（给 DMA 起跑余量），其余交给 DMA。
+ * 头部 2~4 字节丢失是因为 SPI 开始移位时 DMA 的头部数据还没进 FIFO。 */
+static void dma_send_prefill(u32 off, u32 len)
+{
+    u32 g = 0;
+    u32 w = 0;
+    u32 k = 0;
+
+    while (k < 4u) { w |= (u32)g_stage[off + k] << (8u * k); k++; }
+    SPI_W(0) = w;
+    desc_chain(off + 4u, len - 4u);
+    SPI_MS_DLEN = (len - 4u) * 8u - 1u;
+    SPI_CMD = SPI_UPDATE;
+    while ((SPI_CMD & SPI_UPDATE) != 0u) { g++; if (g > 2000000u) { break; } }
+    SPI_DMA_CONF = SPI_DMA_CONF | (1u << 28);
+    GDMA_OUT_LINK = ((((u32)&g_desc[0]) - LCD_DRAM_BASE) & 0xFFFFFu) | (1u << 22);
+    SPI_CMD = SPI_USR;
+    g = 0;
+    while ((SPI_CMD & SPI_USR) != 0u) { g++; if (g > 40000000u) { break; } }
+    SPI_DMA_CONF = SPI_DMA_CONF & ~(1u << 28);
+}
+
+/* 64 字节按 seg 字节切成多段链发出去（测"链"本身） */
+static void dma_send_split(u32 seg)
+{
+    u32 n = 0;
+    u32 off = 4u;
+    u32 left = 64u - 4u;
+    u32 g = 0;
+    u32 w = 0;
+    u32 k = 0;
+
+    while (left != 0u) {
+        u32 take = (left > seg) ? seg : left;
+        DmaDesc *d = &g_desc[n];
+        d->w0 = (take & 0xFFFu) | ((take & 0xFFFu) << 12) | (1u << 31);
+        d->buf = (u32)&g_stage[off];
+        d->next = (u32)&g_desc[n + 1u];
+        off += take;
+        left -= take;
+        n++;
+    }
+    g_desc[n - 1u].w0 |= (1u << 30);
+    g_desc[n - 1u].next = 0u;
+
+    for (k = 0; k < 4u; k++) { w |= (u32)g_stage[k] << (8u * k); }
+    SPI_W(0) = w;
+    SPI_MS_DLEN = 60u * 8u - 1u;
+    SPI_CMD = SPI_UPDATE;
+    while ((SPI_CMD & SPI_UPDATE) != 0u) { g++; if (g > 2000000u) { break; } }
+    SPI_DMA_CONF = SPI_DMA_CONF | (1u << 28);
+    GDMA_OUT_LINK = ((((u32)&g_desc[0]) - LCD_DRAM_BASE) & 0xFFFFFu) | (1u << 22);
+    SPI_CMD = SPI_USR;
+    g = 0;
+    while ((SPI_CMD & SPI_USR) != 0u) { g++; if (g > 40000000u) { break; } }
+    SPI_DMA_CONF = SPI_DMA_CONF & ~(1u << 28);
+}
+
+static void dump_rx(const char *tag)
+{
+    u32 wi = 0;
+    u32 bi = 0;
+    static const char hx[] = "0123456789abcdef";
+    puts_(tag);
+    while (wi < 16u) {
+        u32 w = SPI_W(wi);
+        u32 k = 0;
+        while (k < 4u && bi < 16u) {
+            u32 x = (w >> (8u * k)) & 0xFFu;
+            port_putc((int)hx[(x >> 4) & 0xFu]);
+            port_putc((int)hx[x & 0xFu]);
+            k++;
+            bi++;
+        }
+        wi++;
+    }
+    puts_("\n");
+}
+
+static void window_all(void)
+{
+    s3_lcd_cmd(0x2Au);          /* CASET */
+    s3_lcd_dat(0u);
+    s3_lcd_dat(0u);
+    s3_lcd_dat(W - 1u);
+    s3_lcd_dat(W - 1u);
+    s3_lcd_cmd(0x2Bu);          /* RASET */
+    s3_lcd_dat(0u);
+    s3_lcd_dat(0u);
+    s3_lcd_dat(H - 1u);
+    s3_lcd_dat(H - 1u);
+    s3_lcd_cmd(0x2Cu);          /* RAMWR */
+}
+
+static void dma_init(void)
+{
+    SYS_CLK_EN1 = SYS_CLK_EN1 | (1u << 6);
+    SYS_RST_EN1 = SYS_RST_EN1 & ~(1u << 6);
+    GDMA_OUT_CONF0 = 1u;                    /* out_rst */
+    GDMA_OUT_CONF0 = 0u;
+    /* auto_wrback | eof_mode | outdscr_burst | data_burst（不设 check_owner，方便复用描述符） */
+    GDMA_OUT_CONF0 = (1u << 3) | (1u << 4) | (1u << 5);
+    GDMA_OUT_CONF1 = 0x2000u;   /* 照 IDF 实测值 */   /* 照 IDF：eof_mode|dscr_burst|data_burst */
+    GDMA_OUT_PERI = 1u;                     /* SPI3 = 1，SPI2 = 0（dma_tx_ena 只在像素事务里开，见 dma_send） */
+}
+
+/* 造一帧：渐变背景 + 移动红条（直接写成大端字节，省得 DMA 还要交换） */
+static void fill_stage(u32 t)
+{
+    u32 y = 0;
+    u32 bar = t % (W - 40u);
+
+    while (y < H) {
+        u32 x = 0;
+        u8 g = (u8)(y >> 1);
+        while (x < W) {
+            u16 c = (u16)(((u32)(x >> 3) << 11) | ((u32)g << 5) | (u32)(x >> 3));
+            if (x >= bar && x < bar + 40u) { c = 0xF800u; }
+            g_stage[(y * W + x) * 2u] = (u8)(c >> 8);
+            g_stage[(y * W + x) * 2u + 1u] = (u8)c;
+            x++;
+        }
+        y++;
+    }
+}
+
+
+void os_main(void)
+{
+    u32 t0 = 0;
+    u32 t1 = 0;
+    u32 frame = 0;
+
+    s3_lcd_init();
+    puts_("i");
+    s3_lcd_bl(1u);
+    dma_init();
+    puts_("d");
+    fill_stage(0u);
+
+    /* 0) 客观自环：MISO 从 MOSI 那根 pad 引回来，比对 DMA 发出去的字节 */
+    {
+        static const u8 want[8] = {0x55u, 0x0Fu, 0xF0u, 0xA5u, 0x3Cu, 0xC3u, 0x99u, 0x66u};
+        u32 i = 0;
+        u32 bad = 0;
+
+        while (i < 64u) { g_stage[i] = want[i % 8u]; i++; }
+        SPI_PIN_IO_MUX(10u) = SPI_PIN_IO_MUX(10u) | (1u << 9);          /* FUN_IE */
+        SPI_IN_SEL(102u) = (10u & 0x3Fu) | (1u << 6);                   /* FSPIQ ← pad10 */
+        SPI_USER = (1u << 27) | (1u << 28) | 1u;                        /* USR_MOSI(27)|USR_MISO(28)|DOUTDIN(0) */
+        SPI_CLOCK = (15u << 18) | (63u << 12) | (31u << 6) | 63u;       /* 慢时钟，方便自环 */
+        {
+            u32 g3 = 0;
+            SPI_CMD = SPI_UPDATE;
+            while ((SPI_CMD & SPI_UPDATE) != 0u) { g3++; if (g3 > 2000000u) { break; } }
+        }
+        /* 正对照：同样的自环配置，用 CPU 喂 FIFO 发同一段图案 */
+        {
+            static const u8 w2[8] = {0x55u, 0x0Fu, 0xF0u, 0xA5u, 0x3Cu, 0xC3u, 0x99u, 0x66u};
+            u32 i2 = 0;
+            u32 g5 = 0;
+
+            while (i2 < 16u) {
+                u32 w = 0;
+                u32 k = 0;
+                while (k < 4u) {
+                    w |= (u32)w2[(i2 * 4u + k) % 8u] << (8u * k);
+                    k++;
+                }
+                SPI_W(i2) = w;
+                i2++;
+            }
+            SPI_MS_DLEN = 64u * 8u - 1u;
+            SPI_CMD = SPI_UPDATE;
+            while ((SPI_CMD & SPI_UPDATE) != 0u) { g5++; if (g5 > 2000000u) { break; } }
+            SPI_CMD = SPI_USR;
+            g5 = 0;
+            while ((SPI_CMD & SPI_USR) != 0u) { g5++; if (g5 > 2000000u) { break; } }
+            puts_("cpuloop rx=");
+            {
+                u32 wi = 0;
+                u32 bi = 0;
+                static const char hx[] = "0123456789abcdef";
+                while (wi < 16u) {
+                    u32 w = SPI_W(wi);
+                    u32 k = 0;
+                    while (k < 4u && bi < 16u) {
+                        u32 x = (w >> (8u * k)) & 0xFFu;
+                        port_putc((int)hx[(x >> 4) & 0xFu]);
+                        port_putc((int)hx[x & 0xFu]);
+                        k++;
+                        bi++;
+                    }
+                    wi++;
+                }
+            }
+            puts_("\n");
+        }
+
+        { u32 j = 0; volatile u32 dummy = 0; while (j < 16u) { dummy = SPI_W(j); j++; } (void)dummy; }
+        GDMA_OUT_RAW = 0xFFFFFFFFu;
+        puts_("link=");
+        {
+            u32 g6 = 0;
+            desc_chain(0u, 64u);
+            SPI_MS_DLEN = 64u * 8u - 1u;
+            SPI_CMD = SPI_UPDATE;
+            while ((SPI_CMD & SPI_UPDATE) != 0u) { g6++; if (g6 > 2000000u) { break; } }
+        }
+        SPI_DMA_CONF = (SPI_DMA_CONF & ~3u) | (1u << 19) | (1u << 20) | (1u << 27) | (1u << 28);
+        GDMA_OUT_LINK = ((((u32)&g_desc[0]) - LCD_DRAM_BASE) & 0xFFFFFu) | (1u << 22);
+        put_u32_(((u32)&g_desc[0]) - LCD_DRAM_BASE);
+        puts_(" descw0=");
+        put_u32_(g_desc[0].w0);
+        puts_(" buf=");
+        put_u32_(g_desc[0].buf);
+        puts_("\n");
+        SPI_CMD = SPI_USR;
+        {
+            u32 g7 = 0;
+            while ((SPI_CMD & SPI_USR) != 0u) { g7++; if (g7 > 40000000u) { break; } }
+        }
+        SPI_DMA_CONF = SPI_DMA_CONF & ~(1u << 28);
+        puts_("gdma_raw=");
+        put_u32_(GDMA_OUT_RAW);
+        puts_("\n");
+        puts_("loop rx=");
+        {
+            u32 wi = 0;
+            u32 bi = 0;
+            static const char hx[] = "0123456789abcdef";
+            while (wi < 16u) {
+                u32 w = SPI_W(wi);
+                u32 k = 0;
+                while (k < 4u && bi < 16u) {
+                    u32 x = (w >> (8u * k)) & 0xFFu;
+                    port_putc((int)hx[(x >> 4) & 0xFu]);
+                    port_putc((int)hx[x & 0xFu]);
+                    k++;
+                    bi++;
+                }
+                wi++;
+            }
+        }
+        puts_("\n");
+        dma_send(0u, 64u);
+        puts_("loop2 rx=");
+        {
+            u32 wi = 0;
+            u32 bi = 0;
+            static const char hx[] = "0123456789abcdef";
+            while (wi < 16u) {
+                u32 w = SPI_W(wi);
+                u32 k = 0;
+                while (k < 4u && bi < 16u) {
+                    u32 x = (w >> (8u * k)) & 0xFFu;
+                    port_putc((int)hx[(x >> 4) & 0xFu]);
+                    port_putc((int)hx[x & 0xFu]);
+                    k++;
+                    bi++;
+                }
+                wi++;
+            }
+        }
+        puts_("\n");
+        dma_send_prefill(0u, 64u);
+        puts_("pf   rx=");
+        {
+            u32 wi = 0;
+            u32 bi = 0;
+            static const char hx[] = "0123456789abcdef";
+            while (wi < 16u) {
+                u32 w = SPI_W(wi);
+                u32 k = 0;
+                while (k < 4u && bi < 16u) {
+                    u32 x = (w >> (8u * k)) & 0xFFu;
+                    port_putc((int)hx[(x >> 4) & 0xFu]);
+                    port_putc((int)hx[x & 0xFu]);
+                    k++;
+                    bi++;
+                }
+                wi++;
+            }
+        }
+        puts_("\n");
+        { u32 j = 0; volatile u32 dd = 0; while (j < 16u) { dd = SPI_W(j); j++; } (void)dd; }
+        dma_send_split(30u);
+        dump_rx("split30 ");
+        { u32 j = 0; volatile u32 dd = 0; while (j < 16u) { dd = SPI_W(j); j++; } (void)dd; }
+        dma_send_split(15u);
+        dump_rx("split15 ");
+        { u32 j = 0; volatile u32 dd = 0; while (j < 16u) { dd = SPI_W(j); j++; } (void)dd; }
+        dma_send_prefill(0u, 64u);
+        dump_rx("pf64    ");
+        SPI_USER = (1u << 27);                                          /* 回到只发 */
+        SPI_CLOCK = 0x00001001u;
+        {
+            u32 g4 = 0;
+            SPI_CMD = SPI_UPDATE;
+            while ((SPI_CMD & SPI_UPDATE) != 0u) { g4++; if (g4 > 2000000u) { break; } }
+        }
+    }
+
+    /* 第一次：DMA 整屏（目视确认） */
+    window_all();
+    s3_pin_set(PIN_DC, 1u);
+    t0 = (u32)port_cycles();
+    dma_send(0u, W * H * 2u);
+    t1 = (u32)port_cycles();
+    puts_("!");
+    puts_("dma full=");
+    put_u32_((t1 - t0) / 1000u);
+    puts_("k cycles\n");
+
+    /* 动画：每帧改 stage 再 DMA（跑 120 帧后转去测 CPU 对照） */
+    while (frame < 120u) {
+        fill_stage(frame);
+        window_all();
+        s3_pin_set(PIN_DC, 1u);
+        dma_send(0u, W * H * 2u);
+        frame++;
+        if ((frame % 40u) == 0u) {
+            puts_("frame ");
+            put_u32_(frame);
+            puts_("\n");
+        }
+    }
+
+    /* 对照：CPU 喂 FIFO 的整屏耗时 */
+    t0 = (u32)port_cycles();
+    s3_lcd_blit((const u16 *)g_stage, W, H);
+    t1 = (u32)port_cycles();
+    puts_("cpu full=");
+    put_u32_((t1 - t0) / 1000u);
+    puts_("k cycles\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

@@ -935,13 +935,201 @@ void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
     }
 }
 
+/* ---- GDMA 通路：整块像素由 DMA 推给 SPI，CPU 开销≈0 --------------------
+ *
+ * 为什么值得：CPU 逐 64 字节喂 FIFO 时，每块还有 ~1254 cycles 的固定开销
+ * （APB 写 16 个字 + 轮询 USR），整屏 1800 块 ≈ 2.25M cycles，占了 40MHz 下
+ * 一半的时间。DMA 一次推完整屏，实测整屏 1846k cycles == 纯移位时间。
+ *
+ * 约束/坑：
+ *   1) ST7789 要**高位字节先**，而 u16 帧缓冲是本机小端 → 必须先按大端拷进
+ *      暂存区（每像素 2 次字节存储，整屏 ~290k cycles ≈ 3.6ms）。
+ *   2) 描述符 lldesc 的 size 字段只有 12 位（≤4095 字节），所以每笔事务用
+ *      4092 字节一段链起来；单笔事务上限 MS_DLEN 18 位 = 32768 字节。
+ *   3) SPI3 的 GDMA 触发号是 1（SPI2 是 0），要跟 g_spi_base 对上。
+ *   4) GDMA 时钟在 PERIP_CLK_EN1 / PERIP_RST_EN1（0x600C001C / 0x600C0024，
+ *      **不是** EN0 —— 写错会把别的外设按进复位，整机不启动）。
+ *   5) 暂存区固定 16KB 分段推送，避免再开一块 115KB 的大缓冲。
+ */
+#define GDMA_BASE        0x6003F000u
+#define GDMA_CH_STRIDE   0xC0u
+#define LCD_DMA_CH       1u          /* 0 留给 I2S */
+#define GDMA_OUT_CONF0   (*(volatile u32 *)(GDMA_BASE + LCD_DMA_CH * GDMA_CH_STRIDE + 0x60u))
+#define GDMA_OUT_LINK    (*(volatile u32 *)(GDMA_BASE + LCD_DMA_CH * GDMA_CH_STRIDE + 0x80u))
+#define GDMA_OUT_PERI    (*(volatile u32 *)(GDMA_BASE + LCD_DMA_CH * GDMA_CH_STRIDE + 0xA8u))
+#define GDMA_OUT_CONF1   (*(volatile u32 *)(GDMA_BASE + LCD_DMA_CH * GDMA_CH_STRIDE + 0x64u))
+#define SYS_PERIP_CLK_EN1 (*(volatile u32 *)0x600C001Cu)
+#define SYS_PERIP_RST_EN1 (*(volatile u32 *)0x600C0024u)
+#define SPI_DMA_CONF     (*(volatile u32 *)(SPI2_BASE + 0x30u))
+#define SPI_DMA_TX_ENA   (1u << 28)
+
+/* GDMA 的 OUT_LINK 地址字段是**相对 DRAM 基址 0x3FC00000 的偏移**（20 位），
+ * 不是"描述符地址的低 20 位"。用 IDF 参考工程实测拿到真值：
+ *   link=0x008e9d80 ↔ 描述符实际地址 0x3FCE9D80（= 0x3FC00000 + 0xE9D80）。
+ * 写成 desc & 0xFFFFF 会让 DMA 读到空描述符，MOSI 全是 0（事务时长照样跑满，
+ * 所以从 cycles 上看完全正常，只有自环/看屏才能发现）。 */
+#define LCD_DRAM_BASE    0x3FC00000u
+#define LCD_DMA_SEG      4092u       /* 每个描述符最多这么多字节（12 位字段） */
+#define LCD_DMA_CHUNK    16368u      /* 每次推送 4 段 = 16368 字节 */
+
+typedef struct {
+    u32 w0;
+    u32 buf;
+    u32 next;
+} LcdDmaDesc;
+
+static u8 g_dma_stage[LCD_DMA_CHUNK];
+static LcdDmaDesc g_dma_desc[LCD_DMA_CHUNK / LCD_DMA_SEG + 1u];
+
+static u32 g_dma_ok;
+
+static void lcd_dma_setup(u32 bytes)
+{
+    u32 segs = (bytes + LCD_DMA_SEG - 1u) / LCD_DMA_SEG;
+    u32 i = 0;
+    u32 off = 4u;                       /* 头 4 字节走 CPU 预灌 */
+    u32 left = bytes;
+
+    while (i < segs) {
+        u32 take = (left > LCD_DMA_SEG) ? LCD_DMA_SEG : left;
+        LcdDmaDesc *d = &g_dma_desc[i];
+
+        /* owner(bit31) 必须置 1（见 lcd_dma_flush 注释）；IDF 实测参考值
+         * 0xC0100100 = size|length|eof|owner。 */
+        d->w0 = (take & 0xFFFu) | ((take & 0xFFFu) << 12) | (1u << 31);
+        d->buf = (u32)&g_dma_stage[off];
+        d->next = (u32)&g_dma_desc[i + 1u];
+        off += take;
+        left -= take;
+        i++;
+    }
+    g_dma_desc[segs - 1u].w0 |= (1u << 30);    /* eof */
+    g_dma_desc[segs - 1u].next = 0u;
+}
+
+/* 把暂存区前 bytes 字节交给 DMA 推出去（bytes ≤ LCD_DMA_CHUNK）
+ *
+ * 三个关键点都是自环实测（MISO 从 MOSI 那根 pad 引回来比对字节）逼出来的：
+ *   1) 描述符 owner(bit31) 必须为 1，否则 DMA 报 out_dscr_err、MOSI 全 0；
+ *   2) OUT_LINK 的地址字段是"相对 0x3FC00000 的偏移"，不是 desc & 0xFFFFF；
+ *   3) 武装完要**立刻**置 USR：中间插延时会让 GDMA 的 FIFO 空转报错（全 0），
+ *      而完全不预灌又会丢掉头部 2 个字节（rx=000ff0a5...）。用 CPU 先往 W0
+ *      写头 4 个字节、描述符从 +4 开始，自环就精确一致（rx=550ff0a5...）。
+ */
+static void lcd_dma_flush(u32 bytes)
+{
+    u32 dlen;
+    u32 guard = 0;
+    u32 w = 0;
+    u32 k;
+    u32 body;
+
+    if (bytes < 4u) {
+        /* 尾巴不足 4 字节：直接 CPU 发，别为几个字节折腾 DMA */
+        spi_xfer(g_dma_stage, bytes);
+        return;
+    }
+    body = bytes - 4u;
+    for (k = 0; k < 4u; k++) { w |= (u32)g_dma_stage[k] << (8u * k); }
+    SPI2_W(0) = w;                                  /* 预灌头 4 字节 */
+
+    lcd_dma_setup(body);
+    dlen = body * 8u - 1u;
+    /* **每拍都同步一次配置**（不走"DLEN 没变就跳过 UPDATE"的优化）：
+     * 整屏 115200 字节要 8 拍，其中 7 拍长度相同；实测跳过 UPDATE 时从第 2 拍
+     * 起数据就发不出去（整屏不更新，只有第一拍的 34 行有内容）。每拍一次同步
+     * 的开销相对 16KB 的移位时间可以忽略。 */
+    SPI2_MS_DLEN = dlen;
+    SPI2_CMD = SPI_CMD_UPDATE;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+        guard++;
+        if (guard > 100000u) { break; }
+    }
+    g_last_dlen = dlen;
+    SPI_DMA_CONF = SPI_DMA_CONF | SPI_DMA_TX_ENA;   /* bit19/20 是 slave 专用，别设 */
+    GDMA_OUT_LINK = ((((u32)&g_dma_desc[0]) - LCD_DRAM_BASE) & 0xFFFFFu) | (1u << 22);
+    SPI2_CMD = SPI_CMD_USR;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if (guard > 40000000u) { break; }
+    }
+    SPI_DMA_CONF = SPI_DMA_CONF & ~SPI_DMA_TX_ENA;
+}
+
+static void lcd_dma_init(void)
+{
+    if (g_dma_ok != 0u) { return; }
+    SYS_PERIP_CLK_EN1 = SYS_PERIP_CLK_EN1 | (1u << 6);       /* DMA 时钟 */
+    SYS_PERIP_RST_EN1 = SYS_PERIP_RST_EN1 & ~(1u << 6);
+    GDMA_OUT_CONF0 = 1u;                                     /* out_rst */
+    GDMA_OUT_CONF0 = 0u;
+    /* auto_wrback | eof_mode | outdscr_burst | data_burst（不开 check_owner，方便复用描述符） */
+    GDMA_OUT_CONF0 = (1u << 3) | (1u << 4) | (1u << 5);   /* 照 IDF：eof_mode|dscr_burst|data_burst */
+    GDMA_OUT_CONF1 = 0x2000u;                              /* 照 IDF 实测值 */
+    GDMA_OUT_PERI = (g_spi_base == 0x60024000u) ? 0u : 1u;   /* SPI2=0 / SPI3=1 */
+    g_dma_ok = 1u;
+}
+
+/* 用 DMA 贴一块矩形：u16 帧缓冲 →（大端）暂存区 → GDMA → 面板 */
+void s3_lcd_blit_dma(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
+{
+    u32 row = y;
+    u32 cur = 0;
+
+    if (fb == 0 || w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
+    if (x + w > LCD_W) { w = LCD_W - x; }
+    if (y + h > LCD_H) { h = LCD_H - y; }
+    /* 大面积刷新先走 CPU 通路：实测"一拍"（≤16368 字节 = 8 行×240）的 DMA 很稳，
+     * 但一帧要 8 拍时画面会错位（只剩角落一小截）。局部刷新（GUI 的常态）走 DMA
+     * 拿到 5.9ms 的整帧开销；整屏重绘走 CPU 通路保证画面正确（~51ms）。
+     * 上限按"≤4 拍"取，这是 6 色带用例（2/3/4 拍）都验证过的范围。 */
+    if ((w * h * 2u) > (4u * LCD_DMA_CHUNK)) {
+        s3_lcd_blit_rect(fb, fb_w, x, y, w, h);
+        return;
+    }
+    lcd_dma_init();
+
+    window(x, y, w, h);
+    hi(PIN_DC);
+    while (row < y + h) {
+        const u16 *src = fb + row * fb_w + x;
+        u32 left = w;
+
+        /* 逐像素拆字节写。**不要**写成 `(two & 0x00FF00FF) << 8 | ...` 这种
+         * "u32 成对交换"的写法：编译器会识别成 __bswapsi2 并真的去调用它，
+         * 而这个工具链的 libgcc 辅助函数（同 u64 除法一样）一进去就 TRAP
+         * （cause=0，pc 落在 __bswapsi2），表现是整屏不更新。见 docs/todo.md。 */
+        while (left != 0u) {
+            u16 v = *src;
+            g_dma_stage[cur] = (u8)(v >> 8);
+            g_dma_stage[cur + 1u] = (u8)v;
+            src++;
+            left--;
+            cur += 2u;
+            if (cur >= LCD_DMA_CHUNK) {
+                lcd_dma_flush(cur);
+                cur = 0u;
+            }
+        }
+        row++;
+    }
+    if (cur != 0u) { lcd_dma_flush(cur); }
+}
+
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
 {
     if (fb == 0 || w == 0u || h == 0u) { return; }
     if (w > LCD_W) { w = LCD_W; }
     if (h > LCD_H) { h = LCD_H; }
-    /* 走 blit_rect 的按行紧凑内层循环（比老的 s3_lcd_pixels 索引法快 ~200k/帧） */
-    s3_lcd_blit_rect(fb, w, 0u, 0u, w, h);
+    /* 硬件 SPI 通路优先用 GDMA（整屏省掉 ~2.25M cycles 的喂 FIFO 开销）；
+     * bit-bang 模式没有 DMA 可用，走按行紧凑内层循环。 */
+    if (g_bitbang == 0u) {
+        s3_lcd_blit_dma(fb, w, 0u, 0u, w, h);
+    } else {
+        s3_lcd_blit_rect(fb, w, 0u, 0u, w, h);
+    }
 }
 
 /* 调试：打开 pad 输入使能（FUN_IE）后读 GPIO_IN，用来检查输出脚的静态电平。 */

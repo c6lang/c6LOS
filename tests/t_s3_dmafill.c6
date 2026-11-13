@@ -1,0 +1,69 @@
+/* t_s3_dmafill.c6 —— 判定"整屏 DMA"能不能用：整屏纯色 红→绿→蓝 循环。
+ * 每 1 秒换一色，屏上一定看得清；串口同时打印每色的耗时（cycles）。
+ * 如果屏一直黑/不动 → 多描述符链的整屏 DMA 没通（小脏矩形能通说明链路本身没问题）。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define W 240u
+#define H 240u
+
+static u16 g_fb[W * H];
+
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+
+static void puts_(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+/* 6 条横带，一条一色：整屏 DMA 只要被截断，一眼就能看出只画到第几条 */
+static void bands(u16 *fb)
+{
+    static const u16 c[6] = {0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu};
+    u32 y = 0;
+    while (y < H) {
+        u32 x = 0;
+        u16 col = c[y / 40u];
+        while (x < W) { fb[y * W + x] = col; x++; }
+        y++;
+    }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
+void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color);
+
+void os_main(void)
+{
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    bands(g_fb);
+
+    /* 三块区域，块越大 = 一次刷新的字节越多（每 16368 字节一拍 DMA）：
+     *   A 240x40  = 19200 B → 2 拍     红
+     *   B 240x80  = 38400 B → 3 拍     绿
+     *   C 240x120 = 57600 B → 4 拍     蓝
+     * 看哪几块出来了，就能知道从第几拍开始坏。 */
+    for (;;) {
+        u32 t0 = (u32)port_cycles();
+        u32 t1 = 0;
+
+        s3_lcd_blit_rect(g_fb, W, 0u, 0u, W, 40u);
+        s3_lcd_blit_rect(g_fb, W, 0u, 40u, W, 80u);
+        s3_lcd_blit_rect(g_fb, W, 0u, 120u, W, 120u);
+        t1 = (u32)port_cycles();
+        puts_("3rect ");
+        put_u32_((t1 - t0) / 1000u);
+        puts_("k\n");
+        s3_lcd_delay(30000000u);
+    }
+}
