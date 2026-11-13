@@ -127,14 +127,14 @@ static int run(void) {
 #if defined(C6OS_BARE)
 void os_main(void) {
     port_init();
-    port_delay_ms(1000);
+    port_delay_ms(5000);
     (void)run();
     port_bare_exit(0u);
 }
 #elif defined(C6OS_S3)
 void os_main(void) {
     port_init();
-    port_delay_ms(1000);
+    port_delay_ms(5000);
     (void)run();
     port_reboot();
 }

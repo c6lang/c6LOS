@@ -12,15 +12,11 @@ static u32 g_count = 0;
 static volatile u32 g_to_lock = 0;
 
 static u32 to_lock(void) {
-    u32 st = port_irq_save();
-
-    while (port_atomic_cas(&g_to_lock, 0u, 1u) == 0u) {
-    }
-    return st;
+    /* tick/ISR 上下文不能自旋等锁；这里只关本地中断，避免定时器 ISR 死等。 */
+    return port_irq_save();
 }
 
 static void to_unlock(u32 st) {
-    g_to_lock = 0;
     port_irq_restore(st);
 }
 
