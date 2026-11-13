@@ -64,13 +64,30 @@ static void spi3_send(u32 n)
     }
     wr(SPI3 + 0x18u, 0u);
     wr(SPI3 + 0x1Cu, (n * 8u) - 1u);
-    wr(SPI3 + 0x10u, (1u << 27));
-    wr(SPI3 + 0x0Cu, (3u << 12) | (1u << 6) | 1u);
+    wr(SPI3 + 0x10u, (1u << 27) | (1u << 9));   /* USR_MOSI + CK_OUT_EDGE */
+    /* 慢时钟：clkdiv_pre=16(写15)、n=64(写63)、h=32(写31)、l=32(写31) */
+    wr(SPI3 + 0x0Cu, (15u << 18) | (63u << 12) | (31u << 6) | 31u);
     wr(SPI3 + 0xE8u, 7u);
     wr(SPI3 + 0x00u, (1u << 23));
     while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
     wr(SPI3 + 0x00u, (1u << 24));
     while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+}
+
+/* 软件数 GPIO9 的电平变化（需要慢时钟才跟得上） */
+static u32 poll_gpio9(u32 iters)
+{
+    u32 i = 0;
+    u32 last = 0;
+    u32 n = 0;
+
+    last = rd(0x6000403Cu) & (1u << 9);      /* GPIO_IN */
+    while (i < iters) {
+        u32 v = rd(0x6000403Cu) & (1u << 9);
+        if (v != last) { n++; last = v; }
+        i++;
+    }
+    return n;
 }
 
 void os_main(void)
@@ -89,12 +106,30 @@ void os_main(void)
     pin_out(10u, 68u);
     pin_out(45u, 66u);      /* 对照：把 SPI3 时钟也引到 GPIO45 */
 
+    /* 先看慢时钟下软件轮询能否看到 SCLK 跳变 */
+    pstr("clock=");
+    pu32(rd(SPI3 + 0x0Cu));
+    pstr(" outsel9=");
+    pu32(rd(0x60004554u + 4u * 9u));
+    pstr(" outsel10=");
+    pu32(rd(0x60004554u + 4u * 10u));
+    pstr("\n");
+    /* 先完整配置（慢时钟 + 512bit），再启动，然后边传边轮询 */
+    spi3_send(64u);                       /* 这一步里已含启动并等待完成 */
+    pstr("after one 64B: clock=");
+    pu32(rd(SPI3 + 0x0Cu));
+    pstr("\n");
+    wr(SPI3 + 0x1Cu, (64u * 8u) - 1u);
+    wr(SPI3 + 0x00u, (1u << 24));         /* 启动 512bit 慢传输 */
+    d = poll_gpio9(200000u);
+    pstr("poll_gpio9_transitions=");
+    pu32(d);
+    pstr("\n");
+    while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+    d = 0;
+    m = 0;
     pcnt_init();
-    pcnt_pin(45u);
-    i = 0;
-    while (i < 200u) { spi3_send(64u); i++; }
-    s3_lcd_delay(100000u);
-    d = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
+    pcnt_pin(9u);
 
     pcnt_pin(10u);
     i = 0;
@@ -102,7 +137,7 @@ void os_main(void)
     s3_lcd_delay(100000u);
     m = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
 
-    pstr("spi3 200x64B: clk_on_gpio45=");
+    pstr("spi3 200x64B: clk_gpio9=");
     pu32(d);
     pstr(" mosi=");
     pu32(m);

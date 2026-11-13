@@ -317,14 +317,7 @@ static void hw_xfer(const u8 *p, u32 n);
 static void bb_write(const u8 *p, u32 n)
 {
     if (g_hwspi != 0u) { hw_xfer(p, n); return; }
-    /* 每笔传输给一个 CS 脉冲，并保证 CS 建立/保持时间：ST7789 要求 CS 上升沿
-     * 之后至少 ~10ns，但连续高速刷时给足余量更稳（面板能"喘口气"）。 */
-    if (g_bitbang != 0u) {
-        wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_CS);
-        dly(20);
-        wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_CS);
-        dly(20);
-    }
+
     if (g_bb_fast != 0u) { bb_write_fast(p, n); return; }
     u32 i;
     u32 b;
@@ -666,7 +659,7 @@ void s3_lcd_pixels(const u16 *px, u32 n)
             u32 bytes = k * 2u;
             hi(PIN_DC);
             spi_xfer(buf, bytes);
-            if (g_bitbang != 0u) { dly(40); }   /* 块间小间隔，别让面板连轴转 */
+
         }
         i += k;
     }
@@ -926,7 +919,7 @@ void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
             u32 bytes = k * 2u;
             hi(PIN_DC);
             spi_xfer(buf, bytes);
-            if (g_bitbang != 0u) { dly(40); }   /* 块间小间隔，别让面板连轴转 */
+
         }
         i += k;
     }
