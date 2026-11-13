@@ -176,7 +176,7 @@ static void plain_out(u32 p)
 static void matrix_out(u32 p, u32 sig)
 {
     mux_gpio(p);
-    *(volatile u32 *)GPIO_OUT_SEL(p) = sig & 0x1FFu;
+    *(volatile u32 *)GPIO_OUT_SEL(p) = (sig & 0x1FFu) | (1u << 9);
     *(volatile u32 *)GPIO_ENA_W1TS = 1u << p;
 }
 
@@ -1098,6 +1098,7 @@ static void hw_xfer(const u8 *p, u32 n)
         wr((volatile u32 *)(SPI2_W0 + 4u * (i / 4u)), w);
         i += 4u;
     }
+    while ((rd_reg(SPI2_CMD) & (1u << 24)) != 0u) { }  /* 等上一次结束 */
     wr((volatile u32 *)SPI2_DLEN, (n * 8u) - 1u);
     wr((volatile u32 *)SPI2_CMD, (1u << 24));       /* USR=1 启动 */
     while ((rd_reg(SPI2_CMD) & (1u << 24)) != 0u) { }  /* 等传输完成 */
