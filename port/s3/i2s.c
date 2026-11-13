@@ -9,7 +9,10 @@
 #include "c6os/port.h"
 
 #define I2S_BASE      0x6000F000u
-#define I2S_FIFO      (*(volatile u32 *)(I2S_BASE + 0x00u))
+/* TX FIFO 写端口：S3 上有的资料写 0x00（与 RX 共用），也有 0x04 的独立
+ * txfifo_wdata。先用 0x00，可用 s3_i2s_set_fifo_off() 切到 0x04 试。 */
+static u32 g_fifo_off = 0x00u;
+#define I2S_FIFO      (*(volatile u32 *)(I2S_BASE + g_fifo_off))
 #define I2S_INT_RAW   (*(volatile u32 *)(I2S_BASE + 0x0Cu))
 #define I2S_INT_CLR   (*(volatile u32 *)(I2S_BASE + 0x18u))
 #define I2S_TX_CONF   (*(volatile u32 *)(I2S_BASE + 0x24u))
@@ -101,11 +104,111 @@ void s3_i2s_tone(u32 freq, u32 samples, u32 sample_rate)
     }
 }
 
+void s3_i2s_set_fifo_off(u32 off)
+{
+    g_fifo_off = off;
+}
+
 void s3_i2s_silence(u32 samples)
 {
     u32 i = 0;
     while (i < samples) {
         s3_i2s_write(0u, 0u);
+        i++;
+    }
+}
+
+/* ---- 软件 I2S（GPIO 翻转）--------------------------------------------
+ * 这块 S3 的 I2S 是 EDMA-only：没有 CPU 可写的 TX FIFO，所以不配 DMA 时只能
+ * 出"噗"一声。这里用纯 GPIO 打标准 I2S（Philips）波形当作可用通路：
+ *   BCLK 下降沿换数据、上升沿被采样，WS=0 左声道 / 1 右声道，16bit MSB first，
+ *   WS 变化后延迟一个 BCLK 再出数据。
+ * 开销：24kHz×32bit = 768k bit/s，每 bit 约 30-40 周期 → 约占用 1/3 CPU。
+ */
+#define BB_GPIO_OUT (*(volatile u32 *)(0x60004000u + 0x04u))
+
+static u32 bb_shadow(void)
+{
+    /* 保住 DC/CS/BL 等静态位，只清掉我们要动的三根 */
+    return BB_GPIO_OUT & ~((1u << PIN_BCLK) | (1u << PIN_WS) | (1u << PIN_DOUT));
+}
+
+void s3_i2s_bb_init(void)
+{
+    u32 sh = bb_shadow();
+
+    /* 三根脚改成普通 GPIO 输出 */
+    *(volatile u32 *)(0x60004000u + 0x554u + 4u * PIN_BCLK) = 0x100u;
+    *(volatile u32 *)(0x60004000u + 0x554u + 4u * PIN_WS) = 0x100u;
+    *(volatile u32 *)(0x60004000u + 0x554u + 4u * PIN_DOUT) = 0x100u;
+    *(volatile u32 *)(0x60004000u + 0x24u) = (1u << PIN_BCLK) | (1u << PIN_WS) | (1u << PIN_DOUT);
+    (void)sh;
+}
+
+/* 每个半周期空转（注意不能用 volatile：会插 memw，慢几十倍） */
+static void bb_wait(u32 n)
+{
+    u32 k = n;
+    while (k != 0u) { k--; }
+}
+
+/* 输出一帧立体声（左/右各 16bit）。半周期约 52 周期 → BCLK 768kHz。 */
+void s3_i2s_bb_frame(u16 left, u16 right)
+{
+    u32 sh = bb_shadow();
+    u32 v;
+    int b;
+
+    /* WS 低 = 左声道 */
+    sh = sh & ~(1u << PIN_WS);
+    BB_GPIO_OUT = sh;                       /* WS 变化 */
+    BB_GPIO_OUT = sh & ~(1u << PIN_BCLK);   /* 先一个 BCLK 低，作为移位延迟 */
+    bb_wait(18u);
+    BB_GPIO_OUT = sh | (1u << PIN_BCLK);
+    bb_wait(18u);
+
+    b = 15;
+    while (b >= 0) {
+        v = sh;
+        if (((left >> b) & 1u) != 0u) { v = v | (1u << PIN_DOUT); }
+        BB_GPIO_OUT = v & ~(1u << PIN_BCLK);        /* 下降沿换数据 */
+        bb_wait(18u);
+        BB_GPIO_OUT = v | (1u << PIN_BCLK);         /* 上升沿采样 */
+        bb_wait(18u);
+        b--;
+    }
+
+    /* WS 高 = 右声道 */
+    sh = bb_shadow() | (1u << PIN_WS);
+    BB_GPIO_OUT = sh;
+    BB_GPIO_OUT = sh & ~(1u << PIN_BCLK);
+    bb_wait(18u);
+    BB_GPIO_OUT = sh | (1u << PIN_BCLK);
+    bb_wait(18u);
+
+    b = 15;
+    while (b >= 0) {
+        v = sh;
+        if (((right >> b) & 1u) != 0u) { v = v | (1u << PIN_DOUT); }
+        BB_GPIO_OUT = v & ~(1u << PIN_BCLK);
+        bb_wait(18u);
+        BB_GPIO_OUT = v | (1u << PIN_BCLK);
+        bb_wait(18u);
+        b--;
+    }
+}
+
+/* 软件 I2S 放一段方波：freq 赫兹、dur_ms 毫秒、rate 采样率 */
+void s3_i2s_bb_tone(u32 freq, u32 dur_ms, u32 rate)
+{
+    u32 frames = (rate / 1000u) * dur_ms;
+    u32 period = rate / freq;
+    u32 i = 0;
+
+    if (period == 0u) { period = 2u; }
+    while (i < frames) {
+        u16 v = (((i % period) * 2u) < period) ? 0x2000u : 0xE000u;
+        s3_i2s_bb_frame(v, v);
         i++;
     }
 }

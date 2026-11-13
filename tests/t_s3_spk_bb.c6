@@ -1,0 +1,72 @@
+/* t_s3_spk_bb.c6 —— 软件 I2S（GPIO 打波形）放 1kHz 方波，1 秒响 1 秒停。
+ * 同时用 PCNT 数 BCLK(15) 与 DOUT(7) 的边沿，客观确认两根线都在动。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+
+void s3_i2s_bb_init(void);
+void s3_i2s_bb_tone(u32 freq, u32 dur_ms, u32 rate);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_btn_init(void);
+void s3_btn_poll(void);
+u32 s3_btn_take_event(u32 i);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+void os_main(void)
+{
+    u32 f = 1000u;
+
+    puts_("c6os speaker (software I2S)\n");
+    s3_i2s_bb_init();
+    s3_btn_init();
+    puts_("init done, tone 1kHz (BOOT=no, VOL+/VOL-=频率)\n");
+
+    for (;;) {
+        pcnt_pin(15u);
+        s3_i2s_bb_tone(f, 1000u, 24000u);
+        puts_("f=");
+        put_u32_(f);
+        puts_("Hz bclk_edges=");
+        put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
+        puts_("\n");
+
+        /* 音量键调频率：VOL+ 升、VOL- 降（先做频率，音调明显） */
+        s3_btn_poll();
+        if (s3_btn_take_event(1u) != 0u) { if (f < 4000u) { f = f + 250u; } }
+        if (s3_btn_take_event(2u) != 0u) { if (f > 250u) { f = f - 250u; } }
+
+        s3_lcd_delay(2000000u);      /* 停一下再响下一次 */
+    }
+}
