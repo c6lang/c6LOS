@@ -125,13 +125,14 @@ void s3_trap(u32 frame_sp)
     u32 ps = 0;
 
     __asm__ __volatile__("rsr %0, exccause" : "=r"(cause));
-    if (frame_sp >= (u32)S3_DRAM_LOW &&
-        frame_sp < (u32)S3_DRAM_HIGH - 80u) {
-        pc = f[15];
-        ps = f[16];
-    }
+    /* 直接读 EPC1（异常时它保存出错 PC），比从帧里取更可靠 */
+    __asm__ __volatile__("rsr %0, epc1" : "=r"(pc));
+    __asm__ __volatile__("rsr %0, ps" : "=r"(ps));
+    (void)f;
     s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
-    port_puts("*** TRAP cause=");
+    port_puts("*** TRAP sp=");
+    trap_hex(frame_sp);
+    port_puts(" cause=");
     trap_hex(cause);
     port_puts(" pc=");
     trap_hex(pc);

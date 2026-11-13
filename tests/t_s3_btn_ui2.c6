@@ -35,6 +35,8 @@ static OsSem g_sem;
 static volatile u32 g_cnt[3];
 static volatile u32 g_dirty[3];
 static volatile u32 g_polls;
+static u32 g_last_down[3];
+static u32 g_last_cnt[3];
 
 static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
 
@@ -114,10 +116,23 @@ static void btn_task(void *arg)
                 pu32(g_cnt[i]);
                 pstr("\n");
             }
-            g_dirty[i] = 1u;    /* GUI 会按需重绘（内容没变就不刷） */
+            /* 只有"状态或计数变了"才让 GUI 重绘这一行 */
+            if (s3_btn_pressed(i) != g_last_down[i] || g_cnt[i] != g_last_cnt[i]) {
+                g_dirty[i] = 1u;
+                g_last_down[i] = s3_btn_pressed(i);
+                g_last_cnt[i] = g_cnt[i];
+                hit = 1u;
+            }
             i++;
         }
-        (void)os_sem_post(&g_sem);
+        if (hit != 0u) { (void)os_sem_post(&g_sem); }
+        if ((g_polls % 100u) == 0u) {
+            pstr("btn alive polls=");
+            pu32(g_polls);
+            pstr(" tick=");
+            pu32((u32)os_tick_get());
+            pstr("\n");
+        }
         os_task_delay(1u);      /* 10ms */
     }
 }
@@ -132,6 +147,9 @@ static void gui_task(void *arg)
         while (i < 3u) {
             if (g_dirty[i] != 0u) {
                 g_dirty[i] = 0u;
+                pstr("gui row ");
+                pu32(i);
+                pstr("\n");
                 flush_row(i);
             }
             i++;

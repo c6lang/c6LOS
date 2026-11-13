@@ -8,6 +8,7 @@
 #include "c6os/port.h"
 #include "c6os/gfx.h"
 #include "c6os/task.h"
+#include "c6os/tick.h"
 
 #define W 240u
 #define H 240u
@@ -44,11 +45,14 @@ static void blit_task(void *arg)
     (void)arg;
     while (i < 3u) {
         u32 before = g_hi;
-        u64 t0 = port_cycles();
+        u32 c0 = (u32)port_cycles();     /* 只用 32 位：u64 除法 ABI 不匹配会 TRAP */
+        u32 tk0 = (u32)os_tick_get();
         s3_lcd_blit(g_fb, W, H);
-        t0 = port_cycles() - t0;
+        c0 = (u32)port_cycles() - c0;
         pstr("blit cycles=");
-        pu32((u32)(t0 / 1000u));
+        pu32(c0 / 1000u);
+        pstr("k tick_delta=");
+        pu32((u32)os_tick_get() - tk0);
         pstr("k hi_delta=");
         pu32(g_hi - before);
         pstr("\n");
@@ -69,7 +73,8 @@ void os_main(void)
     os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x07E0u);
     os_gfx_text16(&g, 6, 6, "PREEMPT TEST", 0x0000u);
 
-    (void)os_task_create("hi", hi_task, 0, 4u, 2048u);
+    /* 同优先级才会按时间片轮转（不同优先级高优先级会把低的饿死） */
+    (void)os_task_create("hi", hi_task, 0, 2u, 2048u);
     (void)os_task_create("blit", blit_task, 0, 2u, 4096u);
     os_task_start();
     for (;;) { i++; }
