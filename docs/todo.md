@@ -795,3 +795,31 @@ S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移�
 （当年扫信号号时"只有 103 会翻转"正好对应 MOSI 通了、CLK 没通）。
 下一步：按上表把 `spi_xfer()` 换成硬件 SPI，就能替掉 bit-bang，彻底解决
 "连续刷新几秒后定格"。
+
+## 会话收尾状态（S3 真板，2025）
+
+### 真板已验证可用
+- **面板 ST7789 240×240**：点亮、显示我们自己的画面（纯色/竖条/8×16 文字/仪表盘/
+  FPS 表），走 bit-bang，整屏 ≈29.1M cycles ≈5.7fps。
+  `tests/t_s3_lcd.c6` → `PASS: s3 lcd (bitbang path)`
+- **三键 BOOT/VOL+/VOL-**：`tests/t_s3_btn_ui.c6`（单任务局部刷新，长时间可用）、
+  `tests/t_s3_btn_ui2.c6`（按键任务 + GUI 任务，生产写法，只在变化时刷）
+- **内核**：100Hz tick 抢占正常（blit 期间另一任务实测跑了 49 万次）、
+  双核 SMP 三项用例 PASS、shell 输入 PASS
+- **上游对照**：IDF v6.0.1 + xiaozhi v2.5.0 源码现场编译，板型
+  `CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_WIFI=y`，烧板后屏亮 + 三键正常（用户确认）
+  → 证明硬件（面板/按键/供电）没问题
+
+### 唯一未解决：连续高频刷新几秒后画面定格
+- 已排除：OS/调度（单任务也会停）、绘图状态（gfx 字段稳定）、中断屏蔽、分块大小、
+  CS 脉冲、降速；数据确实在发（PCNT 数 SCLK/SDA 边沿持续增长）；
+  面板是活的（发 DISPOFF 会黑屏）
+- 原厂固件（硬件 SPI + DMA）长时间动画正常 → **必须换硬件 SPI**
+- 硬件 SPI 进展：`port/s3/panel.c` 已有 `s3_lcd_use_spi2hw(div)` + `hw_xfer()`，
+  寄存器偏移已按 `spi_reg.h` 纠正（CLOCK=0x0C、USER=0x10、MS_DLEN=0x1C、W0=0x98），
+  配置后置 `UPDATE`、启动前等 `USR` 清零；`tests/t_s3_spi2hw.c6` 可自测
+  （PCNT 数 SCLK/MOSI）。
+  现状：MOSI 有边沿（说明 SPI 内部在移位），**SCLK 仍未到 GPIO9**，且边沿总数
+  远小于应有值（只有极少数 chunk 真的发出）。
+- 下一步建议：①单独用 `hw_xfer()` 连发固定 64B 数 SCLK（不掺面板逻辑）定位；
+  ②确认本板 SCLK 是否还需要额外 OEN/IO_MUX 处理；③或直接上 GDMA 喂 SPI2。
