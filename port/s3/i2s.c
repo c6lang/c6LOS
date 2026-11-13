@@ -211,3 +211,73 @@ void s3_i2s_bb_tone(u32 freq, u32 dur_ms, u32 rate)
         i++;
     }
 }
+
+/* ---- I2S + GDMA 播放（正路：S3 的 I2S 没有 CPU 可写 FIFO，全靠 GDMA）----
+ * 数字来自 IDF v6.0.1：
+ *   GDMA base 0x6003F000，通道步长 0xC0
+ *   GDMA_OUT_LINK_CH0   = +0x80（addr[19:0]，start=bit22）
+ *   GDMA_OUT_PERI_SEL_CH0 = +0xA8（sel[5:0]）
+ *   SOC_GDMA_TRIG_PERIPH_I2S0 = 3
+ *   描述符沿用 lldesc：w0=size[11:0]|length[23:12]|offset[28:24]|sosf[29]|eof[30]|owner[31]
+ *                     w1=buf 指针，w2=下一个描述符指针
+ */
+#define GDMA_BASE     0x6003F000u
+#define GDMA_CH_STRIDE 0xC0u
+#define GDMA_OUT_CONF0(ch)    (*(volatile u32 *)(GDMA_BASE + (ch) * GDMA_CH_STRIDE + 0x60u))
+#define GDMA_OUT_LINK(ch)     (*(volatile u32 *)(GDMA_BASE + (ch) * GDMA_CH_STRIDE + 0x80u))
+#define GDMA_OUT_PERI_SEL(ch) (*(volatile u32 *)(GDMA_BASE + (ch) * GDMA_CH_STRIDE + 0xA8u))
+#define GDMA_IN_LINK(ch)      (*(volatile u32 *)(GDMA_BASE + (ch) * GDMA_CH_STRIDE + 0x20u))
+#define GDMA_IN_PERI_SEL(ch)  (*(volatile u32 *)(GDMA_BASE + (ch) * GDMA_CH_STRIDE + 0x48u))
+#define SYS_CLK_EN1   (*(volatile u32 *)0x600C001Cu)
+#define SYS_RST_EN1   (*(volatile u32 *)0x600C0024u)
+#define DMA_CLK_BIT   (1u << 6)     /* SYSTEM_DMA_CLK_EN（SYS_PERIP_CLK_EN1 里） */
+
+typedef struct {
+    u32 w0;     /* size/length/offset/sosf/eof/owner */
+    u32 buf;
+    u32 next;
+} I2sDesc;
+
+/* 打开 GDMA 时钟 */
+void s3_gdma_init(void)
+{
+    wr(&SYS_CLK_EN1, SYS_CLK_EN1 | DMA_CLK_BIT);
+    wr(&SYS_RST_EN1, SYS_RST_EN1 & ~DMA_CLK_BIT);
+}
+
+static u32 desc_w0(u32 size, u32 length, u32 eof, u32 owner)
+{
+    return (size & 0xFFFu) | ((length & 0xFFFu) << 12) | ((eof & 1u) << 30) | ((owner & 1u) << 31);
+}
+
+/* 用两个描述符组成环形链，指向同一块样本缓冲，启动 I2S0 TX 的 GDMA */
+void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch)
+{
+    static I2sDesc d[2];
+    u32 bytes = frames * 4u;      /* 立体声 16bit = 4 字节/帧 */
+
+    s3_gdma_init();
+
+    d[0].w0 = desc_w0(bytes, bytes, 1u, 1u);
+    d[0].buf = (u32)samples;
+    d[0].next = (u32)&d[1];
+    d[1].w0 = desc_w0(bytes, bytes, 1u, 1u);
+    d[1].buf = (u32)samples;
+    d[1].next = (u32)&d[0];
+
+    /* 通道复位 + 自动回写 owner（循环播放必需，否则喂完一轮就停，只能听到"噗"） */
+    wr(&GDMA_OUT_CONF0(ch), 1u);       /* out_rst=1 */
+    wr(&GDMA_OUT_CONF0(ch), 0u);       /* out_rst=0 */
+    wr(&GDMA_OUT_CONF0(ch), (1u << 2));/* out_auto_wrback=1 */
+
+    /* I2S0 用 GDMA 触发号 3；把通道接到 I2S0，装描述符并启动 */
+    wr(&GDMA_OUT_PERI_SEL(ch), 3u);
+    wr(&GDMA_OUT_LINK(ch), ((u32)&d[0] & 0xFFFFFu));
+    wr(&GDMA_OUT_LINK(ch), ((u32)&d[0] & 0xFFFFFu) | (1u << 22));   /* start */
+}
+
+/* 启动 I2S TX（时钟与格式已在 s3_i2s_init 里配好） */
+void s3_i2s_tx_start(void)
+{
+    I2S_TX_CONF = I2S_TX_CONF | (1u << 2);    /* TX_START */
+}

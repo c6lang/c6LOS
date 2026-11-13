@@ -1,0 +1,91 @@
+/* t_s3_spk_dma.c6 —— 走 GDMA 的 I2S0 播放：把一段 1kHz 方波样本放进环形描述符链，
+ * 由 GDMA 持续喂给 I2S0。验证：PCNT 数 DOUT(GPIO7) 与 BCLK(GPIO15) 边沿 + 人耳。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define FRAMES 512u
+
+void s3_i2s_init(u32 sample_rate);
+void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch);
+void s3_i2s_tx_start(void);
+void s3_lcd_delay(u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+static u16 g_buf[FRAMES * 2u] = {0};    /* 立体声交织 */
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 dout = 0;
+    u32 bclk = 0;
+
+    pstr("c6os speaker via GDMA\n");
+
+    /* 1kHz 方波，24kHz 采样，立体声（左右相同） */
+    i = 0;
+    while (i < FRAMES) {
+        u16 v = (((i % 24u) * 2u) < 24u) ? 0x2000u : 0xE000u;
+        g_buf[i * 2u] = v;
+        g_buf[i * 2u + 1u] = v;
+        i++;
+    }
+
+    s3_i2s_init(24000u);
+    pstr("i2s init done\n");
+
+    s3_i2s_dma_play(g_buf, FRAMES, 0u);
+    s3_i2s_tx_start();
+    pstr("dma started\n");
+
+    pcnt_init();
+    s3_lcd_delay(2000000u);      /* 约 0.12s 让 DMA 跑起来 */
+
+    pcnt_pin(7u);
+    s3_lcd_delay(4000000u);
+    dout = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pcnt_pin(15u);
+    s3_lcd_delay(4000000u);
+    bclk = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pstr("dout_edges=");
+    pu32(dout);
+    pstr(" bclk_edges=");
+    pu32(bclk);
+    pstr("\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}
