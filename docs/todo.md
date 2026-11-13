@@ -13,7 +13,7 @@
 | P0-2 | esptool | 5.6.0（系统 pip） | `esptool version`；能连 `/dev/ttyACM0` | 完成 |
 | P0-3 | 硬件实测 | README「已知硬件」 | chip-id / flash-id / PSRAM 8MB / MAC | 完成 |
 | P0-4 | 原厂 flash 备份 | `build/backup/flash-16MB.bin` + sha256 | 读回 16MB，可回滚 | 完成（sha256 `fa1a3fcb…8dfe`） |
-| P0-5 | 屏型号/引脚确认 | `boards/xiaozhi-s3-spi.h` | RDDID 或卖家资料确认 IC + 引脚 | 阻塞（待板卡资料） |
+| P0-5 | 屏型号/引脚确认 | `boards/xiaozhi-s3-spi.h` | RDDID 或卖家资料确认 IC + 引脚 | **完成**：屏幕为 **ST7789 240×240 SPI**；引脚 SDA=10/SCL=9/DC=8/CS=14/RES=18/BL=13 与上游 `78/xiaozhi-esp32` v2.5.0 的 `xingzhi-cube-1.54tft-wifi/config.h` 逐项一致（原文已抓取核对），出处在 `docs/s3-board-identification.md` |
 | P0-6 | 仓库骨架 + 设计文档 | README + docs/5 篇 | 文档评审通过 | 完成 |
 
 > P0-4 必须在任何 `write-flash` 之前执行。
@@ -177,15 +177,15 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**当前驱动有两条通路**：GPSPI2 硬件 SPI（数据通路已验证：MOSI 256 边沿/64B）与
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | **真板完成（屏幕已点亮，用户目视确认）**（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**当前驱动有两条通路**：GPSPI2 硬件 SPI（数据通路已验证：MOSI 256 边沿/64B）与
 bit-bang 兜底（PCNT 实测 512 边沿/64B、整屏填色 5.16M cycles ≈ 15fps）；
 **硬件 SPI 的 SCLK 输出实测打不出边沿**（同一时刻 MOSI 有 256 个、SCLK 0 个，
 GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c` 现在**默认走 bit-bang**（`g_bitbang=1`），demo/dash/`t_s3_lcd`
 全用它；`s3_lcd_use_bitbang(0)` 可切回硬件 SPI 做实验。
 详见 `docs/s3-panel-bringup.md` §4.5。**已由真板确认成像（用户目视：颜色/竖条/文字/仪表盘都对）**，`tests/t_s3_lcd_kiosk.c6`（当前留在板上跑）会
 自动轮播 纯色红/绿/蓝 → 8 色竖条+文字 → 仪表盘一帧，串口同步打印各步耗时与 tick |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 5.16M cycles、帧缓冲全屏 blit 5.81M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈14fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
-| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | **真板通过**（`rt/dash.c` 绘制 tick/任务数/堆用量 + 任务行；`t_dash` host PASS；`tests/t_s3_dash.c6` 在 S3 上建 dash 任务，每帧 6.69M cycles（首帧含字体，≈5.9fps）画进 240×240 帧缓冲再 blit 上屏，串口同步打印同一组数字：`tick=57/83/109... tasks=3`，tick 稳定递增 ≈26/帧，说明定时器→调度器→dash 任务整条链路在真板成立。屏上成像仍需人眼确认） |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | **真板完成**（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 5.16M cycles、帧缓冲全屏 blit 5.81M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈14fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
+| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | **真板通过**（`rt/dash.c` 绘制 tick/任务数/堆用量 + 任务行；`t_dash` host PASS；`tests/t_s3_dash.c6` 在 S3 上建 dash 任务，每帧 6.69M cycles（首帧含字体，≈5.9fps）画进 240×240 帧缓冲再 blit 上屏，串口同步打印同一组数字：`tick=57/83/109... tasks=3`，tick 稳定递增 ≈26/帧，说明定时器→调度器→dash 任务整条链路在真板成立；屏幕成像已由用户目视确认） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
 

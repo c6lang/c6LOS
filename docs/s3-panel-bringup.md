@@ -213,6 +213,22 @@ SPI3/LCD_CAM 的 i80 通路。
 - 待确认：面板实际成像（需要人眼）。初始化/整屏填色/帧缓冲 blit 的软件
   路径已跑通，串口数据（周期数、fps）可复现。
 
+## 5.5 自检用例索引（都在 `tests/` 下，`make ... S3_MAIN=tests/<名字>.c6 s3` 即可构建）
+
+| 用例 | 用途 |
+| --- | --- |
+| `t_s3_lcd_kiosk` | **演示/点亮验收**：纯色红绿蓝 → 8 色竖条+文字 → 仪表盘一帧循环 |
+| `t_s3_lcd` | 正式验收：DRAM 自检 + 整屏填色/帧缓冲 blit 周期与 fps，`PASS: s3 lcd` |
+| `t_s3_dash` | 仪表盘任务：tick/tasks/堆用量上屏，串口同步打印 |
+| `t_s3_lcd_pins` | 读回 pad 电平（发现"输出使能没打开"就靠它） |
+| `t_s3_sigscan` | 扫 0..255 号 GPIO 输出信号，找哪个在传输期间翻转 |
+| `t_s3_sclk_cnt` / `t_s3_sclk_why` | 用 PCNT 数 SCLK/MOSI 边沿（含软件翻转正对照） |
+| `t_s3_sclk_try` / `t_s3_clk13` | 逐个替换 SPI 配置（mode/时钟源/ck_mode_13…）看时钟是否出脚 |
+| `t_s3_spi3` / `t_s3_vendor` | 切到 SPI3、照上游（SPI3 + equ_sysclk 80MHz）参数驱动 |
+| `t_s3_dly` | 标定 `dly()` 周期数（5 cycles/单位），用于按手册算延时 |
+| `t_s3_lcd_sweep` | 假设替换演示（慢时钟/DC 反相/INVOFF/BGR/旋转/全速） |
+| `t_s3_lcd_id` / `t_s3_lcd_id2` / `t_s3_lcd_rdreg` | RDDID / 寄存器回读（本板读不出值，仅供参考） |
+
 ## 6. 复现
 
 ```sh
