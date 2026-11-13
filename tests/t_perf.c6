@@ -132,9 +132,15 @@ void os_main(void) {
     port_bare_exit(0u);
 }
 #elif defined(C6OS_S3)
+static void s3_spin_ms(u32 ms) {
+    u32 t0 = (u32)port_cycles();
+    u32 d = ms * 40000u;
+    while ((u32)((u32)port_cycles() - t0) < d) {
+    }
+}
 void os_main(void) {
     /* start.S 已经调用 port_init；这里不能再初始化一次 USB/中断。 */
-    port_delay_ms(5000);
+    s3_spin_ms(1000u);
     (void)run();
     port_reboot();
 }
