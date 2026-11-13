@@ -170,7 +170,10 @@ cycles、`dly(1200000)`=6.0M cycles）。原来 init 里用 `dly(1200000)` 只�
 说明脚确实挂在 SCLK 上）、`CLOCK=0x00003041`（H+L=N 自洽）、`CK_IDLE_EDGE`
 置 0/1、`USER` 加 CMD/DUMMY/DOUTDIN、`equ_sysclk`、PLL/XTAL 两种源、扫
 0..255 号**全部**输出信号（只有 103 会翻转，128–255 段也没有任何信号在动）、`SLAVE_REG.clk_mode_13`（{CPOL,CPHA} 支持位）
-与 `CK_IDLE_EDGE`/`CK_OUT_EDGE` 的 6 种组合（SCLK 仍 0 边沿、MOSI 始终 256）。**下一步**：对照 IDF `spi_bus_initialize`
+与 `CK_IDLE_EDGE`/`CK_OUT_EDGE` 的 6 种组合（SCLK 仍 0 边沿、MOSI 始终 256）、
+以及 IDF `esp_lcd` 那种"命令相位 + 数据相位"的事务结构（`USER.USR_COMMAND` +
+`USER2[31:28]`=命令 bitlen、`USER2[15:0]`=命令值；`tests/t_s3_cmdphase.c6`，
+实测该结构下事务根本回不来，`tests` 在 init 阶段就卡住）。**下一步**：对照 IDF `spi_bus_initialize`
 的完整初始化序列（尤其 `SPI_SLAVE_REG`/`SPI_CTRL` 里可能另有门控位），或换
 SPI3/LCD_CAM 的 i80 通路。
 
