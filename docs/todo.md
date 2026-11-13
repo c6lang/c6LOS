@@ -686,3 +686,11 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   下一步建议：把 IDF `gdma_hal.c` 里 TX 通道的完整初始化抄全（burst size、
   priority、channel reset 时序、`out_link` 的 addr 字段基准/宽度），或者干脆
   用 IDF 的 gdma 源码在自己的内核里编一份。
+
+- **S3 抢占与长时间 bit-bang 的冲突（待查，重要）**：`tests/t_s3_preempt_blit.c6`
+  里高优先级计数任务 + 低优先级整屏 blit 任务，实测在 blit 过程中发生任务切换
+  会陷入 `*** TRAP cause=00000000 pc=00000000`。也就是说内核虽然 100Hz tick
+  抢占正常（`t_s3_preempt` PASS），但**在 bit-bang 长循环中间被抢占后恢复不了**
+  ——这解释了"重绘期间按键不灵/卡顿"。下一步：核对 `port/s3/ctx.S` 里
+  `port_task_switch` 保存/恢复的 EPC 与 frame，以及 `s3_timer_irq` 里
+  `port_irq_fill`(frame) 对被打断帧的处理（bit-bang 循环在任务态，帧应在任务栈上）。
