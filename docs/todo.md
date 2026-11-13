@@ -810,7 +810,7 @@ S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移�
   `CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_WIFI=y`，烧板后屏亮 + 三键正常（用户确认）
   → 证明硬件（面板/按键/供电）没问题
 
-### 唯一未解决：连续高频刷新几秒后画面定格
+### 【已解决，见文末】连续高频刷新几秒后画面定格
 - 已排除：OS/调度（单任务也会停）、绘图状态（gfx 字段稳定）、中断屏蔽、分块大小、
   CS 脉冲、降速；数据确实在发（PCNT 数 SCLK/SDA 边沿持续增长）；
   面板是活的（发 DISPOFF 会黑屏）
@@ -834,3 +834,32 @@ S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移�
   GPIO9 和对照用的 GPIO45 上都没有波形**（寄存器 gate=7/clock=0x3041/user=USR_MOSI
   全部正确、GPIO 矩阵 OUT_SEL 也正确）。下一步需要：对照 IDF `spi_master`
   驱动跑通后的寄存器快照，或用逻辑分析仪确认 SCLK 是否真的没有波形。
+
+### 【已解决】硬件 SPI 时钟 + GUI "定格"（本轮最终结论）
+
+两个独立的问题，都已修好并真板验证（详见 `docs/s3-panel-bringup.md` §4.6 / §4.65）：
+
+1. **硬件 SPI 打不出 SCLK**（三个叠加的寄存器 bug，`port/s3/panel.c`）
+   - `SPI_CLOCK.CLKCNT_L` **必须等于 `CLKCNT_N`**（IDF `spi_ll_master_cal_clock`：
+     `l = n`）。我们按"H+L=N"写成 `N/2` → 模块内部照常移位、MOSI 有边沿，
+     但 SCLK 引脚 0 个边沿。实测（78kHz，软件当逻辑分析仪）：
+     `l=n/2` → sclk9=0 / mosi10=256；`l=n` → sclk9=1024 / mosi10=256。
+   - FIFO **低字节先出**（IDF 就是 `memcpy` 进 `data_buf`）。原来按 MSB 打包，
+     每 4 字节整组倒序；单字节命令直接变成 `0x00` → 面板黑屏。
+   - mode 3 下 `USER.CK_OUT_EDGE` **必须为 0**（置 1 时数据在上升沿更新，正好
+     和面板的上升沿采样撞车）。
+   - 结果：20MHz 硬件 SPI 正常出图，`tests/t_s3_gui.c6` 连续整屏重绘 1~2 分钟
+     画面一直在动；帧 ≈7.2M cycles ≈90ms（含 gfx 绘图）。
+     新增用例：`t_s3_sclkdiag`、`t_s3_sclkdiag2`、`t_s3_spiwire`、`t_s3_gui`、
+     `t_s3_lcd_hwlive`、`t_s3_hello`。
+
+2. **"连续刷新几秒后定格"的真因是控制台阻塞**（`port/s3/console.c`）
+   - `port_putc()` 里两处 `guard > 2000000` 忙等：主机没读串口时 `WR_DONE`
+     不自清，**每字节最坏 250ms**，一行 20 字节打印 = **~5 秒**卡住 GUI；
+     一旦上位机开始读串口就"自己恢复"（用户实测）。只在按键时打印的版本
+     几乎不卡，正好对应"越连续刷越容易定格"。
+   - 修法：两处等待上限压到 20000 次（≈1ms），超限直接丢字节，绝不阻塞业务。
+     实测：串口不接的情况下连续跑 1~2 分钟无停顿。
+
+下一步（性能，不影响正确性）：SPI 时钟 40MHz、上 GDMA 一次推整帧、
+gfx 全屏填充优化；再往后才是原来列的 WiFi/mic/喇叭。
