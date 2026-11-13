@@ -26,7 +26,10 @@
 #define OEN_ALWAYS      (1u << 10)
 
 /* ---- SPI2 ------------------------------------------------------------- */
-#define SPI2_BASE      0x60024000u
+/* SPI 主机可切换：SPI2(GPSPI2, 0x60024000) 或 SPI3(GPSPI3, 0x60025000)。
+ * 上游 xiaozhi v2.5.0 这块板用的是 SPI3_HOST，所以优先试 SPI3。 */
+static u32 g_spi_base = 0x60025000u;   /* 默认 SPI3 */
+#define SPI2_BASE      g_spi_base
 #define SPI2_CMD       (*(volatile u32 *)(SPI2_BASE + 0x00u))
 #define SPI2_CTRL      (*(volatile u32 *)(SPI2_BASE + 0x08u))
 #define SPI2_CLOCK     (*(volatile u32 *)(SPI2_BASE + 0x0Cu))
@@ -50,13 +53,36 @@
 #define SPI_DOUTDIN       (1u << 0)    /* USER: 1=全双工（MOSI/MISO 同时） */
 #define SPI_CS_KEEP_ACTIVE (1u << 30)  /* MISC: 事务结束后不抬 CS */
 
-#define SIG_FSPICLK     101u
-#define SIG_FSPID       103u
-#define SIG_FSPICS0     110u
+static u32 g_sig_clk = 66u;    /* SPI3_CLK_OUT_IDX */
+static u32 g_sig_d   = 68u;    /* SPI3_D_OUT_IDX */
+static u32 g_sig_cs  = 71u;    /* SPI3_CS0_OUT_IDX */
+
+/* 切换主机：0=SPI2(FSPI 信号 101/103/110，时钟位 6)
+ *           1=SPI3(SPI3 信号 66/68/71，时钟位 16) */
+void s3_lcd_use_spi3(u32 on)
+{
+    if (on != 0u) {
+        g_spi_base = 0x60025000u;
+        g_sig_clk = 66u;
+        g_sig_d = 68u;
+        g_sig_cs = 71u;
+    } else {
+        g_spi_base = 0x60024000u;
+        g_sig_clk = 101u;
+        g_sig_d = 103u;
+        g_sig_cs = 110u;
+    }
+}
+
+u32 s3_lcd_get_spi_host(void)
+{
+    return (g_spi_base == 0x60025000u) ? 3u : 2u;
+}
 
 #define SYS_PERIP_CLK_EN0 (*(volatile u32 *)0x600C0018u)
 #define SYS_PERIP_RST_EN0 (*(volatile u32 *)0x600C0020u)
 #define SYS_SPI2_BIT      (1u << 6)
+#define SYS_SPI3_BIT      (1u << 16)
 
 /* ---- 面板 ------------------------------------------------------------- */
 #define PIN_SCLK 9u
@@ -143,6 +169,8 @@ static void matrix_out(u32 p, u32 sig)
     *(volatile u32 *)GPIO_ENA_W1TS = 1u << p;
 }
 
+static void bb_dc(u32 level);
+
 /* ---- bit-bang 兜底通路 ------------------------------------------------ */
 
 /* SPI2 的 SCLK 输出在这块板子上实测不出边沿（用 PCNT 数引脚：同时刻 MOSI 有
@@ -153,6 +181,8 @@ static void matrix_out(u32 p, u32 sig)
  * docs/s3-panel-bringup.md §4.5，PCNT 实测 0 边沿而 MOSI 有 256），
  * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
 static u32 g_bitbang = 1;
+static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
+static u32 g_dc_inv = 0;      /* DC 极性取反（有些板子反相） */
 
 void s3_lcd_use_bitbang(u32 on)
 {
@@ -165,9 +195,9 @@ void s3_lcd_use_bitbang(u32 on)
         lo(PIN_CS);            /* 常低选中 */
         lo(PIN_SDA);
     } else {
-        matrix_out(PIN_SCLK, SIG_FSPICLK);
-        matrix_out(PIN_SDA, SIG_FSPID);
-        matrix_out(PIN_CS, SIG_FSPICS0);
+        matrix_out(PIN_SCLK, g_sig_clk);
+        matrix_out(PIN_SDA, g_sig_d);
+        matrix_out(PIN_CS, g_sig_cs);
     }
 }
 
@@ -217,6 +247,27 @@ int s3_lcd_read_bb(u32 cmd, u8 *out, u32 n)
     return 0;
 }
 
+void s3_lcd_set_bb_pad(u32 n)
+{
+    g_bb_pad = n;
+}
+
+void s3_lcd_set_dc_inv(u32 on)
+{
+    g_dc_inv = on;
+}
+
+static void bb_dc(u32 level)
+{
+    if ((level ^ g_dc_inv) != 0u) { hi(PIN_DC); } else { lo(PIN_DC); }
+}
+
+static void bb_delay(void)
+{
+    volatile u32 k = g_bb_pad;
+    while (k != 0u) { k--; }
+}
+
 static void bb_write(const u8 *p, u32 n)
 {
     u32 i;
@@ -235,7 +286,9 @@ static void bb_write(const u8 *p, u32 n)
             }
             v = v << 1;
             wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_SCLK);   /* 下降沿改数据 */
+            if (g_bb_pad != 0u) { bb_delay(); }
             wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_SCLK);   /* 上升沿采样 */
+            if (g_bb_pad != 0u) { bb_delay(); }
             b++;
         }
         i++;
@@ -332,13 +385,13 @@ static void cmd(u8 c)
     dbg(" cmd ");
     dbg_hex((u32)c);
     dbg("\n");
-    lo(PIN_DC);
+    bb_dc(0u);
     spi_xfer(&c, 1u);
 }
 
 static void dat(const u8 *p, u32 n)
 {
-    hi(PIN_DC);
+    bb_dc(1u);
     spi_write(p, n);
 }
 
@@ -369,9 +422,13 @@ static void spi_init(void)
 
     s3_mark(9u, 0x1001u);
 
-    SYS_PERIP_RST_EN0 |= SYS_SPI2_BIT;
-    SYS_PERIP_CLK_EN0 |= SYS_SPI2_BIT;
-    SYS_PERIP_RST_EN0 &= ~SYS_SPI2_BIT;
+    {
+        u32 bit = (g_spi_base == 0x60025000u) ? SYS_SPI3_BIT : SYS_SPI2_BIT;
+        SYS_PERIP_RST_EN0 |= bit;
+        SYS_PERIP_CLK_EN0 |= bit;
+        SYS_PERIP_RST_EN0 &= ~bit;
+    }
+
 
     /* SPI2 的 DMA/TRANS_DONE 中断必须先关掉并清挂起：ROM 里它可能已经经中断
      * 矩阵接到了 CPU，而本内核的 level-1 向量只按 EXCCAUSE 分流（定时器/异常），
@@ -733,8 +790,8 @@ u32 s3_lcd_get_gate(void) { return *(volatile u32 *)(SPI2_BASE + 0xE8u); }
 void s3_lcd_dat_raw(const u8 *p, u32 n) { hi(PIN_DC); spi_write(p, n); }
 
 /* 给调试用例用：直接发一条命令 / 一个参数。 */
-void s3_lcd_cmd(u32 c) { cmd((u8)c); }
-void s3_lcd_dat(u32 v) { u8 b = (u8)v; dat(&b, 1u); }
+void s3_lcd_cmd(u32 c) { if (g_bitbang != 0u) { bb_dc(0u); } cmd((u8)c); }
+void s3_lcd_dat(u32 v) { u8 b = (u8)v; if (g_bitbang != 0u) { bb_dc(1u); } dat(&b, 1u); }
 
 /* 只填一块矩形（带窗口），用来验证 CASET/RASET 寻址。 */
 void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color)

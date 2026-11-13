@@ -1,0 +1,117 @@
+/* t_s3_spi3.c6 —— 用 SPI3（上游 xiaozhi 板用的就是 SPI3_HOST）驱动面板，
+ * 并用 PCNT 数 SCLK/MOSI 边沿，确认时钟这次能不能上引脚。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define PCNT_BASE 0x60017000u
+#define W 240u
+#define H 240u
+
+void s3_lcd_use_spi3(u32 on);
+u32 s3_lcd_get_spi_host(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_init(void);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_dat_raw(const u8 *p, u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static void pcnt_map(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+}
+
+static u32 count_pin(u32 pin)
+{
+    static const u8 pat[64] = {0x55u, 0x55u};
+    pcnt_map(pin);
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    s3_lcd_dat_raw(pat, 64u);
+    return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+void os_main(void)
+{
+    u32 sclk = 0;
+    u32 mosi = 0;
+    u32 i = 0;
+
+    puts_("c6os lcd over SPI3\n");
+    s3_lcd_use_spi3(1u);
+    s3_lcd_use_bitbang(0u);          /* 走硬件 SPI */
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("host=SPI");
+    put_u32_(s3_lcd_get_spi_host());
+    puts_(" init done\n");
+
+    pcnt_init();
+    sclk = count_pin(9u);
+    mosi = count_pin(10u);
+    puts_("hardware spi: sclk=");
+    put_u32_(sclk);
+    puts_(" mosi=");
+    put_u32_(mosi);
+    puts_("\n");
+
+    /* 画点东西：不管时钟有没有，先让屏幕有机会显示 */
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "SPI3", 0x0000u);
+
+    for (;;) {
+        s3_lcd_fill(0xF800u);
+        puts_("1 red\n");
+        s3_lcd_delay(9000000u);
+        s3_lcd_fill(0x07E0u);
+        puts_("2 green\n");
+        s3_lcd_delay(9000000u);
+        s3_lcd_blit(g_fb, W, H);
+        puts_("3 bars\n");
+        s3_lcd_delay(9000000u);
+        s3_lcd_fill(0x001Fu);
+        puts_("4 blue\n");
+        s3_lcd_delay(9000000u);
+    }
+}

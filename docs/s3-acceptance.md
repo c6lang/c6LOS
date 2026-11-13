@@ -46,3 +46,29 @@
 
 面板的物理成像仍只能靠人眼确认；若屏幕仍无图像，可能性收敛为：面板/排线本身、
 这块屏 SDA 只做输入（回读全不出值）、或该屏需要本驱动之外的初始化。
+
+## 现场排查用：假设逐个替换（`tests/t_s3_lcd_sweep.c6`）
+
+用户反馈"只有背光、屏是黑的"，因此做一个每 4 秒换一种假设、串口同步报步号的
+演示，靠眼睛定位。已核对上游源码：
+
+- 引脚与上游 `config.h` **完全一致**：SDA=10、SCL=9、DC=8、CS=14、RES=18、
+  BL=13；240×240；`DISPLAY_SWAP_XY/MIRROR_X/MIRROR_Y` 全 false、offset 0。
+- 上游 `xingzhi-cube-1.54tft-wifi.cc` 用的是 `esp_lcd_new_panel_st7789` +
+  **`SPI3_HOST`**（所以本仓库驱动也加了 SPI3 支持：基址 `0x60025000`、
+  时钟位 bit16、信号 `SPI3_CLK_OUT=66 / SPI3_D_OUT=68 / SPI3_CS0=71`）。
+- 上游 `power_manager.h` 只管充电检测，**没有显示电源脚**。
+
+演示步骤（每步 4s，屏幕上应变色/出图案）：
+
+| 步 | 变量 | 画面 |
+| --- | --- | --- |
+| 1 SLOWBCLK | bit-bang 降到约 1MHz | 整屏红 |
+| 2 DCINV | DC 极性取反 | 整屏绿 |
+| 3 NOINV | 发 INVOFF(0x20) | 整屏蓝 |
+| 4 BGR | MADCTL=0x08（BGR） | 整屏红 |
+| 5 ROT | MADCTL=0x60（MX+MV） | 8 色竖条 + 文字 |
+| 6 FAST | 恢复全速 + INVON + MADCTL=0 | 整屏白 |
+
+哪一步出现颜色/图案，就说明对应假设成立（例如只有 1 有反应 = 时钟太快；
+只有 2 有反应 = DC 反相）。

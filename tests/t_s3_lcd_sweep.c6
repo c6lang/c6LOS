@@ -1,0 +1,95 @@
+/* t_s3_lcd_sweep.c6 —— 假设逐个替换，请用眼睛判断哪一步屏幕有反应。
+ * 每步 4 秒，串口同步打印步号。任何时候看到颜色/图案就记下步号。
+ *   1 SLOWBCLK : bit-bang 降到约 1MHz，整屏红
+ *   2 DCINV    : DC 极性取反，整屏绿
+ *   3 NOINV    : 发 INVOFF(0x20)，整屏蓝
+ *   4 BGR      : MADCTL=0x08（BGR），整屏红（应显示蓝才对，若显示红说明…）
+ *   5 ROT      : MADCTL=0x60（MX+MV），8 色竖条 + 文字
+ *   6 FAST     : 恢复全速 bit-bang，整屏白
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_set_bb_pad(u32 n);
+void s3_lcd_set_dc_inv(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_cmd(u32 c);
+void s3_lcd_dat(u32 v);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+
+    puts_("c6os lcd sweep (watch the screen)\n");
+    s3_lcd_use_bitbang(1u);
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "SWEEP", 0x0000u);
+
+    for (;;) {
+        puts_("1 SLOWBCLK\n");
+        s3_lcd_set_bb_pad(20u);       /* 每半周期多空转 20 次 -> 约 1MHz */
+        s3_lcd_fill(0xF800u);
+        s3_lcd_delay(16000000u);
+        s3_lcd_set_bb_pad(0u);
+
+        puts_("2 DCINV\n");
+        s3_lcd_set_dc_inv(1u);
+        s3_lcd_fill(0x07E0u);
+        s3_lcd_delay(16000000u);
+
+        puts_("3 NOINV\n");
+        s3_lcd_cmd(0x20u);            /* INVOFF */
+        s3_lcd_fill(0x001Fu);
+        s3_lcd_delay(16000000u);
+        s3_lcd_set_dc_inv(0u);
+
+        puts_("4 BGR\n");
+        s3_lcd_cmd(0x36u);
+        s3_lcd_dat(0x08u);            /* BGR */
+        s3_lcd_fill(0xF800u);
+        s3_lcd_delay(16000000u);
+
+        puts_("5 ROT\n");
+        s3_lcd_cmd(0x36u);
+        s3_lcd_dat(0x60u);            /* MX+MV */
+        s3_lcd_blit(g_fb, W, H);
+        s3_lcd_delay(16000000u);
+
+        puts_("6 FAST\n");
+        s3_lcd_cmd(0x36u);
+        s3_lcd_dat(0x00u);
+        s3_lcd_cmd(0x21u);            /* INVON 恢复 */
+        s3_lcd_fill(0xFFFFu);
+        s3_lcd_delay(16000000u);
+    }
+}
