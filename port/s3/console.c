@@ -110,15 +110,35 @@ void port_putc(int ch)
 
 static u32 g_rx_left[C6OS_MAX_CORES] = {0};
 
+/* RX：数据必须 **32 位读** EP1_REG（8 位读恒为 0，实测），可读字节数在
+ * OUT_EP1_ST[22:16]；读完清 INT_CLR bit2，否则同一批数据会被反复报告。
+ * 一次中断往往带回 1~3 字节，用 per-core 剩余计数把它们逐字节吐出去。 */
 int port_getc(void)
 {
-    volatile u32 *st = (volatile u32 *)(0x6003800Cu);
-    volatile u8 *byte = (volatile u8 *)(0x60038000u);
+    u32 core = port_core_id() & (u32)(C6OS_MAX_CORES - 1);
+    u32 *left = &g_rx_left[core];
+    volatile u32 *ist = (volatile u32 *)(S3_USB_JTAG_BASE + 0x0Cu);   /* INT_ST */
+    volatile u32 *iclr = (volatile u32 *)(S3_USB_JTAG_BASE + 0x14u);  /* INT_CLR */
+    volatile u32 *ostat = (volatile u32 *)(S3_USB_JTAG_BASE + 0x3Cu); /* OUT_EP1_ST */
 
-    if ((*st & 0x4u) == 0u) {
-        return -1;
+    if (*left == 0u) {
+        if ((*ist & 0x4u) == 0u) {
+            return -1;
+        }
+        *left = (*ostat >> 16) & 0x7Fu;
+        if (*left == 0u) {
+            *iclr = 0x4u;
+            return -1;
+        }
     }
-    return (int)(*byte);
+    *left = *left - 1u;
+    {
+        int c = (int)(S3_USB_EP1 & 0xFFu);
+        if (*left == 0u) {
+            *iclr = 0x4u;
+        }
+        return c;
+    }
 }
 
 void port_puts(const char *s)
