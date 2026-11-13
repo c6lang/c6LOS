@@ -26,6 +26,7 @@ u32 s3_btn_idle_level(u32 i);
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
+void s3_lcd_fill(u16 color);
 void s3_lcd_bl(u32 on);
 void s3_lcd_delay(u32 n);
 u32 port_irq_save(void);
@@ -95,11 +96,20 @@ static void flush_row(u32 i)
     u32 ps = 0;
 
     draw_row(i);
-    /* 上屏期间关中断：避免 bit-bang 传输被 tick 打断导致屏收不到数据 */
-    ps = port_irq_save();
-    s3_lcd_blit_rect(g_fb, W, 0u, (u32)y, W, (u32)(ROW_H - 4));
-    port_irq_restore(ps);
-    os_task_yield();
+    /* 不关中断：按 8 行一块上屏（每块 ~3840B ≈ 6ms），块间 yield，
+     * 单次占用 CPU 不超过一个 tick 周期，避免丢 tick */
+    {
+        u32 yy = (u32)y;
+        u32 left = (u32)(ROW_H - 4);
+        while (left > 0u) {
+            u32 n = (left > 8u) ? 8u : left;
+            s3_lcd_blit_rect(g_fb, W, 0u, yy, W, n);
+            yy += n;
+            left -= n;
+            os_task_yield();
+        }
+    }
+    (void)ps;
 }
 
 static void btn_task(void *arg)
@@ -168,9 +178,8 @@ static void gui_task(void *arg)
             os_gfx_text16(&g, 70, 204, t, 0x07FFu);
             {
                 u32 c0 = (u32)port_cycles();
-                ps = port_irq_save();
-                s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
-                port_irq_restore(ps);
+                /* 心跳直接整屏填色（交叉两种颜色），用来判断面板本身还活着没有 */
+                s3_lcd_fill(((hb / 25u) & 1u) != 0u ? 0x0010u : 0x0200u);
                 c0 = (u32)port_cycles() - c0;
                 pstr("hb blit cycles=");
                 pu32(c0 / 1000u);

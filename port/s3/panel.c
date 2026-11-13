@@ -313,6 +313,12 @@ static void bb_write_fast(const u8 *p, u32 n);
 
 static void bb_write(const u8 *p, u32 n)
 {
+    /* 每笔传输给一个 CS 脉冲：ST7789 靠 DC 区分命令/数据，CS 常低时一旦被干扰
+     * 打乱接口状态机就再也恢复不了（表现为"跑一会儿画面定格"）。 */
+    if (g_bitbang != 0u) {
+        wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_CS);
+        wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_CS);
+    }
     if (g_bb_fast != 0u) { bb_write_fast(p, n); return; }
     u32 i;
     u32 b;
