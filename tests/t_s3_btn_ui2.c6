@@ -153,6 +153,15 @@ static void gui_task(void *arg)
             pstr("\n");
         }
         hb++;
+        /* 心跳：每 ~500ms 重画底部一行，证明"画+上屏"这条路本身是通的 */
+        if ((hb % 25u) == 0u) {
+            char t[12] = {0};
+            os_gfx_fill_rect(&g, 0, 200, (int)W, 40, 0x0000u);
+            os_gfx_text16(&g, 6, 204, "GUI hb=", 0x07FFu);
+            u2s(t, hb);
+            os_gfx_text16(&g, 70, 204, t, 0x07FFu);
+            s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
+        }
         while (i < 3u) {
             if (g_dirty[i] != 0u) {
                 g_dirty[i] = 0u;
