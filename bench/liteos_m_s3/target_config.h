@@ -101,7 +101,7 @@ extern "C" {
 extern UINTPTR __heap_start;
 #define LOSCFG_SYS_HEAP_ADDR                                (CHAR *)(UINTPTR)(&__heap_start)
 #define LOSCFG_SYS_EXTERNAL_HEAP                            1
-#define LOSCFG_SYS_HEAP_SIZE                                0x24000
+#define LOSCFG_SYS_HEAP_SIZE                                0x8000
 #define LOSCFG_BASE_MEM_NODE_SIZE_CHECK                     1
 #define LOSCFG_MEM_MUL_POOL                                 1
 #define OS_SYS_MEM_NUM                                      20

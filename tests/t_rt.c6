@@ -5,7 +5,7 @@
 #include "c6os/tick.h"
 #include "c6os/port.h"
 
-#ifdef C6OS_BARE
+#if defined(C6OS_BARE) || defined(C6OS_S3)
 #define RT_N 2000u
 #else
 #define RT_N 20000u
@@ -153,21 +153,21 @@ static int run(void) {
     int t = 0;
 
     (void)os_sem_init(&g_sem, 0u, 1u);
-    w = os_task_create("waiter", waiter, 0, 1u, 8192u);
-    p = os_task_create("poster", poster, 0, 2u, 8192u);
+    w = os_task_create("waiter", waiter, 0, 1u, 2048u);
+    p = os_task_create("poster", poster, 0, 2u, 2048u);
     if (w <= 0 || p <= 0) { port_puts("FAIL: rt create\n"); return 1; }
     os_task_start();
     metric("sem wake", g_wake_min, g_wake_sum, g_wake_max, g_wake_n);
 
     g_sem = (OsSem){0};
     (void)os_sem_init(&g_sem, 0u, 1u);
-    a = os_task_create("swa", sw_a, 0, 2u, 8192u);
-    b = os_task_create("swb", sw_b, 0, 2u, 8192u);
+    a = os_task_create("swa", sw_a, 0, 2u, 2048u);
+    b = os_task_create("swb", sw_b, 0, 2u, 2048u);
     if (a <= 0 || b <= 0) { port_puts("FAIL: rt sw create\n"); return 1; }
     os_task_start();
     metric("ctx switch", g_sw_min, g_sw_sum, g_sw_max, g_sw_n);
 
-    t = os_task_create("tick", tick_task, 0, 1u, 8192u);
+    t = os_task_create("tick", tick_task, 0, 1u, 2048u);
     if (t <= 0) { port_puts("FAIL: rt tick create\n"); return 1; }
     os_task_start();
     port_puts("tick cost: per_op=");
@@ -175,7 +175,7 @@ static int run(void) {
     port_puts("\n");
 
 #ifdef C6OS_BARE
-    t = os_task_create("tickwait", tick_wait_task, 0, 1u, 8192u);
+    t = os_task_create("tickwait", tick_wait_task, 0, 1u, 2048u);
     if (t <= 0) { port_puts("FAIL: rt tickwait create\n"); return 1; }
     os_task_start();
     metric("tick period", g_tick_min, g_tick_sum, g_tick_max, g_tick_n);

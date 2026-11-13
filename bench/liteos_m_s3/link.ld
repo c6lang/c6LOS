@@ -22,6 +22,12 @@ SECTIONS {
     _init_end = ABSOLUTE(.);
   } > IRAM
   .text : { *(.literal .text .literal.* .text.* .iram* .iram1 .iram1.*) } > IRAM
-  .data : { . = ALIGN(16); *(.rodata*) *(.data*) . = ALIGN(16); __heap_start = .; . += 0x8000; __heap_end = .; } > DRAM
-  .bss (NOLOAD) : { . = ALIGN(8); _sbss = .; *(.bss*) *(COMMON) . = ALIGN(8); _ebss = .; . += 0x4000; __stack_top = .; } > DRAM
+  .data : { . = ALIGN(16); *(.rodata*) *(.data*) . = ALIGN(16); } > DRAM
+  .bss (NOLOAD) : {
+    . = ALIGN(8); _sbss = .;
+    *(.bss*) *(COMMON)
+    . = ALIGN(16); __heap_start = .; . += 0x8000; __heap_end = .;
+    . = ALIGN(16); _ebss = .;
+    . += 0x4000; __stack_top = .;
+  } > DRAM
 }

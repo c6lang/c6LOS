@@ -23,7 +23,7 @@ SSRC = $(SECUREC_ROOT)/src/memcpy_s.c $(SECUREC_ROOT)/src/memset_s.c $(SECUREC_R
 all: $(BIN).elf
 	$(XT)size $<
 image: all
-	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB \
+	esptool --chip esp32s3 elf2image --ram-only-header --flash-mode dio --flash-size 16MB \
 		--flash-freq 40m -o $(BIN).bin $(BIN).elf
 	esptool --chip esp32s3 image-info $(BIN).bin | head -20
 

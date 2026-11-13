@@ -71,7 +71,22 @@ host 没有真实定时器中断，tick 是显式调用的，因此不代表硬�
 - 第一个 tick 的 min=820,544 是从任务启动到第一个 tick 的部分周期，不是完整周期。
 - 完整周期抖动：max-avg ≈ 29,823 cycles ≈ 466 指令（约 0.94%）；risc6 是确定性指令边界注入，真实硬件还会受 cache/中断屏蔽影响。
 
-## 6. S3 真板历史数据（CCOUNT @40MHz，本轮未重跑）
+## 6. S3 同板实测（CCOUNT @40MHz）
+
+### 6.1 LiteOS-M S3 基线（本轮真板）
+
+LiteOS-M 经 LX6→LX7 移植后在 ESP32-S3 上运行（`bench/liteos_m_s3`，CCOUNT 40MHz，N=1000）：
+
+| 操作 | cycles/op |
+|---|---:|
+| `LOS_TaskYield` | 592 |
+| `LOS_SemPost` + `LOS_SemPend` | 143 |
+| `LOS_QueueWriteCopy` + `LOS_QueueReadCopy` | 434 |
+| `LOS_MemAlloc(32)` + `LOS_MemFree` | 622 |
+
+这是同一块板、同一 CCOUNT 口径的 LiteOS-M 基线；c6LOS 的 S3 perf 镜像本轮启动复现仍在排查（`t_perf` 只输出 boot，未输出 bench），因此**暂不能给出 c6LOS S3 同表数字**，也不能宣称“不劣于”。
+
+### 6.2 S3 历史数据（c6LOS，CCOUNT @40MHz）
 
 来自 M2-4 / M6-2 上板记录：
 

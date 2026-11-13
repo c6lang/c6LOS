@@ -5,11 +5,11 @@
 #include "los_memory.h"
 #include "los_config.h"
 
-#define MMIO_CONSOLE 0x40000000u
 #define MMIO_EXIT    0x40000004u
+extern void board_putc(int c);
 #define N 1000u
 
-static void pc(int c) { *(volatile unsigned int *)MMIO_CONSOLE = (unsigned int)(unsigned char)c; }
+static void pc(int c) { board_putc(c); }
 static void ps(const char *s) { while (*s) pc(*s++); }
 static void pu(unsigned int v) {
     char b[12]; int i = 0;
