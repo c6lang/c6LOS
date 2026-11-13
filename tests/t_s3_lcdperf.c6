@@ -13,6 +13,7 @@
 
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_bl(u32 on);
 void s3_lcd_delay(u32 n);
 void s3_lcd_set_clock(u32 clk);
@@ -50,6 +51,7 @@ static u32 avg10(void (*fn)(u32), u32 n)
 
 static void fn_draw(u32 i) { draw_frame(i); }
 static void fn_blit(u32 i) { (void)i; s3_lcd_blit(g_fb, W, H); }
+static void fn_rect(u32 i) { (void)i; s3_lcd_blit_rect(g_fb, W, 0u, 0u, W, H); }
 
 void os_main(void)
 {
@@ -72,6 +74,16 @@ void os_main(void)
     /* c) 上屏 @40MHz（0x1001：N=2/H=1/L=2） */
     s3_lcd_set_clock(0x00001001u);
     cyc_blit40 = avg10(fn_blit, 10u);
+
+    /* c2) 局部刷新 API（整屏矩形）：验"去掉逐像素除法"之后和 blit 一样快 */
+    {
+        u32 in = 0;
+        s3_lcd_set_clock(0x00001001u);
+        in = avg10(fn_rect, 10u);
+        puts_("rect40=");
+        put_u32_(in / 1000u);
+        puts_("k/f\n");
+    }
 
     /* d) 分频扫描：每块（64 字节 = 512 bit）耗时随 N 线性增长，
      *    斜率 = 512*N/src_clk，截距 = 每块的固定开销。 */

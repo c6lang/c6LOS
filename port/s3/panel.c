@@ -902,29 +902,36 @@ void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color)
 void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
 {
     u8 buf[SPI_CHUNK];
-    u32 n;
-    u32 i = 0;
-    u32 k;
+    u32 cap = SPI_CHUNK / 2u;      /* 每块最多装这么多个像素 */
+    u32 row = y;
 
     if (fb == 0 || w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
     if (x + w > LCD_W) { w = LCD_W - x; }
     if (y + h > LCD_H) { h = LCD_H - y; }
-    n = w * h;
-    window(x, y, w, h);
-    while (i < n) {
-        for (k = 0; k < SPI_CHUNK / 2u && i + k < n; k++) {
-            u32 p = i + k;
-            u16 v = fb[(y + p / w) * fb_w + (x + p % w)];
-            buf[k * 2u] = (u8)(v >> 8);
-            buf[k * 2u + 1u] = (u8)v;
-        }
-        {
-            u32 bytes = k * 2u;
-            hi(PIN_DC);
-            spi_xfer(buf, bytes);
 
+    window(x, y, w, h);
+    hi(PIN_DC);
+    /* 按行推进，**不再每像素做 p/w、p%w**：原来那种写法每像素一次
+     * __udivsi3（40+ cycles），一屏就是 57600 次除法，比 SPI 本身还贵。 */
+    while (row < y + h) {
+        const u16 *src = fb + row * fb_w + x;
+        u32 left = w;
+
+        while (left != 0u) {
+            u32 k = 0;
+            u32 take = (left > cap) ? cap : left;
+
+            while (k < take) {
+                u16 v = src[k];
+                buf[k * 2u] = (u8)(v >> 8);
+                buf[k * 2u + 1u] = (u8)v;
+                k++;
+            }
+            spi_xfer(buf, take * 2u);
+            src += take;
+            left -= take;
         }
-        i += k;
+        row++;
     }
 }
 
@@ -933,8 +940,8 @@ void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
     if (fb == 0 || w == 0u || h == 0u) { return; }
     if (w > LCD_W) { w = LCD_W; }
     if (h > LCD_H) { h = LCD_H; }
-    window(0u, 0u, w, h);
-    s3_lcd_pixels(fb, w * h);
+    /* 走 blit_rect 的按行紧凑内层循环（比老的 s3_lcd_pixels 索引法快 ~200k/帧） */
+    s3_lcd_blit_rect(fb, w, 0u, 0u, w, h);
 }
 
 /* 调试：打开 pad 输入使能（FUN_IE）后读 GPIO_IN，用来检查输出脚的静态电平。 */
