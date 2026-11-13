@@ -24,6 +24,7 @@ static void core1_entry(void)
     *(volatile u32 *)&g_core1_stack[4] = CORE1_STACK_MAGIC;
     __asm__ __volatile__("mov a1, %0" : : "r"(&g_core1_stack[4096]));
     __asm__ __volatile__("wsr %0, vecbase; isync" : : "r"(&_vecbase));
+    port_core_bind_self();
     g_core1_prid = port_core_id();
     if (g_core1_mode != 0u) {
         os_task_start_core(1u);

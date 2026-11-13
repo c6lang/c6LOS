@@ -179,7 +179,7 @@
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
 | M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**剩余：面板实际成像需人眼确认**，`tests/t_s3_lcd_demo.c6` 会自动轮播 红/绿/8 色竖条+文字/蓝 |
 | M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 5.16M cycles、帧缓冲全屏 blit 5.81M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈14fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
-| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 绘制 tick/任务数/堆用量的彩色数字行、`os_dash_task_row` 任务行、`os_dash_log` 日志行；`t_dash` host PASS；真实屏刷新待硬件恢复） |
+| M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | **真板通过**（`rt/dash.c` 绘制 tick/任务数/堆用量 + 任务行；`t_dash` host PASS；`tests/t_s3_dash.c6` 在 S3 上建 dash 任务，每帧 6.69M cycles（首帧含字体，≈5.9fps）画进 240×240 帧缓冲再 blit 上屏，串口同步打印同一组数字：`tick=57/83/109... tasks=3`，tick 稳定递增 ≈26/帧，说明定时器→调度器→dash 任务整条链路在真板成立。屏上成像仍需人眼确认） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
 
@@ -190,7 +190,7 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M8-1 压力/长稳 | 随机创建/删除/超时 10^6 次 | 10 分钟无泄漏、无 panic | 完成（host `t_stress` 10^6 次 6.9s；S3 `t_s3_stress` 25000 轮创建/延时/回收，00:20:11→00:29:59 约 9m48s，`PASS: s3 stress`，无 panic） |
-| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。core1 侧已加命令/应答邮箱（`s3_core1_send/ack`），`t_s3_twocore` 连发 100 条命令并同时跑 core0 任务；镜像 build/s3tc 已构建，等上电验证；`port_core_id` 改用 Xtensa `rsr prid`，core1 入口回读 `s3_core1_prid()`，`t_s3_core1` 要求 `prid=1` 才 PASS（镜像 build/s3c1 已构建，待上电）。S3 core1 已能进入内核调度器：`port/s3/ctx.c|ctx.S` 的 `g_sched/g_s3_cur` 改为按 `prid` 分核数组，`s3_core1_start_mode(1)` 让 core1 调 `os_task_start_core(1)`；`tests/t_s3_smp.c6` 两核各跑一个 yield 任务并校验 `prid=1`（镜像 build/s3smp 已构建，待上电；`tests/t_s3_smp_sem.c6` 再验跨核 sem，镜像 build/s3smpsem）；S3 侧真 IPI 未做，核 1 `port_idle` 改忙轮询以看到别核投递（核 0 仍 `waiti`）；risc6 参考机已补 `--harts 2` 参考机 SMP 冒烟：`os_task_create_on` 静态绑核 + 每 hart 独立 `g_cur_ctx/g_sched_sp/陷阱保存区/启动栈`，`make check-sim` → `PASS: smp task a/b`；任务都建在核 0，空闲核用 `balance_pull` 自动拉走一个（`os_core_ready` 观测），两任务分别落在核 0/核 1，`PASS: smp task b (one task balanced to core 1)`，417512 条指令；`os_task_set_core` 也支持显式迁核；跨核同步 `t_rv32bare_smp_sem`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒，`PASS: smp cross-core sem`，80223 条指令） |
+| M8-2 双核 | 第二核启动、每核就绪队列、IPI | 两核各自跑任务，负载均衡可观测 | 进行中（**真板 core1 裸核 PASS**：`tests/t_s3_core1.c6` → `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / `PASS: core1`；**内核双核调度仍 trap**：`tests/t_s3_smp.c6` 打印 `ids=1,2` → `start core1` → `core0 sched` 后 `*** TRAP`，即进 `os_task_start_core(0)` 时陷入，下一步按 cause/pc 定位（用串口打印而非 RTC mark，实测 RTC 慢速内存的 2/3/7 号字在真板上不可靠）。core1 已启动：入口写 `SYSTEM_CORE_1_CONTROL_1`(0x600C0004)=入口地址，`CONTROL_0`(0x600C0000) 置 CLKGATE/清 RESET/清 RUNSTALL；`t_s3_core1` 读回 `count=83` / PASS。core1 侧已加命令/应答邮箱（`s3_core1_send/ack`），`t_s3_twocore` 连发 100 条命令并同时跑 core0 任务；镜像 build/s3tc 已构建，等上电验证；`port_core_id` 改用 Xtensa `rsr prid`，core1 入口回读 `s3_core1_prid()`，`t_s3_core1` 要求 `prid=1` 才 PASS（镜像 build/s3c1 已构建，待上电）。S3 core1 已能进入内核调度器：`port/s3/ctx.c|ctx.S` 的 `g_sched/g_s3_cur` 改为按 `prid` 分核数组，`s3_core1_start_mode(1)` 让 core1 调 `os_task_start_core(1)`；`tests/t_s3_smp.c6` 两核各跑一个 yield 任务并校验 `prid=1`（镜像 build/s3smp 已构建，待上电；`tests/t_s3_smp_sem.c6` 再验跨核 sem，镜像 build/s3smpsem）；S3 侧真 IPI 未做，核 1 `port_idle` 改忙轮询以看到别核投递（核 0 仍 `waiti`）；risc6 参考机已补 `--harts 2` 参考机 SMP 冒烟：`os_task_create_on` 静态绑核 + 每 hart 独立 `g_cur_ctx/g_sched_sp/陷阱保存区/启动栈`，`make check-sim` → `PASS: smp task a/b`；任务都建在核 0，空闲核用 `balance_pull` 自动拉走一个（`os_core_ready` 观测），两任务分别落在核 0/核 1，`PASS: smp task b (one task balanced to core 1)`，417512 条指令；`os_task_set_core` 也支持显式迁核；跨核同步 `t_rv32bare_smp_sem`：核 1 `os_sem_pend` 阻塞、核 0 `os_sem_post` 唤醒，`PASS: smp cross-core sem`，80223 条指令） |
 | M8-3 FPU 优化（可选） | 惰性保存 FPU 帧；全镜像统一 ABI | 浮点任务切换上下文一致 | 跳过（可选；内核核心不使用浮点，S3 启动未使能 FPU） |
 | M8-4 PSRAM（可选） | 8MB 初始化、帧缓冲迁移 | 大缓冲分配成功 | 跳过（可选；屏驱动未点亮，帧缓冲仍在内部 RAM） |
 | M8-5 上板文档 | 烧写/回滚/量产镜像 | 新人按文档可复现 | 完成（`docs/board-s3.md`：工具链/构建/BOOT+RESET 烧写/USB 重枚举/串口/中断要点/故障表） |
@@ -587,3 +587,15 @@
   MOSI 采样 996/2000、CS 采样 0/2000。诊断手法（读 pad 电平 / 传输中采样 /
   扫 0..127 号输出信号）见 `docs/s3-panel-bringup.md` §4；顺带修了
   `SPI_CLOCK` 的 H+L≠N 占空比错误（改回自洽的 0x3041）。
+
+- **`port_core_id()` 一直是错的（PRID 在这颗 S3 上是垃圾值），修好后 tick 才动**：
+  Xtensa `rsr.prid` 在本板读回 core0=`0xCDCD`、core1=`0xABAB`（三种写法一致、
+  每核稳定但都不是 0/1），于是 `port_core_id()` 恒返回 1 → `os_sched_tick()` 里
+  "非 0 号核直接返回" 的 SMP 保护一直命中 → **tick 永远不前进**（面板/仪表盘上
+  `tick=0` 的真凶，不是定时器问题：ISR 实测在跑）。
+  修法：`port_core_bind_self()` 让每个核在入口把自己的 PRID 值登记进
+  `g_prid_base[]` 槽位（core0 在 `port_init`、core1 在 `core1_entry`），
+  `port_core_id()` 按值查表返回下标。修后 `t_s3_dash` 的 tick 正常递增，
+  `t_s3_core1` 也正确报 `core_id=0`/`prid=1`。
+  教训：RTC 慢速内存 mark（0x50000000）在这块板子上不可靠（2/3/7 号字读到过
+  垃圾值），诊断要用串口打印，别只信 mark。

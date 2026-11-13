@@ -200,13 +200,47 @@ void port_idle(void)
     __asm__ __volatile__("waiti 0");
 }
 
+u32 s3_prid_raw(void)
+{
+    u32 v = 0u;
+    __asm__ __volatile__("rsr.prid %0" : "=r"(v));
+    return v;
+}
+
+/* PRID 基线：这颗 S3 上 `rsr.prid` 读回来的不是 0/1（实测 core0=0xCDCD、
+ * core1=0xABAB），但**每核稳定且互不相同**，所以启动时让每个核把自己的
+ * PRID 值登记到槽位，之后按值查表就知道"我在哪个核"。 */
+static volatile u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+
+void port_core_bind_self(void)
+{
+    u32 v = s3_prid_raw();
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == v) { return; }
+        i++;
+    }
+    i = 0;
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == 0xFFFFFFFFu) {
+            g_prid_base[i] = v;
+            return;
+        }
+        i++;
+    }
+}
+
 u32 port_core_id(void)
 {
-    /* Xtensa PRID（特殊寄存器 235）：LX7 双核返回 0（PRO_CPU）/1（APP_CPU）。
-     * ctx/ISR 嵌套计数等 per-core 状态都靠它做下标，必须读真值而不是常量。 */
-    u32 v = 0u;
-    __asm__ __volatile__("rsr %0, prid" : "=r"(v));
-    return v & 1u;
+    u32 v = s3_prid_raw();
+    u32 i = 0;
+
+    while (i < (u32)C6OS_MAX_CORES) {
+        if (g_prid_base[i] == v) { return i; }
+        i++;
+    }
+    return 0u;   /* 还没登记：按 0 号核处理 */
 }
 
 void port_init(void)
@@ -258,6 +292,7 @@ void port_init(void)
         __asm__ __volatile__("" ::: "memory");
     }
 
+    port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
     port_puts("c6os s3 boot\n");
     s3_irq_init();
 }

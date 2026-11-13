@@ -5,6 +5,16 @@
 
 extern int s3_core1_start_mode(u32 mode);
 
+static void p32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
 static volatile u32 g_c1_count;
 static volatile u32 g_c1_prid;
 
@@ -39,8 +49,18 @@ static void c0_task(void *arg) {
 void os_main(void) {
     port_init();
     port_puts("c6os s3 smp test\n");
-    (void)os_task_create_on(1u, "c1", c1_task, 0, 1u, 2048u);
-    (void)os_task_create_on(0u, "c0", c0_task, 0, 1u, 2048u);
+    {
+        int id1 = os_task_create_on(1u, "c1", c1_task, 0, 1u, 2048u);
+        int id0 = os_task_create_on(0u, "c0", c0_task, 0, 1u, 2048u);
+        port_puts("ids=");
+        p32((u32)id1);
+        port_puts(",");
+        p32((u32)id0);
+        port_puts("\n");
+    }
+    port_puts("start core1\n");
     (void)s3_core1_start_mode(1u);
+    port_puts("core0 sched\n");
     os_task_start_core(0u);
+    port_puts("core0 sched returned\n");
 }

@@ -100,6 +100,13 @@ static void dash_task(void *arg) {
 
 void os_main(void) {
     port_puts("c6os dash test\n");
+    /* 自检：手动推进 7 个 tick，再读回，验证 tick 读/写这一对函数是通的。 */
+    os_tick_advance(7u);
+    port_puts("manual_tick=");
+    put_u32((u32)os_tick_get());
+    port_puts(" core=");
+    put_u32(port_core_id());
+    port_puts("\n");
     s3_lcd_init();
     os_gfx_init(&g, g_fb, W, H);
 
