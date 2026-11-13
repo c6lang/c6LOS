@@ -147,7 +147,7 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
 `OUT_SEL=0x65`(=101)、`SPI_CLK_GATE=7`、`CK_DIS=0`（把它置 1 引脚会变低，
 说明脚确实挂在 SCLK 上）、`CLOCK=0x00003041`（H+L=N 自洽）、`CK_IDLE_EDGE`
 置 0/1、`USER` 加 CMD/DUMMY/DOUTDIN、`equ_sysclk`、PLL/XTAL 两种源、扫
-0..127 号输出信号（只有 103 会翻转）、`SLAVE_REG.clk_mode_13`（{CPOL,CPHA} 支持位）
+0..255 号**全部**输出信号（只有 103 会翻转，128–255 段也没有任何信号在动）、`SLAVE_REG.clk_mode_13`（{CPOL,CPHA} 支持位）
 与 `CK_IDLE_EDGE`/`CK_OUT_EDGE` 的 6 种组合（SCLK 仍 0 边沿、MOSI 始终 256）。**下一步**：对照 IDF `spi_bus_initialize`
 的完整初始化序列（尤其 `SPI_SLAVE_REG`/`SPI_CTRL` 里可能另有门控位），或换
 SPI3/LCD_CAM 的 i80 通路。

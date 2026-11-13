@@ -6,6 +6,7 @@
 #include "c6os/port.h"
 
 void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
 void s3_spi_begin(void);
 int s3_spi_end(void);
 u32 s3_spi_busy(void);
@@ -45,12 +46,13 @@ void os_main(void)
     u32 n = 0;
 
     puts_("c6os sigscan\n");
+    s3_lcd_use_bitbang(0u);
     s3_lcd_init();
     s3_pin_out(10u);
-    puts_("scan 0..127 on gpio10\n");
+    puts_("scan 0..255 on gpio10\n");
 
     sig = 0;
-    while (sig < 128u) {
+    while (sig < 256u) {
         mux_(10u, sig);
         ones = 0;
         total = 0;
