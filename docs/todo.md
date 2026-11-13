@@ -775,3 +775,23 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   - 模块时钟：`SPI_CLK_GATE(0xE8)` = 7（CLK_EN|MST_CLK_ACTIVE|MST_CLK_SEL）
 - 参考实现：`components/esp_hal_gpspi/esp32s3/include/hal/spi_ll.h` 全是 static inline，
   可以直接搬进 `port/s3/panel.c` 的 `spi_xfer()` 里替换 bit-bang。
+
+### 【重要】硬件 SPI 打不出时钟的真因：我用错了寄存器偏移
+S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移：
+| 寄存器 | 偏移 | 关键位 |
+|---|---|---|
+| `SPI_CMD` | 0x00 | `USR` bit24（启动一次传输）、`UPDATE` bit23 |
+| `SPI_CTRL` | 0x08 | `WR_BIT_ORDER` |
+| `SPI_CLOCK` | **0x0C** | `CLKCNT_N`[17:12]、`CLKCNT_H`[11:6]、`CLKCNT_L`[5:0]、
+`CLKDIV_PRE`[21:18]（都写"值-1"）、`CLK_EQU_SYSCLK` bit31 |
+| `SPI_USER` | **0x10** | `USR_MOSI` bit27、`CK_OUT_EDGE` bit9、`CS_SETUP` bit7、`CS_HOLD` bit6 |
+| `SPI_MS_DLEN` | 0x1C | `usr_mosi_dlen` |
+| `SPI_W0..` | 0x98 | 发送 FIFO（`hw->data_buf[]`） |
+| `SPI_CLK_GATE` | 0xE8 | 写 7（CLK_EN|MST_CLK_ACTIVE|MST_CLK_SEL） |
+
+之前把 CLOCK 当成 0x18（其实是 USER2）、USER 当成 0x1C（其实是 MS_DLEN），
+所以"寄存器能写、时钟不出来"。GPIO 矩阵侧本来就是对的：
+`FSPICLK_OUT_IDX=101`、`FSPID_OUT_IDX=103`、`FSPICS0_OUT_IDX=110`
+（当年扫信号号时"只有 103 会翻转"正好对应 MOSI 通了、CLK 没通）。
+下一步：按上表把 `spi_xfer()` 换成硬件 SPI，就能替掉 bit-bang，彻底解决
+"连续刷新几秒后定格"。
