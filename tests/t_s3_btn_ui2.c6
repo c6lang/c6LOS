@@ -139,11 +139,20 @@ static void btn_task(void *arg)
 
 static void gui_task(void *arg)
 {
+    u32 hb = 0;
+
     (void)arg;
+    pstr("gui entered\n");
     for (;;) {
         u32 i = 0;
 
-        (void)os_sem_pend(&g_sem, 0u);
+        /* 不用信号量：直接每 20ms 看一次脏位（更稳，也不依赖唤醒语义） */
+        if ((hb % 50u) == 0u) {
+            pstr("gui alive hb=");
+            pu32(hb);
+            pstr("\n");
+        }
+        hb++;
         while (i < 3u) {
             if (g_dirty[i] != 0u) {
                 g_dirty[i] = 0u;
@@ -154,6 +163,7 @@ static void gui_task(void *arg)
             }
             i++;
         }
+        os_task_delay(2u);      /* 20ms */
     }
 }
 
