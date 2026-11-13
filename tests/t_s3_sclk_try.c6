@@ -1,0 +1,101 @@
+/* t_s3_sclk_try.c6 —— 试各种 SPI2 配置，用 PCNT 数 SCLK 引脚边沿，找出
+ * 真正能让时钟输出到引脚的那一组。 */
+
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define SYS_CLK_EN0 0x600C0018u
+#define SYS_RST_EN0 0x600C0020u
+#define GPIO_BASE 0x60004000u
+#define IO_MUX(p) (0x60009000u + 0x04u + 4u * (p))
+#define SPI2 0x60024000u
+
+void s3_lcd_init(void);
+int s3_spi_end(void);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static u32 g_clock_base = 0;
+
+static void pcnt_setup(void)
+{
+    s3_reg_wr(SYS_CLK_EN0, s3_reg32(SYS_CLK_EN0) | (1u << 10));
+    s3_reg_wr(SYS_RST_EN0, s3_reg32(SYS_RST_EN0) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));      /* ch0 正边沿 +1，关滤波 */
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+    /* GPIO9 → PCNT 单元0 通道0（输入矩阵索引 33） */
+    s3_reg_wr(GPIO_BASE + 0x154u + 4u * 33u, (9u & 0x3Fu) | (1u << 6));
+    s3_reg_wr(IO_MUX(9u), s3_reg32(IO_MUX(9u)) | (1u << 9));
+}
+
+static u32 run_once(u32 clock, u32 user, u32 misc)
+{
+    u32 i = 0;
+    u32 n = 0;
+
+    for (i = 0; i < 16u; i++) { s3_reg_wr(SPI2 + 0x98u + 4u * i, 0x55555555u); }
+    s3_reg_wr(SPI2 + 0x0Cu, clock);
+    s3_reg_wr(SPI2 + 0x10u, user);
+    s3_reg_wr(SPI2 + 0x20u, misc);
+    s3_reg_wr(SPI2 + 0x1Cu, 64u * 8u - 1u);
+    s3_reg_wr(SPI2 + 0x00u, (1u << 23));           /* UPDATE */
+    while ((s3_reg32(SPI2 + 0x00u) & (1u << 23)) != 0u) { }
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);              /* 清计数 */
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    s3_reg_wr(SPI2 + 0x00u, (1u << 24));           /* USR */
+    while ((s3_reg32(SPI2 + 0x00u) & (1u << 24)) != 0u) { }
+    n = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+    return n;
+}
+
+static void case_(const char *name, u32 clock, u32 user, u32 misc)
+{
+    puts_(name);
+    puts_(" edges=");
+    put_u32_(run_once(clock, user, misc));
+    puts_("\n");
+}
+
+void os_main(void)
+{
+    puts_("c6os sclk try\n");
+    s3_lcd_init();
+    pcnt_setup();
+    g_clock_base = s3_reg32(SPI2 + 0x0Cu);
+
+    /* 20MHz 分频版 */
+    case_("base   ", g_clock_base, 0x08000200u, 0x60000000u);
+    case_("mode0  ", g_clock_base, 0x08000200u, 0x40000000u);
+    case_("equ80m ", g_clock_base | (1u << 31), 0x08000200u, 0x60000000u);
+    case_("cmd+mos", g_clock_base, 0x88000200u, 0x60000000u);
+    case_("dummy  ", g_clock_base, 0x28000200u, 0x60000000u);
+    case_("mosi+ck_only", g_clock_base, 0x00000200u, 0x60000000u);
+    case_("dup+ck_only", g_clock_base, 0x20000200u, 0x60000000u);
+    case_("3wire  ", g_clock_base, 0x08000200u, 0x40000000u);
+    case_("no-keep", g_clock_base, 0x08000200u, 0x20000000u);
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_(".");
+    }
+}

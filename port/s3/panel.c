@@ -143,7 +143,59 @@ static void matrix_out(u32 p, u32 sig)
     *(volatile u32 *)GPIO_ENA_W1TS = 1u << p;
 }
 
+/* ---- bit-bang 兜底通路 ------------------------------------------------ */
+
+/* SPI2 的 SCLK 输出在这块板子上实测不出边沿（用 PCNT 数引脚：同时刻 MOSI 有
+ * 256 个上升沿、SCLK 0 个），所以留一条纯 GPIO 翻转的通路：把 SCLK/SDA 从
+ * GPIO 矩阵摘回普通 GPIO 输出，按 mode 3 手动打时钟。慢，但能证明面板与接线
+ * 本身是好的（也是 SPI 时钟修好前的可用兜底）。 */
+static u32 g_bitbang = 0;
+
+void s3_lcd_use_bitbang(u32 on)
+{
+    g_bitbang = on;
+    if (on != 0u) {
+        plain_out(PIN_SCLK);
+        plain_out(PIN_SDA);
+        plain_out(PIN_CS);
+        hi(PIN_SCLK);          /* mode 3：SCLK 空闲高 */
+        lo(PIN_CS);            /* 常低选中 */
+        lo(PIN_SDA);
+    } else {
+        matrix_out(PIN_SCLK, SIG_FSPICLK);
+        matrix_out(PIN_SDA, SIG_FSPID);
+        matrix_out(PIN_CS, SIG_FSPICS0);
+    }
+}
+
+static void bb_write(const u8 *p, u32 n)
+{
+    u32 i;
+    u32 b;
+    u32 v;
+
+    i = 0;
+    while (i < n) {
+        v = p[i];
+        b = 0;
+        while (b < 8u) {
+            if ((v & 0x80u) != 0u) {
+                wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_SDA);
+            } else {
+                wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_SDA);
+            }
+            v = v << 1;
+            wr((volatile u32 *)GPIO_OUT_W1TC, 1u << PIN_SCLK);   /* 下降沿改数据 */
+            wr((volatile u32 *)GPIO_OUT_W1TS, 1u << PIN_SCLK);   /* 上升沿采样 */
+            b++;
+        }
+        i++;
+    }
+}
+
 /* ---- SPI 传输 --------------------------------------------------------- */
+
+static void bb_write(const u8 *p, u32 n);
 
 /* 一次最多 64 字节（16 个字）：MSB first，W0 先发。 */
 static void spi_xfer(const u8 *buf, u32 len)
@@ -214,6 +266,10 @@ static void spi_xfer(const u8 *buf, u32 len)
 
 static void spi_write(const u8 *buf, u32 len)
 {
+    if (g_bitbang != 0u) {
+        bb_write(buf, len);
+        return;
+    }
     while (len != 0u) {
         u32 n = (len > SPI_CHUNK) ? SPI_CHUNK : len;
         spi_xfer(buf, n);
@@ -304,9 +360,9 @@ static void spi_init(void)
      * 命令字节和参数分属两次事务时面板接口状态机被 CS 打断）。 */
     SPI2_MISC = SPI_CK_IDLE_EDGE | SPI_CS_KEEP_ACTIVE;
 
-    matrix_out(PIN_SCLK, SIG_FSPICLK);
-    matrix_out(PIN_SDA, SIG_FSPID);
-    matrix_out(PIN_CS, SIG_FSPICS0);
+    /* 注意：bit-bang 模式下这里不能把引脚接回 SPI 矩阵，否则后面的
+     * GPIO_OUT 写不到 pad 上（init 序列就得用 bit-bang 打出去）。 */
+    s3_lcd_use_bitbang(g_bitbang);
     plain_out(PIN_DC);
     plain_out(PIN_RST);
     plain_out(PIN_BL);

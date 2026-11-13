@@ -1,0 +1,115 @@
+/* t_s3_lcd_bb.c6 —— 用 bit-bang（纯 GPIO 翻转）点亮面板，用来分辨
+ * 「面板/接线坏」和「SPI2 时钟输出不出来」。画面与 demo 相同：
+ * 红 → 绿 → 8 色竖条 + 文字 → 蓝，各 1.5 秒循环。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_dat_raw(const u8 *p, u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+#define PCNT_BASE 0x60017000u
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* PCNT 数 SCLK(9) 上升沿，验证 bit-bang 时钟真的在动 */
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (9u & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 36u, s3_reg32(0x60009000u + 0x04u + 36u) | (1u << 9));
+}
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u64 t0 = 0;
+    u64 t1 = 0;
+
+    puts_("c6os lcd bitbang\n");
+    s3_lcd_use_bitbang(1u);          /* 先切到 GPIO 通路，init 序列也走它 */
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "C6OS", 0x0000u);
+    os_gfx_text16(&g, 6, 30, "BITBANG 240X240", 0x0000u);
+
+    /* 自检：bit-bang 一次 64 字节，PCNT 数 SCLK 上升沿（应约 512） */
+    pcnt_init();
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    {
+        static const u8 pat[64] = {0x55u, 0x55u, 0x55u, 0x55u};
+        s3_lcd_dat_raw(pat, 64u);
+    }
+    puts_("bb sclk edges=");
+    put_u32_(s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu);
+    puts_("\n");
+
+    t0 = port_cycles();
+    s3_lcd_fill(0xF800u);
+    t1 = port_cycles();
+    puts_("fill_cycles/1000=");
+    put_u32_((u32)(t1 - t0) / 1000u);   /* 只用 32 位除法：本工具链 u64 除法 ABI 不匹配 */
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_fill(0xF800u);
+        puts_("1 red\n");
+        s3_lcd_delay(6000000u);
+        s3_lcd_fill(0x07E0u);
+        puts_("2 green\n");
+        s3_lcd_delay(6000000u);
+        s3_lcd_blit(g_fb, W, H);
+        puts_("3 bars\n");
+        s3_lcd_delay(6000000u);
+        s3_lcd_fill(0x001Fu);
+        puts_("4 blue\n");
+        s3_lcd_delay(6000000u);
+    }
+}

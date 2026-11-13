@@ -126,6 +126,39 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
   `s3_spi_loopback()` 是同一用途的早期尝试（把 `FSPIQ` 接到 MOSI 同一 pad），
   结论相同。
 
+## 4.5 SPI2 的 SCLK 输出打不出边沿（未解，现用 bit-bang 兜底）
+
+用 **PCNT 边沿计数器**直接数引脚，把"时钟到底有没有上脚"钉死了：
+
+| 测点 | 64 字节传输期间的上升沿 |
+| --- | --- |
+| MOSI(GPIO10)、FIFO 装 0x5555… | **256**（= 512 bit 的一半，数据确实在移） |
+| SCLK(GPIO9)、同一时刻 | **0** |
+| 对照：GPIO9 当普通输出软件翻转 100 次 | **99**（测量链路正常） |
+
+也就是说 SPI2 在移位、MOSI 在动，但 `FSPICLK`(信号 101) 始终停在高电平
+（mode 3 的空闲电平）。已排除：`GPIO_ENABLE_REG` 已置（0x00246700 含 pin9）、
+`OUT_SEL=0x65`(=101)、`SPI_CLK_GATE=7`、`CK_DIS=0`（把它置 1 引脚会变低，
+说明脚确实挂在 SCLK 上）、`CLOCK=0x00003041`（H+L=N 自洽）、`CK_IDLE_EDGE`
+置 0/1、`USER` 加 CMD/DUMMY/DOUTDIN、`equ_sysclk`、PLL/XTAL 两种源、扫
+0..127 号输出信号（只有 103 会翻转）。**下一步**：对照 IDF `spi_bus_initialize`
+的完整初始化序列（尤其 `SPI_SLAVE_REG`/`SPI_CTRL` 里可能另有门控位），或换
+SPI3/LCD_CAM 的 i80 通路。
+
+### bit-bang 兜底通路（当前默认演示用）
+
+`s3_lcd_use_bitbang(1)` 把 SCLK/SDA/CS 从 GPIO 矩阵摘回普通 GPIO，用
+`GPIO_OUT_W1TS/W1TC` 按 mode 3 手动打时钟。自检：64 字节写出 **512 个 SCLK
+上升沿**（PCNT 计数，正好 64×8）；整屏 240×240 填色 **5.16M cycles ≈ 64ms
+≈ 15fps**（80MHz 折算），**已经过 M7-3 的 ≥10fps 线**，而且和"硬件 SPI"
+路径实测耗时几乎一样——反过来印证硬件路径其实没在打时钟。
+
+注意两点（都踩过）：
+- `s3_lcd_init()` 里的引脚配置要沿用 `g_bitbang` 状态，否则 init 序列会被
+  重新接回 SPI 矩阵、后面 GPIO 写不到 pad 上（表现为边沿数 0）。
+- 本工具链 **u64 除法 ABI 不匹配**，测试里 `(u64)/1000` 会打出
+  `TRAP cause=0`（IllegalInstruction）；先转 u32 再除。
+
 ## 5. 当前状态
 
 - `make C6_ROOT=... BUILD=build/s3lcd S3_MAIN=tests/t_s3_lcd.c6 s3` →

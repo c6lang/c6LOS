@@ -1,0 +1,121 @@
+/* t_s3_sclk_cnt.c6 —— 用 PCNT 数 SCLK 引脚上的上升沿，验证 SPI 时钟真的上了引脚。
+ *
+ * PCNT 单元0：GPIO 输入矩阵把 SCLK(9) 接到 PCNT_SIG_CH0_IN0(33)，通道0 正边沿加计数，
+ * 关掉滤波器（默认 16 个 APB 周期会滤掉 20MHz 的窄脉冲），然后跑一次 64 字节传输，
+ * 期望数到 ≈512 个上升沿（64*8）。
+ */
+
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define SYS_CLK_EN0 0x600C0018u
+#define SYS_RST_EN0 0x600C0020u
+#define PCNT_BIT 10u
+#define GPIO_BASE 0x60004000u
+#define IO_MUX(p) (0x60009000u + 0x04u + 4u * (p))
+
+void s3_lcd_init(void);
+void s3_spi_begin(void);
+int s3_spi_end(void);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_map(u32 pin)
+{
+    s3_reg_wr(GPIO_BASE + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(IO_MUX(pin), s3_reg32(IO_MUX(pin)) | (1u << 9));
+}
+
+static void pcnt_clear(void)
+{
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static void pcnt_init(void)
+{
+    /* 外设时钟/复位 */
+    s3_reg_wr(SYS_CLK_EN0, s3_reg32(SYS_CLK_EN0) | (1u << PCNT_BIT));
+    s3_reg_wr(SYS_RST_EN0, s3_reg32(SYS_RST_EN0) & ~(1u << PCNT_BIT));
+    /* 通道0：正边沿 +1、负边沿保持；关滤波器 */
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+    /* 清计数 + 解除暂停（ctrl: bit0=rst_u0, bit1=pause_u0） */
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    /* 引脚映射在 pcnt_map() 里做 */
+}
+
+static u32 pcnt_get(void)
+{
+    return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+void os_main(void)
+{
+    u32 n = 0;
+
+    puts_("c6os sclk counter\n");
+    s3_lcd_init();
+    puts_("init done\n");
+
+    pcnt_init();
+    pcnt_map(9u);
+    pcnt_clear();
+    puts_("idle(sclk) count=");
+    put_u32_(pcnt_get());
+    puts_("\n");
+
+    /* 一次 64 字节传输（s3_spi_begin 用 125kHz 慢时钟，512 bit） */
+    s3_spi_begin();
+    (void)s3_spi_end();
+    n = pcnt_get();
+    puts_("sclk edges after 64B=");
+    put_u32_(n);
+    puts_("\n");
+
+    /* 再来一次，看是否是累加（应约 2 倍） */
+    s3_spi_begin();
+    (void)s3_spi_end();
+    puts_("after 2nd 64B=");
+    put_u32_(pcnt_get());
+    puts_("\n");
+
+    /* 对照：数 MOSI(10) 的边沿（已知它在传输中会翻转） */
+    pcnt_map(10u);
+    pcnt_clear();
+    s3_spi_begin();
+    (void)s3_spi_end();
+    puts_("mosi edges after 64B=");
+    put_u32_(pcnt_get());
+    puts_("\n");
+
+    if (n > 400u && n < 1200u) {
+        puts_("PASS: sclk toggles on pin\n");
+    } else {
+        puts_("FAIL: no sclk edges\n");
+    }
+    for (;;) {
+        s3_lcd_delay(4000000u);
+    }
+}
