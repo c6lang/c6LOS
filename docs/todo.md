@@ -647,3 +647,14 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   `gpio_ll_pullup_en/input_enable`）确认：按键就是"输入 + 内部上拉 + 低有效"，
   写的是 MTCK/MTDO 那两个 IO_MUX，与我们的写法一致；仍待查的是为什么同样的
   配置在我们固件里读到恒 0（怀疑与 JTAG TAP 对 MTDO 的驱动/释放时机有关）。
+
+- **喇叭/mic 的关键结论（照 IDF v6 源码核对）**：ESP32-S3 的 I2S **没有 CPU 可写的
+  TX FIFO，也没有自己的 DMA 描述符寄存器**（`soc/esp32s3/register/soc/i2s_reg.h`
+  里只有 CONF/CLKM/RXEOF_NUM 等，没有 OUT_LINK/AHB 寄存器）。它的数据搬运走
+  **GDMA 引擎**（通用 DMA，需要在 GDMA 侧配通道 + 描述符链，再用
+  `DMA_PERI_OUT_SEL` 把通道接到 I2S0 TX）。所以在 c6LOS 里要真正出声/收声，
+  下一步是实现 GDMA 通道 + 描述符链，而不是继续折腾 I2S 本身。
+  参考现成环境：IDF v6.0.1 源码 `/media/winger/inst_26/esp/esp-idf`、工具链
+  `/media/winger/inst_26/esp/tools`、上游固件 `/media/winger/inst_26/esp/xiaozhi`
+  （已验证：按 `CONFIG_BOARD_TYPE_XINGZHI_CUBE_1_54TFT_WIFI=y` 编译出的固件，
+  真板屏亮 + 三个按键都正常）。
