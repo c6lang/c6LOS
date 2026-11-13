@@ -100,6 +100,18 @@ static void draw(void)
     }
 }
 
+/* 只重画会变的两块（动画条所在的带 + FRAME 数字），静态部分靠首帧整屏 */
+static void draw_dirty(void)
+{
+    os_gfx_fill_rect(&g, 6, 44, (int)W - 12, 20, 0x0010u);
+    os_gfx_fill_rect(&g, (int)(6u + g_anim), 46, 30, 16, (u16)(0xF800u | (g_frame & 0x0FFFu)));
+    g_anim += 3u;
+    if (g_anim + 30u >= W - 12u) { g_anim = 0u; }
+
+    os_gfx_fill_rect(&g, 60, 22, 120, 20, 0x0000u);
+    num(70, 24, g_frame, 0xFFFFu);
+}
+
 static void btn_task(void *arg)
 {
     (void)arg;

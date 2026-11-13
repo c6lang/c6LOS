@@ -899,7 +899,7 @@ void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color)
 }
 
 /* 把帧缓冲里的一块（行跨度 fb_w）贴到面板 (x,y) 起的 w*h 区域。 */
-void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
+static void blit_rect_cpu(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
 {
     u8 buf[SPI_CHUNK];
     u32 cap = SPI_CHUNK / 2u;      /* 每块最多装这么多个像素 */
@@ -1081,14 +1081,6 @@ void s3_lcd_blit_dma(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
     if (fb == 0 || w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
     if (x + w > LCD_W) { w = LCD_W - x; }
     if (y + h > LCD_H) { h = LCD_H - y; }
-    /* 大面积刷新先走 CPU 通路：实测"一拍"（≤16368 字节 = 8 行×240）的 DMA 很稳，
-     * 但一帧要 8 拍时画面会错位（只剩角落一小截）。局部刷新（GUI 的常态）走 DMA
-     * 拿到 5.9ms 的整帧开销；整屏重绘走 CPU 通路保证画面正确（~51ms）。
-     * 上限按"≤4 拍"取，这是 6 色带用例（2/3/4 拍）都验证过的范围。 */
-    if ((w * h * 2u) > (4u * LCD_DMA_CHUNK)) {
-        s3_lcd_blit_rect(fb, fb_w, x, y, w, h);
-        return;
-    }
     lcd_dma_init();
 
     window(x, y, w, h);
@@ -1118,18 +1110,25 @@ void s3_lcd_blit_dma(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
     if (cur != 0u) { lcd_dma_flush(cur); }
 }
 
+/* 公开的局部刷新入口：小面积走 GDMA（快），大面积回落 CPU 通路（正确）。
+ * 实测：≤4 拍（4×16368 = 65472 字节）的 DMA 稳定；整屏 8 拍会错位。 */
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
+{
+    u32 bytes = w * h * 2u;
+
+    if (g_bitbang == 0u && fb != 0 && bytes != 0u && bytes <= (4u * LCD_DMA_CHUNK)) {
+        s3_lcd_blit_dma(fb, fb_w, x, y, w, h);
+        return;
+    }
+    blit_rect_cpu(fb, fb_w, x, y, w, h);
+}
+
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
 {
     if (fb == 0 || w == 0u || h == 0u) { return; }
     if (w > LCD_W) { w = LCD_W; }
     if (h > LCD_H) { h = LCD_H; }
-    /* 硬件 SPI 通路优先用 GDMA（整屏省掉 ~2.25M cycles 的喂 FIFO 开销）；
-     * bit-bang 模式没有 DMA 可用，走按行紧凑内层循环。 */
-    if (g_bitbang == 0u) {
-        s3_lcd_blit_dma(fb, w, 0u, 0u, w, h);
-    } else {
-        s3_lcd_blit_rect(fb, w, 0u, 0u, w, h);
-    }
+    s3_lcd_blit_rect(fb, w, 0u, 0u, w, h);
 }
 
 /* 调试：打开 pad 输入使能（FUN_IE）后读 GPIO_IN，用来检查输出脚的静态电平。 */
