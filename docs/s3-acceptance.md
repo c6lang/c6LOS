@@ -6,7 +6,7 @@
 | 待办项 | 用例 | 真板实测输出 | 状态 |
 | --- | --- | --- | --- |
 | P0-5 屏型号确认 | —（查上游固件） | ST7789 240×240 SPI；上游 `78/xiaozhi-esp32` v2.5.0 的 `xingzhi-cube-1.54tft-wifi` 板级配置，见 `docs/s3-board-identification.md` | ✅ |
-| M7-2 面板点亮 | `tests/t_s3_lcd_kiosk.c6` | `init done gate=7` 后循环 `1 red 5168k-cyc / 2 green / 3 blue / 4 bars 5814k-cyc / 5 dash` | 驱动✅，成像待肉眼确认 |
+| M7-2 面板点亮 | `tests/t_s3_lcd_kiosk.c6` | `init done gate=7` 后循环 `1 red 5175k-cyc / 2 green / 3 blue / 4 bars / 5 dash`，**屏幕上确有图像（用户确认）** | ✅ |
 | M7-3 帧缓冲/字体上屏 | `tests/t_s3_lcd.c6` | `fb_bytes=115200 DRAM OK`、`fill_cycles=5168839 fps10=154`、`blit_cycles=5814672 fps10=137`、**`PASS: s3 lcd`**（≈14fps ≥ 10fps） | ✅ |
 | M7-4 仪表盘 | `tests/t_s3_dash.c6` | `manual_tick=7 core=0`、`first_frame_cycles=6707529`、`tick=128/155/181/207…` `tasks=3` | ✅ |
 | M8-2 双核 SMP | `tests/t_s3_core1.c6`<br>`tests/t_s3_smp.c6`<br>`tests/t_s3_smp_sem.c6` | `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / **`PASS: core1`**<br>**`PASS: s3 smp core1 scheduler`**<br>**`PASS: s3 smp cross-core sem`** | ✅ |
@@ -35,6 +35,13 @@
    75ms，而手册要求 SWRESET/SLPOUT 后各 ≥120ms；已按标定值改成 187ms，并补齐
    porch/gate/VCOM/gamma 初始化表。
 
+## 点亮的关键修复（本轮定位，已确认有效）
+
+`cmd()` 走的是**硬件 SPI** `spi_xfer()`，而 `dat()` 走 `spi_write()`（bit-bang 时
+分派到 GPIO）。切到 bit-bang 之后，**所有命令字节仍然从"打不出时钟"的硬件 SPI
+出去**——面板一条命令都没收到，只收到参数/像素数据，表现就是"背光亮、屏全黑"。
+把 `cmd()` 也分派到 `bb_write()` 后，屏幕立刻出图（用户确认）。
+
 ## 仍未知的一件事
 
 **SPI2 的 SCLK 输出在这块板子上打不出边沿**（PCNT 实测：同一毫秒窗口 MOSI 有
@@ -44,8 +51,8 @@
 边沿/64B、整屏 5168k cycles ≈ 15fps），硬件 SPI 通路保留可用
 `s3_lcd_use_bitbang(0)` 复现实验。
 
-面板的物理成像仍只能靠人眼确认；若屏幕仍无图像，可能性收敛为：面板/排线本身、
-这块屏 SDA 只做输入（回读全不出值）、或该屏需要本驱动之外的初始化。
+面板成像已由用户确认（颜色/竖条/文字/仪表盘都能看到）。硬件 SPI 的 SCLK 输出
+问题仍待查（不影响使用：bit-bang 通路 ≈15fps ≥ 10fps 验收线）。
 
 ## 现场排查用：假设逐个替换（`tests/t_s3_lcd_sweep.c6`）
 
