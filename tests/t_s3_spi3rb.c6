@@ -1,0 +1,85 @@
+/* t_s3_spi3rb.c6 —— 切到 SPI3 后把寄存器读回来，确认写入是否生效
+ * （CLK_GATE/CLOCK/USER/MISC/CMD + SYS 时钟位），并数 MOSI/SCLK 边沿。
+ */
+
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define SPI3 0x60025000u
+
+void s3_lcd_use_spi3(u32 on);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_init(void);
+void s3_lcd_dat_raw(const u8 *p, u32 n);
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void hex8_(u32 v)
+{
+    const char *h = "0123456789abcdef";
+    int i = 8;
+    while (i > 0) { i--; port_putc((int)h[(v >> (i * 4)) & 0xFu]); }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_start(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static u32 count_pin(u32 pin)
+{
+    static const u8 pat[64] = {0x55u, 0x55u};
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+    s3_lcd_dat_raw(pat, 64u);
+    return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+void os_main(void)
+{
+    puts_("c6os spi3 readback\n");
+    s3_lcd_use_spi3(1u);
+    s3_lcd_use_bitbang(0u);
+    s3_lcd_init();
+    puts_("init:\n");
+    puts_(" gate="); hex8_(s3_reg32(SPI3 + 0xE8u));
+    puts_(" clock="); hex8_(s3_reg32(SPI3 + 0x0Cu));
+    puts_(" user="); hex8_(s3_reg32(SPI3 + 0x10u));
+    puts_(" misc="); hex8_(s3_reg32(SPI3 + 0x20u));
+    puts_("\n cmd="); hex8_(s3_reg32(SPI3 + 0x00u));
+    puts_(" dma_conf="); hex8_(s3_reg32(SPI3 + 0x30u));
+    puts_(" slave="); hex8_(s3_reg32(SPI3 + 0xE0u));
+    puts_(" sysclk_en0="); hex8_(s3_reg32(0x600C0018u));
+    puts_("\n");
+
+    pcnt_start();
+    puts_("sclk="); put_u32_(count_pin(9u));
+    puts_(" mosi="); put_u32_(count_pin(10u));
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_(".");
+    }
+}

@@ -1,0 +1,97 @@
+/* t_s3_lcd_80m.c6 —— 硬件 SPI2 + CLK_EQU_SYSCLK（SCLK=80MHz，照上游 pclk 80MHz
+ * 的做法）+ mode 3，其余与 kiosk 相同：纯色红→绿→蓝→竖条+文字循环。
+ * 若出图，说明硬件 SPI 在高频下是好的（之前的边沿测量对 80MHz 无效），
+ * 那样整屏帧率能到 ~40fps。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_use_spi3(u32 on);
+void s3_lcd_set_equ_sysclk(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 cyc = 0;
+
+    puts_("c6os lcd HW SPI 80MHz\n");
+    s3_lcd_use_spi3(0u);              /* SPI2 */
+    s3_lcd_set_equ_sysclk(1u);        /* SCLK = 系统时钟 80MHz */
+    s3_lcd_use_bitbang(0u);
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done (hw spi 80m)\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "HW 80MHZ", 0x0000u);
+
+    for (;;) {
+        u64 t0 = port_cycles();
+        s3_lcd_fill(0xF800u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("red   ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(8000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x07E0u);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("green ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(8000000u);
+
+        t0 = port_cycles();
+        s3_lcd_fill(0x001Fu);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("blue  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(8000000u);
+
+        t0 = port_cycles();
+        s3_lcd_blit(g_fb, W, H);
+        cyc = (u32)(port_cycles() - t0) / 1000u;
+        puts_("bars  ");
+        put_u32_(cyc);
+        puts_("k-cyc\n");
+        s3_lcd_delay(10000000u);
+    }
+}

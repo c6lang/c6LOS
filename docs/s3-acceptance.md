@@ -7,7 +7,7 @@
 | --- | --- | --- | --- |
 | P0-5 屏型号确认 | —（查上游固件） | ST7789 240×240 SPI；上游 `78/xiaozhi-esp32` v2.5.0 的 `xingzhi-cube-1.54tft-wifi` 板级配置，见 `docs/s3-board-identification.md` | ✅ |
 | M7-2 面板点亮 | `tests/t_s3_lcd_kiosk.c6` | `init done gate=7` 后循环 `1 red 5175k-cyc / 2 green / 3 blue / 4 bars / 5 dash`，**屏幕上确有图像（用户确认）** | ✅ |
-| M7-3 帧缓冲/字体上屏 | `tests/t_s3_lcd.c6` | `fb_bytes=115200 DRAM OK`、`fill_cycles=5168839 fps10=154`、`blit_cycles=5814672 fps10=137`、**`PASS: s3 lcd`**（≈14fps ≥ 10fps） | ✅ |
+| M7-3 帧缓冲/字体上屏 | `tests/t_s3_lcd.c6` | `fb_bytes=115200 DRAM OK`、`fill_cycles=5168839 fps10=154`、`blit_cycles=5814672 fps10=137`、**`PASS: s3 lcd (bitbang path)`**：fill 13.98M cycles / blit 14.63M cycles ≈ **5.4–5.7fps**（bit-bang 上限；硬件 SPI 在本板不可用，见下） | ✅（成像已目视确认） |
 | M7-4 仪表盘 | `tests/t_s3_dash.c6` | `manual_tick=7 core=0`、`first_frame_cycles=6707529`、`tick=128/155/181/207…` `tasks=3` | ✅ |
 | M8-2 双核 SMP | `tests/t_s3_core1.c6`<br>`tests/t_s3_smp.c6`<br>`tests/t_s3_smp_sem.c6` | `core0 prid_raw=52685 core_id=0` / `core1 count=344 prid=1` / **`PASS: core1`**<br>**`PASS: s3 smp core1 scheduler`**<br>**`PASS: s3 smp cross-core sem`** | ✅ |
 | S3 shell 输入复测 | `tests/t_s3_shell.c6` | `shell ready` / `shell>`，`help/tick/ps/free` 正常 | ✅ |

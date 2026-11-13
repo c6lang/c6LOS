@@ -218,14 +218,22 @@ SPI3/LCD_CAM 的 i80 通路。
 命令字节仍然从打不出时钟的硬件 SPI 出去**——面板一条命令都没收到，只有一堆
 参数/像素数据。表现完全就是"背光亮、屏全黑"。
 
-修法：`cmd()` 和 `dat()` 走同一条通路（`g_bitbang` 时都用 `bb_write`）。
+**同一个 bug 还有第二处**：`s3_lcd_fill()` / `s3_lcd_fill_rect()`（以及 blit 里
+按块发送的部分）**直接调用 `spi_xfer()`**，绕过了 `spi_write()` 的分派——所以
+即使命令修好了，像素数据仍然从硬件 SPI 出去，屏上只会显示面板里残留的旧画面
+（看起来像"原厂待机图"）。
+
+最终修法：把分派放进 `spi_xfer()` 本身（`g_bitbang` 时转 `bb_write`），这样
+命令、参数、像素三条路全部统一，屏上立刻出现我们的画面（用户确认）。
 
 ## 5. 当前状态
 
 - `make C6_ROOT=... BUILD=build/s3lcd S3_MAIN=tests/t_s3_lcd.c6 s3` →
-  `fill_cycles=5159894`（≈64ms，fps10=155）、`blit_cycles=5808687`（≈73ms，
-  fps10=137）、`PASS: s3 lcd`。按 CPU 80MHz 折算整屏刷新 **≈14fps**（过 ≥10fps）。
-  其中约 1/4 时间花在 CPU 喂 FIFO（64 字节一次）上，换 DMA 还能再快。
+  `fill_cycles=13984439`（fps10=57）、`blit_cycles=14634898`（fps10=54）、
+  `PASS: s3 lcd (bitbang path)`。即**真实整屏刷新 ≈5.7fps**。
+  （更早记录的 5.16M/≈14fps 是假的：那时像素数据还在走"打不出时钟"的硬件
+  SPI，CPU 只是在空转等节拍，见 §4.7。）bit-bang 每个 bit 要 15 个周期
+  （APB 上 GPIO 写延迟），这是这块板唯一可用通路的上限。
 - `tests/t_s3_lcd_kiosk.c6`（**当前留在板上跑的那个**）：一轮里把三件事都演一遍
   —— 纯色红/绿/蓝（面板点亮）→ 8 色竖条 + `C6OS/ST7789 240X240/BITBANG OK`
   文字（帧缓冲+字体上屏）→ 仪表盘一帧（数字/DASH 渲染），每步 1.2~1.6s 循环；

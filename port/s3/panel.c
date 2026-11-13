@@ -193,7 +193,7 @@ static void bb_dc(u32 level);
  * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
 static u32 g_bitbang = 1;
 static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
-static u32 g_bb_fast = 0;     /* 1=用整字写 GPIO_OUT 的快速内层循环 */
+static u32 g_bb_fast = 1;     /* 默认用整字写 GPIO_OUT 的快速内层循环（快 2.2x） */
 static u32 g_dc_inv = 0;      /* DC 极性取反（有些板子反相） */
 
 void s3_lcd_use_bitbang(u32 on)
@@ -344,7 +344,22 @@ static void bb_write(const u8 *p, u32 n)
 static void bb_write(const u8 *p, u32 n);
 
 /* 一次最多 64 字节（16 个字）：MSB first，W0 先发。 */
+static void bb_write(const u8 *p, u32 n);
+static void spi_xfer_hw(const u8 *buf, u32 len);
+
+/* 统一的出口：bit-bang 模式下所有字节（命令/参数/像素）都必须走 GPIO 翻转。
+ * 之前只有 cmd/dat 做了分派，而 fill/fill_rect/blit 里是直接调 spi_xfer，
+ * 于是像素数据仍然从"打不出时钟"的硬件 SPI 出去 → 屏上一直是原厂残留画面。 */
 static void spi_xfer(const u8 *buf, u32 len)
+{
+    if (g_bitbang != 0u) {
+        bb_write(buf, len);
+        return;
+    }
+    spi_xfer_hw(buf, len);
+}
+
+static void spi_xfer_hw(const u8 *buf, u32 len)
 {
     u32 nw = (len + 3u) / 4u;
 
