@@ -193,6 +193,7 @@ static void bb_dc(u32 level);
  * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
 static u32 g_bitbang = 1;
 static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
+static u32 g_bb_fast = 0;     /* 1=用整字写 GPIO_OUT 的快速内层循环 */
 static u32 g_dc_inv = 0;      /* DC 极性取反（有些板子反相） */
 
 void s3_lcd_use_bitbang(u32 on)
@@ -279,8 +280,40 @@ static void bb_delay(void)
     while (k != 0u) { k--; }
 }
 
+/* 快速版：整字写 GPIO_OUT（0x04），用阴影字保住 DC/CS/BL/RST 等静态位。
+ * 每 bit 只要 2 次 store，比 W1TS/W1TC 版（3 次）少一次，也没有分支开销。
+ * 阴影在每次调用入口按当前 GPIO_OUT 重新取，所以 hi/lo 改过 DC 也不会错。 */
+void s3_lcd_set_bb_fast(u32 on)
+{
+    g_bb_fast = on;
+}
+
+static void bb_write_fast(const u8 *p, u32 n)
+{
+    volatile u32 *out = (volatile u32 *)(GPIO_BASE + 0x04u);
+    u32 sh = *out & ~((1u << PIN_SCLK) | (1u << PIN_SDA));
+    u32 i = 0;
+
+    while (i < n) {
+        u32 w = p[i];
+        u32 b = 0;
+        while (b < 8u) {
+            u32 v = sh;
+            if ((w & 0x80u) != 0u) { v = v | (1u << PIN_SDA); }
+            *out = v;                              /* SCLK 低电平 */
+            *out = v | (1u << PIN_SCLK);           /* SCLK 高电平 */
+            w = w << 1;
+            b++;
+        }
+        i++;
+    }
+}
+
+static void bb_write_fast(const u8 *p, u32 n);
+
 static void bb_write(const u8 *p, u32 n)
 {
+    if (g_bb_fast != 0u) { bb_write_fast(p, n); return; }
     u32 i;
     u32 b;
     u32 v;
