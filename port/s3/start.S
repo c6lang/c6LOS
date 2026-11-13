@@ -27,6 +27,8 @@ _start:
     and     a2, a2, a3
     movi    a3, -16
     and     a2, a2, a3
+    movi    a3, -17
+    and     a2, a2, a3
     wsr     a2, ps
     rsync
 
