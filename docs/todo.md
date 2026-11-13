@@ -823,3 +823,14 @@ S3 的 GPSPI2（`components/soc/esp32s3/register/soc/spi_reg.h`）正确偏移�
   远小于应有值（只有极少数 chunk 真的发出）。
 - 下一步建议：①单独用 `hw_xfer()` 连发固定 64B 数 SCLK（不掺面板逻辑）定位；
   ②确认本板 SCLK 是否还需要额外 OEN/IO_MUX 处理；③或直接上 GDMA 喂 SPI2。
+
+### 本轮 GUI 收尾结论
+- **可用方案（已在真板长期验证）**：`tests/t_s3_btn_ui.c6` —— 单任务主循环 +
+  按键按下才局部刷新（每次 ~30~150ms）。板上当前烧的就是这个。
+- **多任务版**：`tests/t_s3_btn_ui2.c6`（按键任务 10ms 轮询 + GUI 任务只在变化
+  时刷 + 300ms 节流），架构没问题（tick 抢占已验证），但**连续高频刷屏仍会让面板
+  在几秒后停止接受像素数据**。
+- **硬件 SPI 是正解但没打通**：数据（MOSI）能移位，**SPI 的 CLK 输出信号在
+  GPIO9 和对照用的 GPIO45 上都没有波形**（寄存器 gate=7/clock=0x3041/user=USR_MOSI
+  全部正确、GPIO 矩阵 OUT_SEL 也正确）。下一步需要：对照 IDF `spi_master`
+  驱动跑通后的寄存器快照，或用逻辑分析仪确认 SCLK 是否真的没有波形。
