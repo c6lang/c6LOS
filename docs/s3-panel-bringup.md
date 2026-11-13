@@ -100,8 +100,9 @@ SPI2_CMD = CMD_USR(1<<24);     while (SPI2_CMD & CMD_USR) {}
 ## 5. 当前状态
 
 - `make C6_ROOT=... BUILD=build/s3lcd S3_MAIN=tests/t_s3_lcd.c6 s3` →
-  `fill red fill_cycles=3315474`（≈41ms）、`blit_cycles=3960821`（≈50ms，
-  80MHz 折算 **~20fps**）、`PASS: s3 lcd`。
+  `fill_cycles=5159894`（≈64ms，fps10=155）、`blit_cycles=5808687`（≈73ms，
+  fps10=137）、`PASS: s3 lcd`。按 CPU 80MHz 折算整屏刷新 **≈14fps**（过 ≥10fps）。
+  其中约 1/4 时间花在 CPU 喂 FIFO（64 字节一次）上，换 DMA 还能再快。
 - `tests/t_s3_lcd_demo.c6`：红 → 绿 → 8 色竖条 + `C6OS` 文字 → 蓝，各 1.5s
   循环，用来肉眼确认成色顺序、方向、窗口寻址（无人值守也能判）。
 - 待确认：面板实际成像（需要人眼）。初始化/整屏填色/帧缓冲 blit 的软件
