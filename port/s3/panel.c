@@ -173,10 +173,11 @@ void s3_lcd_use_bitbang(u32 on)
 
 static void bb_write(const u8 *p, u32 n);
 
-/* bit-bang 模式下读回：SDA 是普通 GPIO，可以在时钟上升沿采样。
- * 用来做 RDDID(0x04) —— 面板应答 0x85 0x85 0x52 就说明它真的在听。
+/* bit-bang 模式下读回任意 SPI 命令的返回字节：SDA 是普通 GPIO，可以在时钟
+ * 低电平期间采样。用 RDDCOLMOD(0x0B) 读回我们写进去的 0x55 就能证明面板
+ * 真的收到了初始化命令；RDDID(0x04) 则应回 0x85 0x85 0x52。
  * 注意：读之前必须把 SDA 的输出关掉（清 GPIO_ENABLE），否则两边抢总线。 */
-int s3_lcd_read_id_bb(u8 *out, u32 n)
+int s3_lcd_read_bb(u32 cmd, u8 *out, u32 n)
 {
     u32 i;
     u32 b;
@@ -184,10 +185,10 @@ int s3_lcd_read_id_bb(u8 *out, u32 n)
 
     if (g_bitbang == 0u || n == 0u || n > 8u) { return -1; }
 
-    /* 命令字节 0x04（DC=0） */
+    /* 命令字节（DC=0） */
     lo(PIN_DC);
     {
-        static const u8 c = 0x04u;
+        u8 c = (u8)cmd;
         bb_write(&c, 1u);
     }
     hi(PIN_DC);

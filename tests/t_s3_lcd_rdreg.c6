@@ -1,0 +1,74 @@
+/* t_s3_lcd_rdreg.c6 —— 读回面板寄存器，验证它真的收到并执行了初始化：
+ *   RDDCOLMOD(0x0B) 应回 0x55（我们 init 里写的）
+ *   RDDMADCTL(0x0A) 应回 0x00（我们 init 里写的）
+ *   RDDID(0x04)     应为 0x85 0x85 0x52
+ */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+int s3_lcd_read_bb(u32 cmd, u8 *out, u32 n);
+void s3_lcd_cmd(u32 c);
+void s3_lcd_dat(u32 v);
+void s3_lcd_delay(u32 n);
+
+static u8 g_b[8] = {0};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void hex2_(u32 v)
+{
+    const char *h = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+static void dump_(u32 n)
+{
+    u32 i = 0;
+    while (i < n) { hex2_(g_b[i]); i++; }
+}
+
+void os_main(void)
+{
+    puts_("c6os lcd read regs\n");
+    s3_lcd_use_bitbang(1u);
+    s3_lcd_init();
+    puts_("init done\n");
+
+    /* COLMOD = 0x55（16bpp）再读回 */
+    s3_lcd_cmd(0x3Au);
+    s3_lcd_dat(0x55u);
+    (void)s3_lcd_read_bb(0x0Bu, g_b, 2u);
+    puts_("colmod=");
+    dump_(2u);
+    (void)s3_lcd_read_bb(0x0Bu, g_b, 2u);
+    puts_(" colmod2=");
+    dump_(2u);
+    puts_("\n");
+
+    /* MADCTL = 0x60（MX+MV）再读回 */
+    s3_lcd_cmd(0x36u);
+    s3_lcd_dat(0x60u);
+    (void)s3_lcd_read_bb(0x0Au, g_b, 2u);
+    puts_("madctl=");
+    dump_(2u);
+    (void)s3_lcd_read_bb(0x0Au, g_b, 2u);
+    puts_(" madctl2=");
+    dump_(2u);
+    puts_("\n");
+
+    (void)s3_lcd_read_bb(0x04u, g_b, 4u);
+    puts_("rddid=");
+    dump_(4u);
+    puts_("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        puts_(".");
+    }
+}
