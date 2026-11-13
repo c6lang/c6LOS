@@ -1,14 +1,28 @@
-# ESP32-S3 板卡/LCD 识别（官方固件残留）
+# 这块 ESP32-S3 的实际板卡/LCD 识别（最终）
 
-从板上 flash 0x0–0x400000 读回镜像后，用 `strings` 读到原厂应用残留：
+## 结论
 
-- `esp32-s3-touch-lcd-1.85c`
-- `./main/boards/waveshare/esp32-s3-touch-lcd-1.85c/esp32-s3-touch-lcd-1.85c.cc`
-- `CustomBoard::Initializest77916Display()`
-- `esp_lcd_new_panel_st77916(...)`
-- `esp_lcd_new_panel_st77916_spi`
-- `st77916_spi`
+这台不是 Waveshare ESP32-S3-Touch-LCD-1.85C（ST77916 360×360 QSPI），而是
+**Xingzhi Cube 1.54TFT WiFi**：
 
-结论：板子是 **Waveshare ESP32-S3-Touch-LCD-1.85C**，LCD 控制器是 **ST77916**（QSPI，360×360 圆屏），不是 ST7789。
+- LCD：**ST7789，240×240，SPI**
+- SDA=GPIO10，SCL=GPIO9，DC=GPIO8，CS=GPIO14，RES=GPIO18，BL=GPIO13
+- 音频 I2S：MIC WS4/SCK5/DIN6，SPK DOUT7/BCLK15/LRCK16
+- 按键：BOOT=0，VOL+=40，VOL-=39
 
-注意：当前 c6LOS 镜像写在 0x0，原厂 bootloader 已被覆盖；上述识别来自 flash 中残留的原厂应用字符串。若要完整跑原厂 UI，需要原厂 16MB 整片备份或重新下载官方固件。
+## 证据
+
+- 原厂 1.85C 固件启动即 `TCA9554 create returned error`，在 `InitializeTca9554()`
+  `ESP_ERROR_CHECK` abort，LCD 还没初始化，所以黑屏。
+- 1.85B 固件虽然能初始化 ST77916/背光，但与实际 ST7789 面板不匹配。
+- 刷 `v2.5.0_xingzhi-cube-1.54tft-wifi.bin` 后系统稳定运行、屏幕点亮；串口持续输出
+  `SystemInfo: free sram ...`。
+- 该固件内字符串：`xingzhi-cube-1.54tft-wifi`、
+  `InitializeSt7789Display()`、`esp_lcd_new_panel_st7789(...)`、
+  `SpiLcdDisplay`。
+
+## 对 c6LOS 的影响
+
+`port/s3/panel.c` 现有的 ST77916/QSPI 驱动是给另一块 Waveshare 1.85C 写的，
+不适用于这台 ST7789 SPI 屏；RTOS 性能/对比不受影响，但要点亮这块屏需要按
+ST7789 SPI 引脚重写面板驱动。
