@@ -1,0 +1,30 @@
+/* t_s3_hello.c6 —— 只打串口心跳，用来单独验证"USB-Serial-JTAG 控制台在没有主机
+ * 读的时候会不会整体卡死"这件事（不碰面板、不碰 SPI）。
+ * 每 ~500ms 打一个递增数字，停下来的时刻就是控制台/CPU 出问题的时刻。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void s3_lcd_delay(u32 n);
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    u32 n = 0;
+
+    for (;;) {
+        put_u32_(n);
+        port_putc(' ');
+        n++;
+        s3_lcd_delay(4000000u);
+    }
+}

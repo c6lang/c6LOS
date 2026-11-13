@@ -1,0 +1,209 @@
+/* t_s3_sclkdiag2.c6 —— 抓"SCLK 不出脚"的真凶（IDF 对照后发现的分频器写法差异）。
+ *
+ * IDF esp_hal_gpspi/esp32s3/spi_ll.h: spi_ll_master_cal_clock()
+ *     n = pre 组合里最接近目标频率的那个（2..64）
+ *     l = n;                 // ← **CLKCNT_L 恒等于 N**
+ *     reg.clkcnt_n = n - 1;
+ *     reg.clkcnt_h = (duty*n+127)/256 - 1;
+ *     reg.clkcnt_l = l - 1;  // ← 不是 N-H
+ * 我们原来按"高电平 H 拍 + 低电平 L 拍 = 一个周期 N"，写成 L = N/2
+ * （例如 0x00003041 = N=4/H=2/L=2），结果 **SPI 内部照常在移位（MOSI 有边沿、
+ * 事务耗时随分频线性变化），但 SCLK 引脚不出波形**。
+ *
+ * 本用例用"传输中软件轮询 GPIO9/10"对比两种写法（78kHz 慢时钟）：
+ *   A  L = N/2（旧写法）      → 期望 sclk9=0
+ *   B  L = N  （IDF 写法）    → 期望 sclk9≈256
+ *   C  B + IDF 的 user/misc/u1/u2 全套
+ *   D  B + CS 常低（我们面板要的）
+ * 另外用 PCNT 在 20MHz 下复核 B（高速下软件轮询看不见）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define SPI3       0x60025000u
+#define PCNT_BASE  0x60017000u
+#define PIN_SCLK   9u
+#define PIN_SDA    10u
+#define PIN_CS     14u
+
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void wr(u32 a, u32 v) { s3_reg_wr(a, v); }
+static u32 rd(u32 a) { return s3_reg32(a); }
+
+static void pin_out(u32 pin, u32 sig)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * pin;
+    wr(a, (rd(a) & ~(7u << 12)) | (1u << 12) | (1u << 9));
+    wr(0x60004000u + 0x554u + 4u * pin, sig & 0x1FFu);
+    wr(0x60004000u + 0x24u, 1u << pin);
+}
+
+static u8 g_buf[64];
+static u32 g_t9;
+static u32 g_t10;
+
+static void start_cfg(u32 clk, u32 user, u32 u1, u32 u2, u32 misc, u32 slv)
+{
+    u32 i = 0;
+
+    wr(SPI3 + 0x34u, 0u);
+    wr(SPI3 + 0x38u, 0xFFFFFFFFu);
+    wr(SPI3 + 0x08u, 0u);
+    wr(SPI3 + 0x0Cu, clk);
+    wr(SPI3 + 0x10u, user);
+    wr(SPI3 + 0x14u, u1);
+    wr(SPI3 + 0x18u, u2);
+    wr(SPI3 + 0x20u, misc);
+    wr(SPI3 + 0xE0u, slv);
+    wr(SPI3 + 0xE8u, 7u);
+    while (i < 16u) {
+        u32 k = 0;
+        u32 w = 0;
+        while (k < 4u) { w = (w << 8) | (u32)g_buf[i * 4u + k]; k++; }
+        wr(SPI3 + 0x98u + 4u * i, w);
+        i++;
+    }
+    wr(SPI3 + 0x1Cu, 511u);
+    wr(SPI3 + 0x00u, (1u << 23));
+    while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
+    wr(SPI3 + 0x00u, (1u << 24));
+}
+
+static void poll_during(u32 iters)
+{
+    u32 mask = (1u << PIN_SCLK) | (1u << PIN_SDA);
+    u32 last = rd(0x6000403Cu) & mask;
+    u32 n9 = 0;
+    u32 n10 = 0;
+    u32 i = 0;
+
+    while (i < iters) {
+        u32 v = rd(0x6000403Cu) & mask;
+        if (((v ^ last) & (1u << PIN_SCLK)) != 0u) { n9++; }
+        if (((v ^ last) & (1u << PIN_SDA)) != 0u) { n10++; }
+        last = v;
+        i++;
+    }
+    g_t9 = n9;
+    g_t10 = n10;
+}
+
+static void show(const char *tag, u32 clk, u32 user, u32 u1, u32 u2, u32 misc, u32 slv)
+{
+    start_cfg(clk, user, u1, u2, misc, slv);
+    poll_during(400000u);
+    pstr(tag);
+    pstr(" clk=");
+    pu32(clk);
+    pstr(" sclk9=");
+    pu32(g_t9);
+    pstr(" mosi10=");
+    pu32(g_t10);
+    pstr("\n");
+    while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+    s3_lcd_delay(2000000u);
+}
+
+/* 慢时钟 ~78kHz：pre=16, n=64 */
+#define SLOW_LHALF ((15u << 18) | (63u << 12) | (31u << 6) | 31u)   /* 旧：L=N/2 */
+#define SLOW_LN    ((15u << 18) | (63u << 12) | (31u << 6) | 63u)   /* IDF：L=N   */
+/* 20MHz：pre=1, n=4, h=2 */
+#define FAST_LHALF ((3u << 12) | (1u << 6) | 1u)
+#define FAST_LN    ((3u << 12) | (1u << 6) | 3u)
+
+#define OUR_USER 0x08000200u          /* USR_MOSI + CK_OUT_EDGE */
+#define OUR_MISC 0x60000000u          /* CK_IDLE_EDGE + CS_KEEP_ACTIVE */
+#define IDF_USER 0x08000041u
+#define IDF_MISC 0x20000006u
+#define IDF_U1   0xF87F0007u
+#define IDF_U2   0xF8000000u
+
+static void pcnt_init(void)
+{
+    wr(0x600C0018u, rd(0x600C0018u) | (1u << 10));
+    wr(0x600C0020u, rd(0x600C0020u) & ~(1u << 10));
+    wr(PCNT_BASE + 0x00u, (1u << 18));
+}
+
+static void pcnt_pin(u32 pin)
+{
+    wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    wr(0x60009000u + 0x04u + 4u * pin, rd(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    wr(PCNT_BASE + 0x60u, 1u);
+    wr(PCNT_BASE + 0x60u, 0u);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 n = 0;
+    u32 m = 0;
+
+    while (i < 64u) { g_buf[i] = (u8)(0x5Au ^ (i * 11u)); i++; }
+
+    pstr("\n=== sclk diag2 (clkcnt_l) ===\n");
+
+    wr(0x600C0018u, rd(0x600C0018u) | (1u << 16));
+    wr(0x600C0020u, rd(0x600C0020u) & ~(1u << 16));
+    pin_out(PIN_SCLK, 66u);
+    pin_out(PIN_SDA, 68u);
+    pin_out(PIN_CS, 71u);
+
+    show("A l=n/2   ", SLOW_LHALF, OUR_USER, 0u, 0u, OUR_MISC, 0u);
+    show("B l=n     ", SLOW_LN,    OUR_USER, 0u, 0u, OUR_MISC, 0u);
+    show("C l=n idf ", SLOW_LN,    IDF_USER, IDF_U1, IDF_U2, IDF_MISC, 0u);
+    show("D l=n+keep", SLOW_LN,    OUR_USER, 0u, 0u, OUR_MISC | (1u << 30), 0u);
+
+    /* 20MHz 高速下用 PCNT 复核 A/B */
+    pcnt_init();
+    pcnt_pin(PIN_SDA);
+    pcnt_pin(PIN_SCLK);
+
+    wr(SPI3 + 0x34u, 0u);
+    wr(SPI3 + 0x38u, 0xFFFFFFFFu);
+    wr(SPI3 + 0x10u, OUR_USER);
+    wr(SPI3 + 0x20u, OUR_MISC);
+    wr(SPI3 + 0xE8u, 7u);
+    wr(SPI3 + 0x1Cu, 511u);
+    i = 0;
+    while (i < 16u) { wr(SPI3 + 0x98u + 4u * i, 0x55555555u); i++; }
+
+    wr(SPI3 + 0x0Cu, FAST_LHALF);
+    wr(SPI3 + 0x00u, (1u << 23));
+    while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
+    wr(SPI3 + 0x00u, (1u << 24));
+    while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+    n = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    wr(PCNT_BASE + 0x60u, 1u);
+    wr(PCNT_BASE + 0x60u, 0u);
+    wr(SPI3 + 0x0Cu, FAST_LN);
+    wr(SPI3 + 0x00u, (1u << 23));
+    while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
+    wr(SPI3 + 0x00u, (1u << 24));
+    while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) { }
+    m = rd(PCNT_BASE + 0x30u) & 0xFFFFu;
+
+    pstr("E pcnt 20MHz: l=n/2 edges=");
+    pu32(n);
+    pstr(" l=n edges=");
+    pu32(m);
+    pstr("\n=== done ===\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

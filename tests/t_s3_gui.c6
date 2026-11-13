@@ -1,0 +1,151 @@
+/* t_s3_gui.c6 —— "GUI 连续刷新"回归用例（原来 2~4 秒就定格的那个场景）。
+ *
+ *   btn_task：10ms 轮询 BOOT/VOL+/VOL-，计事件
+ *   gui_task：**每帧整屏重绘**（不节流）：动画条 + 帧计数 + 三个键的状态/计数
+ *
+ * 通路：硬件 SPI（GPSPI3，20MHz，CLKCNT_L=N、FIFO 低字节先出、mode 3 相位
+ * 与 bit-bang 完全等价）。判定：
+ *   - 红条一直在动、FRAME 一直在涨 → 面板没有定格；
+ *   - 按键按下后该行立刻变红/UP→DOWN、n= 增长 → 交互正常；
+ *   - 串口每 60 帧打印一次 fps（帧周期 → fps = 80MHz/周期）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/task.h"
+#include "c6os/tick.h"
+
+#define W 240u
+#define H 240u
+
+void s3_btn_init(void);
+void s3_btn_poll(void);
+u32 s3_btn_pressed(u32 i);
+u32 s3_btn_take_event(u32 i);
+u32 s3_btn_level(u32 i);
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H];
+static OsGfx g;
+static volatile u32 g_cnt[3];
+static volatile u32 g_frame;
+static volatile u32 g_last_frame;
+static u32 g_anim;
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void num(u32 x, u32 y, u32 v, u16 color)
+{
+    char d[12] = {0};
+    char r[12] = {0};
+    int n = 0;
+    int k = 0;
+
+    if (v == 0u) { d[0] = '0'; n = 1; }
+    while (v > 0u) { d[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; r[k] = d[n]; k++; }
+    os_gfx_text16(&g, (int)x, (int)y, r, color);
+}
+
+static const char *names[3] = {"BOOT", "VOL+", "VOL-"};
+
+static void draw(void)
+{
+    u32 i = 0;
+
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+    os_gfx_text16(&g, 6, 4, "C6OS GUI HW-SPI", 0x07FFu);
+    os_gfx_text16(&g, 6, 24, "FRAME", 0xFFE0u);
+    num(70, 24, g_frame, 0xFFFFu);
+
+    /* 动画条：每帧右移、到头回卷 */
+    os_gfx_fill_rect(&g, 6, 44, (int)W - 12, 20, 0x0010u);
+    os_gfx_fill_rect(&g, (int)(6u + g_anim), 46, 30, 16, (u16)(0xF800u | (g_frame & 0x0FFFu)));
+    g_anim += 3u;
+    if (g_anim + 30u >= W - 12u) { g_anim = 0u; }
+
+    /* 三个键 */
+    while (i < 3u) {
+        u32 y = 74u + i * 52u;
+        u32 down = s3_btn_pressed(i);
+        u16 bg = (down != 0u) ? 0xF800u : 0x0010u;
+
+        os_gfx_fill_rect(&g, 6, (int)y, (int)W - 12, 46, bg);
+        os_gfx_text16(&g, 14, (int)y + 6, names[i], 0xFFFFu);
+        os_gfx_text16(&g, 14, (int)y + 26, (down != 0u) ? "DOWN" : "UP  ", 0xFFFFu);
+        os_gfx_text16(&g, 90, (int)y + 26, "n=", 0xFFFFu);
+        num(118, (int)y + 26, g_cnt[i], 0xFFFFu);
+        os_gfx_text16(&g, 90, (int)y + 6, "L=", 0xFFFFu);
+        num(112, (int)y + 6, s3_btn_level(i) & 1u, 0xFFFFu);
+        i++;
+    }
+}
+
+static void btn_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        u32 i = 0;
+
+        s3_btn_poll();
+        while (i < 3u) {
+            if (s3_btn_take_event(i) != 0u) {
+                g_cnt[i]++;
+                pstr("press ");
+                pu32(i);
+                pstr("\n");
+            }
+            i++;
+        }
+        os_task_delay(1u);
+    }
+}
+
+static void gui_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        draw();
+        s3_lcd_blit(g_fb, W, H);
+        g_frame++;
+        if ((g_frame % 60u) == 0u) {
+            u32 d = g_frame - g_last_frame;
+            pstr("frame ");
+            pu32(g_frame);
+            pstr(" tick=");
+            pu32((u32)os_tick_get());
+            pstr(" d=");
+            pu32(d);
+            pstr("\n");
+            g_last_frame = g_frame;
+        }
+    }
+}
+
+void os_main(void)
+{
+    s3_btn_init();
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+    draw();
+
+    (void)os_task_create("btn", btn_task, 0, 3u, 3072u);
+    (void)os_task_create("gui", gui_task, 0, 2u, 4096u);
+    os_task_start();
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

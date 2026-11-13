@@ -1,0 +1,100 @@
+/* t_s3_lcd_hwlive.c6 —— 硬件 SPI "连续刷新"长跑（对应"屏跑几秒后定格"）。
+ *
+ * 每帧整屏重绘：帧计数 + 来回移动的进度条 + 每帧换色的色块，**完全不做节流**。
+ * 屏上内容每帧都变，所以"定格"一眼就能看出。
+ *
+ * 串口：每 100 帧才打印一行（帧号 + 单帧周期数）。注意内核 USB-Serial-JTAG
+ * 有个坑：**没有主机读串口时写满 ~60 字节，控制台会整体卡死**（port_putc 里
+ * WR_DONE 卡住后只能丢字节），所以启动阶段不要多打印，留时间给上位机接上。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_use_bitbang(u32 on);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_mark(u32 idx, u32 v);
+
+static u16 g_fb[W * H];
+static OsGfx g;
+
+static void puts_(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void put_num(u32 x, u32 y, u32 v, u16 color)
+{
+    char d[12] = {0};
+    char r[12] = {0};
+    int n = 0;
+    int k = 0;
+
+    if (v == 0u) { d[0] = '0'; n = 1; }
+    while (v > 0u) { d[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; r[k] = d[n]; k++; }
+    os_gfx_text16(&g, (int)x, (int)y, r, color);
+}
+
+void os_main(void)
+{
+    u32 x = 0;
+    u32 dir = 1u;
+    u32 frame = 0;
+
+    /* 先安静 6 秒：给上位机时间接上串口（内核 USB-Serial-JTAG 在没有主机读的
+     * 情况下写满 ~60 字节会把控制台卡住，后面所有打印都会丢）。 */
+    s3_lcd_delay(48000000u);
+
+    s3_lcd_use_bitbang(0u);          /* 硬件 SPI（20MHz，CLKCNT_L=N 已修正） */
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init ok\n");
+    os_gfx_init(&g, g_fb, W, H);
+
+    for (;;) {
+        u64 t0 = port_cycles();
+        u32 kc = 0;
+
+        os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+        os_gfx_text16(&g, 6, 6, "HW SPI 20MHZ", 0xFFFFu);
+        os_gfx_text16(&g, 6, 28, "FRAME", 0x07FFu);
+        put_num(70, 28, frame, 0xFFFFu);
+
+        /* 进度条：来回移动 */
+        os_gfx_fill_rect(&g, 10, 100, (int)W - 20, 40, 0x0010u);
+        os_gfx_fill_rect(&g, (int)(10u + x), 104, 40, 32, (u16)(0xF800u | (frame & 0x07FFu)));
+        /* 每帧换色的色块 */
+        os_gfx_fill_rect(&g, 10, 170, (int)W - 20, 50, (u16)(0x07E0u ^ (frame << 3)));
+
+        s3_lcd_blit(g_fb, W, H);
+
+        kc = (u32)(port_cycles() - t0) / 1000u;
+        frame++;
+        s3_mark(2u, frame);                     /* 客观存活标记：RTC 慢速内存 */
+        s3_mark(3u, (u32)(port_cycles() >> 12));
+        if (dir != 0u) { x++; if (x + 40u >= W - 20u) { dir = 0u; } }
+        else { if (x == 0u) { dir = 1u; } else { x--; } }
+
+        if ((frame % 100u) == 0u) {
+            puts_("f");
+            put_u32_(frame);
+            puts_(" ");
+            put_u32_(kc);
+            puts_("k\n");
+        }
+    }
+}

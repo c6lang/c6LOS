@@ -1,0 +1,152 @@
+/* t_s3_spiwire.c6 —— 客观验证硬件 SPI 的**线序/相位**（不看屏、不用逻辑分析仪）。
+ *
+ * 做法：SPI 降到 ~78kHz，发一个已知 8 字节图案；同时用软件扮演"SPI 从机"——
+ * 盯 SCLK(GPIO9) 的上升沿，在上升沿采 MOSI(GPIO10)，把 64 bit 拼回 8 字节。
+ * ST7789 在 mode 3 下就是按上升沿采样的，所以"软件从机收到的字节 == 发出的
+ * 字节"就说明硬件 SPI 出线格式和 bit-bang 完全等价。
+ *
+ * 同时把 {CK_IDLE_EDGE, CK_OUT_EDGE} 的 4 种组合都试一遍，看哪一组才能被
+ * 上升沿正确的采到（这就是该给面板用的一组）。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define SPI3      0x60025000u
+#define PIN_SCLK  9u
+#define PIN_SDA   10u
+#define PIN_CS    14u
+
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void phex2(u32 v)
+{
+    static const char h[] = "0123456789abcdef";
+    port_putc((int)h[(v >> 4) & 0xFu]);
+    port_putc((int)h[v & 0xFu]);
+}
+
+static void wr(u32 a, u32 v) { s3_reg_wr(a, v); }
+static u32 rd(u32 a) { return s3_reg32(a); }
+
+static void pin_out(u32 pin, u32 sig)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * pin;
+    wr(a, (rd(a) & ~(7u << 12)) | (1u << 12) | (1u << 9));
+    wr(0x60004000u + 0x554u + 4u * pin, sig & 0x1FFu);
+    wr(0x60004000u + 0x24u, 1u << pin);
+}
+
+static const u8 g_pat[8] = {0x55u, 0x0Fu, 0xF0u, 0xA5u, 0x3Cu, 0xC3u, 0x99u, 0x66u};
+static u8 g_rx[8];
+
+/* 软件从机：等 64 个 SCLK 上升沿，每个沿采一次 MOSI（MSB first） */
+static u32 sample_mosi(void)
+{
+    u32 mask = (1u << PIN_SCLK) | (1u << PIN_SDA);
+    u32 last = rd(0x6000403Cu) & mask;
+    u8 bits[8] = {0};
+    u32 n = 0;
+    u32 guard = 0;
+
+    while (n < 64u) {
+        u32 v = rd(0x6000403Cu) & mask;
+        u32 sclk_now = (v >> PIN_SCLK) & 1u;
+        u32 sclk_old = (last >> PIN_SCLK) & 1u;
+
+        if (sclk_now != 0u && sclk_old == 0u) {
+            u32 idx = n / 8u;
+            bits[idx] = (u8)((bits[idx] << 1) | ((v >> PIN_SDA) & 1u));
+            n++;
+        }
+        last = v;
+        guard++;
+        if (guard > 4000000u) { break; }
+    }
+    {
+        u32 k = 0;
+        while (k < 8u) { g_rx[k] = bits[k]; k++; }
+    }
+    return n;
+}
+
+static void show(const char *tag)
+{
+    u32 k = 0;
+
+    pstr(tag);
+    pstr(" rx=");
+    k = 0;
+    while (k < 8u) { phex2((u32)g_rx[k]); k++; }
+    pstr(" want=");
+    k = 0;
+    while (k < 8u) { phex2((u32)g_pat[k]); k++; }
+    pstr("\n");
+}
+
+static void send8(u32 clk, u32 user, u32 misc)
+{
+    u32 i = 0;
+
+    wr(SPI3 + 0x34u, 0u);
+    wr(SPI3 + 0x38u, 0xFFFFFFFFu);
+    wr(SPI3 + 0x08u, 0u);
+    wr(SPI3 + 0x0Cu, clk);
+    wr(SPI3 + 0x10u, user);
+    wr(SPI3 + 0x20u, misc);
+    wr(SPI3 + 0xE0u, 0u);
+    wr(SPI3 + 0xE8u, 7u);
+    while (i < 2u) {
+        u32 w = 0;
+        u32 k = 0;
+        while (k < 4u) { w = (w << 8) | (u32)g_pat[i * 4u + k]; k++; }
+        wr(SPI3 + 0x98u + 4u * i, w);
+        i++;
+    }
+    wr(SPI3 + 0x1Cu, 63u);
+    wr(SPI3 + 0x00u, (1u << 23));
+    while ((rd(SPI3 + 0x00u) & (1u << 23)) != 0u) { }
+    wr(SPI3 + 0x00u, (1u << 24));
+    (void)sample_mosi();
+    {
+        u32 guard = 0;
+        while ((rd(SPI3 + 0x00u) & (1u << 24)) != 0u) {
+            guard++;
+            if (guard > 2000000u) { break; }
+        }
+    }
+    s3_lcd_delay(2000000u);
+}
+
+/* 慢时钟 ~78kHz：pre=16(写15), n=64(写63), h=32(写31), l=n(写63) */
+#define SLOW ((15u << 18) | (63u << 12) | (31u << 6) | 63u)
+
+void os_main(void)
+{
+    pstr("\n=== spi wire test ===\n");
+
+    wr(0x600C0018u, rd(0x600C0018u) | (1u << 16));
+    wr(0x600C0020u, rd(0x600C0020u) & ~(1u << 16));
+    pin_out(PIN_SCLK, 66u);
+    pin_out(PIN_SDA, 68u);
+    pin_out(PIN_CS, 71u);
+    wr(0x60004000u + 0x0Cu, 1u << 14);          /* CS 常低 */
+
+    send8(SLOW, (1u << 27) | (1u << 9), (1u << 29));
+    show("A idle1/out1");
+    send8(SLOW, (1u << 27), (1u << 29));
+    show("B idle1/out0");
+    send8(SLOW, (1u << 27), 0u);
+    show("C idle0/out0");
+    send8(SLOW, (1u << 27) | (1u << 9), 0u);
+    show("D idle0/out1");
+    send8(SLOW, 0x08000041u, 0x20000006u);
+    show("E idf       ");
+
+    pstr("=== done ===\n");
+    for (;;) { s3_lcd_delay(4000000u); }
+}

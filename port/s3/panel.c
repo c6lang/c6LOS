@@ -51,7 +51,12 @@ static u32 g_spi_base = 0x60025000u;   /* 默认 SPI3 */
 #define SPI_USR_COMMAND  (1u << 31)
 #define SPI_MISC_CK_IDLE (1u << 29)
 #define SPI_CK_IDLE_EDGE  (1u << 29)   /* MISC: CK 空闲电平（mode 3 → 1） */
-#define SPI_CK_OUT_EDGE   (1u << 9)    /* USER: 输出沿（mode 3 → 1） */
+#define SPI_CK_OUT_EDGE   (1u << 9)    /* USER: 输出沿。**mode 3 下必须为 0**：
+                                        * 置 1 时数据在上升沿更新，同时面板也在上升沿采样
+                                        * → 采到的是刚换的新数据（错位）。实测（软件当从机、
+                                        * 78kHz 慢时钟、上升沿采样 MOSI）：
+                                        *   idle=1,out_edge=1 → rx=4be01eaa... （全错）
+                                        *   idle=1,out_edge=0 → rx=a5f00f55... （字节序另论，见下） */
 #define SPI_DOUTDIN       (1u << 0)    /* USER: 1=全双工（MOSI/MISO 同时） */
 #define SPI_CS_KEEP_ACTIVE (1u << 30)  /* MISC: 事务结束后不抬 CS */
 
@@ -184,14 +189,12 @@ static void bb_dc(u32 level);
 
 /* ---- bit-bang 兜底通路 ------------------------------------------------ */
 
-/* SPI2 的 SCLK 输出在这块板子上实测不出边沿（用 PCNT 数引脚：同时刻 MOSI 有
- * 256 个上升沿、SCLK 0 个），所以留一条纯 GPIO 翻转的通路：把 SCLK/SDA 从
- * GPIO 矩阵摘回普通 GPIO 输出，按 mode 3 手动打时钟。慢，但能证明面板与接线
- * 本身是好的（也是 SPI 时钟修好前的可用兜底）。 */
-/* 默认走 bit-bang：SPI2 的 SCLK 输出在这块板子上打不出边沿（见
- * docs/s3-panel-bringup.md §4.5，PCNT 实测 0 边沿而 MOSI 有 256），
- * 只有这条路能真正驱动面板。想试硬件 SPI 就调 s3_lcd_use_bitbang(0)。 */
-static u32 g_bitbang = 1;
+/* 默认走**硬件 SPI**（20MHz）。2025 本轮找到"SCLK 打不出边沿"的真因：
+ * SPI_CLOCK 的 CLKCNT_L 必须等于 CLKCNT_N（IDF: l = n），我们原来按
+ * H+L=N 写成了 N/2 → 模块内部照常移位、MOSI 有边沿，但时钟不出脚。
+ * 改正后真板实测 64 字节 = 512 个 SCLK 边沿，面板正常出图。
+ * bit-bang 通路完整保留（s3_lcd_use_bitbang(1)），作为硬件 SPI 出问题时的兜底。 */
+static u32 g_bitbang = 0;
 static u32 g_hwspi;
 static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
 static u32 g_bb_fast = 1;     /* 默认用整字写 GPIO_OUT 的快速内层循环（快 2.2x） */
@@ -210,7 +213,10 @@ void s3_lcd_use_bitbang(u32 on)
     } else {
         matrix_out(PIN_SCLK, g_sig_clk);
         matrix_out(PIN_SDA, g_sig_d);
-        matrix_out(PIN_CS, g_sig_cs);
+        /* CS 不用外设的 FSPICS0，直接普通 GPIO 拉低常选中：ST7789 靠 DC 区分
+         * 命令/数据，CS 常低完全合法，也免得外设事务之间的 CS 时序成为变量。 */
+        plain_out(PIN_CS);
+        lo(PIN_CS);
     }
 }
 
@@ -379,7 +385,12 @@ static void spi_xfer_hw(const u8 *buf, u32 len)
         while (k < 4u) {
             u32 idx = i * 4u + k;
             u32 b = (idx < len) ? (u32)buf[idx] : 0u;
-            w = (w << 8) | b;
+            /* **低字节先出**：S3 GPSPI 的 data_buf 是从 bit[7:0] 开始往外移的
+             * （IDF 的 spi_ll_write_buffer 就是直接 memcpy，不做字节交换）。
+             * 之前按 MSB 打包，结果每 4 个字节被整组倒序；单个命令字节更是
+             * 变成 0x00 → 面板一条命令都没收到（黑屏）。实测对照见
+             * tests/t_s3_spiwire.c6：want=550ff0a53cc39966 收到 a5f00f556699c33c。 */
+            w |= b << (8u * k);
             k++;
         }
         SPI2_W(i) = w;
@@ -516,12 +527,20 @@ static void spi_init(void)
 
     /* 源选 80MHz PLL（MST_CLK_SEL=1），分频 N+1=4 → 20MHz：
      * CLKDIV_PRE=0（bits21:18）、CLKCNT_N=3（17:12）、CLKCNT_H=1（11:6）、
-     * CLKCNT_L=1（5:0）、CLK_EQU_SYSCLK=0（bit31）。
+     * CLKCNT_L=3（5:0）、CLK_EQU_SYSCLK=0（bit31）→ 0x00003043。
      *
-     * **必须满足 H+L=N**（这里 2+2=4）。写成 CLKCNT_L=3 时 H+L=6>N=4，
-     * 低电平相位被吃掉 → SCLK 卡在常高：事务照样按分频"耗时"，MOSI 也在
-     * 移数据，但面板收不到时钟，屏幕只有背光。复位默认 0x3041 才是对的。 */
-    clk = (g_equ_sysclk != 0u) ? 0x80003041u : 0x00003041u;
+     * 【2025 本轮定位】**CLKCNT_L 必须等于 CLKCNT_N**（IDF
+     * esp_hal_gpspi/esp32s3/spi_ll.h: spi_ll_master_cal_clock() 里就是
+     * `l = n; reg.clkcnt_l = l - 1;`），不是"高 H + 低 L = 一个周期 N"。
+     * 这里曾按 H+L=N 写成 CLKCNT_L=1（0x3041，也是复位默认值），结果：
+     * SPI 内部照常移位（MOSI 有边沿、事务耗时随分频线性变化），但
+     * **SCLK 引脚不出任何边沿** → 面板只有背光。真板对照实验（同一次
+     * 传输里软件轮询 GPIO9/10，78kHz 慢时钟）：
+     *     L=N/2 → sclk9=0    mosi10=256
+     *     L=N   → sclk9=1024 mosi10=256
+     * 20MHz 下用 PCNT 复核同样结论（0 边沿 vs 512 边沿）。
+     * 这就是"硬件 SPI 打不出时钟"的最终真因。 */
+    clk = (g_equ_sysclk != 0u) ? 0x80003043u : 0x00003043u;
     dbg("clock_want=");
     dbg_hex(clk);
     dbg("\n");
@@ -535,9 +554,11 @@ static void spi_init(void)
     SPI2_SLAVE = 0u;
     SPI2_DMA_CONF = (1u << 1) | (1u << 2);   /* tx/rx_seg_trans_clr_en=1 */
     SPI2_CTRL = 0u;                     /* MSB first，d_pol=0（MOSI 空闲低） */
-    /* 原厂是 SPI mode 3：CK_IDLE_EDGE(CK 空闲电平)=1 + CK_OUT_EDGE=1，
-     * 正好也是 ST7789 手册要求的 CPOL=1/CPHA=1。 */
-    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    /* ST7789 是 mode 3（CPOL=1/CPHA=1）：MISC.CK_IDLE_EDGE=1（空闲高）+
+     * USER 里**不置** CK_OUT_EDGE（数据在下降沿更新、面板在上升沿采样）。
+     * 两者都置 1 会让"更新沿"和"采样沿"撞在一起，采到错位数据（实测见
+     * §4.6.3，wire 测试直接能看出来）。 */
+    SPI2_USER = SPI_USR_MOSI;
     /* CS 常低（ST7789 靠 DC 区分命令/数据，CS 一直有效是合法的，也避免
      * 命令字节和参数分属两次事务时面板接口状态机被 CS 打断）。 */
     SPI2_MISC = (g_equ_sysclk != 0u) ? (SPI_CK_IDLE_EDGE)          /* 照 IDF：不常低 CS */
@@ -721,7 +742,7 @@ int s3_lcd_read_id(u8 *out, u32 n)
     hi(PIN_DC);
 
     for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -738,12 +759,13 @@ int s3_lcd_read_id(u8 *out, u32 n)
     nw = (n + 3u) / 4u;
     for (i = 0; i < nw; i++) {
         w = SPI2_W(i);
-        out[i * 4u] = (u8)(w >> 24);
-        if (i * 4u + 1u < n) { out[i * 4u + 1u] = (u8)(w >> 16); }
-        if (i * 4u + 2u < n) { out[i * 4u + 2u] = (u8)(w >> 8); }
-        if (i * 4u + 3u < n) { out[i * 4u + 3u] = (u8)w; }
+        /* 和发送侧对称：RX FIFO 也是**低位字节是先收到的那一个** */
+        out[i * 4u] = (u8)w;
+        if (i * 4u + 1u < n) { out[i * 4u + 1u] = (u8)(w >> 8); }
+        if (i * 4u + 2u < n) { out[i * 4u + 2u] = (u8)(w >> 16); }
+        if (i * 4u + 3u < n) { out[i * 4u + 3u] = (u8)(w >> 24); }
     }
-    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    SPI2_USER = SPI_USR_MOSI;
     *(volatile u32 *)GPIO_OUT_SEL(PIN_SDA) = SIG_GPIO_OUT | OEN_ALWAYS;
     return 0;
 }
@@ -779,7 +801,7 @@ int s3_spi_read_pin(u32 pin, u8 *rx, u32 n)
     *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = (pin & 0x3Fu) | (1u << 6);
 
     for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0u; }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -801,7 +823,7 @@ int s3_spi_read_pin(u32 pin, u8 *rx, u32 n)
         if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
         if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
     }
-    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    SPI2_USER = SPI_USR_MOSI;
     return 0;
 }
 
@@ -836,7 +858,7 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
         if (i * 4u + 3u < n) { w |= (u32)tx[i * 4u + 3u]; }
         SPI2_W(i) = w;
     }
-    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_DOUTDIN;
     SPI2_MS_DLEN = n * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     guard = 0;
@@ -857,7 +879,7 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
         if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
         if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
     }
-    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    SPI2_USER = SPI_USR_MOSI;
     return 0;
 }
 
@@ -952,8 +974,8 @@ void s3_spi_begin(void)
     for (i = 0; i < SPI_CHUNK / 4u; i++) { SPI2_W(i) = 0x55555555u; }
     /* 注意不能置 CLK_EQU_SYSCLK(bit31)，置了分频就被忽略（跑 80MHz）。
      * 125kHz：半周期 4us，远大于软件采样间隔，避免采样混叠。 */
-    /* 125kHz：CLKDIV_PRE=9（前置 10 分频），N=63(H=32,L=32 → H+L=N)。 */
-    SPI2_CLOCK = (9u << 18) | (63u << 12) | (31u << 6) | 31u;
+    /* 125kHz：CLKDIV_PRE=9（前置 10 分频），N=63、H=32、L=N=63（L 必须等于 N）。 */
+    SPI2_CLOCK = (9u << 18) | (63u << 12) | (31u << 6) | 63u;
     SPI2_MS_DLEN = SPI_CHUNK * 8u - 1u;
     SPI2_CMD = SPI_CMD_UPDATE;
     while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) { }
@@ -968,7 +990,7 @@ int s3_spi_end(void)
         guard++;
         if (guard > 4000000u) { return -1; }
     }
-    SPI2_CLOCK = 0x00003041u;
+    SPI2_CLOCK = 0x00003043u;
     return 0;
 }
 
@@ -1045,7 +1067,8 @@ static u32 rd_reg(u32 a)
     return *(volatile u32 *)a;
 }
 
-/* div: CLKCNT_N（80MHz/div） */
+/* div: CLKCNT_N（80MHz/div），div=4 → 20MHz。
+ * 照 IDF spi_ll_master_cal_clock()：n / h=占空比拍数 / **l = n**（不是 n-h）。 */
 void s3_lcd_use_spi2hw(u32 div)
 {
     u32 n = div;
@@ -1054,14 +1077,15 @@ void s3_lcd_use_spi2hw(u32 div)
     if (n < 2u) { n = 2u; }
     if (n > 64u) { n = 64u; }
     if (h == 0u) { h = 1u; }
+    if (h >= n) { h = n - 1u; }
 
     wr((volatile u32 *)0x600C0018u, rd_reg(0x600C0018u) | (1u << 6));   /* SPI2 clk en */
     wr((volatile u32 *)0x600C0020u, rd_reg(0x600C0020u) & ~(1u << 6));  /* 释放复位 */
     wr((volatile u32 *)SPI2_GATE, 7u);                                  /* CLK_EN|MST_ACTIVE|SEL */
-    /* CLOCK: pre-1=0(即 pre=1), n-1, h-1, l-1 */
+    /* CLOCK: pre-1=0(即 pre=1), n-1, h-1, l-1（l = n） */
     wr((volatile u32 *)SPI2_CLOCK, (((n - 1u) & 0x3Fu) << 12) |
                                    (((h - 1u) & 0x3Fu) << 6) |
-                                   ((h - 1u) & 0x3Fu));
+                                   ((n - 1u) & 0x3Fu));
     wr((volatile u32 *)SPI2_CTRL, 0u);                    /* MSB first */
     wr((volatile u32 *)SPI2_USER, (1u << 27) |            /* USR_MOSI */
                                   (1u << 7) | (1u << 6)); /* CS_SETUP/CS_HOLD */
@@ -1085,7 +1109,7 @@ static void hw_xfer(const u8 *p, u32 n)
         u32 w = 0;
         u32 k = 0;
         while (k < 4u && i + k < n) {
-            w |= ((u32)p[i + k]) << (24u - 8u * k);
+            w |= ((u32)p[i + k]) << (8u * k);   /* 低字节先出，见 spi_xfer_hw 注释 */
             k++;
         }
         wr((volatile u32 *)(SPI2_W0 + 4u * (i / 4u)), w);

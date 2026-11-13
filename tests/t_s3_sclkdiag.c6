@@ -1,0 +1,273 @@
+/* t_s3_sclkdiag.c6 —— 把"硬件 SPI 打不出 SCLK"这件事彻底钉死：
+ *
+ * 前几轮只测了"传输结束后"的边沿数，分不清两件事：
+ *   (a) 模块根本没在移位（MOSI 的边沿只是 FIFO 写入改变了 pad 电平）
+ *   (b) 模块在移位、MOSI 在动，但 SCLK 输出被门控住
+ * 这里改成 **传输进行中用软件轮询两个引脚**（时钟降到 ~78kHz，512bit 要 6.5ms，
+ * 轮询 40 万次 ≈ 8M cycles 完全覆盖），分别数 GPIO9(SCLK)/GPIO10(MOSI) 的跳变。
+ *
+ * 然后逐项试配置，看哪一项能让 SCLK 出边沿：
+ *   A 基线（当前 panel.c 的配置）
+ *   B SPI_SLAVE.CLK_MODE=3（bit[1:0]："SCLK 常开"，绕开 CS 门控）
+ *   C IO_MUX MCU_SEL=1（IDF 用 PIN_FUNC_GPIO=1，我们原来写的是 0）
+ *   D 换 SPI2 主机（FSPI，信号 101/103/110）+ 上面两项都开
+ * 最后打印寄存器快照，便于和 IDF 对照。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define SPI3       0x60025000u
+#define SPI2       0x60024000u
+#define GPIO_IN    (*(volatile u32 *)0x6000403Cu)
+#define PIN_SCLK   9u
+#define PIN_SDA    10u
+#define PIN_CS     14u
+
+u32 s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void phex(u32 v)
+{
+    static const char h[] = "0123456789abcdef";
+    int i = 28;
+    pstr("0x");
+    while (i >= 0) { port_putc((int)h[(v >> (u32)i) & 0xFu]); i -= 4; }
+}
+
+static void phex2(const char *n, u32 v) { pstr(n); phex(v); }
+
+static void wr(u32 a, u32 v) { s3_reg_wr(a, v); }
+static u32 rd(u32 a) { return s3_reg32(a); }
+
+/* ---- 引脚 ------------------------------------------------------------- */
+static void mux_sel(u32 pin, u32 sel)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * pin;
+    wr(a, (rd(a) & ~(7u << 12)) | ((sel & 7u) << 12) | (1u << 8) | (2u << 10));
+}
+
+/* 注意：GPIO 输出使能是 GPIO_ENABLE_W1TS = 0x60004000+0x24（pin<32），
+ * +0x10 是 GPIO_OUT1（pin32..53），写到那儿等于什么都没打开。
+ * IO_MUX：MCU_SEL[14:12] 由下面 mux_sel() 单独管；这里只开 FUN_IE(bit9)
+ * 以便用 GPIO_IN 回读 pad 电平。 */
+static void pin_out(u32 pin, u32 sig)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * pin;
+    wr(a, rd(a) | (1u << 9));
+    wr(0x60004000u + 0x554u + 4u * pin, sig & 0x1FFu);
+    if (pin < 32u) { wr(0x60004000u + 0x24u, 1u << pin); }
+    else { wr(0x60004000u + 0x30u, 1u << (pin - 32u)); }
+}
+
+static u8 g_buf[64];
+
+/* ---- 软件"逻辑分析仪" ------------------------------------------------- */
+/* 在一次 512bit 慢传输进行中，轮询 SCLK/MOSI 的跳变次数。 */
+static u32 g_t9;
+static u32 g_t10;
+static u32 g_usr_seen;
+
+static void start_slow(u32 base, u32 bits)
+{
+    u32 i = 0;
+
+    if (bits > 512u) { bits = 512u; }
+    while (i < (bits / 32u)) {
+        u32 k = 0;
+        u32 w = 0;
+        while (k < 4u) { w = (w << 8) | (u32)g_buf[i * 4u + k]; k++; }
+        wr(base + 0x98u + 4u * i, w);
+        i++;
+    }
+    wr(base + 0x18u, 0u);                    /* USER2 */
+    wr(base + 0x1Cu, bits - 1u);             /* MS_DLEN */
+    wr(base + 0x10u, (1u << 27) | (1u << 9));/* USER: USR_MOSI + CK_OUT_EDGE */
+    wr(base + 0x0Cu, (15u << 18) | (63u << 12) | (31u << 6) | 31u);  /* ~78kHz */
+    wr(base + 0xE8u, 7u);                    /* CLK_GATE */
+    wr(base + 0x00u, (1u << 23));            /* UPDATE */
+    while ((rd(base + 0x00u) & (1u << 23)) != 0u) { }
+    wr(base + 0x00u, (1u << 24));            /* USR */
+}
+
+static void poll_during(u32 base, u32 iters)
+{
+    u32 mask = (1u << PIN_SCLK) | (1u << PIN_SDA);
+    u32 last = rd(0x6000403Cu) & mask;
+    u32 n9 = 0;
+    u32 n10 = 0;
+    u32 usr = 0;
+    u32 i = 0;
+
+    while (i < iters) {
+        u32 v = rd(0x6000403Cu) & mask;
+        if (((v ^ last) & (1u << PIN_SCLK)) != 0u) { n9++; }
+        if (((v ^ last) & (1u << PIN_SDA)) != 0u) { n10++; }
+        last = v;
+        if (i < 8u && (rd(base + 0x00u) & (1u << 24)) != 0u) { usr = 1u; }
+        i++;
+    }
+    g_t9 = n9;
+    g_t10 = n10;
+    g_usr_seen = usr;
+}
+
+/* 正对照：用普通 GPIO 方式翻转 9/10，边翻转边用同样的"读 GPIO_IN 比电平"办法数，
+ * 验证测量链路本身是好的（每个引脚应数到 ≈200 个跳变）。 */
+static void poll_ctrl(void)
+{
+    u32 mask = (1u << PIN_SCLK) | (1u << PIN_SDA);
+    u32 i = 0;
+    u32 last = 0;
+    u32 n9 = 0;
+    u32 n10 = 0;
+
+    pin_out(PIN_SCLK, 0x100u);
+    pin_out(PIN_SDA, 0x100u);
+    wr(0x60004000u + 0x0Cu, mask);            /* 两个都拉低 */
+    last = rd(0x6000403Cu) & mask;
+    while (i < 100u) {
+        wr(0x60004000u + 0x08u, mask);        /* W1TS：都拉高 */
+        {
+            u32 v = rd(0x6000403Cu) & mask;
+            if ((v ^ last) & (1u << PIN_SCLK)) { n9++; }
+            if ((v ^ last) & (1u << PIN_SDA)) { n10++; }
+            last = v;
+        }
+        wr(0x60004000u + 0x0Cu, mask);        /* W1TC：都拉低 */
+        {
+            u32 v = rd(0x6000403Cu) & mask;
+            if ((v ^ last) & (1u << PIN_SCLK)) { n9++; }
+            if ((v ^ last) & (1u << PIN_SDA)) { n10++; }
+            last = v;
+        }
+        i++;
+    }
+    g_t9 = n9;
+    g_t10 = n10;
+}
+
+static void regs(u32 base, const char *tag)
+{
+    pstr(tag);
+    phex2(" cmd=", rd(base + 0x00u));
+    phex2(" ctrl=", rd(base + 0x08u));
+    phex2(" clk=", rd(base + 0x0Cu));
+    phex2(" user=", rd(base + 0x10u));
+    phex2(" dlen=", rd(base + 0x1Cu));
+    phex2(" misc=", rd(base + 0x20u));
+    phex2(" slave=", rd(base + 0xE0u));
+    phex2(" gate=", rd(base + 0xE8u));
+    phex2(" date=", rd(base + 0xF0u));
+    pstr("\n");
+}
+
+static void one_case(u32 base, const char *tag, u32 iters)
+{
+    pstr(tag);
+    pstr(" ");
+    start_slow(base, 512u);
+    poll_during(base, iters);
+    pstr("sclk9=");
+    pu32(g_t9);
+    pstr(" mosi10=");
+    pu32(g_t10);
+    pstr(" usr=");
+    pu32(g_usr_seen);
+    pstr(" usr_end=");
+    pu32((rd(base + 0x00u) & (1u << 24)) != 0u ? 1u : 0u);
+    pstr("\n");
+    /* 等这次传输结束（最多 ~30ms） */
+    s3_lcd_delay(6000000u);
+}
+
+static void host_on(u32 base, u32 bit)
+{
+    wr(0x600C0018u, rd(0x600C0018u) | bit);
+    wr(0x600C0020u, rd(0x600C0020u) & ~bit);
+}
+
+static void host_pins(u32 sig_clk, u32 sig_d, u32 sig_cs)
+{
+    pin_out(PIN_SCLK, sig_clk);
+    pin_out(PIN_SDA, sig_d);
+    pin_out(PIN_CS, sig_cs);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+
+    while (i < 64u) { g_buf[i] = (u8)(0x5Au ^ (i * 11u)); i++; }
+
+    pstr("\n=== sclk diag ===\n");
+
+    /* ---- 引脚做普通 GPIO 的正对照（验证轮询链路） ---- */
+    poll_ctrl();
+    pstr("ctrl: sclk9=");
+    pu32(g_t9);
+    pstr(" mosi10=");
+    pu32(g_t10);
+    pstr(" (期望各 ≈200：读 GPIO_IN 的测量链路正常)\n");
+
+    /* ---- A：SPI3 基线 ---- */
+    host_on(SPI3, 1u << 16);
+    host_pins(66u, 68u, 71u);
+    wr(SPI3 + 0x34u, 0u);
+    wr(SPI3 + 0x38u, 0xFFFFFFFFu);
+    wr(SPI3 + 0xE8u, 7u);
+    wr(SPI3 + 0x08u, 0u);
+    wr(SPI3 + 0x20u, (1u << 29) | (1u << 30));
+    one_case(SPI3, "A spi3 base ", 400000u);
+    regs(SPI3, "  A regs");
+
+    /* ---- B：CLK_MODE=3（SCLK 常开） ---- */
+    wr(SPI3 + 0xE0u, (rd(SPI3 + 0xE0u) & ~3u) | 3u);
+    one_case(SPI3, "B clkmode=3 ", 400000u);
+    wr(SPI3 + 0xE0u, rd(SPI3 + 0xE0u) & ~3u);
+
+    /* ---- C：IO_MUX MCU_SEL=1（IDF 的 PIN_FUNC_GPIO） ---- */
+    mux_sel(PIN_SCLK, 1u);
+    mux_sel(PIN_SDA, 1u);
+    mux_sel(PIN_CS, 1u);
+    one_case(SPI3, "C mcusel=1  ", 400000u);
+    phex2("  mux9=", rd(0x60009000u + 0x04u + 4u * PIN_SCLK));
+    phex2(" mux10=", rd(0x60009000u + 0x04u + 4u * PIN_SDA));
+    pstr("\n");
+
+    /* ---- D：SPI2 + 上面两项 ---- */
+    host_on(SPI2, 1u << 6);
+    host_pins(101u, 103u, 110u);
+    wr(SPI2 + 0x34u, 0u);
+    wr(SPI2 + 0x38u, 0xFFFFFFFFu);
+    wr(SPI2 + 0xE8u, 7u);
+    wr(SPI2 + 0x08u, 0u);
+    wr(SPI2 + 0x20u, (1u << 29) | (1u << 30));
+    one_case(SPI2, "D spi2 base ", 400000u);
+    wr(SPI2 + 0xE0u, (rd(SPI2 + 0xE0u) & ~3u) | 3u);
+    one_case(SPI2, "E spi2 clkm3", 400000u);
+    regs(SPI2, "  D/E regs");
+
+    phex2("gpio_out_sel9=", rd(0x60004554u + 4u * PIN_SCLK));
+    phex2(" sel10=", rd(0x60004554u + 4u * PIN_SDA));
+    phex2(" sel14=", rd(0x60004554u + 4u * PIN_CS));
+    phex2(" ena=", rd(0x60004000u + 0x20u));
+    phex2(" in=", rd(0x6000403Cu));
+    phex2(" sysclk=", rd(0x600C0058u));
+    phex2(" clk_en0=", rd(0x600C0018u));
+    pstr("\n=== done ===\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}
