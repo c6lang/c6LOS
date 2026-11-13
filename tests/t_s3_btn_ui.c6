@@ -1,6 +1,8 @@
-/* t_s3_btn_ui.c6 —— 按键状态直接显示在屏上：
- *   BOOT(GPIO0) / VOL+(GPIO40) / VOL-(GPIO39) 三行，
- *   每行显示 UP/DOWN 与按下次数；按下时整行反色。任何变化就重绘上屏。
+/* t_s3_btn_ui.c6 —— 屏上按键面板（局部刷新版）：
+ *   BOOT(GPIO0) / VOL+(GPIO40) / VOL-(GPIO39) 三行，显示 UP/DOWN 与次数。
+ * 关键：只重绘"状态变了的那一行"，用 s3_lcd_blit_rect 做窗口 blit，
+ * 这样一次刷新只有 240x46 像素（约整屏的 1/5），按下立刻就能看到反应，
+ * 也不会因为整屏重绘太慢而漏掉快速点击。
  */
 
 #include "c6os/types.h"
@@ -9,6 +11,7 @@
 
 #define W 240u
 #define H 240u
+#define ROW_H 60
 
 void s3_btn_init(void);
 void s3_btn_poll(void);
@@ -16,19 +19,19 @@ u32 s3_btn_pressed(u32 i);
 u32 s3_btn_take_event(u32 i);
 void s3_lcd_init(void);
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
 void s3_lcd_bl(u32 on);
 void s3_lcd_delay(u32 n);
 
 static u16 g_fb[W * H] = {0};
 static OsGfx g;
-static u32 g_cnt[3] = {0, 0, 0};
+static u32 g_cnt[3];
+static u32 g_drawn_down[3];
+static u32 g_drawn_cnt[3];
 
-static void puts_(const char *s)
-{
-    while (*s != '\0') { port_putc(*s); s++; }
-}
+static void pstr(const char *s) { while (*s) { port_putc(*s); s++; } }
 
-static void put_u32_(u32 v)
+static void pu32(u32 v)
 {
     char b[12] = {0};
     int i = 0;
@@ -37,64 +40,69 @@ static void put_u32_(u32 v)
     while (i > 0) { i--; port_putc((int)b[i]); }
 }
 
-static int u32_str(char *out, u32 v)
+static void u2s(char *out, u32 v)
 {
     char tmp[12] = {0};
     int n = 0;
     int i = 0;
 
-    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return 1; }
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
     while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
     while (n > 0) { n--; out[i] = tmp[n]; i++; }
     out[i] = '\0';
-    return i;
 }
 
-/* 画一行：y 行位置，名字，计数，是否按下 */
-static void row(int y, const char *name, u32 n, u32 down)
+/* 画一行到帧缓冲（不 blit） */
+static void draw_row(u32 i, u32 down)
 {
+    int y = 26 + (int)i * ROW_H;
+    char s[12] = {0};
     u16 bg = (down != 0u) ? 0xF800u : 0x0010u;
-    u16 fg = 0xFFFFu;
-    char s[16] = {0};
 
-    os_gfx_fill_rect(&g, 0, y, (int)W, 46, bg);
-    os_gfx_text16(&g, 8, y + 6, name, fg);
-    os_gfx_text16(&g, 8, y + 24, (down != 0u) ? "DOWN" : "UP  ", fg);
-    (void)u32_str(s, n);
-    os_gfx_text16(&g, 150, y + 24, "n=", fg);
-    os_gfx_text16(&g, 174, y + 24, s, fg);
+    os_gfx_fill_rect(&g, 0, y, (int)W, ROW_H - 4, bg);
+    if (i == 0u) { os_gfx_text16(&g, 6, y + 4, "BOOT  GPIO0", 0xFFFFu); }
+    if (i == 1u) { os_gfx_text16(&g, 6, y + 4, "VOL+  GPIO40", 0xFFFFu); }
+    if (i == 2u) { os_gfx_text16(&g, 6, y + 4, "VOL-  GPIO39", 0xFFFFu); }
+
+    os_gfx_text16(&g, 6, y + 26, (down != 0u) ? "DOWN" : "UP  ", 0xFFFFu);
+    os_gfx_text16(&g, 90, y + 26, "n=", 0xFFFFu);
+    u2s(s, g_cnt[i]);
+    os_gfx_text16(&g, 114, y + 26, s, 0xFFFFu);
 }
 
-static void redraw(void)
+/* 只把某一行刷到屏上 */
+static void flush_row(u32 i)
 {
-    char s[16] = {0};
-    u32 total = g_cnt[0] + g_cnt[1] + g_cnt[2];
-
-    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
-    os_gfx_text16(&g, 8, 4, "C6OS BUTTONS", 0x07FFu);
-    row(30, "BOOT (GPIO0)", g_cnt[0], s3_btn_pressed(0u));
-    row(80, "VOL+ (GPIO40)", g_cnt[1], s3_btn_pressed(1u));
-    row(130, "VOL- (GPIO39)", g_cnt[2], s3_btn_pressed(2u));
-    (void)u32_str(s, total);
-    os_gfx_text16(&g, 8, 196, "PRESSES", 0xFFE0u);
-    os_gfx_text16(&g, 90, 196, s, 0xFFE0u);
-    os_gfx_text16(&g, 8, 216, "ST7789 240X240", 0xF81Fu);
-    s3_lcd_blit(g_fb, W, H);
+    int y = 26 + (int)i * ROW_H;
+    draw_row(i, s3_btn_pressed(i));
+    s3_lcd_blit_rect(g_fb, W, 0u, (u32)y, W, (u32)(ROW_H - 4));
+    g_drawn_down[i] = s3_btn_pressed(i);
+    g_drawn_cnt[i] = g_cnt[i];
 }
 
 void os_main(void)
 {
     u32 i = 0;
-    u32 dirty = 1;
 
-    puts_("c6os buttons (on screen)\n");
+    pstr("c6os buttons (partial refresh)\n");
     s3_btn_init();
     s3_lcd_init();
     s3_lcd_bl(1u);
     os_gfx_init(&g, g_fb, W, H);
-    puts_("init done\n");
 
-    redraw();
+    /* 首帧：整屏画一次 */
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x00000000u);
+    os_gfx_text16(&g, 6, 4, "C6OS BUTTONS", 0x07FFu);
+    i = 0;
+    while (i < 3u) {
+        draw_row(i, s3_btn_pressed(i));
+        g_drawn_down[i] = s3_btn_pressed(i);
+        g_drawn_cnt[i] = g_cnt[i];
+        i++;
+    }
+    os_gfx_text16(&g, 6, 212, "BOOT: rec/play  VOL: +/-", 0xF81Fu);
+    s3_lcd_blit(g_fb, W, H);
+    pstr("init done\n");
 
     for (;;) {
         s3_btn_poll();
@@ -103,19 +111,23 @@ void os_main(void)
         while (i < 3u) {
             if (s3_btn_take_event(i) != 0u) {
                 g_cnt[i]++;
-                dirty = 1u;
-                puts_("press ");
-                put_u32_(i);
-                puts_(" n=");
-                put_u32_(g_cnt[i]);
-                puts_("\n");
+                pstr("press ");
+                pu32(i);
+                pstr(" n=");
+                pu32(g_cnt[i]);
+                pstr("\n");
             }
             i++;
         }
-        if (dirty != 0u) {
-            dirty = 0u;
-            redraw();
+
+        /* 只刷状态/计数变化了的行 */
+        i = 0;
+        while (i < 3u) {
+            if (s3_btn_pressed(i) != g_drawn_down[i] || g_cnt[i] != g_drawn_cnt[i]) {
+                flush_row(i);
+            }
+            i++;
         }
-        s3_lcd_delay(400000u);      /* 约 10ms 采样一次 */
+        s3_lcd_delay(100000u);      /* 约 6ms 采样一次 */
     }
 }
