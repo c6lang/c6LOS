@@ -8,6 +8,7 @@
 #include "c6os/port.h"
 #include "c6os/gfx.h"
 #include "c6os/task.h"
+#include "c6os/tick.h"
 
 #define W 240u
 #define H 240u
@@ -129,33 +130,22 @@ static void btn_task(void *arg)
 
 static void gui_task(void *arg)
 {
-    u32 hb = 0;
+    u32 last = 0;
 
     (void)arg;
     for (;;) {
         u32 i = 0;
-
-        hb++;
-        if ((hb % 100u) == 50u) { s3_lcd_hard_reset(); pstr("hard reset\n"); }
-        if ((hb % 100u) == 0u) {
-            char t2[12] = {0};
-            os_gfx_fill_rect(&g, 0, 200, (int)W, 40, 0x0000u);
-            os_gfx_text16(&g, 6, 204, "HB=", 0x07FFu);
-            u2s(t2, hb);
-            os_gfx_text16(&g, 46, 204, t2, 0x07FFu);
-            s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
-            pstr("hb ");
-            pu32(hb);
-            pstr("\n");
-        }
+        u32 now = (u32)os_tick_get();
 
         while (i < 3u) {
-            if (g_dirty[i] != 0u) {
+            /* 节流：两次上屏至少间隔 ~300ms，避免连续高频刷把面板刷死 */
+            if (g_dirty[i] != 0u && (u32)(now - last) >= 30u) {
                 g_dirty[i] = 0u;
                 pstr("gui row ");
                 pu32(i);
                 pstr("\n");
                 flush_row(i);
+                last = (u32)os_tick_get();
             }
             i++;
         }
