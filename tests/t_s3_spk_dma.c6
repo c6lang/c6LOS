@@ -81,6 +81,17 @@ void os_main(void)
     s3_lcd_delay(4000000u);
     bclk = s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
 
+    /* GDMA 状态诊断 */
+    pstr("gdma: outlink=");
+    pu32(s3_reg32(0x6003F000u + 0x80u));
+    pstr(" conf0=");
+    pu32(s3_reg32(0x6003F000u + 0x60u));
+    pstr(" peri=");
+    pu32(s3_reg32(0x6003F000u + 0xA8u));
+    pstr(" intraw=");
+    pu32(s3_reg32(0x6003F000u + 0x68u));
+    pstr("\n");
+
     pstr("dout_edges=");
     pu32(dout);
     pstr(" bclk_edges=");
