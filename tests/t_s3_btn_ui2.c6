@@ -166,9 +166,16 @@ static void gui_task(void *arg)
             os_gfx_text16(&g, 6, 204, "GUI hb=", 0x07FFu);
             u2s(t, hb);
             os_gfx_text16(&g, 70, 204, t, 0x07FFu);
-            ps = port_irq_save();
-            s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
-            port_irq_restore(ps);
+            {
+                u32 c0 = (u32)port_cycles();
+                ps = port_irq_save();
+                s3_lcd_blit_rect(g_fb, W, 0u, 200u, W, 40u);
+                port_irq_restore(ps);
+                c0 = (u32)port_cycles() - c0;
+                pstr("hb blit cycles=");
+                pu32(c0 / 1000u);
+                pstr("k\n");
+            }
         }
         while (i < 3u) {
             if (g_dirty[i] != 0u) {
