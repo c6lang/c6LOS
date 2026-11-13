@@ -1,0 +1,160 @@
+/* t_s3_vol.c6 —— 专门调音量键：把 GPIO39/40 设成 GPIO 功能 + 上拉输入
+ * （这两个是 JTAG 的 MTCK/MTDO，默认功能不是 GPIO），屏上显示电平与变化次数。
+ * 也顺带显示 BOOT(0) 作对照。
+ */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+#define GPIO_IN (*(volatile u32 *)0x6000403Cu)
+#define IOMUX_MTCK (*(volatile u32 *)0x600090A0u)   /* GPIO39 */
+#define IOMUX_MTDO (*(volatile u32 *)0x600090A4u)   /* GPIO40 */
+
+void s3_lcd_init(void);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u32 g_pin[3] = {0u, 40u, 39u};
+static u32 g_lvl[3];
+static u32 g_cnt[3];
+
+static void pstr(const char *s)
+{
+    while (*s != '\0') { port_putc(*s); s++; }
+}
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void u2s(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+}
+
+static void cfg39_40(void)
+{
+    u32 v = 0;
+
+    /* GPIO0：GPIO 功能 + 上拉输入 */
+    v = *(volatile u32 *)0x60009004u;
+    v = (v & ~(7u << 12)) | (1u << 12);
+    v = v | (1u << 9) | (1u << 8);
+    v = v & ~(1u << 7);
+    *(volatile u32 *)0x60009004u = v;
+
+    /* GPIO39 (MTCK)：GPIO 功能 + 上拉输入 */
+    v = IOMUX_MTCK;
+    v = (v & ~(7u << 12)) | (1u << 12);
+    v = v | (1u << 9) | (1u << 8);
+    v = v & ~(1u << 7);
+    IOMUX_MTCK = v;
+
+    /* GPIO40 (MTDO)：GPIO 功能 + 上拉输入 */
+    v = IOMUX_MTDO;
+    v = (v & ~(7u << 12)) | (1u << 12);
+    v = v | (1u << 9) | (1u << 8);
+    v = v & ~(1u << 7);
+    IOMUX_MTDO = v;
+}
+
+static void draw(void)
+{
+    u32 i = 0;
+
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)H, 0x0000u);
+    os_gfx_text16(&g, 6, 4, "VOL KEY TEST", 0x07FFu);
+    os_gfx_text16(&g, 6, 24, "GPIO func + pullup", 0xFFE0u);
+
+    while (i < 3u) {
+        int y = 50 + (int)i * 52;
+        char s[12] = {0};
+        if (g_lvl[i] != 0u) { os_gfx_fill_rect(&g, 0, y, (int)W, 46, 0x0010u); }
+        if (i == 0u) { os_gfx_text16(&g, 6, y + 2, "G0  BOOT", 0xFFFFu); }
+        if (i == 1u) { os_gfx_text16(&g, 6, y + 2, "G40 VOL+", 0xFFFFu); }
+        if (i == 2u) { os_gfx_text16(&g, 6, y + 2, "G39 VOL-", 0xFFFFu); }
+        s[0] = (char)('0' + (g_lvl[i] & 1u));
+        s[1] = '\0';
+        os_gfx_text16(&g, 6, y + 22, "lvl=", 0xFFE0u);
+        os_gfx_text16(&g, 54, y + 22, s, 0xFFFFu);
+        {
+            char t[12] = {0};
+            u2s(t, g_cnt[i]);
+            os_gfx_text16(&g, 90, y + 22, "n=", 0xFFE0u);
+            os_gfx_text16(&g, 114, y + 22, t, 0xFFFFu);
+        }
+        i++;
+    }
+    os_gfx_text16(&g, 6, 212, "PRESS VOL+ / VOL-", 0xF81Fu);
+    s3_lcd_blit(g_fb, W, H);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 dirty = 1;
+
+    pstr("c6os vol key test\n");
+    cfg39_40();
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    os_gfx_init(&g, g_fb, W, H);
+
+    pstr("iomux39=");
+    pu32(IOMUX_MTCK);
+    pstr(" iomux40=");
+    pu32(IOMUX_MTDO);
+    pstr("\n");
+
+    i = 0;
+    while (i < 3u) {
+        g_lvl[i] = (GPIO_IN >> g_pin[i]) & 1u;
+        g_cnt[i] = 0u;
+        i++;
+    }
+    pstr("levels: ");
+    pu32(g_lvl[0]);
+    pu32(g_lvl[1]);
+    pu32(g_lvl[2]);
+    pstr("\n");
+    draw();
+
+    for (;;) {
+        i = 0;
+        while (i < 3u) {
+            u32 v = (GPIO_IN >> g_pin[i]) & 1u;
+            if (v != g_lvl[i]) {
+                g_lvl[i] = v;
+                g_cnt[i]++;
+                dirty = 1u;
+                pstr("gpio");
+                pu32(g_pin[i]);
+                pstr(" -> ");
+                pu32(v);
+                pstr("\n");
+            }
+            i++;
+        }
+        if (dirty != 0u) { dirty = 0u; draw(); }
+        s3_lcd_delay(100000u);      /* 25ms */
+    }
+}

@@ -9,7 +9,8 @@
 #include "c6os/port.h"
 
 #define GPIO_BASE      0x60004000u
-#define GPIO_IN        (*(volatile u32 *)(GPIO_BASE + 0x3Cu))
+#define GPIO_IN        (*(volatile u32 *)(GPIO_BASE + 0x3Cu))    /* GPIO0..31 */
+#define GPIO_IN1       (*(volatile u32 *)(GPIO_BASE + 0x40u))    /* GPIO32..48 */
 #define IO_MUX(p)      (0x60009000u + 0x04u + 4u * (p))
 
 #define BTN_N   3u
@@ -27,9 +28,14 @@ static u32 g_btn_down[BTN_N];     /* 去抖后的状态：1=按下 */
 static u32 g_btn_cnt[BTN_N];
 static u32 g_btn_event[BTN_N];    /* 1=有一次"按下"边沿没取走 */
 
+/* 注意：≥32 的脚在 GPIO_IN1 里，不能拿 GPIO_IN 直接移（移位越界是未定义行为，
+ * 读出来是垃圾 —— 音量键一直不工作就是这个原因）。 */
 static u32 btn_level(u32 i)
 {
-    return (GPIO_IN >> g_btn_pin[i]) & 1u;
+    u32 p = g_btn_pin[i];
+
+    if (p < 32u) { return (GPIO_IN >> p) & 1u; }
+    return (GPIO_IN1 >> (p - 32u)) & 1u;
 }
 
 /* 1=按下（电平偏离基线） */
@@ -49,7 +55,15 @@ void s3_btn_init(void)
          * GPIO39/40 的 IO_MUX 是 JTAG 的 MTCK/MTDO 专用寄存器，不在这条线性
          * 表里——按线性地址写会写到别的寄存器上（就是音量键不工作的原因）。
          * 保持默认即可做数字输入。 */
+        /* GPIO39/40 是 JTAG 的 MTCK/MTDO，IO_MUX 在 0x600090A0/0xA4，
+         * 同样设成 GPIO 功能 + 上拉（上游 iot_button 就是 disable_pull=false）。 */
         if (g_btn_pin[i] > 21u) {
+            volatile u32 *m = (volatile u32 *)(0x600090A0u + 4u * (g_btn_pin[i] - 39u));
+            u32 w = *m;
+            w = (w & ~(7u << 12)) | (1u << 12);
+            w = w | (1u << 9) | (1u << 8);
+            w = w & ~(1u << 7);
+            *m = w;
             g_btn_idle[i] = btn_level(i);
             g_btn_down[i] = 0u;
             g_btn_cnt[i] = 0u;
@@ -62,11 +76,6 @@ void s3_btn_init(void)
         if (g_btn_pin[i] == 0u) {
             v = v | (1u << 8);                /* BOOT：内部上拉，按下接地（低有效） */
             v = v & ~(1u << 7);
-        } else {
-            /* VOL+/VOL-：板上是外部下拉、按下接高（实测 GPIO39 按下变 1），
-             * 所以开内部下拉、关内部上拉，避免上下拉打架。 */
-            v = v & ~(1u << 8);
-            v = v | (1u << 7);
         }
         *mux = v;
         g_btn_idle[i] = btn_level(i);
