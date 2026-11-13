@@ -258,12 +258,13 @@ void s3_i2s_dma_play(const u16 *samples, u32 frames, u32 ch)
 
     s3_gdma_init();
 
-    d[0].w0 = desc_w0(bytes, bytes, 1u, 1u);
+    /* 单描述符自环：eof=0 让 DMA 不认为"整包结束"，永远循环这块样本 */
+    d[0].w0 = desc_w0(bytes, bytes, 0u, 1u);
     d[0].buf = (u32)samples;
-    d[0].next = (u32)&d[1];
-    d[1].w0 = desc_w0(bytes, bytes, 1u, 1u);
-    d[1].buf = (u32)samples;
-    d[1].next = (u32)&d[0];
+    d[0].next = (u32)&d[0];
+    d[1].w0 = 0u;
+    d[1].buf = 0u;
+    d[1].next = 0u;
 
     /* 通道复位 + 自动回写 owner（循环播放必需，否则喂完一轮就停，只能听到"噗"） */
     wr(&GDMA_OUT_CONF0(ch), 1u);       /* out_rst=1 */
