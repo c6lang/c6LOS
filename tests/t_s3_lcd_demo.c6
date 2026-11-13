@@ -1,0 +1,67 @@
+/* t_s3_lcd_demo.c6 —— 上板演示（无人值守也能看出成没成）：
+ * 循环做四件事，每步 1.5 秒：
+ *   1) 整屏红   2) 整屏绿   3) 帧缓冲 8 色竖条 + C6OS 文字   4) 整屏蓝
+ * 全屏纯色说明「填色路径」通；出现竖条+文字说明「窗口 + 帧缓冲 blit」也通。
+ */
+
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
+
+void s3_lcd_init(void);
+void s3_lcd_fill(u16 color);
+void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+
+    puts_("c6os lcd demo\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    puts_("init done\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
+    }
+    os_gfx_text16(&g, 6, 6, "C6OS", 0x0000u);
+    os_gfx_text16(&g, 6, 30, "ST7789 240X240", 0x0000u);
+    puts_("fb drawn\n");
+
+    for (;;) {
+        s3_lcd_fill(0xF800u);
+        puts_("1 red\n");
+        s3_lcd_delay(8000000u);
+        s3_lcd_fill(0x07E0u);
+        puts_("2 green\n");
+        s3_lcd_delay(8000000u);
+        s3_lcd_blit(g_fb, W, H);
+        puts_("3 bars\n");
+        s3_lcd_delay(8000000u);
+        s3_lcd_fill(0x001Fu);
+        puts_("4 blue\n");
+        s3_lcd_delay(8000000u);
+    }
+}

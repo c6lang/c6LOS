@@ -62,8 +62,12 @@ fcntl.ioctl(fd, 0x5416, struct.pack('i', 0x006))   # DTR|RTS
 - VECBASE：先清 `PMS_CORE_0_VECBASE_OVERRIDE`（0x600C11C0 低 2 位），
   并清 `PS.UM`（ROM 入口是 user mode），否则 level-1 走 0x340 用户向量。
 - 陷阱：`EXCCAUSE != 4` 走 `s3_trap` 打印 cause/pc/ps 后停机。
-- 输入：`port_getc()` 读 `EP1_REG`，用 `EP1_CONF.SERIAL_OUT_EP_DATA_AVAIL`
-  门控；目前主机写入能置位，但 shell 读取仍不稳定（见 docs/todo.md）。
+- 输入：`port_getc()` 用 **32 位**读 `EP1_REG`（8 位读恒为 0），按
+  `OUT_EP1_ST[22:16]` 批次计数出队，读完清 `INT_CLR` bit2；真板 shell
+  `help/tick/ps/free` 已全部正常。
+- 看门狗：除 RTC_WDT（`0x60008098=0`）外，还必须关 **RTC 超级看门狗 SWD**
+  （`0x600080B8=0x8F1D312A` → `0x600080B4 |= 1<<30` → `0x600080B8=0`），
+  否则每 ~3.5s 被整片复位，串口只出几行（复位原因 0x12 = SYS_SUPER_WDT）。
 
 ## 6. 常用验证
 
@@ -84,13 +88,16 @@ make ... S3_MAIN=tests/t_s3_ipc.c6 s3       # ALL PASS: ipc
 | 启动约 300ms 被复位 | TIMG0 时钟未使能就关看门狗；确认先置 `SYSTEM_PERIP_CLK_EN0` bit13 |
 | 中断不触发 | 查 VECBASE override、PS.UM、INTENABLE bit6、CCOMPARE0 重装 |
 | 面板初始化后整机停摆（串口静默、连中断计数也停） | 先查板级电源保持脚 GPIO21（原厂启动即拉高），再对齐 SPI mode3/80MHz，见 §8 |
-| SPI2 写 `CMD.USR` 后该位永不自清 | 没置 `SPI_CLK_GATE`（0xE8）的 `MST_CLK_ACTIVE|MST_CLK_SEL`，主控状态机没有时钟 |
+| SPI2 写 `CMD.USR` 后读回是 0、面板一个字节都收不到 | 没置 `SPI_CLK_GATE`（0xE8）的 **`CLK_EN`(bit0)**/`MST_CLK_ACTIVE`/`MST_CLK_SEL`，模块时钟被门控 |
+| 串口只出几行就静默、USB 每隔几秒重新枚举 | RTC 超级看门狗未关（读 `0x60008038 & 0x3F`，`0x12`=SYS_SUPER_WDT），见 §5 |
+| 加了 `volatile` 忙等之后 CPU 像死机 | GCC 给 volatile 访存插 `memw`，SPI 事务后未回的 APB 事务会让它永久等待；驱动内延时用 `nop` 循环 |
 
 原厂 16MB flash 备份已丢失；恢复原厂需官方固件包整片烧写（见 docs/todo.md）。
 
 ## 8. ST7789 面板（240×240，M7）
 
-面板驱动在 `port/s3/panel.c`。原厂固件出处与完整板级配置见
+面板驱动在 `port/s3/panel.c`，完整的寄存器配方、自检手段与踩坑记录见
+**`docs/s3-panel-bringup.md`**。原厂固件出处与完整板级配置见
 `docs/s3-board-identification.md`「上游固件出处」——上游是开源 XiaoZhi
 （78/xiaozhi-esp32）v2.5.0 的 `main/boards/nologo/xingzhi-cube-1.54tft-wifi`。
 

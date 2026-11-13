@@ -177,8 +177,8 @@
 | 任务 | 细节 | 验收 |
 |---|---|---|
 | M7-1 shell | COBS 帧 + 命令表（ps/free/tick/date/log/reboot） | 每条命令输出正确 | 完成（host `t_shell` 捕获断言；S3 真板 USB 串口输入 `help/tick/ps/free` 全通：`ps n=1 / 1 1 X sh`、`used=0 peak=0 maxfree=4080`） |
-| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS。真板已确认不是微雪 1.85C：面板为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13；出处是开源 XiaoZhi（78/xiaozhi-esp32）v2.5.0 的 `main/boards/nologo/xingzhi-cube-1.54tft-wifi`，引脚/SPI mode3/80MHz/GPIO21 电源保持等参考值见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已从 bit-bang 改成 GPSPI2 硬件 SPI（补 `SPI_CLK_GATE` 后事务能完成，整帧 115200B 帧缓冲放进扩展 DRAM 自检通过），但**面板初始化刚发出第一条命令后整机就停摆**（串口静默、连 ISR 计数都停），正在按上游配置对齐 mode3/80MHz 与 GPIO21 电源保持脚 |
-| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS；真实屏刷新待硬件） |
+| M7-2 面板探测 | RDDID 识别 ST7789/ST77916，profile 兜底 | 两种面板都能点亮 | 进行中（`rt/panel.c` host 匹配 PASS；真板确认为 **ST7789 240×240 SPI**，SCLK=9/SDA=10/DC=8/CS=14/RST=18/BL=13，上游出处见 `docs/s3-board-identification.md`。`port/s3/panel.c` 已改成 GPSPI2 硬件 SPI 并跑通初始化：`SPI_CLK_GATE` 少 `CLK_EN`(bit0) 导致模块时钟被门控是最关键的坑（写 `CMD.USR` 读回仍是 0、面板收不到任何字节），另外对齐了 mode 3、`CS_KEEP_ACTIVE`、GPIO21 电源保持；寄存器配方/自检手段/踩坑全部记在 **`docs/s3-panel-bringup.md`**。同时查清两起"整机像死机"的真正原因：①`volatile` 忙等循环触发的 `memw` 永久等待；②RTC 超级看门狗 SWD 未关导致每 ~3.5s 整片复位（现已关，见 `port/s3/console.c`）。**剩余：面板实际成像需人眼确认**，`tests/t_s3_lcd_demo.c6` 会自动轮播 红/绿/8 色竖条+文字/蓝 |
+| M7-3 帧缓冲/字体 | RGB565、8×16 字体、`fill_rect/blit` | 240×280 全屏刷新率 ≥10fps | 进行中（`rt/gfx.c` RGB565 `pixel/get/fill_rect/blit`、8×8 字库 + `char16/text16` 把每行复制成 8×16 字符单元；`t_gfx` host PASS。真板：240×240×16bit 帧缓冲 115200B 放进扩展 DRAM（`link.ld` DRAM 起址 0x3FCA0000），`t_s3_lcd` 实测整屏填色 3.32M cycles、帧缓冲全屏 blit 3.96M cycles；用 SPI 分频反算 CPU 跑 **80MHz PLL**，折算 **≈20fps**，已过 ≥10fps 验收线，`PASS: s3 lcd`） |
 | M7-4 仪表盘 | 任务表/CPU/内存/日志滚动 | 屏上数字与串口一致 | 进行中（`rt/dash.c` 绘制 tick/任务数/堆用量的彩色数字行、`os_dash_task_row` 任务行、`os_dash_log` 日志行；`t_dash` host PASS；真实屏刷新待硬件恢复） |
 
 **M7 验收**：屏显示与串口数据一致；shell 可交互。
@@ -546,3 +546,27 @@
 - **risc6 回归入口**：新增 `make check-sim`，依次跑 rv32 user 的 hello/sched
   和 bare MTIP tick；当前输出 hello `insns=1776`、sched `36318`、bare tick
   `263076`，均 rc=0。risc6 已支持 1–4 hart（见 risc6 仓库 E7），M8-2 的每核静态分区已在 `t_rv32bare_smp` 上跑通；真板双核仍待上电。
+
+- **S3 面板改用 GPSPI2 硬件 SPI（真板跑通初始化+整屏刷新）**：
+  `port/s3/panel.c` 从 bit-bang 改为 SPI2 CPU 直写 FIFO（W0..W15，64 字节/次），
+  `t_s3_lcd` 输出 `fill_cycles=3315474`、`blit_cycles=3960821`、`PASS: s3 lcd`。
+  用 SPI 分频档位（/4、/24、/40、EQU_SYSCLK）实测传输耗时线性变化，反算
+  **CPU 跑在 80MHz PLL**（不是 40MHz XTAL），故整屏 blit 约 50ms ≈ **20fps**，
+  过 M7-3 的 ≥10fps 线。详细配方与自检手段见 `docs/s3-panel-bringup.md`。
+
+- **`SPI_CLK_GATE` 必须置 `CLK_EN`(bit0)**：IDF `spi_ll_master_init` 里是
+  `clk_en/mst_clk_active/mst_clk_sel` 三位一起置；只置后两位时模块时钟被门控，
+  写 `CMD.USR` 读回仍是 0、SCLK 不出波形、面板一个字节都收不到，但寄存器轮询
+  "立刻通过"，极易误判成事务正常。同时把 SPI 对齐原厂：mode 3
+  （`MISC.CK_IDLE_EDGE` + `USER.CK_OUT_EDGE`）、`MISC.CS_KEEP_ACTIVE`。
+
+- **`volatile` 忙等会把 CPU 卡死（`memw` 屏障）**：GCC 给每个 volatile 访存插
+  `memw`，SPI 事务后只要有 APB 事务未回，下一条 `memw` 就永久等待——表现为
+  串口突然静默、定时器中断也不再进，看着像"整机死机/复位"。面板驱动内的延时
+  因此改成不带 volatile 的 `nop` 循环。
+
+- **RTC 超级看门狗 SWD 未关 → 每 ~3.5s 整片复位**：读
+  `RTC_CNTL_RESET_STATE_REG`（0x60008038）低 6 位得 `0x12`(SYS_SUPER_WDT)，
+  表现是「串口只出几行 + USB 每隔几秒重新枚举」，此前多轮排查都被它误导。
+  `port/s3/console.c port_init()` 里按 `0x600080B8=0x8F1D312A` →
+  `0x600080B4 |= 1<<30`(SWD_DISABLE) → `0x600080B8=0` 关闭后恢复正常。

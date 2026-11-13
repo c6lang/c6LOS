@@ -1,32 +1,147 @@
+/* M7-3：ST7789 帧缓冲 + 字体上屏，并实测全屏刷新率。
+ *
+ * 输出：fill/blit 的 CPU 周期数与 fps*10（实测 CPU 跑在 80MHz PLL：
+ * 用 SPI2 分频后的传输时间反算出来，1 帧 = 240*240*16bit = 115200B）。
+ * 画面：8 条色带（红/绿/蓝/黄/紫/青/白/黑）+ 两行 8x16 文字，用于肉眼核对
+ * 颜色顺序与方向。 */
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W 240u
+#define H 240u
 
 extern void s3_lcd_init(void);
 extern void s3_lcd_fill(u16 color);
 extern void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+extern void s3_lcd_bl(u32 on);
+extern void s3_mark(u32 idx, u32 v);
+extern u32 s3_mark_get(u32 idx);
+extern void s3_irq_set_hook(void (*fn)(void));
 
-static u16 g_fb[8 * 8] = {0};
+/* 心跳：ISR 里每 50 tick（0.5s）翻转一次背光，用来区分「CPU/中断活着但主流程
+ * 卡住」和「整机死掉」。只在 ISR 里写 GPIO，不碰串口（串口卡住会把 ISR 拖死）。 */
+static u32 g_hb;
+static u32 g_bl;
+static void hb(void)
+{
+    g_hb = g_hb + 1u;
+    s3_mark(8u, g_hb);
+    if ((g_hb % 50u) == 0u) {
+        g_bl = (g_bl == 0u) ? 1u : 0u;
+        s3_lcd_bl(g_bl);
+    }
+}
 
-static void wait(u32 n) { volatile u32 i = 0; while (i < n) { i++; } }
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static const u16 g_bars[8] = {
+    0xF800u, 0x07E0u, 0x001Fu, 0xFFE0u, 0xF81Fu, 0x07FFu, 0xFFFFu, 0x0000u
+};
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+/* CPU 40MHz：fps*10 = 40e6 * 10 / cycles */
+static void report(const char *tag, u32 cycles) {
+    port_puts(" ");
+    port_puts(tag);
+    port_puts("_cycles=");
+    put_u32(cycles);
+    port_puts(" fps10=");
+    put_u32(cycles == 0u ? 0u : (800000000u / cycles));
+}
 
 void os_main(void) {
-    port_puts("c6os lcd test\n");
+    u64 t0 = 0;
+    u64 t1 = 0;
+    u32 cfill = 0;
+    u32 cblit = 0;
+    u32 i = 0;
+    u32 bad = 0;
+
+    /* 启动计数：RTC 慢速内存 idx0（复位保留，esptool read-mem 0x50000000 可读）。 */
+    s3_mark(0u, s3_mark_get(0u) + 1u);
+    /* 诊断：先不装心跳钩子（背光闪烁与面板上电可能互相影响）。 */
+    port_puts("boots=");
+    put_u32(s3_mark_get(0u));
+    port_puts("\n");
+    port_puts("c6os lcd spi test\n");
+
+    /* 扩展后的 DRAM（0x3FCA0000 起）可用性自检：帧缓冲首尾双写双读。 */
+    g_fb[0] = 0xA5A5u;
+    g_fb[W * H - 1u] = 0x5A5Au;
+    if (g_fb[0] != 0xA5A5u || g_fb[W * H - 1u] != 0x5A5Au) { bad = 1u; }
+    port_puts("fb_bytes=");
+    put_u32((u32)sizeof(g_fb));
+    port_puts(bad != 0u ? " DRAM FAIL\n" : " DRAM OK\n");
+    g_fb[0] = 0u;
+    g_fb[W * H - 1u] = 0u;
+
     s3_lcd_init();
-    port_puts("init done, red\n");
+    s3_mark(0u, 0x3001u);
+    port_puts("init done\n");
+
+    t0 = port_cycles();
     s3_lcd_fill(0xF800u);
-    wait(20000000u);
-    port_puts("green\n");
-    s3_lcd_fill(0x07E0u);
-    wait(20000000u);
-    port_puts("blue\n");
-    s3_lcd_fill(0x001Fu);
-    wait(20000000u);
-    port_puts("white\n");
-    s3_lcd_fill(0xFFFFu);
-    {
-        u32 i = 0;
-        while (i < 64u) { g_fb[i] = 0xF800u; i++; }
-        s3_lcd_blit(g_fb, 8u, 8u);
+    t1 = port_cycles();
+    cfill = (u32)(t1 - t0);
+    s3_mark(0u, 0x3002u);
+    port_puts("fill red");
+    report("fill", cfill);
+    port_puts("\n");
+
+    os_gfx_init(&g, g_fb, W, H);
+    i = 0u;
+    while (i < 8u) {
+        os_gfx_fill_rect(&g, (int)(i * 30u), 0, 30, (int)H, g_bars[i]);
+        i++;
     }
-    port_puts("done\n");
+    os_gfx_text16(&g, 6, 6, "C6OS", 0x0000u);
+    os_gfx_text16(&g, 6, 30, "ST7789 240X240", 0x0000u);
+    s3_mark(0u, 0x30A2u);
+
+    t0 = port_cycles();
+    s3_lcd_blit(g_fb, W, H);
+    t1 = port_cycles();
+    cblit = (u32)(t1 - t0);
+    s3_mark(0u, 0x3003u);
+    report("blit", cblit);
+    port_puts("\n");
+
+    /* 连续 5 帧，报总时间与平均 fps。 */
+    t0 = port_cycles();
+    i = 0;
+    while (i < 5u) {
+        s3_lcd_blit(g_fb, W, H);
+        i++;
+    }
+    t1 = port_cycles();
+    s3_mark(0u, 0x3004u);
+    report("blit5", (u32)(t1 - t0) / 5u);
+    port_puts("\n");
+
+    s3_mark(0u, 0x3005u);
+    port_puts(cblit != 0u && (800000000u / cblit) >= 100u ? "PASS: s3 lcd\n"
+                                                         : "FAIL: s3 lcd fps\n");
+    for (;;) {
+        s3_lcd_blit(g_fb, W, H);
+    }
 }

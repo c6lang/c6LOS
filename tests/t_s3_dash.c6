@@ -1,0 +1,114 @@
+/* M7-4：仪表盘上屏。dash 任务每 10 tick 把 tick / 任务数 / 堆用量 + 任务行
+ * 画进帧缓冲再 blit；串口同时打印同一组数字，屏上数字应与串口一致。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+#include "c6os/dash.h"
+#include "c6os/tick.h"
+#include "c6os/task.h"
+#include "c6os/heap.h"
+
+#define W 240u
+#define H 240u
+
+extern void s3_lcd_init(void);
+extern void s3_lcd_blit(const u16 *fb, u32 w, u32 h);
+
+static u16 g_fb[W * H] = {0};
+static OsGfx g;
+
+static void put_u32(u32 v) {
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+static void draw(u32 tick, u32 tasks, u32 used) {
+    u32 id = 0;
+    u32 prio = 0;
+    u32 state = 0;
+    char name[9] = {0};
+
+    os_dash_render(&g, tick, tasks, used);
+    if (os_task_info(0u, &id, &prio, &state, name, 8u) != 0u) {
+        os_dash_task_row(&g, 70, id, prio, (char)('A' + state), name);
+    }
+    os_dash_log(&g, 90, "C6OS DASH");
+    os_dash_log(&g, 106, "ST7789 240X240");
+    s3_lcd_blit(g_fb, W, H);
+}
+
+static void worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        os_task_delay(7u);
+    }
+}
+
+static void dash_task(void *arg) {
+    u32 n = 0;
+    u64 t0 = 0;
+    u64 t1 = 0;
+    u32 first = 0;
+
+    (void)arg;
+    for (;;) {
+        u32 tk = (u32)os_tick_get();
+        u32 tc = os_task_count();
+        u32 hu = os_sys_heap_used();
+
+        t0 = port_cycles();
+        draw(tk, tc, hu);
+        t1 = port_cycles();
+        if (first == 0u) {
+            first = (u32)(t1 - t0);
+            port_puts("first_frame_cycles=");
+            put_u32(first);
+            port_puts(" fps10=");
+            put_u32(first == 0u ? 0u : (400000000u / first));
+            port_puts("\n");
+        }
+        if (n < 20u) {
+            port_puts("tick=");
+            put_u32(tk);
+            port_puts(" tasks=");
+            put_u32(tc);
+            port_puts(" used=");
+            put_u32(hu);
+            port_puts("\n");
+            n++;
+        } else if (n == 20u) {
+            port_puts("PASS: s3 dash\n");
+            n++;
+        }
+        os_task_delay(10u);
+    }
+}
+
+void os_main(void) {
+    port_puts("c6os dash test\n");
+    s3_lcd_init();
+    os_gfx_init(&g, g_fb, W, H);
+
+    (void)os_task_create("w1", worker, 0, 3u, 2048u);
+    (void)os_task_create("w2", worker, 0, 3u, 2048u);
+    if (os_task_create("dash", dash_task, 0, 2u, 4096u) <= 0) {
+        port_puts("FAIL: dash create\n");
+        return;
+    }
+    os_task_start();
+    for (;;) { }
+}

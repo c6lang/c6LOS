@@ -1,0 +1,66 @@
+/* t_s3_lcd_probe.c6 —— 面板初始化 + 诊断打印：启动次数、RTC 复位原因。
+ * 若 boards 计数每次复位都 +1，说明芯片在复位循环里（不是 CPU 停摆）。 */
+
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_delay(u32 n);
+u32 s3_mark_get(u32 idx);
+void s3_mark(u32 idx, u32 v);
+u32 s3_reg(u32 addr);
+
+static void puts_(const char *s)
+{
+    while (*s != '\0') {
+        port_putc(*s);
+        s++;
+    }
+}
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u) {
+        b[i] = (char)('0' + (v % 10u));
+        i++;
+        v = v / 10u;
+    }
+    while (i > 0) {
+        i--;
+        port_putc((int)b[i]);
+    }
+}
+
+void os_main(void)
+{
+    u32 boots = 0;
+
+    boots = s3_mark_get(0u) + 1u;
+    s3_mark(0u, boots);
+    puts_("c6os probe boots=");
+    put_u32_(boots);
+    puts_(" cause=");
+    put_u32_(s3_reg(0x60008038u) & 0x3Fu);
+    puts_(" wdt=");
+    put_u32_(s3_reg(0x60008098u));
+    puts_(" stat0=");
+    put_u32_(s3_reg(0x60008018u));
+    puts_("\n");
+
+    s3_lcd_init();
+    puts_("init done\n");
+    for (;;) {
+        boots = s3_mark_get(0u) + 1u;
+        s3_mark(0u, boots);
+        puts_("k boots=");
+        put_u32_(boots);
+        puts_("\n");
+        s3_lcd_delay(2000000u);
+    }
+}

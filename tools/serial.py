@@ -20,8 +20,17 @@ import time
 DTR_RTS = 0x006
 
 
-def open_port(path, baud):
-    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+def open_port(path, baud, wait=10.0):
+    """等设备重新枚举出来再打开（复位后 /dev/ttyACM* 会消失几秒）。"""
+    deadline = time.time() + wait
+    while True:
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            break
+        except FileNotFoundError:
+            if time.time() >= deadline:
+                raise
+            time.sleep(0.1)
     attrs = termios.tcgetattr(fd)
     attrs[0] = 0            # iflag
     attrs[1] = 0            # oflag

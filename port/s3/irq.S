@@ -23,8 +23,10 @@ _vec_exc:
 
     .align 4
 _vec_default:
-    movi    a2, 0x3FCF0004
-    movi    a3, 0xBAD0
+    /* RTC 慢速内存 idx3（0x5000000C）：复位后 esptool 可读，用来确认
+     * 「跑到未处理向量/双重异常」（中断从此永久关闭）。 */
+    movi    a2, 0x3FCF0004   /* 未处理向量/双重异常标记（DRAM） */
+    movi    a3, 0x0000BAD0
     s32i    a3, a2, 0
 1:
     j       1b

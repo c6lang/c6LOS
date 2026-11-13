@@ -145,12 +145,17 @@ void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
 
+    /* 记下被打断的主流程 PC（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
+     * 就知道主流程停在哪条指令上。 */
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
     g_isr_cc = cc;
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
-    s3_mark(6u, (u32)os_tick_get());
+    {
+        static u32 isr_n;
+        isr_n = isr_n + 1u;
+    }
     if (port_cur_ctx() != 0) {
         port_irq_fill(frame_sp);
     }

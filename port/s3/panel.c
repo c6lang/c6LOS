@@ -1,133 +1,533 @@
-/* Xingzhi Cube 1.54TFT WiFi：ST7789 240x240 SPI 屏，bit-bang 驱动。
- * SDA=10 SCL=9 DC=8 CS=14 RES=18 BL=13。 */
+/* Xingzhi Cube 1.54TFT WiFi：ST7789 240x240，硬件 SPI2（GPSPI）驱动。
+ *
+ * 引脚（原厂 v2.5.0_xingzhi-cube-1.54tft-wifi 固件确认）：
+ *   SCLK=GPIO9  MOSI/SDA=GPIO10  DC=GPIO8  CS=GPIO14  RST=GPIO18  BL=GPIO13
+ *
+ * 为什么不用 bit-bang：240x240x16bit = 921600 bit，40MHz CPU 位翻转最多
+ * ~3Mbit/s（≈3fps），达不到 M7-3 的「全屏 ≥10fps」。这里用 SPI2 的 CPU
+ * 直写 FIFO（W0..W15 = 64 字节/次），时钟由外设产生，CPU 只负责喂数据。
+ *
+ * 寄存器（IDF v5.3 esp32s3 spi_reg.h / system_reg.h / io_mux_reg.h：
+ *   SPI2 基址 0x60024000，GPIO 0x60004000，IO_MUX 0x60009000（GPIO0 在 +0x04）
+ */
 #include "c6os/types.h"
 #include "c6os/port.h"
 
+/* ---- GPIO / IO_MUX ---------------------------------------------------- */
 #define GPIO_BASE      0x60004000u
 #define GPIO_OUT_W1TS  (GPIO_BASE + 0x08u)
 #define GPIO_OUT_W1TC  (GPIO_BASE + 0x0Cu)
 #define GPIO_ENA_W1TS  (GPIO_BASE + 0x24u)
+#define GPIO_ENA_W1TC  (GPIO_BASE + 0x28u)
+#define GPIO_OUT_SEL(p) (GPIO_BASE + 0x554u + 4u * (p))
+#define IO_MUX_REG(p)   (0x60009000u + 0x04u + 4u * (p))
 
-#define PIN_SDA 10u
-#define PIN_SCL 9u
-#define PIN_DC  8u
-#define PIN_CS  14u
-#define PIN_RST 18u
-#define PIN_BL  13u
+#define SIG_GPIO_OUT    0x100u   /* GPIO matrix: 普通 GPIO 输出信号（默认值） */
+#define OEN_ALWAYS      (1u << 10)
+
+/* ---- SPI2 ------------------------------------------------------------- */
+#define SPI2_BASE      0x60024000u
+#define SPI2_CMD       (*(volatile u32 *)(SPI2_BASE + 0x00u))
+#define SPI2_CTRL      (*(volatile u32 *)(SPI2_BASE + 0x08u))
+#define SPI2_CLOCK     (*(volatile u32 *)(SPI2_BASE + 0x0Cu))
+#define SPI2_USER      (*(volatile u32 *)(SPI2_BASE + 0x10u))
+#define SPI2_USER1     (*(volatile u32 *)(SPI2_BASE + 0x14u))
+#define SPI2_USER2     (*(volatile u32 *)(SPI2_BASE + 0x18u))
+#define SPI2_MS_DLEN   (*(volatile u32 *)(SPI2_BASE + 0x1Cu))
+#define SPI2_MISC      (*(volatile u32 *)(SPI2_BASE + 0x20u))
+#define SPI2_W(n)      (*(volatile u32 *)(SPI2_BASE + 0x98u + 4u * (n)))
+
+#define SPI_CMD_USR      (1u << 24)
+#define SPI_CMD_UPDATE   (1u << 23)
+#define SPI_USR_MOSI     (1u << 27)
+#define SPI_USR_MISO     (1u << 28)
+#define SPI_USR_DUMMY    (1u << 29)
+#define SPI_USR_ADDR     (1u << 30)
+#define SPI_USR_COMMAND  (1u << 31)
+#define SPI_MISC_CK_IDLE (1u << 29)
+#define SPI_CK_IDLE_EDGE  (1u << 29)   /* MISC: CK 空闲电平（mode 3 → 1） */
+#define SPI_CK_OUT_EDGE   (1u << 9)    /* USER: 输出沿（mode 3 → 1） */
+#define SPI_DOUTDIN       (1u << 0)    /* USER: 1=全双工（MOSI/MISO 同时） */
+#define SPI_CS_KEEP_ACTIVE (1u << 30)  /* MISC: 事务结束后不抬 CS */
+
+#define SIG_FSPICLK     101u
+#define SIG_FSPID       103u
+#define SIG_FSPICS0     110u
+
+#define SYS_PERIP_CLK_EN0 (*(volatile u32 *)0x600C0018u)
+#define SYS_PERIP_RST_EN0 (*(volatile u32 *)0x600C0020u)
+#define SYS_SPI2_BIT      (1u << 6)
+
+/* ---- 面板 ------------------------------------------------------------- */
+#define PIN_SCLK 9u
+#define PIN_SDA  10u
+#define PIN_DC   8u
+#define PIN_CS   14u
+#define PIN_RST  18u
+#define PIN_BL   13u
+/* 原厂 xiaozhi-esp32 v2.5.0（nologo/xingzhi-cube-1.54tft-wifi）启动时用 RTC GPIO
+ * 把 GPIO21 拉高，关机流程里把它拉 0 再 deep sleep —— 板级电源保持/使能脚。 */
+#define PIN_PWR_HOLD 21u
 
 #define LCD_W 240u
 #define LCD_H 240u
 
+#define SPI_CHUNK 64u          /* W0..W15 */
+
+extern void s3_mark(u32 idx, u32 v);
+static u32 g_xfers;
+
 static void wr(volatile u32 *r, u32 v) { *r = v; }
 static void hi(u32 p) { wr((volatile u32 *)GPIO_OUT_W1TS, 1u << p); }
 static void lo(u32 p) { wr((volatile u32 *)GPIO_OUT_W1TC, 1u << p); }
-static void out(u32 p) { wr((volatile u32 *)GPIO_ENA_W1TS, 1u << p); }
+/* 注意：这里**不能**用 volatile 计数。GCC 会给每个 volatile 访存插 memw
+ * 内存屏障，而 SPI2 事务之后总有 APB 事务挂着没回，memw 会一直等它 →
+ * CPU 当场停摆（串口静默、定时器中断也不再进，看起来像死机/复位）。
+ * 实测：volatile 版本发完第一条面板命令就卡死，nop 版本整屏刷新正常。 */
+static void dly(u32 n)
+{
+    u32 i = 0;
+    while (i < n) {
+        __asm__ __volatile__("nop");
+        i++;
+    }
+}
 
+/* 面板调试开关：上板定位 SPI2 时打印，定下来后置 0。 */
+#define LCD_DEBUG 0
+#if LCD_DEBUG
+static void dbg(const char *s) { port_puts(s); }
+static void dbg_hex(u32 v)
+{
+    static const char h[] = "0123456789abcdef";
+    int i = 28;
+    while (i >= 0) {
+        port_putc((int)h[(v >> (u32)i) & 0xFu]);
+        i -= 4;
+    }
+}
+static void dbg_reg(const char *n, u32 v) { dbg(n); dbg_hex(v); dbg("\n"); }
+#else
+static void dbg(const char *s) { (void)s; }
+static void dbg_hex(u32 v) { (void)v; }
+static void dbg_reg(const char *n, u32 v) { (void)n; (void)v; }
+#endif
+
+/* IO_MUX：MCU_SEL=0（GPIO 功能）+ 上拉 + DRV=2，输入关掉（都是输出脚）。 */
 static void mux_gpio(u32 p)
 {
-    volatile u32 *mux = (volatile u32 *)(0x60009000u + p * 4u);
+    volatile u32 *mux = (volatile u32 *)IO_MUX_REG(p);
     u32 v = *mux;
     v = (v & ~(7u << 12)) | (1u << 8) | (2u << 10);
     v = v & ~(1u << 9);
     *mux = v;
 }
-static void dly(u32 n) { volatile u32 i = 0; while (i < n) { i++; } }
 
-static void spi_byte(u8 b)
+static void plain_out(u32 p)
 {
-    int i = 7;
-    while (i >= 0) {
-        if (((b >> i) & 1u) != 0u) { hi(PIN_SDA); } else { lo(PIN_SDA); }
-        dly(2u);
-        hi(PIN_SCL);
-        dly(2u);
-        lo(PIN_SCL);
-        i--;
+    *(volatile u32 *)GPIO_OUT_SEL(p) = SIG_GPIO_OUT;   /* 走 GPIO_ENABLE/OUT */
+    wr((volatile u32 *)GPIO_ENA_W1TS, 1u << p);
+}
+
+static void matrix_out(u32 p, u32 sig)
+{
+    mux_gpio(p);
+    *(volatile u32 *)GPIO_OUT_SEL(p) = (sig & 0x1FFu) | OEN_ALWAYS;
+}
+
+/* ---- SPI 传输 --------------------------------------------------------- */
+
+/* 一次最多 64 字节（16 个字）：MSB first，W0 先发。 */
+static void spi_xfer(const u8 *buf, u32 len)
+{
+    u32 nw = (len + 3u) / 4u;
+
+    g_xfers = g_xfers + 1u;
+    s3_mark(1u, g_xfers);
+    u32 i;
+    u32 guard;
+
+    for (i = 0; i < nw; i++) {
+        u32 w = 0;
+        u32 k = 0;
+        while (k < 4u) {
+            u32 idx = i * 4u + k;
+            u32 b = (idx < len) ? (u32)buf[idx] : 0u;
+            w = (w << 8) | b;
+            k++;
+        }
+        SPI2_W(i) = w;
+    }
+    SPI2_MS_DLEN = len * 8u - 1u;
+    dbg("x1 dlen_written\n");
+    /* 和 IDF spi_ll_user_start 一样：先 UPDATE 同步配置，等它自清之后再置 USR，
+     * 两个写紧跟会丢掉配置同步。 */
+    SPI2_CMD = SPI_CMD_UPDATE;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+        guard++;
+        if (guard > 100000u) { break; }
+    }
+    SPI2_CMD = SPI_CMD_USR;
+    dbg("x3 usr, cmd=");
+    dbg_hex(SPI2_CMD);
+    dbg(" cc=");
+    dbg_hex((u32)port_cycles());
+    dbg("\n");
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if ((guard & 0x3FFFu) == 0u) {
+            dbg("x4 polling cmd=");
+            dbg_hex(SPI2_CMD);
+            dbg(" cc=");
+            dbg_hex((u32)port_cycles());
+            dbg("\n");
+        }
+        if (guard > 2000000u) {
+            dbg("xfer timeout cmd=");
+            dbg_hex(SPI2_CMD);
+            dbg(" clock=");
+            dbg_hex(SPI2_CLOCK);
+            dbg(" user=");
+            dbg_hex(SPI2_USER);
+            dbg("\n");
+            return;
+        }
+    }
+    dbg("x5 done raw=");
+    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x3Cu));
+    dbg(" ena=");
+    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x34u));
+    dbg(" clr=");
+    dbg_hex(*(volatile u32 *)(SPI2_BASE + 0x38u));
+    dbg("\n");
+}
+
+static void spi_write(const u8 *buf, u32 len)
+{
+    while (len != 0u) {
+        u32 n = (len > SPI_CHUNK) ? SPI_CHUNK : len;
+        spi_xfer(buf, n);
+        buf += n;
+        len -= n;
     }
 }
 
 static void cmd(u8 c)
 {
+    dbg(" cmd ");
+    dbg_hex((u32)c);
+    dbg("\n");
     lo(PIN_DC);
-    lo(PIN_CS);
-    spi_byte(c);
-    hi(PIN_CS);
+    spi_xfer(&c, 1u);
 }
 
-static void dat(u8 d)
+static void dat(const u8 *p, u32 n)
 {
     hi(PIN_DC);
-    lo(PIN_CS);
-    spi_byte(d);
-    hi(PIN_CS);
+    spi_write(p, n);
 }
 
-static void dat_start(void) { hi(PIN_DC); lo(PIN_CS); }
-static void dat_end(void) { hi(PIN_CS); }
-
-static void dat16(u16 v)
+static void dat8(u8 v)
 {
-    spi_byte((u8)(v >> 8));
-    spi_byte((u8)(v & 0xFFu));
+    hi(PIN_DC);
+    spi_xfer(&v, 1u);
 }
 
 static void window(u32 x, u32 y, u32 w, u32 h)
 {
-    cmd(0x2Au);
-    dat_start();
-    dat16((u16)x); dat16((u16)(x + w - 1u));
-    dat_end();
-    cmd(0x2Bu);
-    dat_start();
-    dat16((u16)y); dat16((u16)(y + h - 1u));
-    dat_end();
-    cmd(0x2Cu);
+    u8 b[4];
+    u32 xe = x + w - 1u;
+    u32 ye = y + h - 1u;
+
+    b[0] = (u8)(x >> 8);  b[1] = (u8)x;  b[2] = (u8)(xe >> 8);  b[3] = (u8)xe;
+    cmd(0x2Au);           /* CASET */
+    dat(b, 4u);
+    b[0] = (u8)(y >> 8);  b[1] = (u8)y;  b[2] = (u8)(ye >> 8);  b[3] = (u8)ye;
+    cmd(0x2Bu);           /* RASET */
+    dat(b, 4u);
+    cmd(0x2Cu);           /* RAMWR */
+}
+
+static void spi_init(void)
+{
+    u32 clk;
+
+    s3_mark(9u, 0x1001u);
+
+    SYS_PERIP_RST_EN0 |= SYS_SPI2_BIT;
+    SYS_PERIP_CLK_EN0 |= SYS_SPI2_BIT;
+    SYS_PERIP_RST_EN0 &= ~SYS_SPI2_BIT;
+
+    /* SPI2 的 DMA/TRANS_DONE 中断必须先关掉并清挂起：ROM 里它可能已经经中断
+     * 矩阵接到了 CPU，而本内核的 level-1 向量只按 EXCCAUSE 分流（定时器/异常），
+     * 一旦 SPI2 中断上来就会被当成定时器处理并反复重入 → 主流程卡死。 */
+    *(volatile u32 *)(SPI2_BASE + 0x38u) = 0xFFFFFFFFu;   /* DMA_INT_CLR */
+    *(volatile u32 *)(SPI2_BASE + 0x34u) = 0u;            /* DMA_INT_ENA */
+
+    /* SPI_CLK_GATE（0xE8）：按 IDF spi_ll_master_init 三段都要置
+     *   CLK_EN(bit0, "enable clk gate"，默认 0)
+     *   MST_CLK_ACTIVE(bit1, 打开模块时钟)
+     *   MST_CLK_SEL(bit2, 1=80MHz PLL 源 / 0=XTAL)
+     * 少 bit0 时模块时钟被门控：写 CMD.USR 读回仍是 0、总线没有时钟输出，
+     * 面板一个字节都收不到（但轮询看起来"很快完成"，很容易误判成正常）。 */
+    *(volatile u32 *)(SPI2_BASE + 0xE8u) = (1u << 0) | (1u << 1) | (1u << 2);
+
+    /* 源选 80MHz PLL（MST_CLK_SEL=1），分频 N+1=4 → 20MHz：
+     * CLKDIV_PRE=0（bits21:18）、CLKCNT_N=3（17:12）、CLKCNT_H=1（11:6）、
+     * CLKCNT_L=3（5:0）、CLK_EQU_SYSCLK=0（bit31）。 */
+    clk = 0x00003043u;
+    dbg("clock_want=");
+    dbg_hex(clk);
+    dbg("\n");
+    SPI2_CLOCK = clk;
+    dbg_reg(" clock_now=", SPI2_CLOCK);
+
+    SPI2_CTRL = 0u;                     /* MSB first */
+    /* 原厂是 SPI mode 3：CK_IDLE_EDGE(CK 空闲电平)=1 + CK_OUT_EDGE=1，
+     * 正好也是 ST7789 手册要求的 CPOL=1/CPHA=1。 */
+    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    /* CS 常低（ST7789 靠 DC 区分命令/数据，CS 一直有效是合法的，也避免
+     * 命令字节和参数分属两次事务时面板接口状态机被 CS 打断）。 */
+    SPI2_MISC = SPI_CK_IDLE_EDGE | SPI_CS_KEEP_ACTIVE;
+
+    matrix_out(PIN_SCLK, SIG_FSPICLK);
+    matrix_out(PIN_SDA, SIG_FSPID);
+    matrix_out(PIN_CS, SIG_FSPICS0);
+    plain_out(PIN_DC);
+    plain_out(PIN_RST);
+    plain_out(PIN_BL);
+    hi(PIN_DC);
+
+    s3_mark(9u, 0x1002u);
+    dbg("spi2 ready\n");
+    dbg_reg(" cmd=", SPI2_CMD);
+    dbg_reg(" clock=", SPI2_CLOCK);
+    dbg_reg(" user=", SPI2_USER);
+    dbg_reg(" misc=", SPI2_MISC);
+    dbg_reg(" slave=", *(volatile u32 *)(SPI2_BASE + 0xE0u));
 }
 
 static void init_seq(void)
 {
+    static const u8 b2[] = {0x55u};
+    static const u8 b1[] = {0x00u};
+
+    s3_mark(9u, 0x1003u);
     lo(PIN_RST); dly(200000u);
     hi(PIN_RST); dly(1200000u);
+    s3_mark(9u, 0x1004u);
+    dbg("rst done\n");
 
     cmd(0x01u); dly(1200000u);           /* SWRESET */
+    s3_mark(9u, 0x1005u);
     cmd(0x11u); dly(1200000u);           /* SLPOUT */
-    cmd(0x3Au); dat(0x55u);              /* COLMOD 16bpp */
-    cmd(0x36u); dat(0x00u);              /* MADCTL */
+    s3_mark(9u, 0x1006u);
+    cmd(0x3Au); dat(b2, 1u);             /* COLMOD 16bpp */
+    cmd(0x36u); dat(b1, 1u);             /* MADCTL */
     cmd(0x21u);                          /* INVON */
     cmd(0x13u);                          /* NORON */
+    dbg("cmds ok\n");
     cmd(0x29u); dly(200000u);            /* DISPON */
+}
+
+/* 给 c6 测试用的忙等延时（c6 不支持 inline asm，而 volatile 计数会插 memw）。 */
+void s3_lcd_delay(u32 n)
+{
+    dly(n);
 }
 
 void s3_lcd_init(void)
 {
-    mux_gpio(PIN_SDA); mux_gpio(PIN_SCL); mux_gpio(PIN_DC);
-    mux_gpio(PIN_CS); mux_gpio(PIN_RST); mux_gpio(PIN_BL);
-    out(PIN_SDA); out(PIN_SCL); out(PIN_DC); out(PIN_CS); out(PIN_RST); out(PIN_BL);
-    hi(PIN_CS); hi(PIN_DC); hi(PIN_SCL); lo(PIN_SDA); lo(PIN_RST); lo(PIN_BL);
+    s3_mark(9u, 0x1000u);
+    plain_out(PIN_PWR_HOLD);          /* 原厂：板级电源保持脚，启动即拉高 */
+    hi(PIN_PWR_HOLD);
+    spi_init();
+    lo(PIN_RST);
+    lo(PIN_BL);
     init_seq();
     hi(PIN_BL);
+    s3_mark(9u, 0x1007u);
+}
+
+void s3_lcd_bl(u32 on)
+{
+    if (on != 0u) { hi(PIN_BL); } else { lo(PIN_BL); }
+}
+
+void s3_lcd_window(u32 x, u32 y, u32 w, u32 h)
+{
+    if (w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
+    if (x + w > LCD_W) { w = LCD_W - x; }
+    if (y + h > LCD_H) { h = LCD_H - y; }
+    window(x, y, w, h);
+}
+
+void s3_lcd_pixels(const u16 *px, u32 n)
+{
+    u8 buf[SPI_CHUNK];
+    u32 i = 0;
+    u32 k;
+
+    if (px == 0) { return; }
+    while (i < n) {
+        for (k = 0; k < SPI_CHUNK / 2u && i + k < n; k++) {
+            u16 v = px[i + k];
+            buf[k * 2u] = (u8)(v >> 8);
+            buf[k * 2u + 1u] = (u8)v;
+        }
+        {
+            u32 bytes = k * 2u;
+            hi(PIN_DC);
+            spi_xfer(buf, bytes);
+        }
+        i += k;
+    }
 }
 
 void s3_lcd_fill(u16 color)
 {
-    window(0u, 0u, LCD_W, LCD_H);
-    dat_start();
-    {
-        u32 n = LCD_W * LCD_H;
-        while (n != 0u) { dat16(color); n--; }
+    u8 buf[SPI_CHUNK];
+    u32 n = LCD_W * LCD_H;   /* 像素数 */
+    u32 i = 0;
+    u32 k;
+
+    for (k = 0; k < SPI_CHUNK; k += 2u) {
+        buf[k] = (u8)(color >> 8);
+        buf[k + 1u] = (u8)color;
     }
-    dat_end();
+    s3_mark(9u, 0x2001u);
+    window(0u, 0u, LCD_W, LCD_H);
+    hi(PIN_DC);
+    while (i < n) {
+        spi_xfer(buf, SPI_CHUNK);
+        i += SPI_CHUNK / 2u;
+    }
+}
+
+/* LOOPBACK 自检：把 FSPIQ（SPI 的 MISO 输入）映射到与 MOSI 同一根 pad，
+ * 全双工发一段数据再读回 RX FIFO。读回等于发出 → 主控确实在 MOSI 上打数据；
+ * 读回全 0 → 主控没把数据送出去（配置问题），与面板无关。 */
+int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
+{
+    u32 i;
+    u32 w;
+    u32 nw;
+    u32 guard;
+    volatile u32 *mux = (volatile u32 *)IO_MUX_REG(pin);
+
+    if (n == 0u || n > SPI_CHUNK) { return -1; }
+
+    /* pad 输入通路打开（FUN_IE），并把 FSPIQ 的输入选到这根 pad */
+    *mux = *mux | (1u << 9);
+    *(volatile u32 *)(GPIO_BASE + 0x154u + 4u * 102u) = pin & 0x3Fu;
+
+    for (i = 0; i < SPI_CHUNK / 4u; i++) {
+        SPI2_W(i) = 0u;
+    }
+    nw = (n + 3u) / 4u;
+    for (i = 0; i < nw; i++) {
+        w = 0;
+        w |= (u32)tx[i * 4u] << 24;
+        if (i * 4u + 1u < n) { w |= (u32)tx[i * 4u + 1u] << 16; }
+        if (i * 4u + 2u < n) { w |= (u32)tx[i * 4u + 2u] << 8; }
+        if (i * 4u + 3u < n) { w |= (u32)tx[i * 4u + 3u]; }
+        SPI2_W(i) = w;
+    }
+    SPI2_USER = SPI_USR_MOSI | SPI_USR_MISO | SPI_CK_OUT_EDGE | SPI_DOUTDIN;
+    SPI2_MS_DLEN = n * 8u - 1u;
+    SPI2_CMD = SPI_CMD_UPDATE;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_UPDATE) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -2; }
+    }
+    SPI2_CMD = SPI_CMD_USR;
+    guard = 0;
+    while ((SPI2_CMD & SPI_CMD_USR) != 0u) {
+        guard++;
+        if (guard > 2000000u) { return -3; }
+    }
+    for (i = 0; i < nw; i++) {
+        w = SPI2_W(i);
+        rx[i * 4u] = (u8)(w >> 24);
+        if (i * 4u + 1u < n) { rx[i * 4u + 1u] = (u8)(w >> 16); }
+        if (i * 4u + 2u < n) { rx[i * 4u + 2u] = (u8)(w >> 8); }
+        if (i * 4u + 3u < n) { rx[i * 4u + 3u] = (u8)w; }
+    }
+    SPI2_USER = SPI_USR_MOSI | SPI_CK_OUT_EDGE;
+    return 0;
+}
+
+/* 给自检用例用：改分频 / 直接发一段数据 / 读回 CLOCK 与 CLK_GATE 寄存器。 */
+void s3_lcd_set_clock(u32 clk) { SPI2_CLOCK = clk; }
+u32 s3_lcd_get_clock(void) { return SPI2_CLOCK; }
+u32 s3_lcd_get_gate(void) { return *(volatile u32 *)(SPI2_BASE + 0xE8u); }
+void s3_lcd_dat_raw(const u8 *p, u32 n) { hi(PIN_DC); spi_write(p, n); }
+
+/* 给调试用例用：直接发一条命令 / 一个参数。 */
+void s3_lcd_cmd(u32 c) { cmd((u8)c); }
+void s3_lcd_dat(u32 v) { u8 b = (u8)v; dat(&b, 1u); }
+
+/* 只填一块矩形（带窗口），用来验证 CASET/RASET 寻址。 */
+void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color)
+{
+    u8 buf[SPI_CHUNK];
+    u32 n;
+    u32 i = 0;
+    u32 k;
+
+    if (w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
+    if (x + w > LCD_W) { w = LCD_W - x; }
+    if (y + h > LCD_H) { h = LCD_H - y; }
+    for (k = 0; k < SPI_CHUNK; k += 2u) {
+        buf[k] = (u8)(color >> 8);
+        buf[k + 1u] = (u8)color;
+    }
+    n = w * h;
+    window(x, y, w, h);
+    hi(PIN_DC);
+    while (i < n) {
+        spi_xfer(buf, SPI_CHUNK);
+        i += SPI_CHUNK / 2u;
+    }
+}
+
+/* 把帧缓冲里的一块（行跨度 fb_w）贴到面板 (x,y) 起的 w*h 区域。 */
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
+{
+    u8 buf[SPI_CHUNK];
+    u32 n;
+    u32 i = 0;
+    u32 k;
+
+    if (fb == 0 || w == 0u || h == 0u || x >= LCD_W || y >= LCD_H) { return; }
+    if (x + w > LCD_W) { w = LCD_W - x; }
+    if (y + h > LCD_H) { h = LCD_H - y; }
+    n = w * h;
+    window(x, y, w, h);
+    while (i < n) {
+        for (k = 0; k < SPI_CHUNK / 2u && i + k < n; k++) {
+            u32 p = i + k;
+            u16 v = fb[(y + p / w) * fb_w + (x + p % w)];
+            buf[k * 2u] = (u8)(v >> 8);
+            buf[k * 2u + 1u] = (u8)v;
+        }
+        {
+            u32 bytes = k * 2u;
+            hi(PIN_DC);
+            spi_xfer(buf, bytes);
+        }
+        i += k;
+    }
 }
 
 void s3_lcd_blit(const u16 *fb, u32 w, u32 h)
 {
-    u32 i = 0;
-    u32 n = w * h;
     if (fb == 0 || w == 0u || h == 0u) { return; }
     if (w > LCD_W) { w = LCD_W; }
-    if (h > LCD_H) { h = LCD_H; n = w * h; }
+    if (h > LCD_H) { h = LCD_H; }
     window(0u, 0u, w, h);
-    dat_start();
-    while (i < n) { dat16(fb[i]); i++; }
-    dat_end();
+    s3_lcd_pixels(fb, w * h);
 }
