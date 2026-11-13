@@ -577,13 +577,12 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   `port/s3/console.c port_init()` 里按 `0x600080B8=0x8F1D312A` →
   `0x600080B4 |= 1<<30`(SWD_DISABLE) → `0x600080B8=0` 关闭后恢复正常。
 
-- **未解问题（S3，已记录待查）**：`tests/t_s3_irq.c6` 里 `busy()` 靠定时器中断推进
-  `os_tick_get()` 的路径仍不成立——实测定时器 ISR 确实在跑（RTC mark idx2 计到
-  1688 次），但 `os_tick_get()` 在任务上下文里不动。`os_main` 段内 `os_tick_get()`
-  一直为 0 属设计如此（`os_sched_tick()` 只在调度器运行时计数），因此问题落在
-  「任务运行时的 tick 推进 / 抢占」这条链上，与面板驱动无关（面板走忙等，不受影响）。
-  SWD 未关时该用例连 banner 之后都活不到，所以此前文档里的 `PASS: s3 irq tick`
-  不可复现，需按新环境重测。
+- **已修复：`t_s3_irq` 的 tick 推进失败**（原记录为"未解问题"）。根因是
+  `port_core_id()` 读 Xtensa `rsr.prid` 在这颗 S3 上拿到的是垃圾值（core0=0xCDCD、
+  core1=0xABAB），恒等于 1 → `os_sched_tick()` 里"非 0 号核直接返回"的 SMP 保护
+  永远命中 → tick 不前进（ISR 其实在跑）。改成启动时按核登记 PRID 值、查表返回
+  下标后，真板实测：`t_s3_irq` → **`PASS: s3 irq tick`**；`t_s3_dash` 的
+  `tick=57/83/109…` 稳定递增；`t_s3_shell` 正常出 `shell ready` / `shell>`。
 
 - **S3 面板"只有背光"的根因：GPIO 矩阵输出没打开输出使能**（本轮找到并修掉）：
   只写 `GPIO_FUNCx_OUT_SEL_CFG.func_sel`=101/103/110 而不置 `GPIO_ENABLE_REG`
