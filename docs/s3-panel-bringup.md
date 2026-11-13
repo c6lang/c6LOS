@@ -66,6 +66,13 @@ cycles、`dly(1200000)`=6.0M cycles）。原来 init 里用 `dly(1200000)` 只�
 
 命令发太早面板会直接不理（表现就是"只有背光"），所以宁可多等。
 
+## 2.6 初始化命令表
+
+在最小集（SWRESET/SLPOUT/COLMOD/MADCTL/INVON/NORON/DISPON）之上补了 ST7789
+240×240 各家开板示例通用的电源、门控、VCOM 与 gamma 表：`0xB2`(porch)、
+`0xB7`(gate)、`0xBB`(VCOM)、`0xC0/0xC2/0xC3/0xC4/0xC6`(LCM/VDV/VRH/帧率)、
+`0xD0`(电源控制)、`0xE0/0xE1`(正负 gamma)。不少屏在默认 VCOM/porch 下就是不亮。
+
 ## 3. 踩过的坑（每条都曾经让屏幕一片黑）
 
 1. **GPIO 矩阵输出没打开输出使能（本项是"只有背光"的真正原因）**

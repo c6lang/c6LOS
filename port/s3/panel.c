@@ -452,6 +452,24 @@ static void init_seq(void)
     s3_mark(9u, 0x1006u);
     cmd(0x3Au); dat(b2, 1u);             /* COLMOD 16bpp */
     cmd(0x36u); dat(b1, 1u);             /* MADCTL */
+
+    /* ST7789 240x240 常用的电源/门控/gamma 表：不少屏在默认 VCOM/porch 下
+     * 就是不亮，补齐这些（与各家开板示例一致，无副作用）。 */
+    { static const u8 t[] = {0x0Cu, 0x0Cu, 0x00u, 0x33u, 0x33u}; cmd(0xB2u); dat(t, 5u); }
+    { static const u8 t[] = {0x35u}; cmd(0xB7u); dat(t, 1u); }
+    { static const u8 t[] = {0x19u}; cmd(0xBBu); dat(t, 1u); }
+    { static const u8 t[] = {0x2Cu}; cmd(0xC0u); dat(t, 1u); }
+    { static const u8 t[] = {0x01u}; cmd(0xC2u); dat(t, 1u); }
+    { static const u8 t[] = {0x12u}; cmd(0xC3u); dat(t, 1u); }
+    { static const u8 t[] = {0x20u}; cmd(0xC4u); dat(t, 1u); }
+    { static const u8 t[] = {0x0Fu}; cmd(0xC6u); dat(t, 1u); }
+    { static const u8 t[] = {0xA4u, 0xA1u}; cmd(0xD0u); dat(t, 2u); }
+    { static const u8 t[] = {0xD0u, 0x04u, 0x0Du, 0x11u, 0x13u, 0x2Bu, 0x3Fu,
+                             0x54u, 0x4Cu, 0x18u, 0x0Du, 0x0Bu, 0x1Fu, 0x23u};
+      cmd(0xE0u); dat(t, 14u); }
+    { static const u8 t[] = {0xD0u, 0x04u, 0x0Cu, 0x11u, 0x13u, 0x2Cu, 0x3Fu,
+                             0x44u, 0x51u, 0x2Fu, 0x1Fu, 0x1Fu, 0x20u, 0x23u};
+      cmd(0xE1u); dat(t, 14u); }
     cmd(0x21u);                          /* INVON */
     cmd(0x13u);                          /* NORON */
     dbg("cmds ok\n");
