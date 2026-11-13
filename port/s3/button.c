@@ -44,6 +44,13 @@ static int btn_raw(u32 i)
     return btn_level(i) != g_btn_idle[i];
 }
 
+/* 上拉使能后引脚要充一会儿电才能读到稳定高电平，采基线前先等 ~30ms */
+static void btn_settle(void)
+{
+    u32 k = 300000u;
+    while (k != 0u) { k--; }
+}
+
 void s3_btn_init(void)
 {
     u32 i = 0;
@@ -85,6 +92,14 @@ void s3_btn_init(void)
         g_btn_down[i] = 0u;
         g_btn_cnt[i] = 0u;
         g_btn_event[i] = 0u;
+        i++;
+    }
+
+    /* 配置完再采一次基线（此时电平已稳定） */
+    btn_settle();
+    i = 0;
+    while (i < BTN_N) {
+        g_btn_idle[i] = btn_level(i);
         i++;
     }
 }

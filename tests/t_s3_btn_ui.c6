@@ -65,6 +65,10 @@ static void draw_row(u32 i, u32 down)
     if (i == 2u) { os_gfx_text16(&g, 6, y + 4, "VOL-  GPIO39", 0xFFFFu); }
 
     os_gfx_text16(&g, 6, y + 26, (down != 0u) ? "DOWN" : "UP  ", 0xFFFFu);
+    s[0] = (char)('0' + (down & 1u));
+    s[1] = '\0';
+    os_gfx_text16(&g, 52, y + 26, "L=", 0xFFE0u);
+    os_gfx_text16(&g, 74, y + 26, s, 0xFFE0u);
     os_gfx_text16(&g, 90, y + 26, "n=", 0xFFFFu);
     u2s(s, g_cnt[i]);
     os_gfx_text16(&g, 114, y + 26, s, 0xFFFFu);
