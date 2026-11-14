@@ -393,3 +393,41 @@ _vec_level1:
      （如 `.dram0.data`/`.dram1.bss`/`.ext_ram.*`），必要时在 `link.ld` 里显式放置；
   3. 试把镜像写到非 0 偏移（`write-flash 0x10000`）并用 `--flash-size` 调整，
      排除"镜像整体大小/位置"因素。
+
+## 15. 【已定位】libphy 镜像启动不了的真因：IRAM 越过 SRAM 坏区 0x403D9500
+
+用**纯填充实验**（`port/s3/irampad.c` + `tests/t_s3_irampad.c6`，完全不碰 libphy）
+把 IRAM 里的 `.text` 推到不同大小，真板结果：
+
+| 实验 | .text 结束地址 | 结果 |
+|---|---|---|
+| `-DS3_PAD_N=30000` | ≈0x403D0AA8（低于 0x403D9500） | ✅ 正常启动、打印 `c6os s3 boot` |
+| `-DS3_PAD_N=60000` | 0x403DF3E4（越过 0x403D9500） | ❌ 起不来（ROM `load:` 之后反复复位，RTC 标记全乱） |
+
+**根因**：这块 SRAM 在 IRAM 侧的别名 `0x403D9500` 就是之前音频那轮查出来的
+DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 访问会把 CPU 挂住）。
+镜像的 IRAM 段一旦盖过去，ROM 装载/校验阶段就会踩到 → 启动不了。
+
+**由此得到的硬约束**：IRAM 内容必须停在 `0x403D9500` 以下，
+也就是从 `0x403C9000` 起最多 **0x10500 = 66,816 字节**（含 1KB 向量表和 `.iram1`/`.eh_frame`）。
+
+**对 WiFi 的影响**：`phy_get_rf_cal_version` 一个符号的**依赖闭包就有 18 个目标文件**
+（几乎整个 libphy，≈76KB 代码），远超 66KB 预算 → 闭源库不能再全塞 IRAM。
+
+### 下一步（下一轮就做这个）
+
+把 IDF 闭源库的代码放到 **flash（IROM）** 里执行，也就是标准的 ESP 镜像布局：
+
+1. `link.ld` 加两个 flash 段：
+   - `.flash.text : { *(.flash.text) } > IROM`（`IROM` = `0x42000000`，`AT> ...` 用 LMA 指到 flash 偏移）
+   - `.flash.rodata : { ... } > DROM`（`0xDROM` = `0x3C000000`，可选）
+2. 用 `-Wl,--section-start` 或按文件/归档做「段名改写」：把 `libphy.a` 等闭源库的
+   `.text` 改名为 `.flash.text`（IDF 的做法是给这些库加
+   `-mtext-section-literals` + 单独链接脚本里 `libphy.a:(.text)` 之类；
+   我们可以在 `link.ld` 里直接写
+   `.flash.text : { */libphy.a:(.text*) */libpp.a:(.text*) ... } > IROM`）。
+   注意 `l32r` 的字面量池要跟着进 flash 段（`.literal.*` 也要一起搬），
+   否则字面量落在 0x403C… 而代码在 0x42…，`l32r` 的 ±256KB 偏移会溢出。
+3. `elf2image` 去掉 `--ram-only-header`，让镜像带 IROM/DROM 段（ROM 会自动配置 MMU 映射）。
+4. 先只链 `phy_api.o` 验证「flash 里的闭源代码能被正确取指执行」，
+   再回到 `phy_get_rf_cal_version` 走桥调用（M1）。

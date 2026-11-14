@@ -2,9 +2,8 @@
  * IDF 官方就是用这几个 linker script 把符号直接钉到 ROM 地址上的，这里原样引用。 */
 INCLUDE port/s3/rom/esp32s3.rom.ld
 INCLUDE port/s3/rom/esp32s3.rom.api.ld
-/* 实验：把 ROM 的 libc/newlib 映射也打开（历史上带 libphy 的镜像能启动时是开着的） */
-INCLUDE port/s3/rom/esp32s3.rom.libc.ld
-INCLUDE port/s3/rom/esp32s3.rom.newlib.ld
+/* rom.libc.ld / rom.newlib.ld 必须保持关闭：它们把 memcpy/memset 钉到 ROM，
+ * 实测运行期立刻 LoadProhibited（pc=0x40056fc0）。我们用自己的 rt/c6rt.c 实现。 */
 INCLUDE port/s3/rom/esp32s3.rom.version.ld
 
 ENTRY(_start)
