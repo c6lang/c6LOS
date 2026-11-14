@@ -900,3 +900,21 @@ void os_dcache_enable(void) { /* D 总线同理：EXTMEM_DCACHE_CTRL1 &= ~1 */ }
 
 注：`tools/flash.sh` 会自动等串口、失败重试（但这块板的 USB 卡死是硬件层面，
 重试也救不回来，只能拔插）。
+
+## 26. 板子插拔后仍然没有串口输出（第 17 轮末）
+
+现象（值得记住）：
+- `tools/flash.sh` 刷机**成功**（`Hash of data verified`），说明芯片/USB-JTAG 的
+  *下载协议* 正常；
+- 但串口**一个字节都没有** —— 连 ROM 自己的 banner（`ESP-ROM:esp32s3-...`）都没有；
+- `g_boot_marks` 读回来是 0（应该先被 .data 初始化成 0xEE、再由 `_start` 写成
+  0xA1），说明应用根本没跑起来；
+- `esptool --after hard-reset read-mac` 之后立刻抓串口，也是 0 字节。
+
+结论：**ESP32-S3 的 USB-Serial/JTAG 控制台路径还卡着**（下载能用、console 输出到
+不了主机）。之前 sysfs unbind/bind + 重新 bind cdc_acm 都报 `I/O error`，
+说明这是芯片侧的状态，**需要真正断电一次**（USB 拔掉等 5 秒再插，或按板子的
+RST/电源键），单纯重插如果板子还有独立供电就不算断电。
+
+恢复后仍按 §25 的三步走：
+`build/wirom2`（等 `L5irom=42`）→ `build/wphyen7`（PHY 校准）→ WiFi 库放 flash。
