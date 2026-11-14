@@ -1,3 +1,59 @@
+
+# 从这里继续（交接摘要）
+
+## 一分钟看懂现在的状态
+
+- **能做到**：c6LOS 在 S3 上完整跑起来（USB-CDC 串口、背光和音频、RTC 信标、USB-JTAG 调试全通）；
+  windowed ABI 桥（能正确调用 IDF 闭源库）；libphy 的 PHY 初始化 5 步全部真板验证通过；
+  WiFi 闭源库 + IDF 源码层**链接 0 未定义符号**；自己生成的标准 IDF app 镜像能被原厂
+  bootloader 引导（`esptool image-info` 报 checksum valid）。
+- **卡住的唯一一件事**：**从 flash 取指**（IROM 执行）。跳进 flash 里的
+  `movi.n a2,42; retw.n`，trap 显示 `exccause=0`（IllegalInstruction）、`excvaddr=0`、
+  `epc1=<flash 地址>`，即取指成功但取回 `0x00000000`（= `ill`）。
+
+## 已经逐项排除的（都做了真板实测，别重复）
+
+flash 内容、MMU 映射（恒等/重映射/手写表项补 valid 位）、ICache/DCache 使能、
+SPI_MEM 全块寄存器（与能跑 IROM 的原厂固件**逐字节一致**）、`SYSTEM_CACHE_CONTROL_REG`
+的 cache 时钟位、寄存器级 ICache sync（`0x600C4088`，实测能完成）、ROM 的
+`Cache_Enable_ICache`/`Cache_Invalidate_ICache_All`（后者一调就不返回）、
+JTAG 单步进 flash（该方法本身不可靠，原厂固件同样 fault）。
+
+## 最值得试的下一步
+
+1. **flash 芯片内部状态**：SPI_MEM 寄存器一致不代表芯片内部一致。用 SPI_MEM 的
+   用户命令寄存器读 flash 的 JEDEC ID / 状态寄存器 / 配置寄存器，对比原厂固件跑起来
+   之后的状态（IDF 在 `spi_flash_init_chip_state()` 里会改芯片的 dummy/QE 位）。
+2. **在他处复现**：用 IDF 编一个最小 app 跑通（需要先 `install.sh`，本机 `/home` 磁盘
+   已满，装之前要先腾空间），确认 IDF app 能跑 IROM，再把它的 app 侧 flash 初始化
+   逐步搬过来做二分。
+3. 若以上都不通，最后退路是「把 WiFi 栈裁到 66KB IRAM 只留 scan 路径」。
+
+## 常用命令
+
+```sh
+# 刷我们的常规固件（亮屏+心跳）并立即看日志
+./tools/flashmon.sh build/won/c6os.bin 3
+
+# 读 RTC 信标（掉电不丢，esptool 就能读）
+./tools/beacon.sh
+
+# 起 openocd + gdb 调试
+./tools/dbg.sh <elf> <脚本.gdb>
+
+# 构建（示例）
+make C6_ROOT=/home/winger/c6 BUILD=build/xxx S3_MAIN=tests/xxx.c6 s3
+
+# 标准 IDF 镜像路线（三个都要刷！）
+sudo -n esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 <原厂bootloader.bin>
+sudo -n esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x8000 /tmp/p2.bin
+python3 tools/mkimg.py build/xxx/c6os.elf /tmp/app.bin
+sudo -n esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x20000 /tmp/app.bin
+```
+
+注意：`flashmon.sh` 会把镜像写到 0x0，**会覆盖 bootloader 和 0x8000 的分区表**，
+走标准镜像路线后要重新刷这两样。
+
 # ESP32-S3 WiFi 联网设计（含 ABI 迁移）与分阶段计划
 
 > **最终目标**：真板上通过 WiFi 取到 `https://qq.com` 的页面数据。
