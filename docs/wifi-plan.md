@@ -703,3 +703,26 @@ RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU �
   `os_icache_state()` —— flash 窗口(IROM/DROM)映射与 cache 使能，
   按"arch 相关实现放 port/、接口放 include/c6os/"的既有规范加入。
 - `include` 侧的 `g_boot_marks`（`port/s3/marks.c`）+ 调试读法，作为启动期诊断的标准做法。
+
+## 19. IROM 取指问题的最新边界（第 9 轮收尾）
+
+用"已知图案 + DROM 别名"做的测量，把问题切得很干净：
+
+| 现象 | 证据 |
+|---|---|
+| MMU 表项写入正确 | `os_flash_mmu_entry(0x42000000)=0x0000`（页 0 有效）、`0x42010000 -> 0x0001` |
+| **数据通路 OK** | 把 flash 0x0 映射到 DROM 0x3C000000，`os_dcache_enable()` 后读回 **0xE9 0x02**（正是镜像 magic） |
+| **取指通路不通** | 调 IROM 里的函数一律 `cause=0 (IllegalInstruction)`，PC 恒为"函数首地址 + 2" —— 包括**手写的 `movi a2,42; retw.n`（没有 entry）**，所以不是 `entry`/窗口的问题 |
+| 与 cache 使能位无关 | `os_icache_enable()`（`EXTMEM+0x60` bit0）打开后仍然一样；`Cache_Invalidate_ICache_All()` 一调用反而提前跑飞 |
+| ROM 的 `Cache_Enable_ICache` 符号地址不对 | 按 `rom.ld` 调它会跳到 DRAM 里（`pc=0x3fca02df`, cause=2），说明 `esp32s3.rom.ld` 里这个符号不是可调用的入口 |
+
+⇒ 结论：**MMU/D-cache 都已正确，唯独 IBUS→I-cache→flash 这条取指链路没打通**。
+下一步要按 IDF 的 `cache_ll.h` / `bootloader_cache_init` 逐个寄存器对齐
+（`EXTMEM_ICACHE_CTRL/CTRL1`、`EXTMEM_ICACHE_TAG_POWER_CTRL`、
+`EXTMEM_IBUS_*` 计数器，以及 SPI0 侧的 cache 读模式），或者干脆用外部
+bootloader。这条线已经花掉 5 轮，建议：
+- 要么继续按 IDF 寄存器序列逐位对齐（预计还要 2~3 轮试错）；
+- 要么走"纯 IRAM"路线（LEAN 构建 + libphy 闭包分两段放进 66KB+24KB）。
+
+`port/s3/flash.c` 的 `os_flash_init()` 默认**不自动**动 flash 窗口
+（`S3_FLASH_AUTO_MAP` 宏才开），保证普通镜像不受影响。
