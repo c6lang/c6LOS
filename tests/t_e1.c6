@@ -1,0 +1,22 @@
+/* E1: 通过 IBUS 访问/缺失计数器判断"IROM 读有没有进 cache" */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    u32 a0 = 0u, a1 = 0u;
+    s3_beacon(0u, 0xB0000080u);
+
+    os_reg_wr(0x600C40C4u, 0x3u);          /* 清计数器 */
+    a0 = os_reg_rd(0x600C40CCu);           /* IBUS_ACS_CNT 基线 */
+    a1 = os_reg_rd(0x600C40C8u);           /* IBUS_MISS_CNT 基线 */
+
+    (void)*(volatile u32 *)0x42030000u;    /* 触发 IROM 读 */
+    (void)*(volatile u32 *)0x42030004u;
+
+    /* 用差值装进 4 个信标 */
+    s3_beacon(1u, a0);
+    s3_beacon(2u, os_reg_rd(0x600C40CCu) - a0);   /* 访问计数增量（0=没进 cache） */
+    s3_beacon(3u, os_reg_rd(0x600C40C8u) - a1);   /* 缺失计数增量（>0=真去读了 flash） */
+    for (;;) { }
+}
