@@ -75,8 +75,15 @@ void os_main(void)
     os_icache_enable();
     s3_beacon(3u, 0x1CAC1E00u);          /* icache 已开 */
 
-    v = s3_win_call_flash42();           /* flash 里的函数，期望返回 42 */
-    s3_beacon(0u, 0xF1000000u | (v & 0xFFu));   /* 42 => 0xF100002A = **IROM 通了** */
+    /* 循环重试：这样调试器任何时刻附着都能抓到 "正在调 flash" 的现场 */
+    for (;;) {
+        volatile u32 w = 0;
+
+        s3_beacon(1u, 0xAAAA0001u);      /* 即将调用 */
+        v = s3_win_call_flash42();       /* flash 里的函数，期望返回 42 */
+        s3_beacon(0u, 0xF1000000u | (v & 0xFFu));   /* 42 => 0xF100002A = IROM 通了 */
+        while (w < 40000000u) { w = w + 1u; }
+    }
 
     for (;;) {
         if (v == 42u) {

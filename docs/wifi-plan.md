@@ -1996,3 +1996,37 @@ slot0 没有变成 0xF1xxxxxx  =>  s3_win_call_flash42() 没有返回
    `objcopy` 出来的 24 字节）—— 我们写的时候是 verify 通过的，但值得复核一次
 3. 对照原厂固件再读几个相关寄存器（`0x600C406C`、`0x600C4070`、`0x600C4074`
    以及 `SPI_MEM` 的 cache 控制位），把差异一次性补齐
+
+## 56. 第 36 轮决定性证据：**跳进 IROM 成功了，但取到的指令是 0（ill）**
+
+把用例改成"循环调用 flash 里的函数 + 每次写信标"，这样调试器随时附着都能抓到现场。
+真板实测：
+
+```
+信标 slot1 = 0xAAAA0001      （马上要调 s3_win_call_flash42）
+JTAG halt:
+  #0 s3_trap
+  $exccause = 0              （IllegalInstruction）
+  $epc1     = 0x42100014     （**在我们的 flash 段里！**）
+```
+
+⇒ 说明：
+1. **跳转本身成功了** —— `epc1` 落在 `0x42100000` 起的那 24 字节里 ✓
+2. 但在那里执行时是 **IllegalInstruction** ⇒ 取到的指令字节是 `0x00000000`
+   （Xtensa 的 `0x00000000` 正好解码成 `ill`）
+
+也就是说 **I-cache 没有真正从 flash 读数据**（读回来是 0）。
+这跟 §53 的观察一致（总线通了，但读出来全是 0）；原厂固件在 page 0 读到 0 是因为
+那一页本来没映射，不能作为反证。
+
+### 下一步非常明确
+
+补 **SPI flash 控制器的 cache 读配置**，让 I-cache 能真正发起 flash 读：
+
+- `SPI_MEM_CACHE_FCTRL_REG`（0x6000203C 附近）：cache 读的指令/地址模式
+- `SPI_MEM_CACHE_SCTRL_REG`（0x60002040 附近）：数据读模式
+- 以及 `SPI_MEM_CTRL_REG` 的 `FREAD_QIO/FREAD_DIO/FASTRD` 位（ROM 用 DIO@80MHz 引导）
+
+最省事的办法仍然是**对着原厂固件抄**：用 JTAG halt 原厂固件，把
+`0x60002000`~`0x60002080` 这一片 SPI_MEM 寄存器整体 dump 下来，和我们启动后的对比，
+差异补上即可 —— 这已经是最后一块拼图（其余链路：PHY ✓、WiFi 链接 ✓、MMU ✓、I-cache 使能 ✓）。
