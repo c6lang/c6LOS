@@ -54,7 +54,8 @@ S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
 # IDF 闭源库的 ABI 桥与胶水：始终保留
 S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
-           $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o
+           $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o \
+           $(BUILD)/obj/wifi_glue.o
 
 ifeq ($(S3_LEAN),1)
 S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_WIFI)
@@ -167,6 +168,11 @@ $(BUILD)/obj/marks.o: port/s3/marks.c $(S3_HDRS)
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
 $(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+# WiFi OS 适配层（纯 call0 即可，不碰闭源库 ABI）
+$(BUILD)/obj/wifi_glue.o: port/s3/wifi_glue.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 

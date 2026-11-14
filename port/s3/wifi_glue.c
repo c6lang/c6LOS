@@ -28,3 +28,9 @@ void s3_wifi_osi_init(void)
         i = i + 1u;
     }
 }
+
+/* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */
+void *s3_wifi_osi_funcs_ptr(void)
+{
+    return (void *)&g_wifi_osi_funcs;
+}

@@ -1,0 +1,52 @@
+/* t_s3_wifi2.c6 -- 第一版 WiFi 接入：只验证 esp_wifi_init() 能否链接并调用。
+ * 观察通道：USB-JTAG（tools/dbg.sh），因为 PHY 之后串口会废掉。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+void s3_wifi_osi_init(void);
+void *s3_wifi_osi_funcs_ptr(void);
+
+/* IDF 侧的定义（我们只声明，实现在闭源库里） */
+int esp_wifi_init_internal(const void *config);
+int esp_wifi_deinit(void);
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0';
+    pstr(b);
+}
+
+/* wifi_init_config_t 我们先用一块 512 字节、512 对齐的零内存顶上，
+ * 第一个字段是 osi_funcs 指针（稍后由调试器/代码填）。 */
+static u8 g_wifi_cfg[512] __attribute__((aligned(512)));
+
+void os_main(void)
+{
+    u32 rc = 0u;
+
+    s3_wifi_osi_init();
+    /* osi_funcs = &g_wifi_osi_funcs */
+    *(u32 *)&g_wifi_cfg[0] = (u32)s3_wifi_osi_funcs_ptr();
+
+    /* 调试门：等 gdb 写 0xDEADBEEF 再继续 */
+    os_reg_wr(0x600080C0u, 0u);
+    while (os_reg_rd(0x600080C0u) != 0xDEADBEEFu) { }
+
+    pstr("wifi_init ...\n");
+    rc = (u32)esp_wifi_init_internal(g_wifi_cfg);
+    pstr("wifi_init rc=");
+    phex(rc);
+    pstr("\n");
+    for (;;) { }
+}

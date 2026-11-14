@@ -1682,3 +1682,47 @@ IDF 自己的参考实现是 `components/esp_wifi/esp32s3/esp_adapter.c`（119 �
 2. 用 USB-JTAG（`tools/dbg.sh`）在 `esp_wifi_init` 里单步/断点，按崩溃顺序
    把假实现替换成真的（内存 → 队列 → 信号量 → 定时器 → 线程 → 中断）
 3. 能返回 `ESP_OK` 后，接 `esp_wifi_set_mode/start/scan`
+
+## 49. 第 33 轮：M2 的真实工作量评估（重要结论）
+
+把闭源库（libphy+libpp+libnet80211+libcore+libwapi）链进我们的镜像后，
+除了 `g_osi_funcs_p`（已自建 ✓）之外，还缺**一大批 IDF 源码层符号**：
+
+```
+ic_add_rx_ba, ic_del_key, ic_enable_rx, ic_create_wifi_task, ic_csi_set_config,
+ic_ampdu_op, ic_disable_crypto, ic_del_ptk_and_gtk_alg, ...（ic_* 几十个）
+hal_ba_session_restore_by_hw_index, hal_crypto_enable, hal_enable_sta_tsf,
+hal_disable_softap_tsf, hal_get_tsf_time, ...（hal_* 一批）
+esf_buf_setup_for_mesh, dbg_lmac_statis_dump, hexstr2bin,
+esp_wifi_internal_set_retry_counter, esp_wifi_internal_set_msdu_lifetime,
+g_espnow_user_oui, g_mt
+```
+
+这些**不是闭源库内部能自洽的**，它们来自 IDF 的**源码层**
+`components/esp_wifi/src/*.c`（`ic.c`、`hal_*.c`、`wifi_init.c`、`esf_buf.c` …约 40 个文件）。
+
+也就是说：**WiFi 栈 = 闭源 blob + IDF 的 esp_wifi 源码层**，后者必须由我们编译进来。
+
+### 结论（给下一步定方案）
+
+`esp_wifi_init_internal()` / `esp_wifi_start()` / `esp_wifi_set_mode()` 都在 blob 里 ✓，
+但它们依赖源码层的 `ic_*` / `hal_*` ⇒ 必须把 IDF `components/esp_wifi/src/` 编进来。
+这些文件需要的 FreeRTOS API 并不算多（队列/信号量/任务/定时器/事件组），
+可行路径：
+
+1. 把 `components/esp_wifi/src/*.c` 加入构建，用 `-mabi=windowed` 编译
+   （它们和闭源库同 ABI；我们从 c6 侧通过 `win_bridge` 调用）
+2. 提供 **FreeRTOS 兼容层**（`freertos/FreeRTOS.h` 等最小头 + 队列/信号量/任务/定时器实现，
+   内部直接用 c6LOS 的 `os_*` API）
+3. 提供 `esp_log`、`esp_timer`、`esp_event`、`heap_caps_*`、`nvs_*` 的最小实现
+4. 然后按 §48 的顺序填 `wifi_osi_funcs_t`
+
+这是一块**明确但量大**的工作（IDF 侧约 40 个文件），不是几轮能完成的；
+已经完成的 PHY（M1）是它唯一真正有技术风险的先决条件。
+
+### 本轮已落地
+
+- `include/c6os/wifi_osi.h`：119 字段 `wifi_osi_funcs_t`（顺序照抄 IDF）
+- `port/s3/wifi_glue.c`：`g_wifi_osi_funcs` + 自建 `g_osi_funcs_p` + 全桩适配层，已进构建
+- `Makefile`：`wifi_glue.o` 编译规则 + 进 `S3_OBJ_WIFI`
+- `tests/t_s3_wifi2.c6`：调用 `esp_wifi_init_internal()` 的第一版接线用例（含调试门）
