@@ -848,3 +848,36 @@ windowed 的 `call8` 进来、call0 的 `ret` 返回 → 跳到"带窗口位的�
 
 顺带说明：`tests/t_s3_stdnet.c6`（验证用的用例）因为编不过已经删掉，
 结论就记在这里。
+
+## 24. 【关键发现】IROM 取指的最后一块拼图：SHUT_CORE0_BUS（第 15 轮）
+
+翻 IDF bootloader 的 `bootloader_utility.c`（`set_cache_and_load_tee_app`）发现：
+建完 MMU 映射后它还会调 `cache_ll_l1_enable_bus()`，而 S3 上这个函数的实质是
+**清 `EXTMEM_ICACHE_CTRL1.SHUT_CORE0_BUS`（bit0）**。
+
+而 `extmem_reg.h` 里该位的**复位默认值是 1（关着）**：
+
+```
+/* EXTMEM_ICACHE_SHUT_CORE0_BUS : R/W ;bitpos:[0] ;default: 1'b1 ; */
+```
+
+我们之前只做了：
+- ✅ 写 MMU 表项（现在也验证过：DROM 别名能读回镜像 magic 0xE9）
+- ✅ `EXTMEM_ICACHE_CTRL |= 1`（ICACHE_ENABLE）
+- ❌ **没清 SHUT_CORE0_BUS** → core0 的 I 总线根本不到 cache → 取指拿不到内容
+  → `IllegalInstruction`（PC 落在指令中间那一位），这和观察到的一模一样。
+
+已在 `port/s3/flash.c` 修好：
+```c
+void os_icache_enable(void)
+{
+    S3_EXTMEM_ICACHE_CTRL1 &= ~1u;   /* 打开 core0 I 总线（复位默认是关的！） */
+    S3_EXTMEM_ICACHE_CTRL  |=  1u;   /* 使能 I-cache */
+}
+void os_dcache_enable(void) { /* D 总线同理：EXTMEM_DCACHE_CTRL1 &= ~1 */ }
+```
+`os_flash_init()` 也恢复默认自动执行（映射 + 清 bus 位 + 开 cache）。
+
+`tests/t_s3_abic.c6` 里加回了 `L5irom=` 检查（调 flash 段里的手写函数，期望 42）。
+**等板子插拔后验证** —— 如果通过，IROM 就通了，`libpp/libnet80211`（2MB+）
+也就能放 flash，WiFi 才算真正有了路。

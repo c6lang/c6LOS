@@ -14,8 +14,10 @@
 #define S3_MMU_VADDR_MASK 0x1FFFFFFu
 #define S3_MMU_PAGE       0x10000u
 #define S3_MMU_VALID      0u        /* 有效位的值（无效是 bit14=1） */
-#define S3_EXTMEM_ICACHE_CTRL (*(volatile u32 *)0x600C4060u)
-#define S3_EXTMEM_DCACHE_CTRL (*(volatile u32 *)0x600C4000u)
+#define S3_EXTMEM_ICACHE_CTRL  (*(volatile u32 *)0x600C4060u)
+#define S3_EXTMEM_ICACHE_CTRL1 (*(volatile u32 *)0x600C4064u)
+#define S3_EXTMEM_DCACHE_CTRL  (*(volatile u32 *)0x600C4000u)
+#define S3_EXTMEM_DCACHE_CTRL1 (*(volatile u32 *)0x600C4004u)
 
 /* ROM 里的 cache 操作入口（IDF 的 cache_ll 就是这么调的；地址见 port/s3/rom） */
 extern void Cache_Enable_ICache(u32 autoload);
@@ -63,7 +65,11 @@ u32 os_flash_mmu_entry(u32 vaddr)
 
 void os_icache_enable(void)
 {
-    S3_EXTMEM_ICACHE_CTRL = S3_EXTMEM_ICACHE_CTRL | 1u;   /* ICACHE_ENABLE（寄存器写法，实测不崩） */
+    /* **关键**：SHUT_CORE0_BUS 复位默认是 1（关着），不清它的话 core0 的 I 总线
+     * 根本不到 cache —— 映射再好也取不到指令（表现为 IllegalInstruction）。
+     * IDF 的 bootloader 在建完 MMU 映射后就是干这两件事。 */
+    S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~1u;   /* 打开 core0 I 总线 */
+    S3_EXTMEM_ICACHE_CTRL  = S3_EXTMEM_ICACHE_CTRL | 1u;     /* 使能 I-cache */
 }
 
 /* ROM 里的 cache 操作函数（IDF 的 esp_rom/cache.h 同款）。
@@ -81,7 +87,7 @@ extern const u8 _flash_text_lma[];
 
 void os_flash_init(void)
 {
-#ifdef S3_FLASH_AUTO_MAP
+#ifndef S3_FLASH_NO_AUTO_MAP
     /* 默认关闭：我们的 flash 窗口（IROM/DROM）映射 + cache 使能还在调试中
      * （见 docs/wifi-plan.md §15~17：MMU 表项和 I-cache 使能都确认生效，
      * 但在 IROM 里取指仍 IllegalInstruction）。在搞定之前不要自动动它，
@@ -111,7 +117,7 @@ void os_flash_init(void)
         Cache_Invalidate_ICache_All();     /* 清掉 ROM 遗留的旧 tag */
         os_icache_enable();
     }
-#endif /* S3_FLASH_AUTO_MAP */
+#endif /* S3_FLASH_NO_AUTO_MAP */
 }
 
 u32 os_icache_state(void)
@@ -121,7 +127,8 @@ u32 os_icache_state(void)
 
 void os_dcache_enable(void)
 {
-    S3_EXTMEM_DCACHE_CTRL = S3_EXTMEM_DCACHE_CTRL | 1u;   /* DCACHE_ENABLE（实测这条路 DROM 读得通） */
+    S3_EXTMEM_DCACHE_CTRL1 = S3_EXTMEM_DCACHE_CTRL1 & ~1u;   /* 打开 core0 D 总线 */
+    S3_EXTMEM_DCACHE_CTRL  = S3_EXTMEM_DCACHE_CTRL | 1u;
 }
 
 u32 os_dcache_state(void)

@@ -81,6 +81,17 @@ void os_main(void)
     }
     port_putc('\n');
 
+    /* L5irom：映射 IROM + 开 cache，调 flash 段里的手写函数（应返回 42） */
+    port_puts("L5irom=");
+    {
+        u32 v = s3_win_call_flash42();
+
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+        port_puts(" (want 42)");
+    }
+    port_putc('\n');
+
     port_puts("L6 phy_cal=");
     {
         u32 v = s3_win_call_phy_cal();
