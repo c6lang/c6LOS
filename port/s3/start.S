@@ -92,8 +92,11 @@ _start:
     s32i    a3, a2, 0x98            /* RTC WDTCONFIG0：关 */
     s32i    a3, a2, 0xB0            /* 重新上锁 */
 
+#ifndef S3_KEEP_SWD
     /* RTC 超级看门狗（SWD）：esptool 的 watchdog-reset 会把它也装上，超时几秒；
-     * 它同样跨 CPU 复位保留，必须一起关掉。SWD_CONF.SWD_DISABLE = bit30。 */
+     * 它同样跨 CPU 复位保留，必须一起关掉。SWD_CONF.SWD_DISABLE = bit30。
+     * 诊断时可用 -DS3_KEEP_SWD 保留它：应用挂住 -> 几秒后自动复位重跑，
+     * 而 RTC 域（信标）不会被清，于是下一次运行就能报告"上一轮卡在哪"。 */
     movi    a3, 0x8F1D312A
     s32i    a3, a2, 0xB8            /* SWD_WPROTECT */
     l32i    a3, a2, 0xB4
@@ -101,6 +104,7 @@ _start:
     slli    a4, a4, 30
     or      a3, a3, a4
     s32i    a3, a2, 0xB4            /* SWD_CONF |= SWD_DISABLE */
+#endif /* S3_KEEP_SWD */
     movi    a3, 0
     s32i    a3, a2, 0xB8            /* 重新上锁 */
 
