@@ -32,7 +32,7 @@ SECTIONS
      （那个段会让 ROM 往地址 0 写数据，直接挂）。 */
   /* 先是 DROM（0x3C000000），开头必须是 256 字节的 esp_app_desc_t；
      LMA 从 0x20 开始（镜像头之后）。 */
-  .flash.rodata 0x3C000000 : AT (0x20)
+  .flash.rodata 0x3C000020 : AT (0x20)
   {
     _flash_rodata_lma = LOADADDR(.flash.rodata);
     _flash_rodata_start = .;

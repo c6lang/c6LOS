@@ -2330,3 +2330,52 @@ esptool 认可后 bootloader 就会接受镜像。
 
 一旦接受，bootloader 会替我们建好 MMU+cache，IROM 取指这个卡了很久的问题就自然解开，
 WiFi 闭源库（~500KB）也就有地方放了。
+
+## 61. 自定义镜像已经做到"bootloader 能加载"，但卡在校验的最后一步
+
+### 已经确认对的部分（和原厂逐字节对比过）
+
+```
+原厂 xiaozhi.bin 前 0x28 字节：
+  e9 07 02 4f  409a3740  ee000000  09000000  00630000 00000001  <- 24 字节头
+  2000 1e3c  a8390b00                                           <- 段 0 头: vaddr=0x3C1E0020 len=0xB39A8
+  3254cdab ...                                                  <- 段 0 数据 = esp_app_desc_t (魔数!)
+```
+
+我们按同样格式生成的镜像：
+
+```
+  e9 06 02 1f  f0883740  ee000000  09000000  00000000 00000000  <- 24 字节头
+  2000 003c  d8ff0d00                                           <- 段 0 头: vaddr=0x3C000020 len=...
+  3254cdab ...                                                  <- 段 0 数据 = esp_app_desc_t ✓
+```
+
+关键规律（原厂 0x3C1E0020 ↔ 文件偏移 0x20 印证）：
+**flash 段的 vaddr 低 16 位必须等于该段数据在镜像文件里的偏移低 16 位**，
+bootloader 用这个关系反推 flash 物理地址并建 MMU 映射。
+
+### 现在的失败点
+
+1. bootloader 加载了我们的镜像、`mmu_hal_map_region` 的断言不再触发（IRAM 已挪到
+   0x40378000、flash 段已按上述规律对齐）
+2. 但 `bootloader_utility_load_boot_image` 仍然判定"没有可启动分区"（JTAG 实测
+   断点 `bootloader_reset`，回溯到 `bootloader_utility.c:628`）
+3. `esptool image-info` 也报同一个问题：
+
+```
+ERROR: End of file reading segment 0x887c0000, length 2100052023
+```
+
+   这个错误里 `0x7d2c` 正好是 `.text` 段长度、`0x887c` 是 `.text` 段 vaddr 的尾巴，
+   说明 **它读段头的位置比我们写的晚了 4 字节**（段与段之间的补齐规则不一致）。
+
+### 下一步（很具体）
+
+- 段与段之间的 4 字节补齐规则要和 esptool/IDF 完全对齐：IDF 的 `load_segment`
+  本身**不补齐**，补齐由调用方按 4 字节处理；我们最后一段之前补、最后一段之后
+  再放校验和，这一处需要逐字节复核
+- 校验和：IDF 是 `checksum = 0xEF; 对所有段的数据 XOR`（不含镜像头/段头，
+  含段间补齐）；我们已按此实现，但 `esptool` 报的期望值还差 1~2 字节，需一起核对
+- 一旦 `esptool image-info` 通过，bootloader 必然接受；那时 bootloader 会替我们
+  建好 MMU+cache，**IROM 取指这个卡了很久的根本问题就自然解开**，WiFi 闭源库
+  （~500KB）也就有地方放了

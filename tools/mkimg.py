@@ -19,7 +19,7 @@ TC   = os.path.expanduser('~/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-e
 # (section, paddr 或 None=RAM 段)
 SECS = [
     ('.flash.rodata', 0x20020),    # DROM: 数据落文件偏移 0x20
-    ('.flash.text',   0x100000),   # IROM: flash 0x100000（64KB 对齐）
+    ('.flash.text',   0x30000),    # IROM: flash 0x30000（64KB 对齐，且离镜像头近，避免巨大空洞）
     ('.eh_frame',     None),
     ('.vector',       None),
     ('.text',         None),
@@ -61,8 +61,8 @@ for name, paddr in SECS:
     data = extract(name)
     if not data:
         continue
-    if paddr is not None:
-        v &= ~0xFFFF                     # flash 段 vaddr 必须按 64KB 对齐
+    # 注意：flash 段的 vaddr 保持 ELF 里的原值。它低 16 位必须等于该段数据在
+    # 镜像文件里的偏移低 16 位（bootloader 用这个关系推导 flash 物理地址并建映射）。
     segs.append((name, v, paddr, data))
 
 hdr = bytearray(24)
@@ -75,27 +75,37 @@ hdr[8] = 0xEE                            # wp_pin 禁用
 hdr[12:14] = struct.pack('<H', 9)        # chip_id = ESP32-S3
 hdr[23] = 0                              # 不附 SHA256
 
-out = bytearray(hdr)
-for si, (name, vaddr, paddr, data) in enumerate(segs):
+# 先把段排好（段表必须连续；flash 段前的空白并入上一段的数据）
+records = []                          # [vaddr, bytearray]
+for name, vaddr, paddr, data in segs:
     if paddr is not None:
-        off = paddr - BASE
-        if off < 0x18 or len(out) > off - 8:
-            raise SystemExit('%s: 偏移 0x%x 不合法（当前 0x%x）' % (name, off, len(out)))
-        out += b'\x00' * (off - 8 - len(out))
-    out += struct.pack('<II', vaddr, len(data))
-    out += data
-    if si != len(segs) - 1:          # 最后一段不补齐，校验和紧跟其后
+        need = paddr - BASE           # 这段数据在镜像内的偏移
+        cur = 24 + sum(8 + len(d) + ((4 - len(d) % 4) % 4) for _v, d in records)
+        if cur > need - 8:
+            raise SystemExit('%s: 需要偏移 0x%x，已用到 0x%x' % (name, need, cur))
+        gap = need - 8 - cur
+        if gap:
+            if not records:
+                raise SystemExit('%s: 第一段前不能有空白' % name)
+            records[-1][1].extend(b'\x00' * gap)
+    records.append([vaddr, bytearray(data)])
+
+out = bytearray(hdr)
+for i, (vaddr, d) in enumerate(records):
+    out += struct.pack('<II', vaddr, len(d))
+    out += d
+    if i != len(records) - 1:
         while len(out) % 4:
             out.append(0)
 
-# IDF 要求：镜像末尾附 1 字节 XOR 校验和（初值 0xEF）
+# IDF 校验和：对所有段数据 XOR（初值 0xEF）
 chk = 0xEF
-for b in out:
-    chk ^= b
+for _v, d in records:
+    for b in d:
+        chk ^= b
 out.append(chk)
 
 open(OUT, 'wb').write(bytes(out))
-print('wrote %s: %d bytes, %d segments, entry 0x%08x' % (OUT, len(out), len(segs), entry_point()))
-for name, vaddr, paddr, data in segs:
-    print('  %-14s vaddr=0x%08x paddr=%s size=0x%x' %
-          (name, vaddr, ('0x%08x' % paddr) if paddr else 'RAM   ', len(data)))
+print('wrote %s: %d bytes, %d segments, entry 0x%08x' % (OUT, len(out), len(records), entry_point()))
+for vaddr, d in records:
+    print('  vaddr=0x%08x size=0x%x' % (vaddr, len(d)))
