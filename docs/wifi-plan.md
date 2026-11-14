@@ -769,3 +769,34 @@ abic done
 - 注意 WiFi 还要 `libpp.a`+`libnet80211.a`（合起来 >2MB）→ 到时候必须解决 IROM
   或者说服自己只用 PHY（不现实）。所以 §15~19 的 IROM 问题**迟早还得攻**，
   但至少现在 M1 能继续往前走了。
+
+## 21. M1 进展与新的精确卡点（第 11 轮）
+
+**已做**：
+- 搬入 IDF 的 S3 PHY 默认初始化参数（`port/s3/phy_init_data.c`，128 字节，
+  由 `esp_phy/esp32s3/phy_init_data.c` 按默认 20dBm 求值而来）。
+- 孤岛里加 `s3_win_phy_enable()`：调 `register_chipv7_phy(s3_phy_init_data,
+  &g_phy_cal, PHY_RF_CAL_FULL(2))`，校准数据先放内存（1904 字节）。
+- 桥里加 `s3_win_call_phy_enable()` / `s3_win_call_phy_cal_word(i)`。
+- `tests/t_s3_abic.c6` 现在跑到 `L6 phy_cal=0x000002c7` ✓（libphy 调用通），
+  然后 `L7 phy_enable=` 崩。
+
+**新卡点（精确）**：`L7` 陷阱 `pc=0x803cd397`，把 bit31:30（call8 窗口增量位）
+去掉后是 **0x403cd397 —— 落在我们自己的 `s3_win_phy_enable()` 里**。
+也就是说：`register_chipv7_phy()` 这条 windowed 深调用链返回时，把"带窗口位的
+返回地址"当成了 PC 用。
+
+**为什么和前面"深递归 deep=11 通过"不矛盾**：那个测试只用了 `call8`，
+而 PHY 库内部很可能用 `call12`（参数多的函数）→ 会走
+`_win_ovf12`/`_win_unf12`（**这两个向量还没被真板验证过**）。
+
+**下一轮第一件事**：写一个 windowed 的 12 参数函数并递归，专门压
+`_win_ovf12`/`_win_unf12`；如果它挂了，就对着 IDF `xtensa_vectors.S` 里
+`_WindowOverflow12/_WindowUnderflow12` 的字节逐条核对（我之前是照源码抄的，
+但没验证过 `s32e/l32e` 的偏移）。
+
+另外记录一个**尝试过但失败**的方案：给 `memcpy/memset` 做"双 ABI thunk"
+（按 a0 的窗口位决定 `ret`/`retw`）。思路是对的，但接上后**我们自己的 call0
+调用路径**反而在 `add2` 的帧拷贝上挂了（原因待查）；文件留在
+`port/s3/abi_thunk.S`（未参与构建）。既然 L7 的崩点其实在
+`s3_win_phy_enable` 里而不是 memcpy，这个 thunk 也许并非必需。

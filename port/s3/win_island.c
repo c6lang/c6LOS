@@ -69,6 +69,28 @@ u32 s3_win_deep(u32 n)
     return s3_win_deep(n - 1u) + 1u;
 }
 
+/* ---- 最小 PHY 初始化（M1） ------------------------------------------
+ * register_chipv7_phy(init_data, cal_data, cal_mode) 是 libphy 的初始化主入口
+ * （IDF 的 esp_phy_enable() 最终也是调它）。cal_mode: 0=部分校准 1=不校准 2=完整校准。
+ * 校准数据先放内存（我们还没有 NVS 落盘）。
+ */
+typedef struct { u8 v[1904]; } phy_cal_data_t;      /* esp_phy_calibration_data_t */
+
+extern const u8 s3_phy_init_data[128];              /* port/s3/phy_init_data.c */
+int register_chipv7_phy(const void *init_data, void *cal_data, int cal_mode);
+
+static phy_cal_data_t g_phy_cal;
+
+int s3_win_phy_enable(void)
+{
+    return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, 2 /* PHY_RF_CAL_FULL */);
+}
+
+u32 s3_win_phy_cal_word(u32 i)
+{
+    return ((const u32 *)(const void *)g_phy_cal.v)[i & 0x1FFu];
+}
+
 /* libphy.a 里的入口（闭源，windowed ABI，只能从孤岛里调）。
  * 需要链接 libphy.a 的构建才定义 S3_WITH_LIBPHY。 */
 #ifdef S3_WITH_LIBPHY

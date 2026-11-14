@@ -12,6 +12,8 @@
 void port_puts(const char *s);
 u32 s3_win_call_add(u32 a, u32 b);   /* 走 ABI 桥调 windowed 孤岛里的函数 */
 u32 s3_win_call_phy_cal(void);       /* 桥调 windowed 孤岛 → libphy.a */
+u32 s3_win_call_phy_enable(void);    /* 桥调 register_chipv7_phy（完整 RF 校准） */
+u32 s3_win_call_phy_cal_word(u32 i); /* 读回校准数据里的一个字 */
 u32 s3_win_call_deep(u32 n);         /* 桥调 windowed 深递归（测窗口溢出/欠载） */
 u32 s3_win_call_flash_add(u32 a, u32 b);  /* 桥调放在 flash 段里的 windowed 函数 */
 u32 s3_win_call_flash_pat(void);          /* flash 段里已知图案数组的地址 */
@@ -80,6 +82,35 @@ void os_main(void)
         while (sh >= 0) {
             port_putc((int)("0123456789abcdef"[(v >> (u32)sh) & 0xFu]));
             sh -= 4;
+        }
+    }
+    port_putc('\n');
+
+    port_puts("L7 phy_enable=");
+    {
+        u32 rc = s3_win_call_phy_enable();
+        int sh = 28;
+
+        port_putc((int)('0' + (rc % 10u)));
+        port_puts(" cal=");
+        {
+            u32 i = 1u;
+
+            while (i <= 4u) {
+                u32 w = s3_win_call_phy_cal_word(i);
+
+                if (w == 0u) {
+                    port_puts("0 ");
+                } else {
+                    sh = 28;
+                    while (sh >= 0) {
+                        port_putc((int)("0123456789abcdef"[(w >> (u32)sh) & 0xFu]));
+                        sh -= 4;
+                    }
+                    port_putc(' ');
+                }
+                i++;
+            }
         }
     }
     port_putc('\n');

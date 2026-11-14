@@ -47,7 +47,7 @@ S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
 # IDF 闭源库的 ABI 桥与胶水：始终保留
 S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
-           $(BUILD)/obj/irampad.o
+           $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o
 
 ifeq ($(S3_LEAN),1)
 S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_WIFI)
@@ -132,6 +132,14 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 $(BUILD)/obj/flash.o: port/s3/flash.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
+
+$(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/marks.o: port/s3/marks.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
