@@ -1,0 +1,32 @@
+/* t_s3_paint.c6 —— 人眼判活：整屏刷红，再用文字带写一行状态。
+ * 串口坏掉/不接的时候，看屏幕就能知道应用到底跑没跑。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color);
+void port_delay_ms(u32 ms);
+
+void os_main(void)
+{
+    u32 n = 0u;
+
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+
+    for (;;) {
+        /* 红 → 绿 → 蓝 循环，1 秒换一次；屏幕在动 = 应用在跑 */
+        s3_lcd_fill(0xF800u);
+        port_delay_ms(300u);
+        s3_lcd_fill(0x07E0u);
+        port_delay_ms(300u);
+        s3_lcd_fill(0x001Fu);
+        port_delay_ms(300u);
+        n = n + 1u;
+        /* 顶部小方块随心跳增长，屏幕停住时能看出停在哪个阶段 */
+        s3_lcd_fill_rect(0u, 0u, (n % 40u) * 6u, 12u, 0xFFFFu);
+    }
+}
