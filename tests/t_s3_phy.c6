@@ -88,7 +88,7 @@ void os_main(void)
     u32 n = 0u;
 
     bl_init();
-    blink(3u, 120u);                    /* 开始 */
+    blink(3u, 150u);                    /* 开始：快闪 3 下 */
 
     timg_wdt_arm(160000000u);            /* 约 2 秒；挂住 -> 硬件复位 */
     swd_on();
@@ -103,7 +103,7 @@ void os_main(void)
         bl(0u);
         n = (rc & 0x7u) + 1u;
         for (;;) {
-            blink(n, 250u);              /* 慢闪 rc+1 下 = 失败码 */
+            blink(n, 600u);              /* 慢闪 rc+1 下 = 失败码 */
             port_delay_ms(1200u);
         }
     }

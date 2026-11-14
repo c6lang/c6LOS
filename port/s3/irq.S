@@ -166,14 +166,14 @@ _vec_lvl_common:
     movi    a7, 0
 2:
     addi    a7, a7, 1
-    movi    a3, 200000
+    movi    a3, 5000000
     bltu    a7, a3, 2b
     movi    a3, 0x6000400C          /* OUT_W1TC */
     s32i    a4, a3, 0
     movi    a7, 0
 3:
     addi    a7, a7, 1
-    movi    a3, 200000
+    movi    a3, 5000000
     bltu    a7, a3, 3b
     addi    a6, a6, 1
     bltu    a6, a2, 1b
