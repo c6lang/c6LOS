@@ -1342,3 +1342,46 @@ slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了
 - ABI 桥、libphy 能执行 ✓（`phy_get_rf_cal_version()` = 0x2C7）
 - modem 时钟已开 ✓（step1 rc=0）
 - 卡点**唯一且明确**：`g_phyFuns` 空表 ⇒ `callx8 0` ⇒ `cause=0x14 pc=0`
+
+## 40. 第 29 轮收尾：状态与交接
+
+### 构建状态（已验证，两种配置都通过）
+
+- 不带闭源库：`make C6_ROOT=/home/winger/c6 BUILD=build/x S3_MAIN=tests/t_s3_paint.c6 s3` ✓
+- 带闭源库：`S3_LEAN=1 S3_CDEFS=-DS3_WITH_LIBPHY S3_EXTRA_LIBS=build/x/libphy_win.a` ✓
+
+`port/s3/win_island.c` 的预处理结构这一轮被改乱过，已修好（ifdef 作用域合并、
+补回 `#endif`、非 libphy 构建补 `s3_win_phy_step/funcs_word/romfuncs_ret/find_phytab` stub）。
+
+### 真板当前事实（RTC 信标，掉电域，崩溃/复位都不丢）
+
+```
+0x600080C0 = 0x000000F1   进到 os_main 并开始探测
+0x600080C4 = 0x00000002   phy_get_romfuncs() 返回值 = 2（不是表指针）
+0x600080C8 = 0x00000000   返回值不像指针，未解引用
+0x600080CC = 0xB0B0B0B0   port_init 标记；之后 step2 卡住
+```
+
+**唯一卡点仍是 `g_phyFuns` 空表**：`register_chipv7_phy` 一进来就
+`l32i a5,[g_phyFuns]; l32i a5,[a5+0x204]; callx8 a5` ⇒ 空指针调用。
+
+### 下次开工需要的三样东西（按性价比排序）
+
+1. **USB-UART（CH340/CP2102）接 GPIO43(TX)/44(RX)+GND**：PHY 一初始化 USB-CDC 就
+   掉枚举，串口和 esptool 全失联；UART0 不受影响。拿到后先给 `port_putc` 加一条
+   "同时写 UART0" 的分支，之后所有调试都看得见。
+2. **OpenOCD（S3 内置 USB-JTAG）**：对 `register_chipv7_phy` 下断点，直接看 ROM
+   把函数表写到哪个地址。
+3. **自己造表**：`g_phyFuns` 只是函数指针表，把 `+0x204` 等表项填成 ROM 里已有的
+   `phy_*` 地址（`port/s3/rom/esp32s3.rom.ld` 有 1200+ 符号）。
+
+### 已经稳稳到手的（都在仓库里）
+
+- 音频：BOOT 键录音 → 循环播放（已合并 main，真板有声）
+- call0 ↔ windowed ABI 桥 + 寄存器窗口向量（含 12 参数递归）
+- 闭源 `libphy.a` 在 c6LOS 里执行（`phy_get_rf_cal_version()` = 0x2C7）
+- 闭源库用的 `mem*` 全改 windowed 版（objcopy 改名 + 孤岛实现）
+- c6 标准库：`flash.h`（IROM/DROM 映射 + `SHUT_CORE0_BUS` 修复）、`reg.h`
+- 工具链：`flash.sh`、`usbreset.py`、`reset.py`、`cap.py`、`beacon.sh`
+- 本文档 40 节，把 ABI、内存坏区、看门狗、下载模式、DTR、USB PHY 抢占、
+  镜像段布局、函数表这些坑全部记录在案
