@@ -1607,3 +1607,24 @@ make C6_ROOT=/home/winger/c6 BUILD=build/wgate S3_LEAN=1 S3_CDEFS="-DS3_WITH_LIB
 ./tools/flashmon.sh build/wgate/c6os.bin 5      # 刷进去，应用会卡在调试门
 ./tools/dbg.sh build/wgate/c6os.elf tools/gfin2.gdb   # 逐个读 5 步的返回值
 ```
+
+### PHY 之后串口失联的根因（调试器实测寄存器）
+
+| 寄存器 | PHY 之前 | PHY 之后 |
+|---|---|---|
+| `SYSTEM_PERIP_CLK_EN1` (0x600C001C) | 0x00000604 | **0x00000000** |
+| `SYSTEM_PERIP_RST_EN1` (0x600C0024) | 0x000001CA | **0x00000000** |
+| `RTC_CNTL_USB_CONF` (0x60008120) | 0x00100000 | **0x00000000** |
+| `USB_JTAG_CONF0` (0x60038018) | 0x00004200 | **0x00000000** |
+
+⇒ PHY 初始化（或它里面的 modem 上电序列）把 **USB 外设的时钟/复位/PHY 配置全清了**。
+`/dev/ttyACM*` 仍然存在（USB-Serial/JTAG 设备还在），但 **CDC 通道废掉** ⇒
+我们的打印在 ROM `ets_printf` 里跑飞。
+
+`port/s3/win_island.c` 的 `s3_win_usb_reclaim()` 已经在 `register_chipv7_phy()` 之后
+按这些值回写，但实测**回写无效**（再读仍然全 0）；用 openocd 的 `monitor mww`
+从调试器写也一样。推测是 modem 上电序列把 USB 的**时钟根**关掉了，
+需要按 IDF `esp_phy_disable()`/`esp_wifi_bt_power_domain_off()` 的逆序恢复，
+或者干脆接受"PHY 之后没有串口"，改用 USB-JTAG 调试通道看结果（已验证可行）。
+
+**结论：PHY 之后请用 `./tools/dbg.sh` + `tools/gfin2.gdb` 观察，不要指望串口。**
