@@ -473,3 +473,31 @@ DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 
    （用链接脚本的 `.text` + `--only-section` 抽出必要目标文件），
    把 IRAM 控制在 66KB 以内（当前 libphy 闭包 76KB，只差 10KB，
    可以先用 `-Os`/裁剪无关函数试试）。
+
+### 15.3 段表修正完成 + 发现 RTC 标记不可靠
+
+- 已把 `.flash.text` 放到镜像最前面、`VMA=0x42000020 / LMA=0x20`（与 IDF 的 IROM
+  惯例一致）。现在镜像段表干净了（不再有"load 地址 = 0"的 PADDING 段）：
+  ```
+  seg0: IROM 0x42000020 len 0x9700  data@0x20
+  seg1: DRAM 0x3fca0000 len 0x1890  data@0x9728
+  seg2: IRAM 0x403c9000 len 0x9674  data@0xafc0     ← IRAM 结束 0x403D2674，安全 ✓
+  ```
+- **重要发现：RTC 慢速内存前几个字不可靠**——实测同一块板上
+  `0x50000000` 读到过 0xA0/0xA1/0xB1，也读到过 0xb0dc51a9/0x5a588d90 这类乱值，
+  而同一时刻 `0x50000008` 却是合理的 0xB1。ROM/bootloader 很可能也在用
+  RTC_SLOW_MEM 开头几个字。**以后做启动进度标记要改写到 DRAM**
+  （比如 0x3FCEE000，栈顶下面那块没人用），别再依赖 RTC[0]。
+- 该 IROM 镜像刷进去后：串口没有输出，但 RTC[+8] 显示到过 `0xB1`
+  （`port_init` 关完看门狗），说明**这次 `_start` 是跑起来的**（与之前完全不同），
+  卡在 `port_init` 的 USB 重枚举/延时段。下一轮先用 DRAM 标记确认它到底走到哪、
+  再解决 USB 控制台。
+
+### 下一轮（明确）
+
+1. `port/s3/start.S` 和 `port/s3/console.c` 的启动标记从 RTC 改成 DRAM
+   （`0x3FCEE000` 起），并写一个小的 `tools/mark.py` 或直接用
+   `esptool read-mem 0x3FCEE000` 读。
+2. 用 DRAM 标记确认 IROM 镜像走到 `port_init` 的哪一步；如果卡在 USB 段，
+   先临时跳过 USB 重枚举（打 `-DS3_NO_USB_REINIT`）看能不能到 `os_main`。
+3. 然后 `phy_get_rf_cal_version()` 走桥调用，拿到非 0 值 = M1 地基打通。

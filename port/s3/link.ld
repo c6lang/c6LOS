@@ -26,7 +26,11 @@ SECTIONS
      只在真的链接了这些库时才非空，普通构建里是空段、不产生 flash 段。
      注意字面量池必须跟代码一起搬：l32r 是 PC 相对（往低地址 ±256KB），
      代码和字面量都在 flash 段里就没问题。 */
-  .flash.text 0x42000000 : AT (0x10000)
+  /* 放在镜像最前面：VMA 的页内偏移必须和 flash 偏移一致（这里都是 0x20，
+     IDF 的 IROM 段也是从 0x42000020 开始），否则 ROM 建 MMU 映射会错位。
+     放在最前面还能避免 elf2image 为了对齐插入"load 地址=0"的 PADDING 段
+     （那个段会让 ROM 往地址 0 写数据，直接挂）。 */
+  .flash.text 0x42000020 : AT (0x20)
   {
     _flash_text_start = .;
     *libphy.a:(.literal .literal.* .text .text.*)
