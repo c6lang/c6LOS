@@ -1,0 +1,27 @@
+/* t_s3_irom17.c6 —— 逐行打印 SPI_MEM 前 16 个字 + MMU 前 8 项（每行一个值，便于对比）。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+static void pstr(const char *s) { s3_win_call_log(s); }
+static void phex(u32 v)
+{
+    char b[11] = {0}; int i = 2; int sh = 28; const char *h = "0123456789abcdef";
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0'; pstr(b); pstr("\n");
+}
+
+void os_main(void)
+{
+    u32 n = 0u;
+
+    s3_beacon(0u, 0xB0000018u);
+    pstr("SPIBEGIN\n");
+    for (n = 0u; n < 16u; n = n + 1u) { phex(os_reg_rd(0x60002000u + n * 4u)); }
+    pstr("SPIEND\nMMUBEGIN\n");
+    for (n = 0u; n < 8u; n = n + 1u) { phex(os_reg_rd(0x600C5000u + n * 4u)); }
+    pstr("MMUEND\n");
+    for (;;) { }
+}
