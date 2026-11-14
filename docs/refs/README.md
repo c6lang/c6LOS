@@ -15,6 +15,11 @@
 
 本地 IDF 源码在 `/media/winger/inst_26/esp/esp-idf`（v6.0.1）。
 
+## 问题报告
+
+- `../support-report.md` —— 整理好的 Espressif 问题报告（背景/现象/环境/已排除 8 项/
+  两边各自代码读的对照表/4 个具体问题），可直接发帖或提工单。
+
 ## 摘录文件
 
 - `trm-cache-mmu.md` —— TRM §4.3.3 外部存储器 / 高速缓存 / Cache 操作

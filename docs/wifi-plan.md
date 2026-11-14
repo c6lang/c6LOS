@@ -1,6 +1,9 @@
 
 # 从这里继续（交接摘要）
 
+> **2026 更新**：IROM 问题已整理成官方问题报告 → 见 `docs/support-report.md`。
+> 官方文档摘录见 `docs/refs/`（TRM 的 cache/MMU/PMS/system 章节 + 镜像格式 + IDF 参照 app）。
+
 ## 一分钟看懂现在的状态
 
 - **能做到**：c6LOS 在 S3 上完整跑起来（USB-CDC 串口、背光和音频、RTC 信标、USB-JTAG 调试全通）；
