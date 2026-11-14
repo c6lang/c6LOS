@@ -398,3 +398,15 @@ u32 s3_win_phy_cal(void)
     return 0xDEADu;      /* 没链 libphy：用来验证桥本身 */
 }
 #endif
+
+/* 通过 ROM 的 Cache_Enable_ICache() 使能 I-cache（IDF 自己也是这么做的，
+ * 见 hal/esp32s3/include/hal/cache_ll.h）。ROM 是 windowed ABI，所以本函数
+ * 必须在这个 -mabi=windowed 的孤岛里实现，由 win_bridge 的 trampoline 调进来。 */
+u32 s3_win_cache_enable(void)
+{
+    void (*fn)(u32) = (void (*)(u32))0x40001878u;   /* ROM: Cache_Enable_ICache */
+
+    fn(0u);
+    return 0u;
+}
+

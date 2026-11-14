@@ -1,0 +1,103 @@
+/* t_s3_irom4.c6 —— 系统化搜索 IROM 取指配置。
+ * 探针：0x42100000 处应该读到 flash 0x100000 的前 4 字节（已知 = 0x7B004136）。
+ * 关键技巧：每次"开 cache -> 读探针 -> 立刻关 cache"，再打印结果，
+ * 这样即使 cache 配置不对也不会把串口/系统搞挂。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+
+void s3_win_call_log(const char *s);
+
+#define R_CTRL   0x600C4060u
+#define R_CTRL1  0x600C4064u
+#define R_4068   0x600C4068u
+#define R_407C   0x600C407Cu
+#define R_SPI08  0x60002008u
+#define R_SPI14  0x60002014u
+#define R_SPI1C  0x6000201Cu
+#define R_SPI28  0x60002028u
+#define PROBE    0x42100000u
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0';
+    pstr(b);
+}
+
+static u32 probe(void)
+{
+    u32 v = *(volatile u32 *)PROBE;      /* 开 cache 状态下读 */
+
+    os_reg_wr(R_CTRL, 0u);               /* 立刻关掉，保证后面还能打印 */
+    return v;
+}
+
+void os_main(void)
+{
+    u32 v = 0u;
+
+    pstr("=== IROM probe 搜索 ===\n");
+    pstr("期望探针 = 0x7b004136 (flash 0x100000 头 4 字节)\n");
+    pstr("初始 CTRL=");  phex(os_reg_rd(R_CTRL));  pstr(" CTRL1="); phex(os_reg_rd(R_CTRL1)); pstr("\n");
+    pstr("初始 SPI08="); phex(os_reg_rd(R_SPI08)); pstr(" SPI14="); phex(os_reg_rd(R_SPI14)); pstr("\n");
+
+    (void)os_flash_map(0x100000u, 0x42100000u, 0x10000u, OS_FLASH_IROM);
+    pstr("MMU[0x10]="); phex(os_reg_rd(0x600C5040u)); pstr("\n");
+
+    /* A: 只清 SHUT + 使能 */
+    os_reg_wr(R_CTRL1, os_reg_rd(R_CTRL1) & ~0x3u);
+    os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
+    v = probe();
+    pstr("A 清SHUT+使能            => "); phex(v); pstr("\n");
+
+    /* B: 再加 0x4068=5 / 0x407C=4 */
+    os_reg_wr(R_4068, 0x5u);
+    os_reg_wr(R_407C, 0x4u);
+    os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
+    v = probe();
+    pstr("B +4068=5/407C=4          => "); phex(v); pstr("\n");
+
+    /* C: 再加 invalidate 脉冲 */
+    os_reg_wr(R_CTRL1, os_reg_rd(R_CTRL1) | 0x4u);
+    os_reg_wr(R_CTRL1, os_reg_rd(R_CTRL1) & ~0x4u);
+    os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
+    v = probe();
+    pstr("C +invalidate             => "); phex(v); pstr("\n");
+
+    /* D: 再按原厂值配 SPI_MEM */
+    os_reg_wr(R_SPI08, 0x00608000u);
+    os_reg_wr(R_SPI14, 0x00030103u);
+    os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
+    v = probe();
+    pstr("D +SPI_MEM 原厂值         => "); phex(v); pstr("\n");
+
+    /* E: 也读一下 page 0（flash 0x0，镜像头应以 0xE9 结尾） */
+    (void)os_flash_map(0u, 0x42000000u, 0x10000u, OS_FLASH_IROM);
+    os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
+    v = *(volatile u32 *)0x42000000u;
+    os_reg_wr(R_CTRL, 0u);
+    pstr("E flash0x0 头             => "); phex(v); pstr("\n");
+
+    /* F: 用 ROM 的 Cache_Enable_ICache（我们自己的窗口化孤岛去调） */
+    os_reg_wr(R_CTRL, 0u);
+    os_reg_wr(R_CTRL1, os_reg_rd(R_CTRL1) & ~0x3u);
+    s3_win_call_cache_enable();
+    v = *(volatile u32 *)PROBE;
+    pstr("F ROM Cache_Enable_ICache  => "); phex(v); pstr("\n");
+    v = *(volatile u32 *)0x42000000u;
+    pstr("F2 flash0x0 头             => "); phex(v); pstr("\n");
+    os_reg_wr(R_CTRL, 0u);
+
+    pstr("=== 完 ===\n");
+    for (;;) { }
+}

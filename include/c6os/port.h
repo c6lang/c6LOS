@@ -45,4 +45,6 @@ void port_delay_ms(u32 ms);
  */
 void s3_beacon(u32 slot, u32 val);
 
+u32 s3_win_call_cache_enable(void);
+
 #endif

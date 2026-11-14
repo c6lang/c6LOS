@@ -2194,3 +2194,48 @@ slot2 = 0x00004010   MMU 表项 valid ✓
 
 ⇒ 排除了"flash 内容不对"，确认就是 **I-cache 不从 flash 取数**。
 （这也是本轮唯一没打通的平台能力，其余链路全部就绪。）
+
+## 58. IROM 探针系统化搜索：6 种配置全部读出 0（含 ROM 自己的 Cache_Enable_ICache）
+
+新用例 `tests/t_s3_irom4.c6` 的做法：**每次"开 cache → 读探针 `0x42100000` → 立刻关 cache"**，
+这样即使配置不对也不会把串口搞挂，能拿到每一步的结果。探针期望值
+`0x7B004136`（flash 0x100000 的头 4 字节，已用 `read-flash` + `cmp` 校验过内容正确）。
+
+真板结果：
+
+```
+初始 CTRL=0x0 CTRL1=0x3  SPI08=0x00ACA008 SPI14=0x00010001
+MMU[0x10]=0x00004010                       <- 映射有效
+A 清SHUT+使能                => 0x00000000
+B +4068=5/407C=4             => 0x00000000
+C +invalidate 脉冲           => 0x00000000
+D +SPI_MEM 按原厂值          => 0x00000000
+E 读 flash 0x0 头            => 0x00000000
+F ROM Cache_Enable_ICache    => 0x00000000   <- 走 windowed 孤岛调 ROM 0x40001878
+```
+
+**连 ROM 官方的 `Cache_Enable_ICache()` 都读不出来** ⇒ 问题不在"配置没配对"这个层面，
+而更靠底层（flash 控制器给 cache 的读通道、或者 bootloader 之后 SPI flash 处于某种
+只有 ROM 能读的状态）。
+
+### 已排除
+
+- ✅ flash 内容正确（`write-flash` + `read-flash` + `cmp` 一致）
+- ✅ MMU 表项正确（`0x4010`）
+- ✅ I-cache 使能位与原厂一致（`CTRL=1/CTRL1=0/4068=5`）
+- ✅ SPI_MEM 关键寄存器按原厂值写过
+- ✅ ROM 的 Cache_Enable_ICache 也试了（经 windowed 孤岛，ABI 正确）
+
+### 建议的下一条路（换个方向）
+
+既然"让 cache 读 flash"这么难，可以**绕开它**：
+
+1. **把 WiFi 栈裁到 IRAM 装得下** —— 只链真正用到的对象（`-ffunction-sections` +
+   `--gc-sections` 对闭源 .a 无效，但可以只 `ar x` 出需要的 `.o` 再重打包），
+   先跑通 scan 这种最小功能
+2. **用 SPI_MEM 的 FIFO 手动读 flash 到 RAM**（不走 cache）：把需要的代码段在
+   启动时拷到 IRAM 的保留区 —— 但 500KB 装不下，只能挑关键路径
+3. **换成带 PSRAM 的配置**（如果板子有）—— 代码不能从 PSRAM 取指，也无解
+
+结论：**S3 上要让闭源 WiFi 栈跑起来，"从 flash 取指"基本是硬需求**，
+这块平台能力没打通之前，WiFi 目标无法推进。所有其他环节（PHY、ABI、链接、调试）都已就绪。
