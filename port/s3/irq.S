@@ -5,13 +5,124 @@
     .balign 1024
     .global _vecbase
 _vecbase:
-    .rept 256
+    /* Xtensa 的向量表是每 0x40 一个槽。windowed ABI 下前面 6 个槽是寄存器窗口
+     * 的溢出/欠载异常（寄存器文件只有 4 个窗口，调用链一深就会溢出，必须靠这组
+     * 向量把窗口 spill 到栈上/从栈上 fill 回来）。call0 下它们不会被触发，
+     * 放在这里没有副作用。0x300 是内核异常向量，level-1 中断也从这里进。 */
+    .org 0x000
+    j   _win_ovf4
+    .org 0x040
+    j   _win_unf4
+    .org 0x080
+    j   _win_ovf8
+    .org 0x0C0
+    j   _win_unf8
+    .org 0x100
+    j   _win_ovf12
+    .org 0x140
+    j   _win_unf12
+    .org 0x180
+    j   _vec_default            /* level-2 */
+    .org 0x1C0
+    j   _vec_default            /* level-3 */
+    .org 0x200
+    j   _vec_default            /* level-4 */
+    .org 0x240
+    j   _vec_default            /* level-5 */
+    .org 0x280
+    j   _vec_default            /* level-6 */
+    .org 0x2C0
+    j   _vec_default            /* level-7 / NMI */
+    .org 0x300
+    j   _vec_level1             /* kernel exception / level-1 中断 */
+    .org 0x340
+    j   _vec_default            /* user exception */
+    .org 0x380
+    j   _vec_default            /* double exception */
+    .org 0x3C0
     j   _vec_default
-    .endr
-    j   _vec_level1          /* offset 0x300：kernel exception / level-1 */
-    .rept 84
-    j   _vec_default
-    .endr
+
+
+/* ---- 寄存器窗口溢出/欠载（windowed ABI 必需）------------------------------
+ * 语义见 Xtensa ISA：溢出时把被调用者的 a0-a7/a0-a11 spill 到它的栈帧里，
+ * 然后 rfwo 回到出错点重试；欠载时反过来 fill 再 rfwu。
+ * 这几个处理体不能改寄存器（除规定的那几个），否则栈帧内容会错。
+ */
+    .align 4
+_win_ovf4:
+    s32e    a0, a5, -16
+    s32e    a1, a5, -12
+    s32e    a2, a5,  -8
+    s32e    a3, a5,  -4
+    rfwo
+
+    .align 4
+_win_unf4:
+    l32e    a0, a5, -16
+    l32e    a1, a5, -12
+    l32e    a2, a5,  -8
+    l32e    a3, a5,  -4
+    rfwu
+
+    .align 4
+_win_ovf8:
+    s32e    a0, a9, -16
+    l32e    a0, a1, -12
+    s32e    a1, a9, -12
+    s32e    a2, a9,  -8
+    s32e    a3, a9,  -4
+    s32e    a4, a0, -32
+    s32e    a5, a0, -28
+    s32e    a6, a0, -24
+    s32e    a7, a0, -20
+    rfwo
+
+    .align 4
+_win_unf8:
+    l32e    a0, a9, -16
+    l32e    a1, a9, -12
+    l32e    a2, a9,  -8
+    l32e    a7, a1, -12
+    l32e    a3, a9,  -4
+    l32e    a4, a7, -32
+    l32e    a5, a7, -28
+    l32e    a6, a7, -24
+    l32e    a7, a7, -20
+    rfwu
+
+    .align 4
+_win_ovf12:
+    s32e    a0,  a13, -16
+    l32e    a0,  a1,  -12
+    s32e    a1,  a13, -12
+    s32e    a2,  a13,  -8
+    s32e    a3,  a13,  -4
+    s32e    a4,  a0,  -48
+    s32e    a5,  a0,  -44
+    s32e    a6,  a0,  -40
+    s32e    a7,  a0,  -36
+    s32e    a8,  a0,  -32
+    s32e    a9,  a0,  -28
+    s32e    a10, a0,  -24
+    s32e    a11, a0,  -20
+    rfwo
+
+    .align 4
+_win_unf12:
+    l32e    a0,  a13, -16
+    l32e    a1,  a13, -12
+    l32e    a2,  a13,  -8
+    l32e    a11, a1,  -12
+    l32e    a3,  a13,  -4
+    l32e    a4,  a11, -48
+    l32e    a5,  a11, -44
+    l32e    a6,  a11, -40
+    l32e    a7,  a11, -36
+    l32e    a8,  a11, -32
+    l32e    a9,  a11, -28
+    l32e    a10, a11, -24
+    l32e    a11, a11, -20
+    rfwu
 
     .section .text, "ax", @progbits
     .align 4

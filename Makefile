@@ -5,7 +5,13 @@ C6_ROOT ?= $(HOME)/superc
 C6CC    := $(C6_ROOT)/tcc/c6
 XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
 XTGCC   := $(XTP)gcc
-XTFLAGS := -mabi=call0 -Os -ffreestanding -fno-builtin -fno-common \
+# Xtensa 的两种 ABI：call0（本项目原来的选择）/ windowed（IDF 的闭源 WiFi·PHY
+# 库都是这个）。想用 WiFi 就得把 S3_ABI 切成 windowed，同时用 windowed 版的
+# port/s3/irq.S / ctx.S（见 docs/wifi-plan.md「ABI 迁移」）。
+# 注意：必须定义在 XTFLAGS（立即展开）之前。
+S3_ABI ?= call0
+
+XTFLAGS := -mabi=$(S3_ABI) -Os -ffreestanding -fno-builtin -fno-common \
            -mlongcalls -mtext-section-literals -Wall -Wextra
 PORT    ?= /dev/ttyACM0
 
@@ -67,7 +73,7 @@ $(BUILD)/obj/cobs.o: rt/cobs.c
 
 $(BUILD)/obj/kprintf.o: rt/kprintf.c
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -Os -ffreestanding -fno-builtin -mlongcalls -mtext-section-literals \
+	$(XTGCC) -mabi=$(S3_ABI) -Os -ffreestanding -fno-builtin -mlongcalls -mtext-section-literals \
 		-Iinclude -c $< -o $@
 
 $(BUILD)/obj/c6rt.o: rt/c6rt.c
@@ -108,11 +114,11 @@ $(BUILD)/obj/irq.o: port/s3/irq.c
 
 $(BUILD)/obj/irq_asm.o: port/s3/irq.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
 $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
 $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
@@ -120,10 +126,10 @@ $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
 
 $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
-	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/link.ld \
+	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
@@ -783,7 +789,7 @@ s3-min: $(BUILD)/min.bin
 
 $(BUILD)/min.elf: port/s3/min.S port/s3/min.ld
 	@mkdir -p $(BUILD)
-	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
+	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
 
 $(BUILD)/min.bin: $(BUILD)/min.elf
 	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq 40m -o $@ $<

@@ -127,3 +127,39 @@ M0（把 `libphy.a` 链进来并调用 `phy_get_rf_cal_version()`）已经做到
 
 M0 的成果（ROM 符号表 `port/s3/rom/*.ld`、`port/s3/idf_shim.c`、Makefile 的
 `S3_EXTRA_LIBS`）已经提交，是迁移后可直接复用的地基。
+
+## 8. ABI 迁移：已完成的地基 + 剩下的步骤
+
+### 已做（call0 下真板回归通过）
+
+1. `Makefile` 里 ABI 变成可切换：`S3_ABI ?= call0`，所有 `-mabi=` 都走它
+   （`make ... S3_ABI=windowed` 即可切）。**变量必须定义在 `XTFLAGS :=` 之前**，
+   否则立即展开成空串（踩过一次：`unrecognized option '-mabi='`）。
+2. `port/s3/irq.S` 的向量表改成显式 `.org` 布局，并补上 windowed 必需的
+   **寄存器窗口溢出/欠载向量**：`_WindowOverflow4/8/12`、`_WindowUnderflow4/8/12`
+   （照 Xtensa HAL 的标准实现：`s32e/l32e` + `rfwo/rfwu`）。call0 下不触发、无副作用。
+3. `port/s3/rom/*.ld`（IDF 的 ROM 符号表）接进 `link.ld`。
+   **注意：`rom.libc.ld`/`rom.newlib.ld` 必须先关掉** —— 它们把 `memcpy/memset/
+   strlen` 钉到 ROM 里，和我们自己的运行库打架，实测真板一启动就
+   `*** TRAP cause=0000001c(LoadProhibited) pc=40056fc0`（PC 落在 ROM 内部）。
+   只留 `rom.ld`/`rom.api.ld`/`rom.version.ld` 就正常。
+
+### windowed 还差的（按顺序）
+
+1. **level-1 中断入口改 windowed**：`call0` 换成 `call8`，参数放 **a10~a15**
+   （实测编译器生成：`movi a10, arg0; movi a11, arg1; call8 f`，返回值也从 a10 读）。
+   进入 C 之前要把 PS 置成 `INTLEVEL=1 | UM | WOE`（IDF 的 `_xt_lowint1` 就这么干）。
+2. **`port/s3/ctx.S` 上下文切换**：切换前先把当前任务的寄存器窗口全部 spill 到它
+   自己的栈上（`xthal_window_spill`，在 IDF 的
+   `components/xtensa/esp32s3/libxt_hal.a` 里有，可以直接链），然后保存
+   a0-a15 + epc1 + ps + windowstart；恢复时先 `wsr windowstart` 再 `rfi`。
+3. **启动期**：`windowstart=1`、`PS.WOE=1`（这两句已经写好又被我回退过一次，
+   因为当时把 ROM libc 的问题误算在它头上；确认后加回来）。
+4. **回归**：面板/GUI/录音回放三个用例必须重新过一遍（中断入口和上下文切换是
+   所有东西的地基）。
+
+参考代码位置（都在 IDF 里，可以直接抄）：
+- 窗口溢出/欠载：`components/xtensa/xtensa_vectors.S` 的 `_WindowOverflow*`/`_WindowUnderflow*`
+- level-1 入口：同文件 `_KernelExceptionVector` → `_xt_kernel_exc` → `_xt_lowint1`
+- 上下文保存：`components/xtensa/xtensa_context.S` 的 `_xt_context_save`/`_xt_context_restore`
+- 裸机骨架：`components/xtensa/baremetal/xtensa_rtos_bm.S`（85 行）
