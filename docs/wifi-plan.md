@@ -3071,3 +3071,30 @@ IDF app 运行态是 `0`（没置位）。
 我们和 IDF 也不同，但方向是"我们有、它没有"，不能简单照搬。
 
 结论：XIP/连续读这条线也只能算"待子代理确认"，不能直接当作修复方案。
+
+## 81. 最具体的一条异常：同一个 bootloader，给两个 app 配的 SPI_MEM 不同
+
+在 IDF 的 `cpu_start.c` 里插探针，让它**在自己的 cache/flash 初始化之前**打印寄存器
+（这时的值就是 bootloader 留下的）：
+
+```
+IDF app  PRECLK: icache=0x01 dcache=0x01 spiclk=0x00010001 spictrl=0x00aca008 mmu0=2 mmu1=1 mmu2/3=0x4000
+         POSTCLK: icache=0x0b dcache=0x09 （其余不变 —— 说明 cache 模式是 IDF 自己设的，SPI 是 bootloader 设的）
+我们 app 入口:    icache=0x01 dcache=0x01 spiclk=0x80000000 spictrl=0x012ca008 mmu0=2 mmu1=0x4000
+```
+
+⇒ **同一个 bootloader、同样的镜像头字段（`0x40` = 16MB/40MHz、chip_id=9、hash_appended=1、
+chip rev 0x63 都已对齐），给我们镜像留下的是 `spiclk=0x80000000`，给 IDF 镜像留下的是
+`0x00010001`。**
+
+这是目前最具体、最可追的异常：**bootloader 读取我们镜像的某个信息后走了不同的配置路径**。
+`SPI_MEM_CLOCK=0x80000000` 很可能就意味着 SPI 时钟分频没配好（bit31 置位、分频字段为 0），
+于是 cache 拿不到有效数据，于是取指得到 0。
+
+### 下一步
+
+找出 bootloader 里决定 `SPI_MEM_CLOCK` 的那段逻辑（`bootloader_flash_...` /
+`esp_image_...` 里与 `SPI_MEM_CLOCK`/`spi_flash_hal_configure_host_io_mode` 相关的调用），
+看它依赖镜像的哪个字段（很可能是**段表里 flash 段的描述方式**，而不是 24 字节头）。
+
+已交给子代理 `sub-2` 深挖。

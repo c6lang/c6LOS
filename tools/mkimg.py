@@ -69,10 +69,11 @@ hdr = bytearray(24)
 hdr[0] = 0xE9                            # magic
 hdr[1] = len(segs)                       # segment count
 hdr[2] = int(os.environ.get("MKIMG_SPI_MODE", "2"))  # 0=QIO 1=QOUT 2=DIO 3=DOUT
-hdr[3] = 0x1F                            # 40MHz | 16MB
+hdr[3] = 0x40                            # 高半字节=容量(4=16MB) 低半字节=速度(0=40MHz)
 struct.pack_into('<I', hdr, 4, entry_point())
 hdr[8] = 0xEE                            # wp_pin 禁用
 hdr[12:14] = struct.pack('<H', 9)        # chip_id = ESP32-S3
+hdr[15:17] = struct.pack('<H', 0x0063)   # min/max chip rev（照抄 IDF app）
 hdr[23] = 0                              # 不附 SHA256
 
 # 先把段排好（段表必须连续；flash 段前的空白并入上一段的数据）
