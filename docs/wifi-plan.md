@@ -2589,3 +2589,42 @@ ROM 官方 cache 函数）都已逐项试过并验证生效，取指仍返回全
 确认它能正常跑（它当然能），然后**逐步把它的初始化搬过来做二分**，找出"app 侧"
 到底做了哪一件我们没做的事（最可能是 `spi_flash_init_chip_state()` 里改写 flash
 **芯片内部**状态的那部分——寄存器看起来一致，但芯片内部的 dummy/QE 位可能不同）。
+
+## 68. 查官方 TRM（ESP32-S3 Technical Reference Manual v1.8）
+
+官方资料是有的，之前一直在逆向猜，这次把 TRM 拉到本地（`/tmp/trm.pdf`，15MB，
+`pdftotext` 转文本 20 万行）逐节查了：
+
+### §4.3.3 外部存储器 / §4.3.3.1 地址映射
+
+> CPU 借助高速缓存 (Cache) 来访问外部存储器。Cache 将根据 MMU 中的信息把 CPU 指令总线
+> 或数据总线的地址变换为访问片外 flash 与片外 RAM 的实地址……32 MB 的指令总线地址空间，
+> 通过 ICache 以 **64 KB 为单位**映射到片外 flash 或片外 RAM，支持 4 字节对齐的读访问
+> 或**取指访问**。
+
+→ 和我们做的完全一致（64KB 页、0x4200_0000 起、页对齐）。ICache 16/32KB，块 16/32B。
+
+### §4.3.3.3 Cache 操作
+
+Write-Back / Clean / Invalidate（自动+手动）/ Preload / Lock —— 没有"改 MMU 前必须做某
+特殊操作"的额外要求。
+
+### §17 SYSTEM_CACHE_CONTROL_REG (0x60026048) —— 新查到的寄存器
+
+```
+bit0 SYSTEM_ICACHE_CLK_ON   置 1 使能 i-cache 时钟
+bit1 SYSTEM_ICACHE_RESET
+bit2 SYSTEM_DCACHE_CLK_ON   置 1 使能 d-cache 时钟
+bit3 SYSTEM_DCACHE_RESET
+```
+
+这条很像是答案（"cache 根本没时钟，自然读不回数据"），于是做了两件事：
+
+1. 在我们固件里读该寄存器：`0x00001000`（bit0/bit2 都是 0），于是置上 bit0|bit2
+   → **仍然 fault**
+2. 用 JTAG 去读**能正常跑 IROM 的原厂固件**的同一寄存器：**也是 `0x00001000`**
+   → **说明这两位的状态本来就该是 0，和取指无关**，这条也排除
+
+⇒ TRM 层面能查的配置项已经全部对过一遍，我们的寄存器状态与"能跑 IROM 的原厂固件"
+完全一致（§64 的全量 diff 已经证明），问题不在这张寄存器表能解释的范围内。
+剩下最可能的仍是**flash 芯片内部状态**（dummy cycle / 模式位），而 cache 读是直接依赖它的。

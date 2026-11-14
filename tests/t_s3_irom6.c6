@@ -18,6 +18,11 @@ void os_main(void)
     os_reg_wr(0x60002014u, 0x00030103u);
     s3_beacon(2u, os_reg_rd(0x60002008u));
 
+    /* 0) TRM §17 SYSTEM_CACHE_CONTROL_REG(0x60026048): bit0=ICACHE_CLK_ON bit2=DCACHE_CLK_ON
+     *    这两个时钟位如果没打开，cache 根本无法访问外部存储器 —— 先读、再打开。 */
+    s3_beacon(1u, os_reg_rd(0x60026048u));
+    os_reg_wr(0x60026048u, os_reg_rd(0x60026048u) | 0x5u);   /* bit0 + bit2 */
+
     /* 1) 手写 MMU 表项（补 valid 位）2) 用寄存器做 I-cache sync（ROM 那个函数会挂） */
     os_reg_wr(0x600C500Cu, 0x4000u | 3u);
     os_reg_wr(0x600C4088u, 0x1u);              /* ICACHE_SYNC_CTRL: 启动 sync */
