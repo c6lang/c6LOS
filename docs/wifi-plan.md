@@ -726,3 +726,46 @@ bootloader。这条线已经花掉 5 轮，建议：
 
 `port/s3/flash.c` 的 `os_flash_init()` 默认**不自动**动 flash 窗口
 （`S3_FLASH_AUTO_MAP` 宏才开），保证普通镜像不受影响。
+
+## 20. 【里程碑 M1 地基打通】闭源 libphy 在我们的 RTOS 里跑通并返回结果
+
+真板输出（`build/wphy_lean`，LEAN 构建 + libphy 放 IRAM）：
+
+```
+c6os s3 boot
+ABC                      ← 直接 port_putc
+L2 port_puts ok          ← 调运行库（windowed 普通 C）
+L3=3                     ← c6 生成的带参数函数（call0）
+L4 put1 ok               ← c6 生成的指针参数函数
+L5 win=1003              ← 经 ABI 桥调 windowed 孤岛函数
+L5b deep=11              ← 10 层深递归（寄存器窗口溢出/欠载向量也验过了）
+L6 phy_cal=0x000002c7    ← **经桥调用闭源 libphy 的 phy_get_rf_cal_version()**
+abic done
+```
+
+0x2C7 正是该函数在库里的返回值（`movi a2, 0x2c7; retw.n`），说明：
+**call0 主世界 → 手写桥 → windowed 孤岛 → 闭源 PHY 库** 整条调用链是对的。
+
+### 关键做法（能跑通的原因）
+
+1. **LEAN 构建**（`S3_LEAN=1`，Makefile 里把 panel/gfx/i2s/dash/shell/button/core1
+   这些对象去掉）：我们自己的代码从 ~30KB 降到 ~26KB。
+2. **libphy 闭包放回 IRAM**（不放 flash）：闭包只有约 38KB（不是早先估的 76KB，
+   因为只拉进真正被引用的对象），26+38 ≈ 64KB，正好在 IRAM 预算
+   （0x403C9000..0x403D9500 = 66.8KB）之内；镜像 IRAM 段实际结束在 0x403D8CE8。
+3. 因此**不需要 IROM**（那条线的结论仍记录在 §15~19，等以后要放 libnet80211
+   这种 1.4MB 的大库时再回来攻）。
+4. 编译命令：
+   ```
+   make C6_ROOT=/home/winger/c6 BUILD=build/wphy_lean S3_LEAN=1 \
+     S3_CDEFS="-DS3_WITH_LIBPHY" S3_MAIN=tests/t_s3_abic.c6 \
+     S3_EXTRA_LIBS=/media/winger/inst_26/esp/esp-idf/components/esp_phy/lib/esp32s3/libphy.a s3
+   ```
+
+### 下一步（M1 正式）
+
+- 把 IDF 的 `esp_phy/src/phy_init.c` 搬进孤岛（它提供 `esp_phy_enable()` 需要的
+  PHY 初始化/校准流程 + `phy_init_data`），先跑 `esp_phy_enable()` 并读回信道/校准状态。
+- 注意 WiFi 还要 `libpp.a`+`libnet80211.a`（合起来 >2MB）→ 到时候必须解决 IROM
+  或者说服自己只用 PHY（不现实）。所以 §15~19 的 IROM 问题**迟早还得攻**，
+  但至少现在 M1 能继续往前走了。

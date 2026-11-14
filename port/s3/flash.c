@@ -17,6 +17,10 @@
 #define S3_EXTMEM_ICACHE_CTRL (*(volatile u32 *)0x600C4060u)
 #define S3_EXTMEM_DCACHE_CTRL (*(volatile u32 *)0x600C4000u)
 
+/* ROM 里的 cache 操作入口（IDF 的 cache_ll 就是这么调的；地址见 port/s3/rom） */
+extern void Cache_Enable_ICache(u32 autoload);
+extern void Cache_Enable_DCache(u32 autoload);
+
 static volatile u32 *s3_mmu_entry(u32 vaddr)
 {
     u32 id = (vaddr & S3_MMU_VADDR_MASK) >> 16;
@@ -59,13 +63,12 @@ u32 os_flash_mmu_entry(u32 vaddr)
 
 void os_icache_enable(void)
 {
-    S3_EXTMEM_ICACHE_CTRL = S3_EXTMEM_ICACHE_CTRL | 1u;   /* ICACHE_ENABLE */
+    S3_EXTMEM_ICACHE_CTRL = S3_EXTMEM_ICACHE_CTRL | 1u;   /* ICACHE_ENABLE（寄存器写法，实测不崩） */
 }
 
 /* ROM 里的 cache 操作函数（IDF 的 esp_rom/cache.h 同款）。
- * 关键：ROM 启动阶段可能已经把 0x42xxxxxx 的旧 MMU 映射用进了 I-cache，
- * 我们自己改完 MMU 必须清一次 I-cache，否则取到的是旧内容（表现为
- * IllegalInstruction、PC 落在指令中间）。 */
+ * Cache_Invalidate_ICache_All：ROM 启动阶段可能已经把 0x42xxxxxx 的旧映射
+ * 用进了 I-cache，改完 MMU 后需要清一次。 */
 extern void Cache_Invalidate_ICache_All(void);
 
 /* 链接脚本提供的 flash 段边界（没有 flash 段时三者相等） */
@@ -118,7 +121,7 @@ u32 os_icache_state(void)
 
 void os_dcache_enable(void)
 {
-    S3_EXTMEM_DCACHE_CTRL = S3_EXTMEM_DCACHE_CTRL | 1u;   /* DCACHE_ENABLE */
+    S3_EXTMEM_DCACHE_CTRL = S3_EXTMEM_DCACHE_CTRL | 1u;   /* DCACHE_ENABLE（实测这条路 DROM 读得通） */
 }
 
 u32 os_dcache_state(void)

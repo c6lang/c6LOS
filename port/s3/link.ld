@@ -35,12 +35,9 @@ SECTIONS
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text) *(.flash.text.*) *(.flash.rodata) *(.flash.rodata.*)
-    *libphy.a:(.literal .literal.* .text .text.*)
-    *libpp.a:(.literal .literal.* .text .text.*)
-    *libnet80211.a:(.literal .literal.* .text .text.*)
-    *libcore.a:(.literal .literal.* .text .text.*)
-    *libcoexist.a:(.literal .literal.* .text .text.*)
-    *libwapi.a:(.literal .literal.* .text .text.*)
+    /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：
+     * LEAN 构建下 libphy 闭包约 38KB、我们自己的代码约 26KB，合计约 64KB，
+     * 正好在 IRAM 预算（66.8KB，坏区 0x403D9500 以下）之内。 */
     _flash_text_end = .;
   }
 
