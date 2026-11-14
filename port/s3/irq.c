@@ -106,7 +106,10 @@ void s3_irq_init(void)
     s3_timer_rearm();
     __asm__ __volatile__("rsr %0, intenable" : "=r"(old));
     __asm__ __volatile__("wsr %0, intenable" : : "r"(old | mask));
+#ifndef S3_IRQ_HOLD_OFF
+    /* 排查用开关：定义 S3_IRQ_HOLD_OFF 时先不开中断（验证非中断路径） */
     __asm__ __volatile__("rsil a2, 0" : : : "a2");
+#endif
 }
 
 static void trap_hex(u32 v)

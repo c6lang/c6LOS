@@ -1060,3 +1060,46 @@ windowed 版能启动并打印 `c6os s3 boot`（说明 start.S + `port_init` 前
   `0x50000100`=异常现场。读法：
   `sudo esptool --chip esp32s3 -p $P --before default-reset read-mem 0x50000100`
 - CPU 主频是 **40MHz**（`port_cycles()` 按 40MHz 算时间），`s3_lcd_delay(n)`≈n/16 µs。
+
+### 【本轮新发现：windowed 跑到哪一步、死在哪个地址】
+
+1. **修掉一个真 bug**：`port/s3/start.S` 原来用 `call0 port_init` / `call0 os_main`。
+   windowed 的 C 函数是 `entry sp,N` 进、`retw` 出，用 call0 进去它 `retw` 就会
+   退到错误窗口 → 直接跑飞。现在 windowed 下改成 `call8`（`#ifdef` 分支）。
+   —— 这条解释了"只打出 `c6os s3 boot` 就没了"（banner 是 port_init 打的，
+   port_init 一 return 就炸）。
+2. 关掉中断（`port/s3/irq.c` 里 `s3_irq_init()` 的 `rsil a2, 0` 有个
+   `#ifndef S3_IRQ_HOLD_OFF` 钩子可临时关）后**仍然**崩，说明问题不在中断，
+   而在普通 C 函数调用链。RTC 现场：`0xA1`、`0xB1`、
+   `_vec_default` 跑过、`EXCCAUSE=0`、`EXCVADDR=0`、`EPC1=0x403c966d`。
+3. `addr2line` 解出 `0x403c966d` = **`pstr` 里的 `l8ui a10, a8, 0`**，而
+   `a8` 是从帧里取回的字符串指针，值是 **0**（所以 EXCVADDR=0）。
+   看一下 pstr 的汇编就能明白可疑点：
+   ```
+   pstr: entry a1,144
+         s32i a2, a1, 96        /* 参数 a2 存到帧里 */
+         addi a10, a1, 88 ; addi a11, a1, 96 ; movi a12,8
+         call8 memcpy           /* 把 8 字节从 +96 拷到 +88 */
+         l32i a8, a1, 88        /* 取回指针 → 竟然是 0 */
+         l8ui a10, a8, 0        /* ← 在这里 LoadProhibited */
+   ```
+   注意 c6 编译器生成的 C 是这种风格（`build/wdup/c99/t_s3_i2s_duplex.c`）：
+   ```c
+   union { ... } __c99_frm;
+   memcpy(__c99_frm.f + 32 + (-8), &__c99_a0, 8);   /* 取参数地址，拷 8 字节 */
+   ```
+   即**它依赖"参数在内存里有可寻址的实体"**并且按 8 字节搬运。call0 下没问题，
+   windowed 下参数是通过"调用者 a10~a15 ↔ 被调用者 a2~a7"这种窗口别名传的，
+   取 `&参数` 会强制落栈槽，这条路径和窗口机制怎么交互需要单独验证。
+
+### 下一步（精确到文件）
+
+1. 先做**最小 windowed 验证**：写一个只有
+   `pstr` / 一个带指针参数的函数 / 一个返回值的极小用例（比如打印 3 个数），
+   确认"windowed 下 c6 生成的 C 能不能正确传指针参数"。
+   - 若不行 → 需要改 c6 代码生成器的参数处理（`__c99_frm` 那套），
+     或者让 c6 输出改成 `-mno-windowed` 风格不取参数地址（工作量大）；
+   - 若行 → 说明是别的函数（如 `memcpy` 在 windowed 下的行为）把参数弄丢了。
+2. 检查 `rt/c6rt.c` 的 `memcpy` 在 windowed 下被调用的寄存器约定
+   （调用点用 a10/a11/a12 ✓ 与实测一致），必要时换成内联/汇编实现。
+3. windowed 能跑到 `os_main` 之后，再按 wifi-plan.md §11 的顺序回到中断入口。

@@ -89,8 +89,16 @@ _start:
     l32r    a2, .Lrtc
     l32r    a3, .Lm1
     s32i    a3, a2, 0            /* 标记 A1：清 bss 完成 */
+#ifdef __XTENSA_CALL0_ABI__
     call0   port_init
     call0   os_main
+#else
+    /* windowed ABI：C 函数入口是 `entry sp,N`、出口是 `retw`，必须用 call8 进去
+     * （窗口 base += 8），否则它 retw 时会退回到错误的窗口直接跑飞。
+     * 之前就是这里用 call0 调 port_init：banner 打完一返回就炸。 */
+    call8   port_init
+    call8   os_main
+#endif
 3:
     j       3b
 
