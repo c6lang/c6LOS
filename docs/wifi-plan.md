@@ -2146,3 +2146,27 @@ slot2 = 0x00004010   （MMU 表项 valid ✓）
 
 这条线索留给下一次：**用 S3 的 TRM 核对 ICACHE/EXTMEM 寄存器映射**，
 而不是继续靠读值猜。原厂固件备份和刷回命令都在 §54。
+
+### 第 39 轮：S3 ROM 没有导出 flash/cache 初始化入口
+
+查遍 `esp32s3.rom.ld` / `esp32s3.rom.api.ld`：
+
+```
+没有 Cache_* 前缀的符号（Cache_Read_Enable / Cache_Enable_ICache 都没有导出）
+没有 spi_flash_* 符号
+```
+
+所以"调 ROM 的现成函数把 cache 配好"这条路在 S3 上走不通（只有 efuse 相关的
+`ets_efuse_get_spiconfig`、`ets_efuse_flash_octal_mode` 之类）。
+
+⇒ 必须自己把 SPI_MEM 的 cache 读路径配全。**下次最有效的办法**：
+在**原厂固件**上 halt，用 JTAG 写一个"探针"到它的 RAM 里跑不了（没有编译环境），
+所以更现实的是：
+
+1. 按 S3 TRM 的 "SPI0/1 Cache Control" 章节，把
+   `SPI_MEM_CACHE_FCTRL`(读命令/addr 位宽/mode 位)、`SPI_MEM_CACHE_SCTRL`、
+   `SPI_MEM_SRAM_CMD`、`SPI_MEM_CTRL`(FREAD_* 位) 全部按 DIO@80MHz 配一遍
+2. 每次配完读一次 `0x42000000`（应该返回 flash 偏移 0 的内容，我们的镜像头 `0xE9...`）
+   作为**快速判据**——这个判据比跳进去执行安全得多
+3. 直到 `0x42000000` 读回 `0x000000e9` 一类非 0 值，就说明 cache 读通了，
+   那时 IROM 执行自然就通了
