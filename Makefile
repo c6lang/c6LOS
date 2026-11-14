@@ -24,6 +24,12 @@ PORT    ?= /dev/ttyACM0
 BUILD   := build/s3
 S3_MAIN ?= kernel/os.c6
 S3_EXTRA_LIBS ?=
+# 闭源库是 windowed ABI，但它们引用的 memcpy/memset 是我们 call0 编译的 ——
+# windowed call8 进来、call0 ret 返回会跳飞。所以链接前用 objcopy 把这些引用
+# 改名成 win_*，由 port/s3/win_island.c 里的 windowed 版提供。
+LIBPHY_SRC ?= /media/winger/inst_26/esp/esp-idf/components/esp_phy/lib/esp32s3/libphy.a
+LIBPHY_WIN := $(BUILD)/libphy_win.a
+OBJCOPY    := $(dir $(XTGCC))xtensa-esp32s3-elf-objcopy
 S3_C6FLAGS ?=
 S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/heap.c6
 S3_SKIP_C6 := kernel/heap.c6 kernel/sem.c6 kernel/queue.c6
@@ -132,6 +138,12 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 $(BUILD)/obj/flash.o: port/s3/flash.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(LIBPHY_WIN): $(LIBPHY_SRC)
+	@mkdir -p $(BUILD)
+	$(OBJCOPY) --redefine-sym memcpy=win_memcpy --redefine-sym memset=win_memset \
+	  --redefine-sym memmove=win_memmove --redefine-sym memcmp=win_memcmp \
+	  $< $@
 
 $(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
 	@mkdir -p $(BUILD)/obj

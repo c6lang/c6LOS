@@ -345,3 +345,35 @@ s3_win_call_phy_cal_word:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* u32 s3_win_call_deep12(u32 n) —— 验 call12 的窗口溢出/欠载 */
+    .align  4
+    .global s3_win_call_deep12
+    .type   s3_win_call_deep12, @function
+s3_win_call_deep12:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    mov     a10, a2
+    call8   s3_win_deep12_entry
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret

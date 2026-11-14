@@ -800,3 +800,31 @@ abic done
 调用路径**反而在 `add2` 的帧拷贝上挂了（原因待查）；文件留在
 `port/s3/abi_thunk.S`（未参与构建）。既然 L7 的崩点其实在
 `s3_win_phy_enable` 里而不是 memcpy，这个 thunk 也许并非必需。
+
+## 22. M1 关键修复：闭源库的 mem* 必须用 windowed 版（第 12 轮）
+
+**根因**：`register_chipv7_phy()` 一进来就 `call8 memset(a1, 0, 128)`（还用了
+memcpy）。而我们的 `memcpy/memset` 在 `rt/c6rt.c` 里是 **call0** 编译的：
+windowed 的 `call8` 进来、call0 的 `ret` 返回 → 跳到"带窗口位的返回地址"
+（`pc=0x803cd397`），直接跑飞。
+
+**做法**（通用机制，已写进 Makefile）：
+1. 链接前用 `objcopy --redefine-sym` 把闭源库对 `memcpy/memset/memmove/memcmp`
+   的引用改名成 `win_memcpy/win_memset/...`；
+2. `port/s3/win_island.c`（windowed 编译）里提供这些 `win_*` 实现；
+3. 主世界（call0）继续用 `rt/c6rt.c` 那份，两边互不干扰。
+   规则：**任何被 windowed 闭源库调用的符号，都必须是 windowed 编译的**
+   （目前已有：`phy_enter_critical`/`phy_exit_critical`/`phy_printf`/`sprintf`/
+   `coex_pti_print` 在 `port/s3/idf_shim.c`，`win_mem*` 在孤岛里）。
+
+**验证**：
+- `call12` 的窗口溢出/欠载也确认没问题（`L5c12 deep12=074 (want 074)`），
+  所以之前的怀疑排除。
+- 加上 `win_mem*` 后，`L7 phy_enable=` 不再立刻跳飞，而是**死在完整 RF 校准
+  过程中**（FULL 模式耗时长/电流大）。已把默认校准模式改成
+  `PHY_RF_CAL_PARTIAL`（`S3_PHY_CAL_MODE` 可切 0/1/2），等板子重新插拔后
+  再验证。
+
+**环境问题（本轮结束时的状态）**：板子的 USB-CDC 又卡死了
+（`esptool` 报 `OSError: [Errno 71] Protocol error`，RTS ioctl 失败），
+需要**拔插一次 USB** 才能继续刷机/读串口。
