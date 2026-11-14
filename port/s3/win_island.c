@@ -140,6 +140,15 @@ static phy_cal_data_t g_phy_cal;
 
 int s3_win_phy_enable(void)
 {
+    /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
+     * （见 esp_phy/src/phy_init.c）。这里先写死成这块板自己的 MAC
+     * cc:8d:a2:ec:99:c4；以后改成从 efuse 读。 */
+    g_phy_cal.v[4] = 0xccu;
+    g_phy_cal.v[5] = 0x8du;
+    g_phy_cal.v[6] = 0xa2u;
+    g_phy_cal.v[7] = 0xecu;
+    g_phy_cal.v[8] = 0x99u;
+    g_phy_cal.v[9] = 0xc4u;
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
