@@ -81,6 +81,17 @@ IROM 页时会正常 `panic'ed (Cache error)`。
   所以它不是我们缺的那一步。真正写 `SPI_MEM_*` 的是 flash 驱动的
   `spi_flash_chip_generic_config_host_io_mode()`。
 
+## 4c. 又排除三条（cache 错误可观测性 / 时钟电源 / MMU 表项范围）
+
+- **cache 错误状态寄存器**（IDF 靠 `esp_cache_err_int_init()` 才打开的中断）：
+  清状态后做一次 IROM 读，再读：
+  `EXTMEM_CACHE_ILG_INT_ST = 0`、`EXTMEM_MMU_FAULT_VADDR = 0`
+  ⇒ **没有任何非法访问、也没有 MMU 表项错误记录**。
+- **cache 时钟/电源**：`SYSTEM_CACHE_CONTROL_REG(0x600C0048) = 0x5`（两个 cache 时钟都开）、
+  `EXTMEM_CLOCK_GATE(0x600C4164) = 0x1`、`EXTMEM_CACHE_MMU_POWER_CTRL(0x600C412C) = 0x5`。
+- **MMU 表项范围**：`Cache_Get_IROM_MMU_End() = 0x200`（=512，整张表归 IROM），
+  `Cache_Get_DROM_MMU_End() = 0x400`；我们用的 entry 3 在 IROM 范围内。
+
 ## 5. 最关键的对照数据
 
 两边都用**各自应用内的代码**读取（JTAG 读这个寄存器块不可靠，实测 IDF app 的 MMU 表
@@ -108,6 +119,20 @@ IROM 页时会正常 `panic'ed (Cache error)`。
    bootloader 只在特定条件下才真正启用 cache）需要满足？
 4. 是否提供 `spi_flash_init_chip_state()` / `ext_mem_init()` 这类初始化在
    **非 IDF 环境**下的最小可用参考实现？
+
+## 6b. 一个重要澄清（避免误判）
+
+我们一开始把"不抛 Cache error"当作"访问没走到 cache"的证据，这是**错的**：
+
+- IDF 源码注释（`esp_system/port/soc/esp32s3/cache_err_int.c:11-15`）说明，cache 在
+  未使能时对外部存储区域的访问会触发中断，但**该中断复位默认是关闭的**
+  （`EXTMEM_CACHE_ILG_INT_ENA(0x600C40DC)`、`EXTMEM_CORE0_ACS_CACHE_INT_ENA(0x600C40E8)`
+  全为 0）。IDF app 会 panic 只是因为它显式调用了 `esp_cache_err_int_init()`。
+- TRM §15.6 明确写：非法访问会被**过滤并返回默认值**（取指/读返回 0 或 `0xdeadbeaf`），
+  中断是否触发取决于是否使能。
+
+所以正确表述是：**我们看到的 `0x00000000` 与"访问被过滤后返回默认值"一致，
+只是没有装报警器所以看不到错误事件**。
 
 ## 7. 可提供的复现材料
 
