@@ -1,0 +1,34 @@
+/* 调 ROM 的 Cache_Enable_ICache（经 windowed 孤岛），然后再读 IROM */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void s3_win_call_log(const char *s);
+u32  s3_win_call_flash42(void);
+static void pstr(const char *s) { s3_win_call_log(s); }
+static void phex(u32 v)
+{
+    char b[11] = {0}; int i = 2; int sh = 28; const char *h = "0123456789abcdef";
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0'; pstr(b); pstr("\n");
+}
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000023u);
+    pstr("fctrl(before)="); phex(os_reg_rd(0x6000203Cu));
+
+    s3_win_call_cache_enable();                 /* ROM Cache_Enable_ICache(0) */
+
+    pstr("fctrl(after)="); phex(os_reg_rd(0x6000203Cu));
+    s3_beacon(3u, os_reg_rd(0x6000203Cu));
+
+    v = *(volatile u32 *)0x42030000u;           /* 期望 0x7b004136 */
+    s3_beacon(2u, v);
+    pstr("irom3="); phex(v);
+
+    v = s3_win_call_flash42();                  /* 期望 42 */
+    s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
+    pstr("call="); phex(v);
+    for (;;) { }
+}

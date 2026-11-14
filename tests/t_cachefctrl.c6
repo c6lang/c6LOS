@@ -1,0 +1,23 @@
+/* 读 SPI_MEM_CACHE_FCTRL(0x6000203C) bit0 CACHE_REQ_EN —— cache 访问 SPI0 的总闸 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void s3_win_call_log(const char *s);
+static void pstr(const char *s) { s3_win_call_log(s); }
+static void phex(u32 v)
+{
+    char b[11] = {0}; int i = 2; int sh = 28; const char *h = "0123456789abcdef";
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0'; pstr(b); pstr("\n");
+}
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000020u);
+    v = os_reg_rd(0x6000203Cu);
+    s3_beacon(1u, v);
+    pstr("cache_fctrl="); phex(v);
+    pstr("req_en="); phex(v & 1u);
+    for (;;) { }
+}
