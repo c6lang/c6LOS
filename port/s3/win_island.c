@@ -213,7 +213,8 @@ u32 s3_win_find_phytab(void)
     while (a < 0x3FCA0000u) {
         u32 v = *(volatile u32 *)a;
 
-        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+        /* 只在**确定映射的 DRAM** 里解引用，否则会 LoadStoreError（踩过） */
+        if (v >= 0x3FC88000u && v < 0x3FCF0000u) {
             u32 e = *(volatile u32 *)(v + 0x204u);
 
             if (e >= 0x40000000u && e < 0x40100000u) {
@@ -368,7 +369,8 @@ u32 s3_win_find_phytab(void)
     while (a < 0x3FCA0000u) {
         u32 v = *(volatile u32 *)a;
 
-        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+        /* 只在**确定映射的 DRAM** 里解引用，否则会 LoadStoreError（踩过） */
+        if (v >= 0x3FC88000u && v < 0x3FCF0000u) {
             u32 e = *(volatile u32 *)(v + 0x204u);
 
             if (e >= 0x40000000u && e < 0x40100000u) {
