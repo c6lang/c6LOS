@@ -1802,3 +1802,24 @@ WiFi 闭源栈（libpp + libnet80211 + libcore + mesh + espnow）约 **500KB**�
 1. 把 libpp/libnet80211/libcore/mesh/espnow 放进 `.flash.text`（0x42000000）
 2. 启动时 `os_flash_map()` + `os_icache_enable()`（映射 0x42000000 到 flash 偏移 0）
 3. 真板验证：能不能从 IROM 正常取指执行（用一个放在 flash 里的自证函数）
+
+## 52. 第 34 轮末：IROM 取指验证卡在 `os_flash_map`/`os_icache_enable`
+
+真板跑 `tests/t_s3_irom.c6`（串口实测）：
+
+```
+c6os s3 boot
+irom test start          <- 打到这里
+（之后无输出，RTC 信标 slot0 仍是 0）
+```
+
+⇒ 卡在 `os_flash_map(...)` 或紧接着的 `os_icache_enable()`，
+还没走到写 slot0 信标那一步（信标 slot3=0xB0B0B0B0 说明 `port_init` 正常）。
+
+**下一步就查这两个函数**（`port/s3/flash.c`）：
+
+- `os_flash_mmu_entry(0x42000000)` 的 MMU 读写是不是碰了坏区/没映射的地址
+- `os_icache_enable()` 里清 `EXTMEM_ICACHE_CTRL1.SHUT_CORE0_BUS` 的顺序
+  （S3 要求：先关 cache、清 SHUT_CORE0_BUS、再使能）
+- 建议先用 USB-JTAG（`tools/dbg.sh`）在 `os_flash_map` 上下断点单步，
+  这个通道已经验证可用，不用再猜
