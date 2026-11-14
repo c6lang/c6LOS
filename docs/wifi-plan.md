@@ -1521,3 +1521,49 @@ PC 落在指令中间 + 随参数漂移 ⇒ **返回地址/a0 被破坏**，而�
 
 已刷回 `build/won`（`tests/t_s3_on.c6`）：背光常亮 + 每 5 秒打印 `alive n=...`，
 不碰 PHY，USB/esptool 随时可用。
+
+## 46. 第 31 轮：**USB-JTAG 调试通道打通**（这个目标卡了十几轮缺的观察手段）
+
+不需要 UART！ESP32-S3 内置的 USB-Serial/JTAG 外设**同时**提供 CDC 串口和 JTAG，
+系统里已经有 `openocd`（`~/.espressif/tools/openocd-esp32/.../bin/openocd`）和
+`xtensa-esp32s3-elf-gdb`。真板实测连接成功：
+
+```
+Info : esp_usb_jtag: serial (CC:8D:A2:EC:99:C4)
+Info : JTAG tap: esp32s3.cpu0 tap/device found: 0x120034e5 (Tensilica)
+Info : Listening on port 3333 for gdb connections
+```
+
+### 新工具
+
+- `tools/dbg.sh <elf> <gdb脚本>` —— 起 openocd（等端口就绪）+ gdb 批处理 + 收尾
+- `tools/gphy.gdb` —— 在 `register_chipv7_phy` 下断点
+- `tools/gtrap2.gdb` —— 在 `_vec_level1` 用**硬件断点**（`hbreak`；软件断点写不进去，
+  因为目标常驻异常态 EXCM=1）循环跳过 `exccause==4`（定时器中断），只报真异常
+- `tools/gstep.gdb` —— 单步跟踪
+
+### 已观测到的硬证据
+
+```
+Breakpoint hit: register_chipv7_phy+3
+pc=0x403ce7fb  a0=0x803cdbf1  a1=0x3fcd8e90  ps=0x60500(WOE=1, CALLINC=2)   ← ABI 桥是对的
+
+停在 set_chan_freq_hw_init:
+pc=0x403d04b3  a0=0xffffffff803ce7ee                                        ← 返回地址正常
+
+捕获真异常:
+exccause=0 (IllegalInstruction)  epc1=0x40044290(**ROM 里**)  excvaddr=0
+ps=0x6050f  a0=0x403cc819(in port_init)  a1=0x3fcd8fe0
+a2=0x600080cc  a3=0xffffffffb0b0b0b0                                        ← 我们 s3_beacon(3,0xB0B0B0B0) 的参数
+```
+
+`epc1` 落在 **ROM 区**（0x40044290），且寄存器里还是 `port_init` 里 `s3_beacon` 的参数
+⇒ 这条异常是**从我们自己的 call0 代码直接调 ROM** 触发的（ROM 是 windowed ABI，这是老坑）。
+下一步就用这个调试通道把 PHY 崩溃点和这条 ROM 调用精确定位（现在可以单步、可以读 a0/ps）。
+
+### 注意
+
+- 目标常驻异常态时软件断点插不进去 → 用 `hbreak`（硬件断点）
+- PHY 抢 USB PHY 时 JTAG 会一起断；所以 PHY 用例里加了 **90 秒调试窗口**，
+  要在窗口内附着
+- `pkill -f openocd` 会把自己这条 shell 命令一起杀掉 —— 用 `pkill -x openocd`
