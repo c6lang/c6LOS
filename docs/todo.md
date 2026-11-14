@@ -877,3 +877,105 @@ gfx 全屏填充优化；再往后才是原来列的 WiFi/mic/喇叭。
   （起点是 5fps）；大面积刷新（>65KB）自动回落 CPU 通路保证画面正确。
 - 还差：整屏 8 拍 DMA 的错位（现用回落规避）、gfx 绘图 1350k 可再优化
   （全屏填充/文字逐像素写）、SPI 80MHz 未试（超 ST7789 串行时钟规格）。
+
+### 【本轮】音频（喇叭 + 麦克风）真板打通进度
+
+**喇叭：已经出声（真板确认）。** `port/s3/i2s.c` 全量重写为 I2S0 TX + GDMA：
+
+- 格式按上游 `NoAudioCodecSimplex`：32bit 数据 / 32bit 槽 / 单声道只左槽 /
+  左对齐 / MSB / Philips → 每帧 64 BCLK；16kHz 用整数分频 div=39（XTAL 40MHz）。
+- **S3 的 STD 模式其实就是 2 槽 TDM**：IDF 的 `i2s_hal_std_enable_tx_channel()`
+  只做一件事——置 `TX_CONF.tx_tdm_en`(bit19)。**少了这一位**，BCLK/WS 照样在跑、
+  GDMA 链路 `park=0` 干等、`int_raw` 恒 0、DOUT 一个边沿都没有（就是之前只
+  出一声"噗"的真因）。补上后 DOUT 立刻有边沿（0.12 秒 4013 个 = 256 帧 ×16），
+  环形播放也就通了（`loop=1` 时把 `out_auto_wrback`(OUT_CONF0 bit2) 打开即可）。
+- 老版本 `TX_CONF1=(15<<13)|(1<<7)|(1<<30)`（16bit、半帧 1 个 BCLK）是错的；
+  正确的 32bit 槽：`ws_width=31(bits6:0)`、`bck_div=0(bits12:7)`、
+  `bits_mod=31(bits17:13)`、`half_sample=31(bits23:18)`、`chan_bits=31(bits28:24)`、
+  `msb_shift=1(bit29)`。
+- TX_CONF 正确位：`tx_start=bit2`、`tx_update=bit8`、`pcm_bypass=bit12`、
+  `stop_en=bit13`、`left_align=bit15`、`tdm_en=bit19`、`sig_loopback=bit27`。
+- TX 时钟：`TX_CLKM_CONF` bit29=`clk_en`（模块门控）、bit26=`tx_clk_active`、
+  bits28:27=源（0=XTAL 40MHz）、bits7:0=div；`TX_CLKM_DIV_CONF=0`。
+
+**麦克风：时钟已通，数据还没进来（下一步）。**
+
+- 关键坑：**RX 主模式的 BCK/WS 输出走的是另一组 GPIO 矩阵信号**——
+  `I2S0I_BCK_OUT=26 / I2S0I_WS_OUT=27`、`I2S1I_BCK_OUT=31 / I2S1I_WS_OUT=32`；
+  接 TX 侧那组（22/24、28/29）的话 pad 上永远静态（实测：一条边沿都没有，
+  把信号改路由到别的 pad 也一样是 0）。换成 31/32 后 SCK 立刻跑起来，
+  边沿数和 TX BCLK 完全一致（62891 vs 62907）。
+- 麦克风数据输入是 `I2S1I_SD_IN_IDX=30`（接 GPIO6），这个没错。
+- 现状：`rx_conf=0x00089024`（rx_start/tdm_en/mono/left_align 齐全）、
+  `rx_conf1=0x3f7fe01f`、RX 时钟在跑，但 GDMA IN 通道（ch2、触发号 4）
+  的描述符 `w0` 一个字节都没被回写、`int_raw` 恒 0 → **RX FIFO 没往 DMA 推数据**。
+  已排除：pad/GPIO 矩阵、I2S0/I2S1 实例、`mclk_sel` 0/1、`tx_clk_active` 0/1、
+  GDMA 各寄存器偏移（都核对过）、描述符 owner/eof/size。下一步：扫 RX 槽配置矩阵
+  （tdm/mono/chan_mask/RXEOF_NUM/16bit），再用 SPI3 自环（`GPIO_FUNC102_IN_SEL`
+  回灌 MISO）单独验证 IN 通道本身。用例：`tests/t_s3_i2s_rx.c6`。
+- 其它已知：S3 的 I2S **没有 CPU 可读写的 FIFO**，收发必须全靠 GDMA；通道分配
+  ch0=I2S0 TX、ch1=面板 SPI、ch2=I2S1 RX。GDMA 五个坑见
+  `docs/s3-panel-bringup.md` §4.68（描述符 owner、LINK 相对 DRAM 基址 0x3FC00000、
+  别开 check_owner、武装完立刻 start）。
+- 用例：`tests/t_s3_i2s_duplex.c6`（TX 边沿 + RX 采集 + 客观统计）、
+  `tests/t_s3_i2s_arm.c6`（GDMA 武装方式对比）、`tests/t_s3_i2s_rx.c6`（RX 探针）、
+  `tests/t_s3_recplay.c6`（BOOT 键"录音→循环播放"演示，等 RX 通了即可用）。
+
+### 【本轮结论】录放全链路打通（BOOT 键：录 5 秒 → 循环播放）
+
+**交付用例：`tests/t_s3_recplay.c6`**（`build/recplay/c6os.bin`）
+
+- 按一下 BOOT：麦克风录 5.0 秒（16kHz、16bit 存储 160KB）→ 自动转入循环播放；
+  录音中再按一下提前结束并播放；播放中按 BOOT 重新录。
+- 客观数据：`rec stats: samples=80000 peak=675 avg=104`、`play loop bytes=160000`。
+- 采样率选 16kHz 是硬约束：**这块板的 MEMS 麦克风在 8kHz 下完全不出数据**
+  （实测：8kHz 抓到全是 0，16kHz 才有真实波形），所以不能靠降采样率省内存。
+- 内存也不够：16kHz×5 秒×32bit = 320KB > 可用 .bss。因此麦克风仍跑 32bit 槽，
+  分块（2 个 DMA 段 = 2046 帧）抓进 8KB 暂存区，取高 16 位压成 16bit PCM；
+  喇叭用 I2S0 的 **16bit 槽**模式（`s3_i2s_init16()`，帧 32 BCLK）直接播紧凑
+  u16 数组，不展开、不额外占内存。
+
+**五个新踩的坑（都已在代码里注释）：**
+
+1. **DRAM 有一段"密集读写会把 CPU 挂住"的坏区**，就在 `0x3FCD9500` 往后一小段。
+   稀疏读写都正常（所以早年的"整段 DRAM 可写"探针全绿），但**逐字**清零到那里
+   就静默死：不打印、不进异常向量、十几秒后被看门狗整片复位 → 表现是"串口一个
+   字都没有 + 屏幕全黑"。`_start` 清 .bss 正好会踩过去。
+   - 诊断方法：`port/s3/start.S` 在清 .bss 前后往 RTC 慢速内存（0x50000000）写
+     标记 A0/A1，复位后用 `esptool read-mem 0x50000000` 读；`port/s3/irq.S` 的
+     `_vec_default` 会把 EXCCAUSE/EXCVADDR/EPC1 写到 0x50000100，`console.c` 的
+     `port_init` 另有 0xB0..0xB3 四个阶段标记。
+   - 这条也解释了为什么"只有大 bss 的镜像才会黑屏"：小镜像清不到坏区就进
+     `port_init` 了。**约束：`.bss` 必须停在 0x3FCD9500 以下**（`_bss_end` 现在
+     0x3FCD8A3C，只剩 ~2.7KB 余量，加缓冲前先看这个数）。
+2. **启动期必须关中断**：`_start` 原来把 PS.INTLEVEL 清成 0（开中断），此时 .bss
+   还没清、内核结构还没初始化、看门狗也还没关（那是 `port_init` 的第一件事），
+   一个中断就能跳进半初始化状态。现在启动期 INTLEVEL=15，由 `s3_irq_init()` 末尾
+   的 `rsil 0` 正式打开。
+3. **RX 主模式的 BCLK/WS 走另一组 GPIO 矩阵信号**：`I2S0I_BCK_OUT=26` /
+   `I2S0I_WS_OUT=27`、`I2S1I_BCK_OUT=31` / `I2S1I_WS_OUT=32`。接 TX 侧那组
+   （22/24、28/29）时 pad 上永远是静态的（RX 内部时钟在跑、pad 一条边沿都没有）。
+4. **`rx_mono_fst_vld`(RX_CONF bit9) 必须和 `rx_mono`(bit5) 一起置**——IDF 的
+   `i2s_ll_rx_enable_mono_mode()` 就是同时写这两位。只置 bit5 的含义是"单声道取
+   第二个槽"，而第二个槽的 chan_en 没开 → RX FIFO 一个字节都不推（描述符 owner
+   恒 1、GDMA `int_raw` 恒 0）。同理 TX 侧 `tx_mono`(bit5)+`tx_mono_fst_vld`(bit9)
+   不开的话，一帧会从 FIFO 取两个样本 → **单声道语音以 2 倍速播放**（放方波听
+   不出来，换录音回放立刻露馅）。
+5. **`s3_lcd_blit_rect(fb, fb_w, x, y, w, h)` 的 x/y 同时是 fb 内的源坐标**。
+   用小文字带（240×16）当画布时，不能把屏幕行号当源坐标传（会越界读到 DRAM 外
+   → 取指异常 → 静默死机）；要么用 `s3_lcd_window()` + `s3_lcd_pixels()`（源/目标
+   分离，推荐），要么画布开得够大。
+
+**S3 I2S 目前确认可用的寄存器配置（真板）**
+
+- 32bit 槽（麦克风）：`CONF1 = (31<<0)|(0<<7)|(31<<13)|(31<<18)|(31<<24)|(1<<29)`，
+  帧 64 BCLK，`div = 40MHz/(64*rate)`；`TX_TDM/RX_TDM = (1<<16)|1`。
+- 16bit 槽（喇叭）：`CONF1 = (15<<0)|(0<<7)|(15<<13)|(15<<18)|(15<<24)|(1<<29)`，
+  帧 32 BCLK，`div = 40MHz/(32*rate)`。
+- `TX_CONF = tdm_en(19) | left_align(15) | pcm_bypass(12) | mono_fst_vld(9) | mono(5)`
+  `| update(8) | start(2)`；`RX_CONF` 同构（加 `rx_start(2)`）。
+- GDMA：ch0 = I2S0 TX（触发号 3）、ch1 = 面板 SPI、ch2 = I2S1 RX（触发号 4）；
+  `RXEOF_NUM` 必须等于描述符 size（字节），否则一拍永远等不到 eof。
+- 工具链/环境：CPU 跑在 **40MHz**（XTAL，未开 PLL），`port_cycles()` 是 40MHz，
+  算时间别按 80MHz；esptool 用 `--after watchdog-reset` 才能真的复位进应用
+  （`--after hard_reset` 在本会话里经常把芯片留在 bootloader 里，看起来像"没输出"）。

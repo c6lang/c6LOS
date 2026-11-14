@@ -1,0 +1,176 @@
+/* t_s3_i2s_rx.c6 —— I2S RX 配置矩阵扫描（真板）：找出"RX 有时钟但收不到数据"。
+ *
+ * 现状：RX 的 SCK/WS 已经在跑（RX 侧信号 31/32 接 pad 5/4），rx_conf 里
+ * rx_start/tdm_en/mono/left_align 都在，GDMA IN 通道也武装好了（link 里
+ * park=0、int 恒 0），但描述符 w0 原封不动（owner 还是 1）→ 一个字节都没搬。
+ *
+ * 这里把 RX 槽配置的组合扫一遍，每种跑 0.12 秒，只看两件事：
+ *   描述符 w0 有没有被回写、缓冲区前两个字是什么。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define SEG       4092u
+#define SEGS      4u
+#define CAP_BYTES (SEG * SEGS)
+#define RATE      16000u
+
+#define I2S1_BASE 0x6002D000u
+#define GDMA_BASE 0x6003F000u
+#define DRAM_BASE 0x3FC00000u
+
+#define IN_CONF0 (GDMA_BASE + 2u * 0xC0u + 0x00u)
+#define IN_CONF1 (GDMA_BASE + 2u * 0xC0u + 0x04u)
+#define IN_INT   (GDMA_BASE + 2u * 0xC0u + 0x08u)
+#define IN_CLR   (GDMA_BASE + 2u * 0xC0u + 0x14u)
+#define IN_LINK  (GDMA_BASE + 2u * 0xC0u + 0x20u)
+#define IN_PERI  (GDMA_BASE + 2u * 0xC0u + 0x48u)
+
+void s3_gdma_init(void);
+void s3_lcd_delay(u32 n);
+u32  s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+typedef struct { u32 w0; u32 buf; u32 next; } Desc;
+
+static Desc g_desc[SEGS];
+static u32 g_cap[CAP_BYTES / 4u];
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void hex32(u32 v)
+{
+    int i = 28;
+    u32 nib = 0u;
+
+    pstr("0x");
+    while (i >= 0) {
+        nib = (v >> (u32)i) & 0xFu;
+        port_putc((int)(nib < 10u ? ('0' + nib) : ('a' + nib - 10u)));
+        i -= 4;
+    }
+}
+
+static void pad_out(u32 pin, u32 sig)
+{
+    u32 v = s3_reg32(0x60009000u + 0x04u + 4u * pin);
+
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, (v & ~(7u << 12)) | (1u << 12));
+    s3_reg_wr(0x60004000u + 0x554u + 4u * pin, sig & 0x1FFu);
+    s3_reg_wr(0x60004000u + 0x24u, 1u << pin);
+}
+
+static void pad_in(u32 pin, u32 sig)
+{
+    u32 v = s3_reg32(0x60009000u + 0x04u + 4u * pin);
+
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin, (v & ~(7u << 12)) | (1u << 12) | (1u << 9));
+    s3_reg_wr(0x60004000u + 0x154u + 4u * sig, pin & 0x3Fu);
+}
+
+/* 一次 RX 尝试：conf 位、conf1 值、tdm 值、eof 值都给外部指定 */
+static void rx_try(const char *tag, u32 conf1, u32 tdm, u32 eof, u32 extra_conf)
+{
+    u32 k = 0;
+    u32 link = 0;
+
+    while (k < SEGS) {
+        g_desc[k].w0 = SEG | (SEG << 12) | (1u << 30) | (1u << 31);
+        g_desc[k].buf = (u32)g_cap + k * SEG;
+        g_desc[k].next = (k + 1u < SEGS) ? (u32)&g_desc[k + 1u] : (u32)&g_desc[0];
+        k++;
+    }
+    link = ((u32)&g_desc[0] - DRAM_BASE) & 0xFFFFFu;
+
+    s3_reg_wr(I2S1_BASE + 0x20u, (1u << 0) | (1u << 1));
+    s3_reg_wr(I2S1_BASE + 0x18u, 0xFFFFFFFFu);
+    s3_reg_wr(I2S1_BASE + 0x34u, (1u << 29) | 39u);                 /* clk_en */
+    s3_reg_wr(I2S1_BASE + 0x30u, (1u << 29) | (1u << 26) | 39u);    /* mclk_sel|rx_clk_active */
+    s3_reg_wr(I2S1_BASE + 0x28u, conf1);
+    if (tdm != 0xFFFFFFFFu) { s3_reg_wr(I2S1_BASE + 0x50u, tdm); }
+    s3_reg_wr(I2S1_BASE + 0x64u, eof);
+    s3_reg_wr(I2S1_BASE + 0x20u, extra_conf);
+    s3_reg_wr(I2S1_BASE + 0x20u, extra_conf | (1u << 8));
+
+    s3_reg_wr(IN_CONF0, 1u);
+    s3_reg_wr(IN_CONF0, 0u);
+    s3_reg_wr(IN_CONF0, (1u << 2) | (1u << 3));
+    s3_reg_wr(IN_CONF1, 12u);
+    s3_reg_wr(IN_PERI, 4u);
+    s3_reg_wr(IN_CLR, 0xFFFFFFFFu);
+    s3_reg_wr(IN_LINK, link);
+    s3_reg_wr(IN_LINK, link | (1u << 22));
+
+    s3_reg_wr(I2S1_BASE + 0x20u, s3_reg32(I2S1_BASE + 0x20u) | (1u << 2));
+
+    s3_lcd_delay(2000000u);                 /* ≈0.12 秒 */
+
+    pstr(tag);
+    pstr(" w0[0]=");
+    hex32(g_desc[0].w0);
+    pstr(" s0=");
+    hex32(g_cap[0]);
+    pstr(" s1=");
+    hex32(g_cap[1]);
+    pstr(" int=");
+    hex32(s3_reg32(IN_INT));
+    pstr("\n");
+
+    s3_reg_wr(I2S1_BASE + 0x20u, s3_reg32(I2S1_BASE + 0x20u) & ~(1u << 2));
+    s3_reg_wr(IN_LINK, (s3_reg32(IN_LINK) & 0xFFFFFu) | (1u << 21));
+    s3_lcd_delay(200000u);
+}
+
+#define CONF1_32BIT ((31u << 0) | (31u << 13) | (31u << 18) | (31u << 24) | (1u << 29))
+#define CONF1_16BIT ((15u << 0) | (15u << 13) | (15u << 18) | (15u << 24) | (1u << 29))
+/* 关键对比项 bit9 = rx_mono_fst_vld：IDF 的 i2s_ll_rx_enable_mono_mode() 会把
+ * bit5(rx_mono) 和 bit9 一起置上。只置 bit5 时含义是"取第二个槽的数据"，
+ * 而第二个槽的 chan_en 没开 → 一个字节都不进 FIFO。 */
+#define CONF_TDM_MONO_FST   ((1u << 19) | (1u << 15) | (1u << 12) | (1u << 9) | (1u << 5))
+#define CONF_TDM_MONO_ALIGN ((1u << 19) | (1u << 15) | (1u << 12) | (1u << 5))
+#define CONF_TDM_ALIGN      ((1u << 19) | (1u << 15) | (1u << 12))
+
+void os_main(void)
+{
+    pstr("c6os rx matrix\n");
+
+    s3_gdma_init();
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 21));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 21));
+
+    /* 麦克风：SCK/WS 用 RX 侧信号 31/32，DIN 收 30 */
+    pad_out(5u, 31u);
+    pad_out(4u, 32u);
+    pad_in(6u, 30u);
+
+    /* V1：驱动现在的配置（32bit 槽 + tdm + mono + fst_vld + 左槽） */
+    rx_try("V1 fst32 tdm mono", CONF1_32BIT, (1u << 16) | 1u, SEG, CONF_TDM_MONO_FST);
+    /* V2：对照组——去掉 bit9（就是之前完全收不到数据的那套） */
+    rx_try("V2 no-fst  (旧)   ", CONF1_32BIT, (1u << 16) | 1u, SEG, CONF_TDM_MONO_ALIGN);
+    /* V3：bit9 有、16 个槽全开 */
+    rx_try("V3 fst allchan    ", CONF1_32BIT, (1u << 16) | 0xFFFFu, SEG, CONF_TDM_MONO_FST);
+    /* V4：bit9 有、不开 mono */
+    rx_try("V4 fst no-mono    ", CONF1_32BIT, (1u << 16) | 1u, SEG, CONF_TDM_ALIGN);
+    /* V5：bit9 有、16bit 槽（最保守） */
+    rx_try("V5 fst 16bit      ", CONF1_16BIT, (1u << 16) | 1u, SEG, CONF_TDM_MONO_FST);
+    /* V6：bit9 有、RXEOF 1020 */
+    rx_try("V6 fst eof1020    ", CONF1_32BIT, (1u << 16) | 1u, 1020u, CONF_TDM_MONO_FST);
+    /* V7：bit9 有、TDM 全关（复位默认） */
+    rx_try("V7 fst plain      ", CONF1_32BIT, 0xFFFFFFFFu, SEG, CONF_TDM_MONO_FST);
+
+    pstr("done\n");
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive\n");
+    }
+}

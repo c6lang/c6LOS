@@ -23,11 +23,20 @@ _vec_exc:
 
     .align 4
 _vec_default:
-    /* RTC 慢速内存 idx3（0x5000000C）：复位后 esptool 可读，用来确认
-     * 「跑到未处理向量/双重异常」（中断从此永久关闭）。 */
-    movi    a2, 0x3FCF0004   /* 未处理向量/双重异常标记（DRAM） */
+    /* 未处理向量/双重异常现场存进 RTC 慢速内存（CPU 复位后不丢，esptool
+     * read-mem 0x50000100 起 16 字节即可读到）：
+     *   +0x100 标记 0xBAD0 / +0x104 EXCCAUSE / +0x108 EXCVADDR / +0x10C EPC1
+     * 注意别往 DRAM 写（原来写的 0x3FCF0004 已经超出 DRAM 末端 0x3FCEF000，
+     * 一写就是二次异常，什么线索都留不下来）。 */
+    movi    a2, 0x50000100
     movi    a3, 0x0000BAD0
     s32i    a3, a2, 0
+    rsr     a3, exccause
+    s32i    a3, a2, 4
+    rsr     a3, excvaddr
+    s32i    a3, a2, 8
+    rsr     a3, epc1
+    s32i    a3, a2, 12
 1:
     j       1b
 
