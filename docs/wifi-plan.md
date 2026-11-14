@@ -2495,3 +2495,26 @@ S3 的 IROM 取指在我们这套"自建镜像 + 原厂 bootloader"里，**TRM �
 这是本项目目前唯一剩下的平台级障碍。已经排除的方向列在上面的 §60~§63 里，
 建议后续按 §63 的三条思路继续（最有用的是第 2 条：在原厂固件的环境里用 JTAG
 把 PC 指到我们镜像的 flash 页上单步，把差异收敛到"bootloader 之后、app 之前"）。
+
+## 65. 最后一组诊断：确认是"取到非法指令"而不是"映射/权限错误"
+
+JTAG 直读异常寄存器（我们的 app，跳进 flash 后 trap）：
+
+```
+pc        = 0x4037c011  (s3_trap 里的死循环)
+exccause  = 0           <- IllegalInstruction
+excvaddr  = 0           <- 没有任何地址错误
+epc1      = 0x42030014  <- 出错的那条指令地址（我们的 flash 段里）
+```
+
+如果 MMU 没映射或权限不对，会得到 `LoadStoreError`/`InstructionFetchError`（cause 24/28/29）
+且 `excvaddr` 有值。现在 `cause=0`、`excvaddr=0` ⇒ **CPU 确实取到了指令，但取回的是
+`0x00000000`**（Xtensa 里 `0x0000` 正好解码成 `ill`）。
+
+同时做的一个对照实验（在原厂固件的环境里用 JTAG 把 PC 指到它自己映射的 flash 页上单步）
+**同样 fault**，说明这条路本身也不能用来验证——JTAG 单步进 flash 不可靠，结论以
+"真正跳进去执行"为准。
+
+至此 IROM 取指问题的性质已经完全确定：**不是配置、不是映射、不是内容**，
+而是 cache 从 flash 取回的数据恒为 0。所有 IDF 官方路径（bootloader 引导、ROM 的
+Cache_Enable_ICache、原厂 SPI_MEM 值）都试过并验证生效，问题仍在。
