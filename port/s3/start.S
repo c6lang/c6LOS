@@ -16,6 +16,7 @@
     .literal .Lrtc,     0x50000000
     .literal .Lm0,      0x000000A0
     .literal .Lm1,      0x000000A1
+    .literal .Lmarks,   g_boot_marks
 
     .global _start
     .type   _start, @function
@@ -96,6 +97,12 @@ _start:
     movi    a3, 0
     s32i    a3, a2, 0xB8            /* 重新上锁 */
 
+    /* 进 _start 的第一件事：往 .data 里的 marks[1] 写 0xA0（这个不会被
+     * 清 .bss 抹掉，比 RTC 可靠）。看到 0xEE 就说明连 _start 都没进来。 */
+    l32r    a2, .Lmarks
+    movi    a3, 0xA0
+    s32i    a3, a2, 4
+
     /* 清 .bss。
      *
      * **注意 .bss 不能长到 0x3FCD9500 那一带**：这块板实测有一段"密集读写就
@@ -118,7 +125,10 @@ _start:
 2:
     l32r    a2, .Lrtc
     l32r    a3, .Lm1
-    s32i    a3, a2, 0            /* 标记 A1：清 bss 完成 */
+    s32i    a3, a2, 0            /* RTC 里的 A1（可能被 ROM 覆写，仅作参考） */
+    l32r    a2, .Lmarks
+    l32r    a3, .Lm1
+    s32i    a3, a2, 0            /* DRAM 标记 [0] = 0xA1：清 bss 完成（可靠） */
 #ifdef __XTENSA_CALL0_ABI__
     call0   port_init
     call0   os_main
