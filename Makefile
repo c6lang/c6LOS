@@ -12,6 +12,8 @@ XTGCC   := $(XTP)gcc
 S3_ABI ?= call0
 # 额外 C 宏（排查用，例如 S3_CDEFS=-DS3_IRQ_HOLD_OFF 先不开中断）
 S3_CDEFS ?=
+# idf_shim.c 的 ABI：默认 windowed（要和闭源库一致）；做对照实验时可设 call0
+S3_SHIM_ABI ?= windowed
 
 XTFLAGS := -mabi=$(S3_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common \
            -mlongcalls -mtext-section-literals -Wall -Wextra
@@ -113,7 +115,7 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 
 $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=windowed $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
@@ -134,7 +136,7 @@ $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 # idf_shim.c 是给闭源库（windowed ABI）用的胶水，必须按 windowed 编译
 $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=windowed $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj

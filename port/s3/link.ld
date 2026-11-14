@@ -2,10 +2,9 @@
  * IDF 官方就是用这几个 linker script 把符号直接钉到 ROM 地址上的，这里原样引用。 */
 INCLUDE port/s3/rom/esp32s3.rom.ld
 INCLUDE port/s3/rom/esp32s3.rom.api.ld
-/* rom.libc.ld / rom.newlib.ld 会把 memcpy/memset/strlen 这类符号钉到 ROM 里，
- * 我们自己的 C 运行库（rt/kprintf.c 等）用的是自己的实现，一起钉过去会打架
- * （实测：真板一启动就 LoadProhibited，PC 落在 ROM 内部）。这两个只在真正
- * 需要时再打开。 */
+/* 实验：把 ROM 的 libc/newlib 映射也打开（历史上带 libphy 的镜像能启动时是开着的） */
+INCLUDE port/s3/rom/esp32s3.rom.libc.ld
+INCLUDE port/s3/rom/esp32s3.rom.newlib.ld
 INCLUDE port/s3/rom/esp32s3.rom.version.ld
 
 ENTRY(_start)

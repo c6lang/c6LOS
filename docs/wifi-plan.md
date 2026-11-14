@@ -356,3 +356,40 @@ _vec_level1:
    逐个加，找出"哪一个目标文件"让镜像过不了 ROM 校验。
 3. 用 esptool `read-flash 0 0x20000` 把写进去的内容读回来和 bin 逐字节 diff，
    排除写入/压缩路径的问题（虽然 esptool 已报 hash 校验通过）。
+
+### 【本轮】启动期看门狗加固（已修好一类问题）+ libphy 启动问题仍未解
+
+**已修并验证**：`port/s3/start.S` 现在在清 .bss 之前就把三个看门狗全部关掉
+（TIMG0、RTC WDT、RTC SWD）。原因：这些寄存器**跨 CPU 复位不清零**（只有掉电才
+复位），任何一次 `esptool --after watchdog-reset` 或之前固件的设置都会留下来，
+表现为"每次都在跑到 `port_init`（关狗）之前就被复位"。
+验证：加完这段之后 `build/wphy2`（windowed 孤岛 + 桥，不含 libphy）刷完立刻正常启动。
+
+**仍未解决**：任何**链接了 `libphy.a`** 的镜像都进不到 `_start`（串口只有 ROM 的
+`load:` 两行，RTC 标记是乱值，`Saved PC` 落在 ROM）。本轮排除了以下可能：
+
+| 假设 | 实验 | 结果 |
+|---|---|---|
+| 写入/flash 路径有问题 | `read-flash` 读回与 bin 逐字节比较 | 完全一致 |
+| 镜像结构坏 | `image-info`：段表/entry/checksum | 都正常（entry == `_start`，checksum valid） |
+| `.iram1` 孤儿段被塞错位置 | 显式 `*(.iram1*)` 合并进 `.text`；再回退 | 两种都不启动 |
+| ROM libc/newlib 映射差异 | 重新打开 `rom.libc.ld`/`rom.newlib.ld` | 不启动 |
+| 三个看门狗 | `_start` 最前面全关（已验证有效） | libphy 镜像仍不启动 |
+| shim 的 ABI（windowed/call0） | `S3_SHIM_ABI=call0` 对照 | 不启动 |
+| 环境漂移 | 重新刷**历史上能启动的** `build/wifim0/c6os.bin` | **现在也不启动** |
+
+最后一条很关键：**同一个二进制文件以前能启动、现在不能** → 说明还有"跨复位保留
+的板级状态"没被清掉（看门狗已排除，剩下可能是 RTC 域里的其它东西，如
+`RTC_CNTL_OPTIONS0`/`SW_SYS_RST` 相关状态、或 flash 的 boot 模式位），也可能
+`libphy` 只是让启动时间变长从而暴露了这个问题。
+
+**下一轮第一步：让用户拔插一次 USB（真正掉电）**，然后刷 `build/wifim0/c6os.bin`
+或 `build/wifim4/c6os.bin`（带 libphy）看是否恢复启动：
+- 恢复 → 说明是"跨复位保留的板级状态"，之后每次实验前先掉电；同时继续查是哪个寄存器；
+- 不恢复 → 说明确实和 libphy 链接有关，按下面的顺序二分：
+  1. 从 `libphy.a` 里解出 `.o`，先只链 `phy_debug.o`（含 `phy_get_rf_cal_version`），
+     再逐个加其它 `.o`，找出"哪一个目标文件"让镜像过不了 ROM；
+  2. 检查该 `.o` 的段名（`readelf -S`），看是否有我们 `link.ld` 没覆盖的段
+     （如 `.dram0.data`/`.dram1.bss`/`.ext_ram.*`），必要时在 `link.ld` 里显式放置；
+  3. 试把镜像写到非 0 偏移（`write-flash 0x10000`）并用 `--flash-size` 调整，
+     排除"镜像整体大小/位置"因素。

@@ -64,7 +64,37 @@ _start:
     /* 栈 */
     l32r    a1, .Lsp
 
-    /* TIMG0 看门狗留给 C 侧在时钟确定后关闭；此处不碰外设。 */
+    /* **先把看门狗关掉，再干活**：TIMG0 / RTC 的看门狗寄存器跨 CPU 复位不清零
+     * （只有掉电才复位），之前任何固件（或 esptool 的 watchdog-reset）把它武装成
+     * 很短的超时后，就会出现"每次都还没跑到 port_init 就被复位"——现象是串口只有
+     * ROM 的 load 两行、RTC 标记全是乱值。这里用最少的指令先关 TIMG0 和 RTC 的狗。 */
+    movi    a2, 0x6001F000          /* TIMG0 */
+    movi    a3, 0x50D83AA1
+    s32i    a3, a2, 0x64            /* WDTWPROTECT */
+    movi    a3, 0
+    s32i    a3, a2, 0x48            /* WDTCONFIG0：关 */
+    s32i    a3, a2, 0x4C
+    s32i    a3, a2, 0x64            /* 重新上锁 */
+
+    movi    a2, 0x60008000          /* RTC_CNTL */
+    s32i    a3, a2, 0xB0            /* 先写 0（解锁前的旧 key 之后会被覆盖） */
+    movi    a3, 0x50D83AA1
+    s32i    a3, a2, 0xB0            /* WDTWPROTECT */
+    movi    a3, 0
+    s32i    a3, a2, 0x98            /* RTC WDTCONFIG0：关 */
+    s32i    a3, a2, 0xB0            /* 重新上锁 */
+
+    /* RTC 超级看门狗（SWD）：esptool 的 watchdog-reset 会把它也装上，超时几秒；
+     * 它同样跨 CPU 复位保留，必须一起关掉。SWD_CONF.SWD_DISABLE = bit30。 */
+    movi    a3, 0x8F1D312A
+    s32i    a3, a2, 0xB8            /* SWD_WPROTECT */
+    l32i    a3, a2, 0xB4
+    movi    a4, 1
+    slli    a4, a4, 30
+    or      a3, a3, a4
+    s32i    a3, a2, 0xB4            /* SWD_CONF |= SWD_DISABLE */
+    movi    a3, 0
+    s32i    a3, a2, 0xB8            /* 重新上锁 */
 
     /* 清 .bss。
      *
