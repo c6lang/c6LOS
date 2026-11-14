@@ -1,0 +1,30 @@
+/* H8: 绕过 cache，用 SPI_MEM 的 USER 通路手工读 flash 0x30000（命令 0x03） */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    u32 guard = 0u, v = 0u;
+
+    s3_beacon(0u, 0xB0000060u);
+
+    os_reg_wr(0x600C4060u, 0x0u);                          /* 关 I-cache，避免干扰 */
+    os_reg_wr(0x600C4000u, 0x0u);                          /* 关 D-cache */
+
+    os_reg_wr(0x60002018u, (1u<<31) | (1u<<30) | (1u<<28)); /* USER: CMD|ADDR|MISO */
+    os_reg_wr(0x6000201Cu, 24u << 26);                      /* USER1: ADDR_BITLEN=24 */
+    os_reg_wr(0x60002020u, (8u << 28) | 32u | 0x03u);       /* USER2: CMD_BITLEN=8, CMD=0x03, MISO=32bit */
+    os_reg_wr(0x60002004u, 0x00030000u);                    /* ADDR */
+
+    os_reg_wr(0x60002000u, 1u << 18);                       /* CMD.USR = 1 触发 */
+    while (guard < 100000u) {
+        if ((os_reg_rd(0x60002000u) & (1u<<18)) == 0u) { break; }
+        guard = guard + 1u;
+    }
+    v = os_reg_rd(0x60002058u);                             /* W0 = 读回数据 */
+
+    s3_beacon(1u, guard);        /* 等待轮数（0 表示立刻完成） */
+    s3_beacon(2u, v);            /* 读回的数据（期望 0x7b004136） */
+    s3_beacon(3u, os_reg_rd(0x60002000u));  /* CMD 残留状态 */
+    for (;;) { }
+}

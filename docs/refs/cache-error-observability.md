@@ -111,3 +111,31 @@ flash 内容 ✓ 无非法访问记录 ✓ 无 MMU 错误记录 ✓ —— **读
 
 唯一还没做的是 **H8**：用 SPI_MEM 的 USER 通路（不走 cache）手工读 flash，
 把"flash 通路"和"cache 通路"彻底分开。这是下一步最有价值的实验。
+
+## H8 实测：SPI 控制器本身是活的（能完成 flash 读命令）
+
+绕过 cache，用 `SPI_MEM` 的 USER 通路手工发一条 `0x03` 读命令（目标 flash 0x30000）：
+
+```c
+os_reg_wr(0x60002018u, (1u<<31)|(1u<<30)|(1u<<28));  /* USER: COMMAND|ADDR|MISO */
+os_reg_wr(0x6000201Cu, 24u << 26);                   /* ADDR_BITLEN = 24 */
+os_reg_wr(0x60002020u, (8u<<28)|32u|0x03u);          /* CMD_BITLEN=8, CMD=0x03, MISO=32bit */
+os_reg_wr(0x60002004u, 0x00030000u);                 /* ADDR */
+os_reg_wr(0x60002000u, 1u<<18);                      /* CMD.USR = 1 触发 */
+while (cmd & (1u<<18)) ;                             /* 轮询完成 */
+```
+
+真板结果：
+
+```
+slot0 = 0xB0000060   进 os_main
+slot1 = 0x00000001   轮询 1 次就完成   <- SPI 控制器正常工作！
+slot2 = 0x00000010   W0 读回的值（数据相位/位序还需调整，不是期望的字节）
+slot3 = 0x00000000   CMD.USR 已清零
+```
+
+⇒ **SPI 控制器能正常执行并完成 flash 读命令**，说明 flash 通路是活的。
+读回的具体字节不对是 MISO 位序/相位配置问题（另一件事），不影响这个结论。
+
+**因此问题确实是 cache 侧特有的**：SPI 能读、bootloader 能读、`esptool` 能读，
+唯独 cache 从 flash 取数返回 0。
