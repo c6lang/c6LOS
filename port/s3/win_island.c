@@ -119,6 +119,18 @@ u32 s3_win_deep(u32 n)
     return s3_win_deep(n - 1u) + 1u;
 }
 
+/* ---- ROM 控制台转发 ---------------------------------------------------
+ * ROM 里的 ets_printf 按 ROM 自己的配置输出（USB-Serial/JTAG 或 UART0），
+ * 不依赖我们 port_init 里的 USB 初始化 —— 串口"坏掉"时这是最可靠的通道。
+ * 注意 ROM 是 windowed ABI，必须从孤岛（windowed）里调，call0 直接调会跑飞。
+ */
+int ets_printf(const char *fmt, ...);
+
+void s3_win_log(const char *s)
+{
+    ets_printf("%s", s);
+}
+
 /* ---- 最小 PHY 初始化（M1） ------------------------------------------
  * register_chipv7_phy(init_data, cal_data, cal_mode) 是 libphy 的初始化主入口
  * （IDF 的 esp_phy_enable() 最终也是调它）。cal_mode: 0=部分校准 1=不校准 2=完整校准。

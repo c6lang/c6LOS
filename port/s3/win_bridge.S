@@ -377,3 +377,34 @@ s3_win_call_deep12:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* void s3_win_call_log(const char *s) —— 从 call0 让 ROM 打印一行 */
+    .align  4
+    .global s3_win_call_log
+    .type   s3_win_call_log, @function
+s3_win_call_log:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    mov     a10, a2
+    call8   s3_win_log
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret

@@ -11,6 +11,20 @@
 #include "c6os/flash.h"
 
 void port_delay_ms(u32 ms);
+
+void s3_win_call_log(const char *s);   /* 经桥用 ROM 的 ets_printf 打印 */
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
 u32  s3_win_call_flash42(void);       /* 经桥调 flash 段里的手写函数(movi a2,42;retw) */
 
 #define GPIO_BASE 0x60004000u
@@ -48,6 +62,7 @@ void os_main(void)
 {
     u32 v = 0u;
 
+    pstr("irom test start\n");
     bl_init();
     blink(2u, 150u);                    /* 开始 */
 
@@ -55,7 +70,19 @@ void os_main(void)
     (void)os_flash_map(0u, 0x42000000u, 0x20000u, OS_FLASH_IROM);
     os_icache_enable();
 
+    pstr("mmu=0x");
+    {
+        u32 e = os_flash_mmu_entry(0x42000000u);
+        int sh = 28;
+
+        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e >> (u32)sh) & 0xFu])); sh -= 4; }
+    }
+    pstr("\n");
+
     v = s3_win_call_flash42();           /* 期望 42 */
+    pstr("flash42 returned ");
+    pu32(v);
+    pstr(" (want 42)\n");
 
     for (;;) {
         if (v == 42u) {

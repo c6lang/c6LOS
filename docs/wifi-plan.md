@@ -992,3 +992,39 @@ CPU 卡死也有效）复位，程序重跑了。
 下一步：刷 `build/wphytest8`，看背光是否出现"3 快闪 + 4 次慢闪"这种组合。
 如果是 → 说明闭源库要 high-level 中断，我们得把对应等级的向量实现成"清中断 +
 返回"（而不是死循环）；如果不是 → 回来查时钟树（第 2 条）。
+
+## 30. 第 25 轮结束时的总状态（接手先看这一节）
+
+### 已经打通、真板验证过的（都在 main 分支或本工作树里）
+
+| 能力 | 证据 |
+|---|---|
+| 音频录放（BOOT 键录音→循环播放） | 真板有声、速度正确 |
+| call0 ↔ windowed ABI 桥 | `L5 win=1003`、`L5b deep=11`、`L5c12 deep12=074` |
+| 寄存器窗口溢出/欠载向量（call4/8/12） | 同上（含 12 参数递归） |
+| 闭源 `libphy.a` 在我们的 RTOS 里执行 | `phy_get_rf_cal_version()` 返回 0x2C7 |
+| 闭源库调用的 mem* 用 windowed 版 | objcopy 改名 + `win_memcpy/win_memset` |
+| LEAN 构建 + libphy 装进 IRAM | IRAM 段结束 0x403D8CE8（坏区 0x403D9500 以下） |
+| flash 窗口(IROM/DROM)映射模块 | `include/c6os/flash.h` + `port/s3/flash.c`（含 SHUT_CORE0_BUS 修复，**未验证**） |
+| 诊断工具 | `tools/flash.sh`（自动重试+USB 自恢复）、`tools/usbreset.py`（USBDEVFS_RESET，能救卡死的 USB）、背光指示灯、`g_boot_marks` |
+
+### 当前唯一的硬卡点
+
+`register_chipv7_phy()`（PHY 初始化/射频校准）**会挂住**：背光实测"反复闪 3 下"，
+即被看门狗复位后重试。已经把 level-2~6 中断改成"闪出等级"来验证"闭源库要
+高等级中断"这个猜想，但**串口在这块板上不稳定**（我们的 USB 初始化在这块板
+状态不对时会失效，连 ROM 的 `ets_printf` 也没输出），背光读数用户也反馈难以判读，
+所以结论还没拿到。
+
+### 后面还有多远（务必先看）
+
+即使 PHY 通了，还要：
+1. 把 `libpp.a`(708KB) + `libnet80211.a`(1.4MB) 放 flash（依赖 §24 的 IROM 修复生效）；
+2. 移植 IDF 的 `esp_wifi/src`（~2000 行）+ FreeRTOS 垫片 + 内存版 NVS + PHY 校准存储；
+3. 关联 WPA2（`libwapi.a`）、DHCP/DNS（可移植 c6 std 库代码或自写）、TCP；
+4. TLS 1.3 握手（std 库只有记录层/KDF/x25519/x509）+ HTTP 客户端（std 库有 `https.c6`）。
+且 §23 已经确认：**当前 c6 编译器不支持 std 库的 module/import 方言**，这些模块要手工移植。
+
+**现实判断**：距离"真板取到 https://qq.com 页面"还有很长距离，不是几轮能完成的。
+建议后续按里程碑推进，先把"PHY 初始化跑通 + 能扫到 AP"作为下一个硬目标
+（它同时验证了 IROM、ABI 桥、闭源库三件事）。

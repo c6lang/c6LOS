@@ -17,7 +17,9 @@ for t in $(seq 1 8); do
     echo "flash ok: $BIN -> $ADDR ($D)"
     exit 0
   fi
-  sleep 2
+  # 失败常见原因是 USB-CDC 卡成 EPROTO：先做主机侧端口复位再重试
+  sudo -n python3 "$(dirname "$0")/usbreset.py" >/dev/null 2>&1
+  sleep 3
   D=""
 done
 echo "flash FAILED: $BIN"
