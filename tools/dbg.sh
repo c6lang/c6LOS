@@ -1,10 +1,11 @@
 #!/bin/sh
 # 用法: ./tools/dbg.sh <elf> <gdb脚本>  —— 通过内置 USB-JTAG（不需要 UART）调试
 set -e
+ESP_TOOLS=${ESP_TOOLS:-/media/winger/inst_26/esp/.espressif}
 ELF="$1"; SCRIPT="$2"
 [ -n "$ELF" ] && [ -n "$SCRIPT" ] || { echo "用法: $0 <elf> <gdb脚本>" >&2; exit 1; }
-OC=$(ls -d ~/.espressif/tools/openocd-esp32/*/openocd-esp32/bin/openocd 2>/dev/null | head -1)
-GDB=$(ls -d ~/.espressif/tools/xtensa-esp-elf-gdb/*/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb 2>/dev/null | head -1)
+OC=$(ls -d ${ESP_TOOLS:-$HOME/.espressif}/tools/openocd-esp32/*/openocd-esp32/bin/openocd 2>/dev/null | head -1)
+GDB=$(ls -d ${ESP_TOOLS:-$HOME/.espressif}/tools/xtensa-esp-elf-gdb/*/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb 2>/dev/null | head -1)
 pkill -x openocd 2>/dev/null || true
 sleep 1
 "$OC" -f board/esp32s3-builtin.cfg >/tmp/oc.log 2>&1 &

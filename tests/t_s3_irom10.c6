@@ -1,0 +1,45 @@
+/* t_s3_irom10.c6 —— 干净判别：MMU 表项补 valid 位(bit14) + cache 关闭状态下重写 + 再开，
+ * 然后**用数据读**访问 IROM 窗口（不取指，避免其它因素干扰）。
+ * 期望：若 valid 位是关键，0x42030000 应读回 flash 0x30000 的内容 0x7B004136。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+static void pstr(const char *s) { s3_win_call_log(s); }
+static void phex(u32 v)
+{
+    char b[11] = {0}; int i = 2; int sh = 28; const char *h = "0123456789abcdef";
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0'; pstr(b);
+}
+
+void os_main(void)
+{
+    u32 v = 0u;
+
+    s3_beacon(0u, 0xB0000010u);
+    s3_beacon(2u, os_reg_rd(0x600C500Cu));      /* 改之前表项 */
+
+    /* cache 全关 */
+    os_reg_wr(0x600C4060u, 0x0u);
+    os_reg_wr(0x600C4000u, 0x0u);
+    /* 表项补 valid 位 */
+    os_reg_wr(0x600C500Cu, 0x4003u);
+    /* cache 再开 */
+    os_reg_wr(0x600C4000u, 0x1u);
+    os_reg_wr(0x600C4060u, 0x1u);
+
+    s3_beacon(3u, os_reg_rd(0x600C500Cu));      /* 改之后表项 */
+
+    /* 按 IDF 参照 app 的实测值恢复 SPI flash 控制器（关键！） */
+    os_reg_wr(0x60002008u, 0x00608000u);        /* SPI_MEM_CTRL */
+    os_reg_wr(0x60002014u, 0x00030103u);        /* SPI_MEM_CLOCK */
+    os_reg_wr(0x600C500Cu, 0x4003u);            /* MMU[3] = valid | page3 */
+
+    v = *(volatile u32 *)0x42030000u;           /* 数据读 IROM 窗口 */
+    s3_beacon(1u, v);
+    pstr("read 0x42030000 = "); phex(v); pstr(" (want 0x7b004136)\n");
+    for (;;) { }
+}
