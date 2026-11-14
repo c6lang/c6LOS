@@ -431,3 +431,21 @@ DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 
 3. `elf2image` 去掉 `--ram-only-header`，让镜像带 IROM/DROM 段（ROM 会自动配置 MMU 映射）。
 4. 先只链 `phy_api.o` 验证「flash 里的闭源代码能被正确取指执行」，
    再回到 `phy_get_rf_cal_version` 走桥调用（M1）。
+
+### 15.1 进展：闭源库代码已经能落进 flash 段（但镜像还没启动）
+
+- `link.ld`：新增 `.flash.text 0x42000000 : AT (0x20000)`，收集
+  `libphy/libpp/libnet80211/libcore/libcoexist/libwapi` 这些归档的
+  `.text*` + `.literal*`；同时把 IRAM 区域的 LENGTH 改成 `0x10500`
+  （= 到坏区 0x403D9500 为止），超出会链接报错，等于把"IRAM 预算"变成硬约束。
+- `Makefile`：`elf2image` 去掉 `--ram-only-header`（有 flash 段时必须）。
+- 验证：不链闭源库的普通镜像**照常启动**（`wphy8` 输出 ABC/L2/L3/L4/L5 全对），
+  `image-info` 里也只有 DRAM + IRAM 两段 → 没有回归。
+- 链 libphy 时 ELF 已经正确：程序头 `LOAD VirtAddr 0x42000000 PhysAddr 0x20000
+  FileSiz 0x96fd` ✓，IRAM 段缩到 0x9674（结束 0x403D2674，安全）。
+- **但镜像仍启动不了**：`image-info` 显示 IROM 段落在**文件偏移 0xfff8**
+  （不是 64KB 对齐的 0x10000），ROM 很可能因为这个非对齐/填充段而拒绝映射 →
+  下一轮要修 `elf2image` 的填充：让 IROM 段的 flash 偏移严格落在 64KB 边界
+  （做法：把 `.flash.text` 的 LMA 设到 `0x20000` 之外，再保证前面所有段
+  总长 < 0x20000；或显式加一个 `. = 0x20000` 的填充段在链接脚本里，
+  不让 elf2image 自己插入 PADDING 段）。

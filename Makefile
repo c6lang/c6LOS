@@ -152,7 +152,7 @@ $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
-	esptool --chip esp32s3 elf2image --ram-only-header --flash-mode dio \
+	esptool --chip esp32s3 elf2image --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
 
 image-info: $(BUILD)/c6os.bin

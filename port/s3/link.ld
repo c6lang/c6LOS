@@ -10,7 +10,10 @@ ENTRY(_start)
 
 MEMORY
 {
-  IRAM (rx) : ORIGIN = 0x403C9000, LENGTH = 0x17000
+  /* IRAM 只能用 0x403C9000..0x403D9500 这 66KB：再往上 0x403D9500 是 SRAM 坏区
+     （DRAM 侧别名 0x3FCD9500，密集 CPU 访问会挂死 CPU，实测越过它的镜像根本
+     启动不了）。所以 IDF 闭源大库（libphy/libpp/libnet80211）的代码要放 flash。 */
+  IRAM (rx) : ORIGIN = 0x403C9000, LENGTH = 0x10500
   /* 原来只用 DRAM 顶部 116KB（0x3FCE3000 起）。实测 0x3FCA0000 起、下方留 96KB
      给 ROM 之后，RAM-only 镜像在 app 运行期可自由读写整段，240x240 RGB565
      帧缓冲（115200B）因此可以放进内部 RAM。 */
@@ -19,6 +22,22 @@ MEMORY
 
 SECTIONS
 {
+  /* IDF 闭源库的代码放 flash（IROM 0x42000000，LMA 在 flash 0x20000）。
+     只在真的链接了这些库时才非空，普通构建里是空段、不产生 flash 段。
+     注意字面量池必须跟代码一起搬：l32r 是 PC 相对（往低地址 ±256KB），
+     代码和字面量都在 flash 段里就没问题。 */
+  .flash.text 0x42000000 : AT (0x20000)
+  {
+    _flash_text_start = .;
+    *libphy.a:(.literal .literal.* .text .text.*)
+    *libpp.a:(.literal .literal.* .text .text.*)
+    *libnet80211.a:(.literal .literal.* .text .text.*)
+    *libcore.a:(.literal .literal.* .text .text.*)
+    *libcoexist.a:(.literal .literal.* .text .text.*)
+    *libwapi.a:(.literal .literal.* .text .text.*)
+    _flash_text_end = .;
+  }
+
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的
      （M1 之后代码变大时改用 -mno-text-section-literals + --auto-litpools）。 */
   .vector : {
