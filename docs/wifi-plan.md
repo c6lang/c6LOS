@@ -2079,3 +2079,55 @@ WiFi 栈就能装进 image，`esp_wifi_init_internal()` 就能真板跑起来。
 | I-cache 使能 | ✅ 与能跑的固件一致 |
 | **SPI_MEM flash 读模式** | ❌ **唯一剩余** |
 | 之后：WiFi 初始化/扫描/连接/DHCP/TCP/TLS/HTTP | ⏳ 待 IROM 打通 |
+
+### 第 38 轮：按原厂值改 SPI_MEM 读模式 —— 仍未通（记录在案）
+
+在 `os_icache_enable()` 里加上了：
+
+```c
+*(volatile u32 *)0x60002008u = 0x00608000u;   /* 原厂值：DIO */
+*(volatile u32 *)0x60002014u = 0x00030103u;
+```
+
+重刷镜像 + flash 段后信标仍是：
+
+```
+slot0 = 0xB0000001   （进 os_main）
+slot1 = 0xAAAA0001   （马上要调 flash 里的函数）
+slot2 = 0x00004010   （MMU 表项 valid ✓）
+=> slot0 没有变成 0xF100002A，即 s3_win_call_flash42() 仍未返回
+```
+
+说明 SPI_MEM 的这两个值不是充分条件（也可能写进去后被 ROM/硬件覆盖，或还需要别的位）。
+
+### 交接时的确切结论（重要）
+
+到这一轮为止，**WiFi 目标没有达成**。已确证的部分：
+
+| 环节 | 状态 | 证据 |
+|---|---|---|
+| windowed ABI 桥 + 窗口溢出/欠载向量 | ✅ | 真板 deep=11 / deep12=074 |
+| libphy 在 c6LOS 里执行（PHY 初始化） | ✅ | JTAG 逐步：5 步全返回，s3_trap 未命中 |
+| PHY 之后串口失联的原因 | ✅ | USB 时钟/复位/RTC_USB_CONF 被清零（实测寄存器） |
+| 无 UART 的调试通道 | ✅ | USB-JTAG + openocd + gdb（断点/单步/读寄存器） |
+| WiFi 闭源库 + IDF esp_wifi 源码层链接 | ✅ | 0 个未定义符号 |
+| MMU IROM 映射 | ✅ | 表项 0x4010（含 valid 位）|
+| I-cache 使能 | ✅ | CTRL=1 / CTRL1=0 / 0x4068=5，与原厂一致 |
+| **IROM 取指（flash 里执行代码）** | ❌ | epc1=0x42100014 但 exccause=0（取到 0x00000000 = ill） |
+| WiFi 初始化/扫描/连接/DHCP/TCP/TLS/HTTP | ⏳ | 卡在上面这一项 |
+
+**唯一阻塞点**：S3 的 I-cache 不从 flash 取数（读到 0）。这是纯平台配置问题，
+所有寄存器对照手段都已就绪（刷原厂固件 + JTAG dump 对照），继续做只需要：
+
+1. 更系统地 dump 原厂固件的 `0x60002000~0x60002100`（SPI_MEM 全段）以及
+   `0x600C4000~0x600C4100`（EXTMEM/ICACHE 全段），逐位比对
+2. 或者在原厂固件里 halt 后，**直接观察它执行一次 flash 访问**前后的寄存器变化
+3. 也可以换个思路：**用 ROM 的 `Cache_Read_Enable`/`SPI_read` 类 API**
+   （ROM 里有现成的 flash cache 初始化入口，只是之前没找对）
+
+### 代码与工具状态
+
+- 所有工作已提交（main 干净）
+- 板子刷的是 `build/won`：背光常亮 + 每秒心跳，不碰 PHY，串口/esptool/JTAG 都可用
+- 排查工具：`tools/dbg.sh`、`tools/flashmon.sh`、`tools/beacon.sh`、`tools/idfcc.sh`、
+  `tools/{gphy,gfin2,gusb,gtrap2,gidf2,gspi,gwhere2}.gdb`

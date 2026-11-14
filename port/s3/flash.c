@@ -71,6 +71,12 @@ void os_icache_enable(void)
     /* **关键**：SHUT_CORE0_BUS 复位默认是 1（关着），不清它的话 core0 的 I 总线
      * 根本不到 cache —— 映射再好也取不到指令（表现为 IllegalInstruction）。
      * IDF 的 bootloader 在建完 MMU 映射后就是干这两件事。 */
+    /* SPI_MEM 的 flash 读模式：必须和能跑的固件一致（DIO）。
+     * 我们镜像头给的是 QIO 类配置(0x00ECA008)，实测导致 **cache 读回来全是 0**
+     * （跳到 IROM 里执行时是 ill）。原厂值是 0x00608000 / 0x00030103。 */
+    *(volatile u32 *)0x60002008u = 0x00608000u;
+    *(volatile u32 *)0x60002014u = 0x00030103u;
+
     /* 这两个值是从**原厂 IDF 固件**里用 JTAG halt 读出来的（它能正常从 flash 取指）：
      *   0x600C4068 = 0x5, 0x600C407C = 0x4
      * 不设它们，缓存虽然"使能"了，但取指仍然拿不到数据。 */
