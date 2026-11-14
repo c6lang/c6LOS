@@ -144,3 +144,44 @@ IROM 访问仍然返回 0。** 因此可以确认差异不在这些"事后可写
 `0 / 0x00010001`，是它**自己初始化后**的状态，不能简单照搬。
 
 ⇒ 更加确认：问题不在这些"事后可写"的寄存器，而在**引导阶段完成的一次性配置**。
+
+---
+
+## 附三：**把同一个 MMU 表项写进去，IDF app 能读，我们不能**
+
+这是目前为止最有力的一组对照实验。
+
+在**能正常工作的 IDF app** 里加三行：
+
+```c
+printf("before mmu3=%08x\n", *(volatile unsigned*)0x600C500C);   // 0x00004000（无效）
+*(volatile unsigned*)0x600C500C = 3u;                             // 映射 entry3 -> flash 页 3
+printf("after  mmu3=%08x\n", *(volatile unsigned*)0x600C500C);   // 0x00000003（有效）
+printf("read 0x42030000 = %08x\n", *(volatile unsigned*)0x42030000u);
+```
+
+真板输出：
+
+```
+after  mmu3=00000003
+read 0x42030000 = 20c02088      ← 真实数据（不是 0）
+```
+
+在**我们的 app** 里做同样的事（bootloader 本来就把 entry3 映射成页 3）：
+
+```
+irom3=0x00000000                ← 永远返回 0
+```
+
+补充：我们还把
+- cache 模式位对齐成 IDF 运行态的 `ICACHE_CTRL=0x0b` / `DCACHE_CTRL=0x09`
+- 经 windowed 孤岛成功调用了 ROM 的 `Cache_Invalidate_ICache_All()`（信标确认返回）
+
+之后再读，**仍然是 0**。
+
+⇒ 结论：**问题不在 MMU 表项、不在 cache 模式、不在 flash 内容**，
+而在于「我们这个 app 的运行时状态和 IDF app 有某种本质差别」，
+使得 cache 对 IROM 的访问被静默吞掉。
+
+**这一条最适合作为排查线索**：请 Espressif 帮我们指出，还有什么东西会让
+"cache 访问外部存储器的请求"被静默丢弃（不响应、不报 Cache error）。

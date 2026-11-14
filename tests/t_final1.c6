@@ -1,0 +1,38 @@
+/* 最后的组合：cache 模式对齐 IDF(0x0b/0x09) + 经 windowed 岛调 ROM invalidate + 读 IROM */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void s3_win_call_log(const char *s);
+u32  s3_win_call_flash42(void);
+u32  s3_win_call_cache_invalidate(void);
+static void pstr(const char *s) { s3_win_call_log(s); }
+static void phex(u32 v)
+{
+    char b[11] = {0}; int i = 2; int sh = 28; const char *h = "0123456789abcdef";
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0'; pstr(b); pstr("\n");
+}
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000030u);
+
+    /* 1) cache 模式对齐 IDF 运行态 */
+    os_reg_wr(0x600C4000u, 0x00000009u);
+    os_reg_wr(0x600C4060u, 0x0000000Bu);
+
+    /* 2) ROM 的 Cache_Invalidate_ICache_All（经 windowed 孤岛） */
+    s3_win_call_cache_invalidate();
+    s3_beacon(3u, 0x1CAC0001u);
+
+    /* 3) 读 IROM（bootloader 已把 entry3 映射为页3） */
+    v = *(volatile u32 *)0x42030000u;
+    s3_beacon(2u, v);
+    pstr("irom3="); phex(v);
+
+    v = s3_win_call_flash42();
+    s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
+    pstr("call="); phex(v);
+    for (;;) { }
+}
