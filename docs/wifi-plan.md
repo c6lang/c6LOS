@@ -1259,3 +1259,53 @@ ROM 才会正常引导 flash 里的固件；
 - 一套硬件诊断工具（`tools/flash.sh`、`reset.py`、`cap.py`、`usbreset.py`、
   `beacon.sh`）+ RTC 信标通道
 - `docs/wifi-plan.md` 37 节，把这十几次踩的坑全部记录在案
+
+## 38. 第 29 轮末：PHY 卡死的根因已定位到"函数表 g_phyFuns"，但还没接上
+
+### 已确认的事实（反汇编 + 分步实测）
+
+`register_chipv7_phy()` 一开始就：
+```
+l32r a7, <&g_phyFuns>      ; a7 = g_phyFuns 变量的地址
+l32i a5, a7, 0             ; a5 = g_phyFuns（函数表指针）
+l32i a5, a5, 0x204         ; 表项
+callx8 a5                  ; 调 ROM 里的 PHY 函数
+```
+而我们的链接结果里 `g_phyFuns` 是本地 `.bss`（`0x3fca95e4`）= **0**，
+所以这一步就是空指针调用 ⇒ 卡死/跑飞（实测 trap：`cause=0x14 InstrFetchProhibited pc=0`）。
+
+分步实测（`build/wphyM` 的 RTC 信标）：
+```
+phyFuns before = 0
+step1(时钟)            rc=0      ✓
+step2(phy_get_romfuncs) rc=0     ✓ 调通了，但…
+step3(查表)            rc=0x102  ✗ g_phyFuns 仍然是 0
+```
+
+### 为什么 `phy_get_romfuncs()` 没填上
+
+ESP32-**S2** 的 ROM ld 里有 `PROVIDE ( g_phyFuns = 0x3ffffd90 )`，
+即应用引用的 `g_phyFuns` 直接**别名到 ROM 的内存变量**，ROM 填的就是它。
+ESP32-**S3** 的 `esp32s3.rom.ld` **没有**这条 ⇒ 我们的链接器造了个私有副本，
+ROM 填的是它自己那份，两边不是同一个变量。
+
+### 下一次的最短路径（任选）
+
+1. **反查 S3 的 g_phyFuns 地址**：在 IDF 的 `libphy.a` 里它是个 `.bss` 符号；
+   真正有效的是 ROM 数据区里的那一份。可以用"调用 `phy_get_romfuncs()` 前后
+   dump `0x3FC88000..0x3FC9FFF0` 做 diff"（注意：**只能解引用确定映射的地址**，
+   否则 LoadStoreError——这一轮踩过）。
+2. 或者干脆**自己造表**：`g_phyFuns` 指向一张 4 字节对齐的函数指针表，
+   把 `register_chipv7_phy` 用到的表项（0x204 等）填成 ROM 里对应的
+   `phy_*` 函数地址（`port/s3/rom/esp32s3.rom.ld` 里已经有一批）。
+3. 观察通道：**强烈建议接一根 USB-UART 到 GPIO43/44**（UART0）。现在的
+   USB-CDC 只要 PHY 一初始化就掉枚举，什么都看不到；UART0 不受影响。
+
+### 这一轮新增/修正的代码
+
+- `port/s3/win_island.c`：`s3_win_phy_clock_enable()`（modem 时钟）、
+  `phy_get_romfuncs()` 调用、`s3_win_find_phytab()`（按特征搜表）、
+  `s3_win_usb_reclaim()`（PHY 抢走 USB PHY 后抢回）、`s3_win_phy_step(1..5)`
+- `port/s3/win_bridge.S`：`s3_win_call_phy_step`、`s3_win_call_phy_funcs`
+- `tools/beacon.sh`、`tools/cap.py`（抓所有 ttyACM + 释放 DTR）
+- `tests/t_s3_phy.c6`：分步诊断，结果只写 RTC 信标（崩溃也不丢）
