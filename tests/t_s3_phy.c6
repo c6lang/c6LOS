@@ -119,18 +119,22 @@ void os_main(void)
     u32 cal0 = 0u;
     u32 n = 0u;
 
+    s3_beacon(0u, 0xB0000001u);
     pstr("phy: enter os_main\n");
     bl_init();
     pstr("phy: bl ok\n");
     blink(3u, 150u);                    /* 开始：快闪 3 下 */
     pstr("phy: blink ok\n");
 
+    s3_beacon(0u, 0xB0000004u);
     pstr("phy: clock+call\n");
     timg_wdt_arm(160000000u);            /* 约 2 秒；挂住 -> 硬件复位 */
     swd_on();
     rc = s3_win_call_phy_enable();       /* 0 = 成功 */
     swd_off();
     timg_wdt_off();
+    s3_beacon(0u, 0xB0000005u);
+    s3_beacon(1u, rc);
     pstr("phy: rc=");
     phex(rc);
     pstr(" cal1=");

@@ -10,3 +10,20 @@
 /* 故意用非零初值 → 落在 .data（清 .bss 不会抹掉），这样连"进 _start 之前"
  * 的阶段也能留下痕迹。 */
 volatile u32 g_boot_marks[8] = {0xEEu, 0xEEu, 0xEEu, 0xEEu, 0xEEu, 0xEEu, 0xEEu, 0xEEu};
+
+/* ---- 掉电域"信标"：RTC_CNTL_STORE4..7 -------------------------------
+ * 0x600080C0/C4/C8/CC —— 属于 RTC 域，**CPU 复位/看门狗复位都不会清**，
+ * 而 esptool 又能直接 read-mem 读出来。串口不可靠时，这是最靠谱的诊断通道：
+ * 程序把执行进度写进这 4 个字，跑完后用
+ *   esptool read-mem 0x600080C0
+ * 就能知道它走到哪一步、卡在哪。
+ */
+#define S3_RTC_STORE4 (*(volatile u32 *)0x600080C0u)
+
+void s3_beacon(u32 slot, u32 val)
+{
+    volatile u32 *p = &S3_RTC_STORE4;
+
+    if (slot > 3u) { slot = 3u; }
+    p[slot] = val;
+}

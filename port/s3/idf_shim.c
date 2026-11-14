@@ -22,8 +22,11 @@ static u32 g_phy_ps;
 int  ets_printf(const char *fmt, ...);
 static u32 g_trace_n;
 
+void s3_beacon(u32 slot, u32 val);
+
 void s3_win_trace(const char *s)
 {
+    s3_beacon(3u, 0xC0000000u | (g_trace_n & 0xFFFFu));
     if (g_trace_n < 40u) {
         g_trace_n = g_trace_n + 1u;
         ets_printf("%s", s);
