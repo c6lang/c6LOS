@@ -182,6 +182,41 @@ static void s3_win_usb_reclaim(void)
     *(volatile u32 *)0x60038018u |= (1u << 14);            /*               置 pullup */
 }
 
+/* 分步诊断：逐步执行 PHY 初始化的前置动作，每步都返回，方便用串口/信标
+ * 定位"到底哪一步开始卡"。step 含义见 tests/t_s3_phy.c6。
+ * 返回：0 成功；否则是失败的步骤号。
+ * 另外把 g_phyFuns 的内容也暴露出去（step 2 用它确认 ROM 真的填了表）。 */
+extern volatile u32 g_phyFuns;
+int register_chipv7_phy_init_param(const void *init_data, void *cal_data, int mode);
+
+u32 s3_win_phy_funcs_word(void)
+{
+    return g_phyFuns;
+}
+
+int s3_win_phy_step(int step)
+{
+    s3_win_phy_clock_enable();
+    if (step <= 1) {
+        return 0;
+    }
+    phy_get_romfuncs();            /* 填 g_phyFuns */
+    if (step <= 2) {
+        return 0;
+    }
+    if (g_phyFuns == 0u) {
+        return 0x100 + 2;          /* 表没填上 */
+    }
+    if (step <= 3) {
+        return 0;
+    }
+    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    if (step <= 4) {
+        return 0;
+    }
+    return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+}
+
 int s3_win_phy_enable(void)
 {
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
@@ -240,6 +275,41 @@ static void s3_win_usb_reclaim(void)
     *(volatile u32 *)0x600C0024u &= ~(1u << 10);           /* PERIP_RST_EN1: 解除复位 */
     *(volatile u32 *)0x60038018u &= ~(1u << 16);           /* USB_JTAG_CONF0: 清 disconnect */
     *(volatile u32 *)0x60038018u |= (1u << 14);            /*               置 pullup */
+}
+
+/* 分步诊断：逐步执行 PHY 初始化的前置动作，每步都返回，方便用串口/信标
+ * 定位"到底哪一步开始卡"。step 含义见 tests/t_s3_phy.c6。
+ * 返回：0 成功；否则是失败的步骤号。
+ * 另外把 g_phyFuns 的内容也暴露出去（step 2 用它确认 ROM 真的填了表）。 */
+extern volatile u32 g_phyFuns;
+int register_chipv7_phy_init_param(const void *init_data, void *cal_data, int mode);
+
+u32 s3_win_phy_funcs_word(void)
+{
+    return g_phyFuns;
+}
+
+int s3_win_phy_step(int step)
+{
+    s3_win_phy_clock_enable();
+    if (step <= 1) {
+        return 0;
+    }
+    phy_get_romfuncs();            /* 填 g_phyFuns */
+    if (step <= 2) {
+        return 0;
+    }
+    if (g_phyFuns == 0u) {
+        return 0x100 + 2;          /* 表没填上 */
+    }
+    if (step <= 3) {
+        return 0;
+    }
+    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    if (step <= 4) {
+        return 0;
+    }
+    return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
 int s3_win_phy_enable(void)

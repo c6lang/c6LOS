@@ -1,18 +1,21 @@
-/* t_s3_phy.c6 —— 用"背光当指示灯"来验证 PHY 初始化结果（不依赖串口）。
+/* t_s3_phy.c6 —— PHY 初始化分步诊断（M1 的关键一步）。
  *
- * 板子的 LCD 背光在 GPIO13，这里不走 panel.c（LEAN 构建里没有），直接操作 GPIO：
- *   开始：快速闪 3 下
- *   成功（register_chipv7_phy 返回 0）：背光常亮
- *   失败：慢闪 (|rc| + 1) 下，然后停一下重复
+ * 逐步执行 PHY 初始化的每个前置动作，每步返回后打印，从而定位"到底哪一步开始卡"：
+ *   step1: 开 modem 时钟（SYSCON_WIFI_CLK_EN）
+ *   step2: 调 ROM 的 phy_get_romfuncs()（填 g_phyFuns 函数表）
+ *   step3: 检查 g_phyFuns 是否非空
+ *   step4: register_chipv7_phy_init_param()
+ *   step5: register_chipv7_phy()  ← 之前就是卡在这里
+ * 打印走 ROM 的 ets_printf（不依赖我们自己的 USB 控制台），同时也写 RTC 信标。
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/reg.h"
 
 void port_delay_ms(u32 ms);
-#include "c6os/reg.h"
-u32  s3_win_call_phy_enable(void);      /* 经 ABI 桥调 register_chipv7_phy */
-u32  s3_win_call_phy_cal_word(u32 i);   /* 读回校准数据里的字 */
-void s3_win_call_log(const char *s);    /* 经孤岛用 ROM 的 ets_printf 打印 */
+void s3_win_call_log(const char *s);
+u32  s3_win_call_phy_step(u32 step);
+u32  s3_win_call_phy_funcs(void);
 
 static void pstr(const char *s) { s3_win_call_log(s); }
 
@@ -20,78 +23,20 @@ static void phex(u32 v)
 {
     char b[11] = {0};
     int i = 0;
+    int sh = 28;
 
     b[0] = '0'; b[1] = 'x';
     i = 2;
-    {
-        int sh = 28;
-
-        while (sh >= 0) {
-            b[i] = "0123456789abcdef"[(v >> (u32)sh) & 0xFu];
-            i++;
-            sh -= 4;
-        }
+    sh = 28;
+    while (sh >= 0) {
+        b[i] = "0123456789abcdef"[(v >> (u32)sh) & 0xFu];
+        i++;
+        sh -= 4;
     }
     b[10] = '\0';
     pstr(b);
 }
 
-#define GPIO_BASE 0x60004000u
-#define PIN_BL    13u
-
-static void bl_init(void)
-{
-    u32 a = 0x60009000u + 0x04u + 4u * PIN_BL;
-    u32 v = os_reg_rd(a);
-
-    os_reg_wr(a, (v & ~(7u << 12)) | (1u << 12));       /* IO_MUX: 选 GPIO */
-    os_reg_wr(GPIO_BASE + 0x554u + 4u * PIN_BL, 0x100u); /* OUT_SEL = 普通 GPIO */
-    os_reg_wr(GPIO_BASE + 0x24u, 1u << PIN_BL);          /* 输出使能 */
-}
-
-static void bl(u32 on)
-{
-    os_reg_wr(on != 0u ? (GPIO_BASE + 0x08u) : (GPIO_BASE + 0x0Cu), 1u << PIN_BL);
-}
-
-/* 危险调用前后开关 TIMG0 看门狗（硬件定时器：即使 CPU 卡在死循环里、
- * 中断也关着，时间到照样整片复位）。这块板上 esptool 的 watchdog-reset
- * 用的就是它，实测有效。
- *   WDT_CONFIG0(0x48): EN=bit31, STG0=bits30:29 (2 = 系统复位), SYS_RESET_LENGTH=bits17:15
- *   WDT_CONFIG1(0x4C): STG0 超时 ticks（APB 时钟，按 80MHz 估算）
- */
-static void timg_wdt_arm(u32 ticks)
-{
-    os_reg_wr(0x6001F064u, 0x50D83AA1u);                       /* WDTWPROTECT */
-    os_reg_wr(0x6001F04Cu, ticks);                             /* STG0 hold */
-    os_reg_wr(0x6001F048u, (1u << 31) | (2u << 29) | (1u << 15));
-    os_reg_wr(0x6001F064u, 0u);
-}
-
-static void timg_wdt_off(void)
-{
-    os_reg_wr(0x6001F064u, 0x50D83AA1u);
-    os_reg_wr(0x6001F048u, 0u);
-    os_reg_wr(0x6001F064u, 0u);
-}
-
-/* 危险调用（可能挂死）前后开关 RTC 超级看门狗（SWD）：
- * 打开后约 3.5 秒没被喂就会整片复位 —— 这样挂住也能自己恢复，不用人工拔插。 */
-static void swd_on(void)
-{
-    os_reg_wr(0x600080B8u, 0x8F1D312Au);                  /* SWD_WPROTECT */
-    os_reg_wr(0x600080B4u, os_reg_rd(0x600080B4u) & ~(1u << 30));  /* SWD_DISABLE=0 */
-    os_reg_wr(0x600080B8u, 0u);
-}
-
-static void swd_off(void)
-{
-    os_reg_wr(0x600080B8u, 0x8F1D312Au);
-    os_reg_wr(0x600080B4u, os_reg_rd(0x600080B4u) | (1u << 30));
-    os_reg_wr(0x600080B8u, 0u);
-}
-
-/* 纯忙等延时（不等 tick，避免依赖中断） */
 static void busy_ms(u32 ms)
 {
     volatile u32 i = 0;
@@ -100,58 +45,33 @@ static void busy_ms(u32 ms)
     while (i < n) { i = i + 1u; }
 }
 
-static void blink(u32 n, u32 ms)
-{
-    u32 i = 0;
-
-    while (i < n) {
-        bl(1u);
-        busy_ms(ms);
-        bl(0u);
-        busy_ms(ms);
-        i++;
-    }
-}
-
 void os_main(void)
 {
+    u32 step = 1u;
     u32 rc = 0u;
-    u32 cal0 = 0u;
-    u32 n = 0u;
 
-    s3_beacon(0u, 0xB0000001u);   /* 进 os_main */
+    s3_beacon(0u, 0xE0000001u);
     pstr("phy: enter os_main\n");
-    bl_init();
-    pstr("phy: bl ok\n");
-    blink(3u, 150u);                    /* 开始：快闪 3 下 */
-    pstr("phy: blink ok\n");
 
-    s3_beacon(0u, 0xB0000004u);
-    pstr("phy: clock+call\n");
-    timg_wdt_arm(160000000u);            /* 约 2 秒；挂住 -> 硬件复位 */
-    swd_on();
-    rc = s3_win_call_phy_enable();       /* 0 = 成功 */
-    swd_off();
-    timg_wdt_off();
-    s3_beacon(0u, 0xB0000005u);
-    s3_beacon(1u, rc);
-    pstr("phy: rc=");
-    phex(rc);
-    pstr(" cal1=");
-    phex(cal0);
+    s3_beacon(3u, s3_win_call_phy_funcs());   /* 调用前 g_phyFuns 的内容 */
+    pstr("phyFuns before = ");
+    phex(s3_win_call_phy_funcs());
     pstr("\n");
-    cal0 = s3_win_call_phy_cal_word(1); /* 校准数据里应该出现非零 */
 
-    if (rc == 0u && cal0 != 0u) {
-        bl(1u);                          /* 常亮 = 成功 */
-    } else {
-        bl(0u);
-        n = (rc & 0x7u) + 1u;
-        for (;;) {
-            blink(n, 600u);              /* 慢闪 rc+1 下 = 失败码 */
-            busy_ms(1200u);
-        }
+    for (step = 1u; step <= 5u; step++) {
+        s3_beacon(0u, 0xE0000000u + step);
+        pstr("step ");
+        phex(step);
+        pstr(" ... ");
+        rc = s3_win_call_phy_step(step);
+        pstr("rc=");
+        phex(rc);
+        pstr("\n");
     }
+
+    s3_beacon(0u, 0xE00000FFu);
+    s3_beacon(1u, rc);
+    s3_beacon(2u, s3_win_call_phy_funcs());
 
     for (;;) {
         busy_ms(500u);
