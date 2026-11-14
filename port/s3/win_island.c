@@ -125,6 +125,8 @@ u32 s3_win_deep(u32 n)
  * 注意 ROM 是 windowed ABI，必须从孤岛（windowed）里调，call0 直接调会跑飞。
  */
 int ets_printf(const char *fmt, ...);
+/* ROM：0x40005c58，填 g_phyFuns 函数表（见 esp32s3.rom.ld） */
+void phy_get_romfuncs(void);
 
 void s3_win_log(const char *s)
 {
@@ -192,6 +194,13 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
     s3_win_phy_clock_enable();
+    /* **关键**：register_chipv7_phy() 一上来就用全局函数表 g_phyFuns
+     * （反汇编：l32i a5, g_phyFuns; l32i a5, a5, 0x204; callx8 a5）。
+     * 这个表由 ROM 的 phy_get_romfuncs()（0x40005c58）填；IDF 在
+     * esp_phy_enable() 里会先调它。我们之前没调 -> 表是空的 -> 解引用空指针，
+     * 表现就是"卡死在里面"。
+     * ROM 是 windowed，所以必须从孤岛里调。 */
+    phy_get_romfuncs();
     {
         int rc = register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 
