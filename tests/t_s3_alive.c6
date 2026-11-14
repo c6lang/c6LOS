@@ -1,0 +1,22 @@
+/* t_s3_alive.c6 —— 不依赖串口的"活着吗"探针：往 RTC 慢速内存 0x50000008
+ * 写一个不断自增的心跳。用 `esptool read-mem 0x50000008` 读两次，数字变了就
+ * 说明应用在跑（串口坏了也能判断）。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void port_delay_ms(u32 ms);
+
+#define HEART (*(volatile u32 *)0x50000008u)
+
+void os_main(void)
+{
+    u32 n = 0u;
+
+    HEART = 0x100u;                 /* 0x100 = 进了 os_main */
+    for (;;) {
+        n = n + 1u;
+        HEART = 0x100u + (n & 0xFFFu);
+        port_delay_ms(20u);
+    }
+}
