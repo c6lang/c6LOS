@@ -2993,3 +2993,16 @@ Flash memory status: 0x0200     <- 原厂固件
 
 同时新增了 `tools/try.sh`（一条命令完成 构建→生成镜像→烧三件套→复位→抓串口→读信标），
 后续验证假设可以一条命令搞定。
+
+## 78. eFuse 也排除了
+
+`espefuse summary` 关键位：
+
+```
+DIS_ICACHE      = False    (没有禁用 I-cache)
+DIS_DCACHE      = False
+DIS_DIRECT_BOOT = False    (没有禁用直接启动)
+FLASH_TYPE      = 4 data lines
+```
+
+⇒ **没有任何 eFuse 位禁用 cache 或 flash 直启**，一次性配置里这一项也排除。
