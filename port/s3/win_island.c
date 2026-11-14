@@ -35,6 +35,26 @@ u32 s3_win_flash_add(u32 a, u32 b)
     return a + b + 7u;
 }
 
+/* 叶子函数：不需要栈帧，编译器应该只生成 addi/retw（没有 entry）。
+ * 用它区分"是不是 entry 指令在 IROM 里出问题"。 */
+__attribute__((section(".flash.text"), noinline))
+u32 s3_win_flash_leaf(u32 a)
+{
+    return a + 7u;
+}
+
+u32 s3_asm_flash_42(void);      /* 手写在 flash 段里的 movi+retw（无 entry） */
+
+u32 s3_win_flash42_chain(void)
+{
+    return s3_asm_flash_42();
+}
+
+u32 s3_win_flash_leaf_chain(u32 a)
+{
+    return s3_win_flash_leaf(a);
+}
+
 /* IRAM 里的包装：由编译器负责跨到 flash（-mlongcalls 会生成 l32r+callx8） */
 u32 s3_win_flash_chain(u32 a, u32 b)
 {

@@ -17,6 +17,8 @@ u32 s3_win_call_deep(u32 n);         /* 桥调 windowed 深递归（测窗口溢
 u32 s3_win_call_flash_add(u32 a, u32 b);  /* 桥调放在 flash 段里的 windowed 函数 */
 u32 s3_win_call_flash_pat(void);          /* flash 段里已知图案数组的地址 */
 u32 s3_win_call_flash_addr(void);         /* flash 里那个函数的地址 */
+u32 s3_win_call_flash_leaf(u32 a);        /* 调 flash 里的叶子函数（无 entry） */
+u32 s3_win_call_flash42(void);            /* 调 flash 里手写的 movi+retw（无 entry） */
 
 static void put1(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
 
@@ -92,6 +94,26 @@ void os_main(void)
     }
     port_putc('\n'); }
 
+    /* 用 DROM 别名验证映射：映射 flash 0x0..0x20000 到 0x3C000000，
+     * 读回来的第 0 字节应该是镜像头 0xE9（magic）。 */
+    port_puts("L5f drom=");
+    {
+        int rc = os_flash_map(0u, 0x3C000000u, 0x20000u, OS_FLASH_DROM);
+        u8 b0 = 0;
+        u8 b2 = 0;
+
+        os_dcache_enable();
+        b0 = *(volatile u8 *)0x3C000000u;
+        b2 = *(volatile u8 *)0x3C000002u;
+        port_putc((int)('0' + (rc == 0 ? 1 : 0)));
+        port_putc(',');
+        port_putc((int)("0123456789abcdef"[(b0 >> 4) & 0xFu]));
+        port_putc((int)("0123456789abcdef"[b0 & 0xFu]));
+        port_putc((int)("0123456789abcdef"[(b2 >> 4) & 0xFu]));
+        port_putc((int)("0123456789abcdef"[b2 & 0xFu]));
+    }
+    port_putc('\n');
+
     port_puts("L5e mmu=");
     {
         u32 e0 = os_flash_mmu_entry(0x42000000u);
@@ -106,6 +128,39 @@ void os_main(void)
         port_putc(',');
         sh = 28;
         while (sh >= 0) { port_putc((int)("0123456789abcdef"[(ic >> (u32)sh) & 0xFu])); sh -= 4; }
+    }
+    port_putc('\n');
+
+    port_puts("L5i asm42=");
+    {
+        u32 v = s3_win_call_flash42();
+
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    port_puts("L5h leaf=");
+    {
+        u32 v = s3_win_call_flash_leaf(1u);
+
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    /* L5g：显式按顺序映射 IROM + 打开 I-cache，然后再调 flash 里的函数 */
+    port_puts("L5g irom=");
+    {
+        int rc = os_flash_map(0u, 0x42000000u, 0x20000u, OS_FLASH_IROM);
+        u32 v = 0;
+
+        os_icache_enable();
+        v = s3_win_call_flash_add(1u, 2u);
+        port_putc((int)('0' + (rc == 0 ? 1 : 0)));
+        port_putc(',');
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
     }
     port_putc('\n');
 

@@ -28,6 +28,12 @@ void os_flash_init(void);
 /* 打开指令 cache（IROM 取指前必须）。可重复调用。 */
 void os_icache_enable(void);
 
+/* 打开数据 cache（读 DROM 前必须）。可重复调用。 */
+void os_dcache_enable(void);
+
+/* 当前 D-cache 控制寄存器值（调试用，bit0 = 已使能） */
+u32 os_dcache_state(void);
+
 /* 当前 MMU 表项（调试用）：返回 entry_id 对应的原始值 */
 u32 os_flash_mmu_entry(u32 vaddr);
 

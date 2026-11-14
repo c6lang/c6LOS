@@ -209,3 +209,76 @@ s3_win_call_flash_addr:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* u32 s3_win_call_flash_leaf(u32 a) —— 调 flash 里的叶子函数 */
+    .align  4
+    .global s3_win_call_flash_leaf
+    .type   s3_win_call_flash_leaf, @function
+s3_win_call_flash_leaf:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    mov     a10, a2
+    call8   s3_win_flash_leaf_chain
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+
+/* ---- 放在 flash 段里的手写函数（没有 entry，只有 movi+retw） ---- */
+    .section .flash.text, "ax", @progbits
+    .align  4
+    .global s3_asm_flash_42
+    .type   s3_asm_flash_42, @function
+s3_asm_flash_42:
+    movi    a2, 42
+    retw.n
+
+    .section .text, "ax", @progbits
+/* u32 s3_win_call_flash42(void) —— 从 call0 调上面那个 flash 里的手写函数 */
+    .align  4
+    .global s3_win_call_flash42
+    .type   s3_win_call_flash42, @function
+s3_win_call_flash42:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_flash42_chain
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
