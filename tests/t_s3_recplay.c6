@@ -1,0 +1,368 @@
+/* t_s3_recplay.c6 —— BOOT 按键控制的"录 5 秒 → 循环播放"演示（真板）。
+ *
+ *   按一下 BOOT：麦克风（I2S1 + GDMA）开始录音，**录满 5.0 秒**自动转入
+ *                循环播放；录音途中再按一下就提前结束并播放。
+ *   播放中按 BOOT：停下播放，重新录一段 —— 形成"录 → 放 → 录 → 放"循环。
+ *
+ * 为什么是 16bit 采样（而不是跟麦克风一样的 32bit 槽）：
+ *   32bit 槽下每样本 4 字节，16kHz×5 秒 = 320KB，而这块板能用的 .bss 只有
+ *   ~231KB（DRAM 在 0x3FCD9500 之后有一小段"密集读写就把 CPU 挂住"的坏区，
+ *   .bss 盖过去就会在启动清 .bss 时静默死机，详见 docs/todo.md）。所以：
+ *     - 麦克风仍然跑 32bit 槽 / 16kHz（MEMS 麦克风在 8kHz 不出数据，实测），
+ *       分块抓进 8KB 暂存区，取高 16 位压成 16bit 样本存进 160KB 的 PCM 缓冲；
+ *     - 喇叭用 I2S0 的 **16bit 槽**模式（s3_i2s_init16，帧 32 BCLK）播放这
+ *       160KB 紧凑 u16 数组，不需要任何展开，也不额外占内存。
+ *   分块抓音会在每块边界丢掉几十微秒（约 1%），换来的是一整段 5 秒录音。
+ *
+ * 屏幕：**不用整屏帧缓冲**（115KB 会把录音缓冲挤掉），只用一条 240×16 的
+ * 文字带（7.5KB），每次把一行字画进带子里再贴到目标行；进度条用
+ * s3_lcd_fill_rect 直接画。
+ *
+ * 串口：逐步初始化标记 + 每段采样统计 + 两个 GDMA 通道的 int_raw。
+ * 想不按键就验证整条通路：编译时加 S3_C6FLAGS=-DRECPLAY_AUTO=1。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/gfx.h"
+
+#define W          240u
+#define H          240u
+#define BAND_H     16u                         /* 文字带高度（一行 16px 字模） */
+#define RATE       16000u                      /* 麦克风 32bit 槽 / 喇叭 16bit 槽 */
+#define PCM_SAMPLES 80000u                     /* 16kHz × 5.0 秒 */
+#define CHUNK_BYTES 8184u                      /* 每次抓 2046 帧（2 个 DMA 段） */
+#define CHUNK_FRAMES (CHUNK_BYTES / 4u)
+
+#ifndef RECPLAY_AUTO
+#define RECPLAY_AUTO 0
+#endif
+
+void s3_btn_init(void);
+void s3_btn_poll(void);
+u32 s3_btn_take_event(u32 i);
+u32 s3_btn_pressed(u32 i);
+
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_fill(u16 color);
+void s3_lcd_fill_rect(u32 x, u32 y, u32 w, u32 h, u16 color);
+void s3_lcd_window(u32 x, u32 y, u32 w, u32 h);
+void s3_lcd_pixels(const u16 *px, u32 n);
+void s3_lcd_delay(u32 n);
+
+void s3_i2s_init16(u32 sample_rate);          /* 喇叭：16bit 槽 */
+void s3_i2s_rx_init(u32 rate);               /* 麦克风：32bit 槽 */
+u32  s3_i2s_rx_capture(void *buf, u32 bytes);
+void s3_i2s_rx_stop(void);
+u32  s3_i2s_rx_filled(void);
+void s3_i2s_play(const void *buf, u32 bytes, u32 loop);
+void s3_i2s_play_stop(void);
+u32  s3_i2s_tx_int_raw(void);
+u32  s3_i2s_rx_int_raw(void);
+
+#define ST_IDLE 0u
+#define ST_REC  1u
+#define ST_PLAY 2u
+
+static u16 g_band[W * BAND_H];            /* 文字带（不初始化 → .bss） */
+static OsGfx g;
+static u16 g_pcm[PCM_SAMPLES];            /* 16bit 单声道 PCM：5.0 秒 */
+static u32 g_raw[CHUNK_FRAMES];           /* 麦克风 32bit 样本暂存区 */
+static u32 g_state = ST_IDLE;
+static u32 g_got;                         /* 已录样本数 */
+static u32 g_peak;
+static u32 g_t0;                          /* 进入当前状态的周期数 */
+static u32 g_drawn_state = 0xFFFFFFFFu;
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void u2s(char *out, u32 v)
+{
+    char tmp[12] = {0};
+    int n = 0;
+    int i = 0;
+
+    if (v == 0u) { out[0] = '0'; out[1] = '\0'; return; }
+    while (v > 0u) { tmp[n] = (char)('0' + (v % 10u)); n++; v = v / 10u; }
+    while (n > 0) { n--; out[i] = tmp[n]; i++; }
+    out[i] = '\0';
+}
+
+/* 在文字带里写一行字，再整条贴到屏幕的 y 行（window+pixels：源/目标分离，
+ * 不能拿屏幕行号当 fb 源坐标，那会越界读出 DRAM → 取指异常 → 静默死机） */
+static void band_text(const char *s, u32 y, u16 color)
+{
+    os_gfx_fill_rect(&g, 0, 0, (int)W, (int)BAND_H, 0x0000u);
+    os_gfx_text16(&g, 2, 0, s, color);
+    s3_lcd_window(0u, y, W, BAND_H);
+    s3_lcd_pixels(g_band, W * BAND_H);
+}
+
+static void band_kv(const char *prefix, u32 v, u32 y, u16 color)
+{
+    char b[24] = {0};
+    char n[12] = {0};
+    int i = 0;
+    int k = 0;
+
+    while (prefix[i] != '\0' && i < 12) { b[i] = prefix[i]; i++; }
+    u2s(n, v);
+    while (n[k] != '\0' && i < 22) { b[i] = n[k]; i++; k++; }
+    b[i] = '\0';
+    band_text(b, y, color);
+}
+
+/* 16bit 样本 → 绝对值 */
+static u32 abs16(u32 s)
+{
+    u32 v = s & 0xFFFFu;
+
+    if ((v & 0x8000u) != 0u) { return 0x10000u - v; }
+    return v;
+}
+
+static void rec_stats(void)
+{
+    u32 i = 0;
+    u32 sum = 0;
+    u32 peak = 0;
+
+    while (i < g_got) {
+        u32 a = abs16((u32)g_pcm[i]);
+        if (a > peak) { peak = a; }
+        sum = sum + a;
+        i++;
+    }
+    g_peak = peak;
+    pstr("rec stats: samples=");
+    pu32(g_got);
+    pstr(" peak=");
+    pu32(peak);
+    pstr(" avg=");
+    pu32((g_got != 0u) ? (sum / g_got) : 0u);
+    pstr(" s0=");
+    pu32((u32)g_pcm[0]);
+    pstr(" s1=");
+    pu32((u32)g_pcm[1]);
+    pstr(" ms=");
+    pu32(((u32)port_cycles() - g_t0) / 40000u);   /* CPU 40MHz → cycles/40 = 微秒 */
+    pstr("\n");
+}
+
+static void draw_static(void)
+{
+    s3_lcd_fill(0x0000u);
+    band_text("C6OS REC 5s / LOOP", 0u, 0x07FFu);
+    band_text("mic 32bit  spk 16bit 16k", 20u, 0x7BEFu);
+    band_text("BOOT: rec 5s -> loop", 200u, 0xF81Fu);
+}
+
+static void flush_state(void)
+{
+    u16 color = 0xFFFFu;
+    const char *s = "IDLE";
+
+    if (g_state == ST_REC) { color = 0xF800u; s = "REC 5s"; }
+    if (g_state == ST_PLAY) { color = 0x07E0u; s = "PLAY LOOP"; }
+
+    band_text(s, 60u, color);
+    band_kv("samples=", g_got, 80u, 0xFFE0u);
+    if (g_state == ST_PLAY) { band_kv("peak=", g_peak, 100u, 0xFFFFu); }
+    g_drawn_state = g_state;
+}
+
+static void flush_bar(void)
+{
+    u32 pct = 0;
+    u32 w = 0u;
+
+    if (g_state == ST_REC) {
+        pct = (g_got * 100u) / PCM_SAMPLES;
+    } else if (g_state == ST_PLAY) {
+        u32 el = ((u32)port_cycles() - g_t0) / 40u;                /* 微秒 */
+        u32 total = (g_got * 1000000u) / RATE;
+        if (total != 0u) { pct = (el % total) * 100u / total; }
+    }
+    if (pct > 100u) { pct = 100u; }
+    w = (W - 16u) * pct / 100u;
+
+    s3_lcd_fill_rect(8u, 130u, W - 16u, 18u, 0x2104u);
+    if (w != 0u) {
+        s3_lcd_fill_rect(8u, 130u, w, 18u,
+                         (g_state == ST_REC) ? 0xF800u : 0x07E0u);
+    }
+    band_kv("progress=", pct, 156u, 0xFFFFu);
+}
+
+/* 开始抓下一块（2 个 DMA 段 = 2046 帧） */
+static void rec_chunk(void)
+{
+    u32 got = s3_i2s_rx_capture(g_raw, CHUNK_BYTES);
+
+    if (got == 0u) {
+        pstr("rec chunk failed\n");
+        g_state = ST_IDLE;
+        return;
+    }
+}
+
+static void rec_start(void)
+{
+    g_got = 0u;
+    g_peak = 0u;
+    g_state = ST_REC;
+    g_t0 = (u32)port_cycles();
+    pstr("rec start chunk=");
+    pu32(CHUNK_BYTES);
+    pstr(" target_samples=");
+    pu32(PCM_SAMPLES);
+    pstr(" rx_int=");
+    pu32(s3_i2s_rx_int_raw());
+    pstr("\n");
+    rec_chunk();
+    flush_state();
+    flush_bar();
+}
+
+/* 一块抓满：32bit → 16bit，继续下一块或转入播放 */
+static void rec_chunk_done(void)
+{
+    u32 i = 0;
+    u32 n = CHUNK_FRAMES;
+
+    s3_i2s_rx_stop();
+    if (n > (PCM_SAMPLES - g_got)) { n = PCM_SAMPLES - g_got; }
+    while (i < n) {
+        g_pcm[g_got + i] = (u16)(g_raw[i] >> 16);   /* 32bit 左槽 → 高 16 位 */
+        i++;
+    }
+    g_got = g_got + n;
+
+    if (g_got >= PCM_SAMPLES) {
+        rec_stats();
+        s3_i2s_rx_stop();
+        s3_i2s_play(g_pcm, g_got * 2u, 1u);
+        pstr("play loop bytes=");
+        pu32(g_got * 2u);
+        pstr(" tx_int=");
+        pu32(s3_i2s_tx_int_raw());
+        pstr(" rx_int=");
+        pu32(s3_i2s_rx_int_raw());
+        pstr("\n");
+        g_state = ST_PLAY;
+        g_t0 = (u32)port_cycles();
+        flush_state();
+        flush_bar();
+        return;
+    }
+    rec_chunk();
+}
+
+static void rec_finish_early(void)
+{
+    s3_i2s_rx_stop();
+    if (g_got == 0u) {
+        pstr("rec empty -> idle\n");
+        g_state = ST_IDLE;
+        flush_state();
+        flush_bar();
+        return;
+    }
+    rec_stats();
+    s3_i2s_play(g_pcm, g_got * 2u, 1u);
+    pstr("play loop (early) bytes=");
+    pu32(g_got * 2u);
+    pstr("\n");
+    g_state = ST_PLAY;
+    g_t0 = (u32)port_cycles();
+    flush_state();
+    flush_bar();
+}
+
+static void play_stop(void)
+{
+    s3_i2s_play_stop();
+    pstr("play stop tx_int=");
+    pu32(s3_i2s_tx_int_raw());      /* 播放期间 TX 的 DMA 中断＝真的推出去了 */
+    pstr("\n");
+}
+
+void os_main(void)
+{
+    u32 btn = 0;
+    u32 now = 0;
+    u32 last_bar = 0;
+
+    pstr("c6os rec/play 5s: BOOT -> record, again -> loop playback\n");
+    pstr("rate=");
+    pu32(RATE);
+    pstr(" pcm_samples=");
+    pu32(PCM_SAMPLES);
+    pstr(" auto=");
+    pu32(RECPLAY_AUTO);
+    pstr("\n");
+
+    pstr("init btn..\n");
+    s3_btn_init();
+    pstr("init lcd..\n");
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    pstr("init gfx..\n");
+    os_gfx_init(&g, g_band, W, BAND_H);
+    pstr("init i2s spk 16bit..\n");
+    s3_i2s_init16(RATE);
+    pstr("init i2s mic 32bit..\n");
+    s3_i2s_rx_init(RATE);
+    pstr("init done\n");
+
+    draw_static();
+    flush_state();
+    flush_bar();
+    pstr("first screen done\n");
+
+    if (RECPLAY_AUTO != 0u) { rec_start(); }
+
+    for (;;) {
+        s3_btn_poll();
+        btn = s3_btn_take_event(0u);            /* 0 = BOOT(GPIO0) */
+
+        if (g_state == ST_IDLE) {
+            if (btn != 0u) { rec_start(); }
+        } else if (g_state == ST_REC) {
+            if (s3_i2s_rx_filled() >= CHUNK_BYTES) {
+                rec_chunk_done();
+            } else if (btn != 0u) {
+                rec_finish_early();
+            }
+        } else {                                /* ST_PLAY：无限循环播放中 */
+            if (btn != 0u) {
+                play_stop();
+                rec_start();
+            }
+        }
+
+        if (RECPLAY_AUTO != 0u && g_state == ST_PLAY &&
+            ((u32)port_cycles() - g_t0) > 40u * 3000000u) {   /* 放 3 秒 */
+            play_stop();
+            rec_start();
+        }
+
+        now = (u32)port_cycles();
+        if (g_state != g_drawn_state || (now - last_bar) > 40u * 100000u) {
+            last_bar = now;
+            flush_state();
+            flush_bar();
+        }
+        s3_lcd_delay(8000u);                    /* ≈0.5ms 采一次：抓音块要尽快接上 */
+    }
+}

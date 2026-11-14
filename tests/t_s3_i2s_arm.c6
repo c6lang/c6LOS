@@ -1,0 +1,220 @@
+/* t_s3_i2s_arm.c6 —— 定位"I2S0 TX 的 GDMA 武装方式"到底哪一套能跑（真板）。
+ *
+ * 主驱动（port/s3/i2s.c）现在已经把 I2S0 的时钟/格式配对了：实测 BCLK =
+ * 1.0256MHz = 16025×64，但 DOUT(GPIO7) 一个边沿都没有、GDMA int_raw 恒为 0，
+ * 说明描述符链路根本没被搬动。这里把几种"武装顺序/起始位"逐个试一遍，
+ * 每种都数 0.12 秒 DOUT 边沿 + 读 int_raw/link/conf0，用客观数据挑出正确的。
+ *
+ * 变体：
+ *   V1  OUT_LINK = addr            （先写地址）
+ *       OUT_LINK = addr | 1<<21    （S3 头文件里 out_link.start = bit21）
+ *   V2  同上，但起始位用 1<<22    （面板 panel.c 现网在用的写法 = restart）
+ *   V3  起始位 1<<21 | 1<<22
+ *   V4  OUT_CONF0 再加 auto_wrback(bit2)，起始位 1<<22
+ *   V5  只写一次 OUT_LINK = addr|1<<22（不先单独写地址）
+ *   V6  描述符 eof 只打在最后一段（照搬面板的建链方式）+ 起始位 1<<22
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define RATE      16000u
+
+#define GDMA_BASE   0x6003F000u
+#define OUT_CONF0   (*(volatile u32 *)(GDMA_BASE + 0x60u))
+#define OUT_CONF1   (*(volatile u32 *)(GDMA_BASE + 0x64u))
+#define OUT_INT_RAW (*(volatile u32 *)(GDMA_BASE + 0x68u))
+#define OUT_INT_CLR (*(volatile u32 *)(GDMA_BASE + 0x74u))
+#define OUT_LINK    (*(volatile u32 *)(GDMA_BASE + 0x80u))
+#define OUT_PERI    (*(volatile u32 *)(GDMA_BASE + 0xA8u))
+#define DRAM_BASE   0x3FC00000u
+#define LINK_A(p)   (((u32)(p) - DRAM_BASE) & 0xFFFFFu)
+
+void s3_i2s_init(u32 rate);
+void s3_i2s_tx_start(void);
+void s3_gdma_init(void);
+void s3_lcd_delay(u32 n);
+u32  s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+typedef struct { u32 w0; u32 buf; u32 next; } Desc;
+
+static Desc g_desc[2];
+static u32 g_buf[2048];             /* 8192 字节，够 2 段 4092 */
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* ---- PCNT 数引脚边沿（复用 t_s3_i2s_duplex 的写法）------------------- */
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static u32 pcnt_take(void) { return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu; }
+static void pcnt_clear(void) { s3_reg_wr(PCNT_BASE + 0x30u, 0xFFFFu); }
+
+/* ---- 描述符建链 ------------------------------------------------------ */
+static void desc_build(u32 segs, u32 eof_each)
+{
+    u32 i = 0;
+
+    while (i < segs) {
+        g_desc[i].w0 = 4092u | (4092u << 12) | (1u << 31);
+        if (eof_each != 0u) { g_desc[i].w0 = g_desc[i].w0 | (1u << 30); }
+        g_desc[i].buf = (u32)g_buf + i * 4092u;
+        g_desc[i].next = 0u;
+        if (i + 1u < segs) { g_desc[i].next = (u32)&g_desc[i + 1u]; }
+        i++;
+    }
+    if (eof_each == 0u) {
+        g_desc[segs - 1u].w0 = g_desc[segs - 1u].w0 | (1u << 30);
+    }
+}
+
+static void chan_reset(void)
+{
+    OUT_LINK = (OUT_LINK & 0xFFFFFu) | (1u << 20);      /* stop */
+    OUT_CONF0 = 1u;                                     /* out_rst */
+    OUT_CONF0 = 0u;
+    OUT_INT_CLR = 0xFFFFFFFFu;
+}
+
+/* 测 0.12 秒：DOUT 边沿 + int_raw + link + conf0 */
+static void measure(const char *tag)
+{
+    u32 e = 0u;
+
+    pcnt_clear();
+    s3_lcd_delay(2000000u);
+    e = pcnt_take();
+    pstr(tag);
+    pstr(" e=");
+    pu32(e);
+    pstr(" int=");
+    pu32(OUT_INT_RAW);
+    pstr(" link=");
+    pu32(OUT_LINK);
+    pstr(" c0=");
+    pu32(OUT_CONF0);
+    pstr("\n");
+    chan_reset();
+    s3_lcd_delay(200000u);
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 base = 0;
+
+    pstr("c6os i2s arm probe\n");
+
+    /* SAWTOOTH：每帧 32bit，左槽，DOUT 必然翻转 */
+    while (i < 2048u) {
+        g_buf[i] = 0x11110000u * ((i % 16u) + 1u);
+        i++;
+    }
+
+    s3_i2s_init(RATE);
+    s3_gdma_init();
+    OUT_PERI = 3u;                    /* SOC_GDMA_TRIG_PERIPH_I2S0 */
+    OUT_CONF1 = 0x2000u;
+    pcnt_init();
+    pcnt_pin(7u);                     /* DOUT = GPIO7 */
+
+    base = LINK_A(&g_desc[0]);
+
+    /* ---- V1：bit21（S3 头文件里的 out_link.start）---- */
+    desc_build(2u, 1u);
+    chan_reset();
+    OUT_CONF0 = (1u << 3) | (1u << 4) | (1u << 5);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 21);
+    s3_i2s_tx_start();
+    measure("V1 b21");
+
+    /* ---- V2：bit22（面板在用的写法）---- */
+    desc_build(2u, 1u);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V2 b22");
+
+    /* ---- V3：两个位一起置 ---- */
+    desc_build(2u, 1u);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 21) | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V3 b21+22");
+
+    /* ---- V4：auto_wrback 打开 + bit22 ---- */
+    desc_build(2u, 1u);
+    OUT_CONF0 = (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V4 wrback");
+
+    /* ---- V5：只写一次 LINK ---- */
+    desc_build(2u, 1u);
+    OUT_CONF0 = (1u << 3) | (1u << 4) | (1u << 5);
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V5 onewr");
+
+    /* ---- V6：eof 只打最后一段 ---- */
+    desc_build(2u, 0u);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V6 eof1");
+
+    /* ---- V7：单段 + bit22 ---- */
+    desc_build(1u, 0u);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    measure("V7 seg1");
+
+    /* 收尾：留着最后一个变体持续播放，便于用耳朵/示波器复核 */
+    desc_build(2u, 0u);
+    OUT_LINK = base;
+    OUT_LINK = base | (1u << 22);
+    s3_i2s_tx_start();
+    pstr("final armed\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive int=");
+        pu32(OUT_INT_RAW);
+        pstr(" link=");
+        pu32(OUT_LINK);
+        pstr(" e=");
+        pcnt_pin(7u);
+        s3_lcd_delay(1000000u);
+        pu32(pcnt_take());
+        pstr("\n");
+    }
+}

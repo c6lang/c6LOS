@@ -1,0 +1,199 @@
+/* t_s3_i2s_duplex.c6 —— 硬件 I2S + GDMA 收发联调（真板，客观数据版）
+ *
+ *   1) 喇叭 I2S0：环形播放 1kHz 方波，PCNT 数 DOUT(GPIO7) 与 BCLK(GPIO15) 边沿，
+ *      并打印 GDMA 通道0 的 int_raw（bit2=dscr_err 必须为 0）；
+ *   2) 麦克风 I2S1：录 0.38 秒（6 × 4092 字节），打印录到的字节数、PCNT 数
+ *      SCK(GPIO5) 边沿、GDMA 通道2 的 int_raw，以及样本 min/max/peak/前 8 个；
+ *   3) 把刚录到的缓冲原样环形播放（音高/速度应与录音一致），再数一次 DOUT。
+ *
+ * 期望现象：两个方向的边沿数随时间增长；tx/rx int_raw 不带 dscr_err；
+ *           对着麦克风说话时 peak 明显变化（安静时也应有小抖动，若恒为 0
+ *           或恒为某个定值说明麦克风没在出数据）。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define PCNT_BASE 0x60017000u
+#define RATE      8000u
+#define SEG       4092u
+#define SEGS      6u
+#define CAP_BYTES (SEG * SEGS)          /* 24552 字节 ≈ 0.38 秒 */
+
+void s3_i2s_init(u32 rate);
+void s3_i2s_rx_init(u32 rate);
+void s3_i2s_play(const void *buf, u32 bytes, u32 loop);
+void s3_i2s_play_stop(void);
+u32  s3_i2s_rx_capture(void *buf, u32 bytes);
+void s3_i2s_rx_stop(void);
+u32  s3_i2s_rx_filled(void);
+u32  s3_i2s_tx_int_raw(void);
+u32  s3_i2s_rx_int_raw(void);
+u32  s3_i2s_tx_link(void);
+u32  s3_i2s_rx_link(void);
+void s3_lcd_delay(u32 n);
+u32  s3_reg32(u32 addr);
+void s3_reg_wr(u32 addr, u32 v);
+
+static u32 g_tone[256];
+static u32 g_cap[CAP_BYTES / 4u];
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+/* ---- PCNT：借来当"逻辑分析仪"，数某根脚的边沿 ------------------------- */
+static void pcnt_init(void)
+{
+    s3_reg_wr(0x600C0018u, s3_reg32(0x600C0018u) | (1u << 10));
+    s3_reg_wr(0x600C0020u, s3_reg32(0x600C0020u) & ~(1u << 10));
+    s3_reg_wr(PCNT_BASE + 0x00u, (1u << 18));
+    s3_reg_wr(PCNT_BASE + 0x04u, 0u);
+    s3_reg_wr(PCNT_BASE + 0x08u, 0u);
+}
+
+static void pcnt_pin(u32 pin)
+{
+    s3_reg_wr(0x60004000u + 0x154u + 4u * 33u, (pin & 0x3Fu) | (1u << 6));
+    s3_reg_wr(0x60009000u + 0x04u + 4u * pin,
+              s3_reg32(0x60009000u + 0x04u + 4u * pin) | (1u << 9));
+    s3_reg_wr(PCNT_BASE + 0x60u, 1u);
+    s3_reg_wr(PCNT_BASE + 0x60u, 0u);
+}
+
+static u32 pcnt_take(void)
+{
+    return s3_reg32(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+static u32 abs16(u32 frame)
+{
+    u32 v = frame >> 16;
+
+    if ((v & 0x8000u) != 0u) { return 0x10000u - (v & 0xFFFFu); }
+    return v;
+}
+
+static void cap_stats(void)
+{
+    u32 n = s3_i2s_rx_filled() / 4u;
+    u32 i = 0;
+    u32 peak = 0;
+    u32 sum = 0;
+
+    if (n > (CAP_BYTES / 4u)) { n = CAP_BYTES / 4u; }
+    while (i < n) {
+        u32 a = abs16(g_cap[i]);
+        if (a > peak) { peak = a; }
+        sum = sum + a;
+        i++;
+    }
+    pstr("rx frames=");
+    pu32(n);
+    pstr(" peak=");
+    pu32(peak);
+    pstr(" avg=");
+    pu32((n != 0u) ? (sum / n) : 0u);
+    pstr("\n");
+
+    i = 0;
+    pstr("rx s[0..7]=");
+    while (i < 8u) {
+        pu32(g_cap[i]);
+        pstr(" ");
+        i++;
+    }
+    pstr("\n");
+}
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 filled = 0;
+
+    pstr("c6os i2s duplex (hw + gdma)\n");
+
+    /* 1kHz 方波：16kHz 采样 → 每周期 16 帧；32bit 左槽样本（高 16 位放幅度） */
+    while (i < 256u) {
+        g_tone[i] = ((i % 16u) < 8u) ? 0x40000000u : 0xC0000000u;
+        i++;
+    }
+
+    s3_i2s_init(RATE);
+    s3_i2s_rx_init(RATE);
+    pcnt_init();
+
+    /* ---- 1) 喇叭：环形播放方波，数 DOUT / BCLK 边沿 ---- */
+    s3_i2s_play(g_tone, 256u * 4u, 1u);
+    pcnt_pin(7u);
+    s3_lcd_delay(2000000u);                 /* ≈0.12 秒 */
+    pstr("tx dout_edges=");
+    pu32(pcnt_take());
+    pstr(" int_raw=");
+    pu32(s3_i2s_tx_int_raw());
+    pstr(" link=");
+    pu32(s3_i2s_tx_link());
+    pstr("\n");
+
+    pcnt_pin(15u);
+    s3_lcd_delay(1000000u);                 /* ≈0.06 秒 */
+    pstr("tx bclk_edges=");
+    pu32(pcnt_take());
+    pstr(" tx_conf=");
+    pu32(s3_reg32(0x6000F000u + 0x24u));
+    pstr(" tx_conf1=");
+    pu32(s3_reg32(0x6000F000u + 0x2Cu));
+    pstr("\n");
+    s3_i2s_play_stop();
+
+    /* ---- 2) 麦克风：录音 + 统计 ---- */
+    filled = s3_i2s_rx_capture(g_cap, CAP_BYTES);
+    pstr("rx capture target=");
+    pu32(filled);
+    pstr(" int_raw=");
+    pu32(s3_i2s_rx_int_raw());
+    pstr(" link=");
+    pu32(s3_i2s_rx_link());
+    pstr("\n");
+
+    s3_lcd_delay(16000000u);                /* ≈1 秒：足够录满 0.38 秒 */
+    pcnt_pin(5u);
+    s3_lcd_delay(1000000u);
+    pstr("rx sck_edges=");
+    pu32(pcnt_take());
+    pstr(" filled=");
+    pu32(s3_i2s_rx_filled());
+    pstr(" int_raw=");
+    pu32(s3_i2s_rx_int_raw());
+    pstr(" rx_conf1=");
+    pu32(s3_reg32(0x6002D000u + 0x28u));
+    pstr("\n");
+    s3_i2s_rx_stop();
+    cap_stats();
+
+    /* ---- 3) 把录音原样循环播放，确认 TX 通路还在跑 ---- */
+    s3_i2s_play(g_cap, CAP_BYTES, 1u);
+    pcnt_pin(7u);
+    s3_lcd_delay(2000000u);
+    pstr("replay dout_edges=");
+    pu32(pcnt_take());
+    pstr(" int_raw=");
+    pu32(s3_i2s_tx_int_raw());
+    pstr("\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive tx_int=");
+        pu32(s3_i2s_tx_int_raw());
+        pstr(" rx_int=");
+        pu32(s3_i2s_rx_int_raw());
+        pstr("\n");
+    }
+}
