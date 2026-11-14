@@ -68,7 +68,7 @@ for name, paddr in SECS:
 hdr = bytearray(24)
 hdr[0] = 0xE9                            # magic
 hdr[1] = len(segs)                       # segment count
-hdr[2] = 2                               # DIO
+hdr[2] = int(os.environ.get("MKIMG_SPI_MODE", "2"))  # 0=QIO 1=QOUT 2=DIO 3=DOUT
 hdr[3] = 0x1F                            # 40MHz | 16MB
 struct.pack_into('<I', hdr, 4, entry_point())
 hdr[8] = 0xEE                            # wp_pin 禁用

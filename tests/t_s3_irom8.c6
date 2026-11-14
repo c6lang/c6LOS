@@ -1,0 +1,49 @@
+/* t_s3_irom8.c6 —— 关键判别：用**数据读**访问 IROM 窗口（不是取指）。
+ * flash 0x30000 处内容已知 = 36 41 00 7b ...（小端 4 字节字 = 0x7B004136）
+ * 如果这里能读回正确值，说明 cache 从 flash 读数据是好的，坏的只是"取指"；
+ * 如果读回 0，说明 cache 的 flash 读通路整体不通。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+u32 s3_win_call_flash42(void);
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0';
+    pstr(b);
+}
+
+void os_main(void)
+{
+    u32 v = 0u;
+
+    s3_beacon(0u, 0xB0000008u);
+
+    /* 1) 数据读 IROM 窗口（0x42030000 << flash 0x30000） */
+    v = *(volatile u32 *)0x42030000u;
+    s3_beacon(1u, v);
+    pstr("data read 0x42030000 = "); phex(v); pstr("  (期望 0x7b004136)\n");
+
+    /* 2) 再读一个字，确认不是偶然 */
+    v = *(volatile u32 *)0x42030010u;
+    s3_beacon(2u, v);
+    pstr("data read 0x42030010 = "); phex(v); pstr("\n");
+
+    /* 3) 然后才是取指 */
+    v = s3_win_call_flash42();
+    s3_beacon(3u, 0xF1000000u | (v & 0xFFu));
+    pstr("call flash => "); phex(v); pstr("\n");
+
+    for (;;) { }
+}
