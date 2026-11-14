@@ -2628,3 +2628,41 @@ bit3 SYSTEM_DCACHE_RESET
 ⇒ TRM 层面能查的配置项已经全部对过一遍，我们的寄存器状态与"能跑 IROM 的原厂固件"
 完全一致（§64 的全量 diff 已经证明），问题不在这张寄存器表能解释的范围内。
 剩下最可能的仍是**flash 芯片内部状态**（dummy cycle / 模式位），而 cache 读是直接依赖它的。
+
+## 69. 官方 WiFi 文档到底有什么（回答"官方有 wifi 的文档吗"）
+
+查了 TRM 和本地这套 IDF v6.0.1 的文档目录，结论是：**有，但全在"怎么用 API"这一层，
+没有"怎么移植"这一层**。
+
+### TRM 里的 WiFi：只有两处
+
+1. 框图里出现 "Wi-Fi MAC"、"Wi-Fi Baseband" （仅有名字，没有寄存器说明）
+2. **§7.2.4.3 Wi-Fi 和 Bluetooth LE 时钟** —— 这条是硬要求，对我们**实际有用**：
+
+   > Wi-Fi 和 Bluetooth LE **必须在 CPU_CLK 时钟源选择 PLL_CLK 下才能工作**。
+   > 只有当 Wi-Fi 和 Bluetooth LE 进入低功耗模式时，才能暂时关闭 PLL_CLK。
+
+   我们现在 CPU 跑的是 40 MHz XTAL（`port_cycles()` 也按 40MHz 算），
+   **等 IROM 通了、真要跑 WiFi 时，必须先切到 PLL_CLK**，否则 WiFi MAC 根本不工作。
+   这一条现在就记下来，免得后面白折腾。
+
+### IDF 文档里的 WiFi：全是 API 层
+
+```
+docs/zh_CN/api-reference/network/esp_wifi.rst        WiFi API 编程指南
+docs/zh_CN/api-reference/network/esp_netif*.rst      TCP/IP 适配层
+docs/zh_CN/api-reference/network/esp-wifi-mesh.rst   Mesh
+```
+
+没有任何"移植到其他 OS / 裸机"的章节 —— 因为这层本身就是**闭源二进制**：
+`libphy / libpp / libnet80211 / libcore / libwapi / libmesh / libespnow`，
+官方只开放 API，WiFi MAC 寄存器也不公开。
+
+### 所以"看标准库"这条路的尽头在哪
+
+尽头就是我们现在的状态：把官方**开放的那部分源码**（`components/esp_wifi/src/*.c`、
+`esp_phy`、`regulatory`、`soc/*.h` 寄存器头）编进来，加上闭源 blob 一起链接。
+这一步已经做到 **0 个未定义符号**（§M1 记录）。
+
+剩下唯一的门槛就是**这些 blob 要能放在 flash 里执行**（合计约 500KB，而可用 IRAM 只有
+66KB），也就是 IROM 取指那个问题。官方文档在这件事上帮不上忙——它默认你就在跑 IDF。
