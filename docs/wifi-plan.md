@@ -1823,3 +1823,18 @@ irom test start          <- 打到这里
   （S3 要求：先关 cache、清 SHUT_CORE0_BUS、再使能）
 - 建议先用 USB-JTAG（`tools/dbg.sh`）在 `os_flash_map` 上下断点单步，
   这个通道已经验证可用，不用再猜
+
+### 第 34 轮末补充：IROM 用例真正卡在 `memcpy`
+
+用 USB-JTAG 逐个断点跟下来：
+
+```
+停在 os_flash_map+11           <- 进入映射函数
+停在 os_icache_enable+36       <- 继续执行
+单步后发现 PC 在 0x403d0d7e..0x403d0d8d 之间反复循环
+nm 一查：0x403d0d7c = memcpy
+```
+
+⇒ 不是 cache 的问题，而是 **`os_flash_map()` 里那次 `memcpy` 卡住了**
+（`port/s3/flash.c`）。下一步就看这次 memcpy 的长度/源地址算错了哪里
+（很可能是把 0x20000 这种长度当成了元素数，或者源地址跨了没映射的区域）。
