@@ -38,14 +38,8 @@ void os_main(void)
     u32 step = 1u;
     u32 rc = 0u;
 
-    /* 点亮 LCD 背光（GPIO13）——LEAN 构建里没有 panel.c，直接操作 GPIO。
-     * 这样即使在 PHY 死掉、串口失联之后，屏幕也是亮的，肉眼就能确认板子在跑。 */
-    os_reg_wr(0x60009034u, (os_reg_rd(0x60009034u) & ~(7u << 12)) | (1u << 12));
-    os_reg_wr(0x60004554u, 0x100u);      /* GPIO13 的 OUT_SEL = 普通 GPIO */
-    os_reg_wr(0x60004024u, 1u << 13);    /* 输出使能 */
-    os_reg_wr(0x60004008u, 1u << 13);    /* 背光常亮 */
-
-    /* 先把上一轮（可能是被看门狗复位掉的）信标打出来：RTC 域在 CPU 复位时不清，
+    /* 调试窗口：给 openocd/gdb 90 秒接入时间（USB-JTAG，不需要 UART）*/
+/* 先把上一轮（可能是被看门狗复位掉的）信标打出来：RTC 域在 CPU 复位时不清，
      * 只有真断电才丢，所以看门狗复位能让我们看到"卡在第几步"。 */
     pstr("prev: step=");
     phex(*(volatile u32 *)0x600080C0u);
@@ -62,9 +56,11 @@ void os_main(void)
 
     /* 重新武装 RTC 超级看门狗（SWD）：应用若在 PHY 校准里挂住，约 3.5 秒后
      * 整片复位重跑；RTC 域不清，所以下一轮的 prev 会显示卡在 0xE5。 */
+#if 1   /* 无人值守调试时必须自恢复：崩溃后 3.5 秒复位重跑，USB 会重新枚举 */
     os_reg_wr(0x600080B8u, 0x8F1D312Au);
     os_reg_wr(0x600080B4u, os_reg_rd(0x600080B4u) & ~(1u << 30));
     os_reg_wr(0x600080B8u, 0u);
+#endif
 
     /* 2) 本轮重新跑一遍 */
     s3_beacon(2u, s3_win_call_phy_funcs());
