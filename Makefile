@@ -877,7 +877,7 @@ $(BUILD)/min.elf: port/s3/min.S port/s3/min.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
 
 $(BUILD)/min.bin: $(BUILD)/min.elf
-	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq 40m -o $@ $<
+	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq 80m -o $@ $<
 
 toolchain-info:
 	@echo "C6_ROOT = $(C6_ROOT)"
