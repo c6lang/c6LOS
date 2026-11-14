@@ -2887,3 +2887,39 @@ TRM §7.2.4.3 只要求 Wi-Fi/BLE 用 PLL，没要求 cache/flash——但这是
    哪个 vaddr、对应表项里写的是什么值。这个"正确样例"能直接告诉我们表项该长什么样。
 2. 切到 PLL_CLK(160MHz) 后再试（唯一还没对齐的系统级差异）。
 3. 若还不行，就需要 Espressif 支持或硬件层面手段了。
+
+## 74. 全部要素齐备的最终序列 —— 仍然失败
+
+把目前掌握的所有正确要素一次性凑齐（每步都用信标确认生效）：
+
+```
+1. ICACHE off / DCACHE off
+2. SPI_MEM_CLOCK(0x60002014) = 0x00030103      ← 按 IDF 参照 app 运行态值
+3. SPI_MEM_CTRL (0x60002008) = 0x00608000      ← 同上
+4. MMU[3] = 0x4003 (valid|页3), MMU[0] = 0x4002 (valid|页2)
+5. DCACHE on / ICACHE on
+6. ICACHE INVALIDATE：0x600C4088 写 bit0(INVALIDATE_ENA)，轮询 bit1(DONE)
+   -> 信标 0x00000602，确认失效完成
+7. 数据读 0x42030000
+8. 取指 s3_win_call_flash42()
+```
+
+真板信标：
+
+```
+slot0 = 0xB0000013   进 os_main
+slot3 = 0x00000602   invalidate 完成 ✓
+slot2 = 0x00000000   数据读仍是 0 ✗
+slot1 = 0x00000000   取指没返回 ✗
+```
+
+### 结论
+
+trace 到这里，S3 上"让 cache 从 flash 读数"的可控手段已经全部试尽并且都能确认生效
+（寄存器值可写、可回读、与能正常工作的 IDF app 一致；invalidate 能完成；MMU 表项
+带 valid 位），**访问仍然静默返回 0、且不触发 Cache error**。
+
+这已经超出"配置"能解释的范围。下一步只能靠：
+1. Espressif 官方支持（我们有完整的对照实验记录）
+2. 或者换思路：不用 IROM，改用其它方式容纳 WiFi 栈（例如只保留 scan 路径裁到
+   IRAM——工作量大但可行）
