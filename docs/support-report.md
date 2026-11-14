@@ -70,6 +70,17 @@ IROM 页时会正常 `panic'ed (Cache error)`。
    `ICACHE_CLK_ON/DCACHE_CLK_ON` 位与 IDF app 相同。
 8. **时钟**：`SYSTEM_SYSCLK_CONF` 等 SYSCON 时钟寄存器与 IDF app 完全一致。
 
+## 4b. 另外三项排除（后续补充）
+
+- **eFuse**：`espefuse summary` 显示 `DIS_ICACHE=False`、`DIS_DCACHE=False`、
+  `DIS_DIRECT_BOOT=False`、`FLASH_TYPE=4 data lines` —— 没有任何熔丝位禁用 cache 或直启。
+- **flash 芯片内部状态**：`esptool read-flash-status` 在"我们固件跑过"和"原厂固件跑过"
+  两种状态下都读到 `Flash memory status: 0x0200` —— 芯片模式一致。
+- **`spi_flash_init_chip_state()` 本身**：读 `components/spi_flash/flash_ops.c:180` 可知，
+  在"四线 + 未开 HPM"的默认配置下它是**空函数**（两个分支都不满足，直接 `return ESP_OK`），
+  所以它不是我们缺的那一步。真正写 `SPI_MEM_*` 的是 flash 驱动的
+  `spi_flash_chip_generic_config_host_io_mode()`。
+
 ## 5. 最关键的对照数据
 
 两边都用**各自应用内的代码**读取（JTAG 读这个寄存器块不可靠，实测 IDF app 的 MMU 表
