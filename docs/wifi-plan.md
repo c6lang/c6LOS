@@ -2554,3 +2554,38 @@ Cache_Enable_ICache、原厂 SPI_MEM 值）都试过并验证生效，问题仍�
 `Cache_Invalidate_ICache_All()`（ROM 0x400016d4）在我们的镜像里一调就不返回
 （§59 实测）。所以下一步的关键是**找一个不依赖 ROM 的 I-cache 失效办法**
 （例如直接操作 `EXTMEM_ICACHE_CTRL` 的 preload/sync 位，或在 cache 关闭状态下写表）。
+
+## 67. 寄存器级 I-cache sync 也试了：sync 能完成，取指依旧为 0
+
+按 `extmem_reg.h` 找到真正的寄存器（不是靠猜）：
+
+```
+EXTMEM_ICACHE_SYNC_CTRL   = 0x600C4088   bit0=启动, bit1=SYNC_DONE
+EXTMEM_ICACHE_PRELOAD_CTRL= 0x600C4094
+EXTMEM_ICACHE_LOCK_CTRL   = 0x600C407C
+EXTMEM_ICACHE_SYNC_ADDR   = 0x600C408C
+```
+
+用例里做了三件事（信标逐步确认）：
+
+```
+1. 手写 MMU[3] = 0x4003        -> slot3 前身回读 0x00004003  ✓ 表项正确
+2. 写 0x600C4088 = 1 启动 sync
+3. 轮询 bit1                   -> slot3 = 0x00000602        ✓ sync 完成（6 次轮询）
+4. 调用 flash 里的 movi.n a2,42; retw.n
+```
+
+结果：**依然 `cause=0, pc=42030014`**（取回 0x0000）。
+
+⇒ "MMU 表项缺 valid 位" 和 "cache 需要 sync" 两条也都排除了。
+
+至此，S3 从 flash 取指这件事，我们这边能做的一切（镜像格式、bootloader 引导、
+MMU 两种映射 + 手写表项、双 cache 使能、SPI_MEM 与原厂逐字节一致、寄存器级 sync、
+ROM 官方 cache 函数）都已逐项试过并验证生效，取指仍返回全零。
+
+### 下一条值得走的路：用同版本 IDF 编一个最小 app 做"参照物"
+
+原厂那套 IDF 源码是现成的，可以编一个只有 `printf("hello")` 的最小 IDF app，
+确认它能正常跑（它当然能），然后**逐步把它的初始化搬过来做二分**，找出"app 侧"
+到底做了哪一件我们没做的事（最可能是 `spi_flash_init_chip_state()` 里改写 flash
+**芯片内部**状态的那部分——寄存器看起来一致，但芯片内部的 dummy/QE 位可能不同）。
