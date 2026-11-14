@@ -1,26 +1,46 @@
 
 # 从这里继续（交接摘要）
 
-> **2026 更新**：IROM 问题已整理成官方问题报告 → 见 `docs/support-report.md`。
-> 官方文档摘录见 `docs/refs/`（TRM 的 cache/MMU/PMS/system 章节 + 镜像格式 + IDF 参照 app）。
-
 ## 一分钟看懂现在的状态
 
-- **能做到**：c6LOS 在 S3 上完整跑起来（USB-CDC 串口、背光和音频、RTC 信标、USB-JTAG 调试全通）；
-  windowed ABI 桥（能正确调用 IDF 闭源库）；libphy 的 PHY 初始化 5 步全部真板验证通过；
+- **能做到**：c6LOS 在 S3 上完整跑起来（USB-CDC 串口、背光音频、RTC 信标、USB-JTAG 调试全通）；
+  windowed ABI 桥（能正确调用 IDF 闭源库）；libphy 的 PHY 初始化 5 步真板验证通过；
   WiFi 闭源库 + IDF 源码层**链接 0 未定义符号**；自己生成的标准 IDF app 镜像能被原厂
-  bootloader 引导（`esptool image-info` 报 checksum valid）。
-- **卡住的唯一一件事**：**从 flash 取指**（IROM 执行）。跳进 flash 里的
-  `movi.n a2,42; retw.n`，trap 显示 `exccause=0`（IllegalInstruction）、`excvaddr=0`、
-  `epc1=<flash 地址>`，即取指成功但取回 `0x00000000`（= `ill`）。
+  bootloader 引导（`esptool image-info` 报 checksum + hash 双 valid）。
+- **卡住的唯一一件事**：**访问 IROM 窗口**。数据读返回 `0x00000000`，取指则
+  `exccause=0 (IllegalInstruction)`、`excvaddr=0`、`epc1=<flash 地址>`；
+  而且**不抛 Cache error**（正常应该抛）。
+- **官方问题报告**：`docs/support-report.md`（可直接发帖/提工单）
+- **官方文档摘录**：`docs/refs/`（TRM cache/MMU/PMS/system、镜像格式、IDF 参照 app）
+
+## 研究过程中纠正过的重要误区（别再踩）
+
+1. **`SOC_MMU_INVALID = BIT(14)`** —— bit14 置位表示**无效**，不是有效。
+   我们 bootloader 写的 `MMU[3]=3`（bit14 清零）本来就是**正确**的映射。
+   早期"补 valid 位写 0x4003"其实是把映射弄坏。
+2. **JTAG 读 MMU/cache 寄存器块不可靠** —— IDF app 运行时经 JTAG 读 MMU 表全是
+   `0x4000`，但它自己代码读出来是 `0x00000002`。**对照必须让两边 app 各自用代码读**。
+3. **`SPI_MEM_CLOCK=0x80000000` 是 bootloader 留下的正常值** —— IDF app 早期也是这个
+   状态且已能执行 IROM，所以它本身不是问题。
 
 ## 已经逐项排除的（都做了真板实测，别重复）
 
-flash 内容、MMU 映射（恒等/重映射/手写表项补 valid 位）、ICache/DCache 使能、
-SPI_MEM 全块寄存器（与能跑 IROM 的原厂固件**逐字节一致**）、`SYSTEM_CACHE_CONTROL_REG`
-的 cache 时钟位、寄存器级 ICache sync（`0x600C4088`，实测能完成）、ROM 的
-`Cache_Enable_ICache`/`Cache_Invalidate_ICache_All`（后者一调就不返回）、
-JTAG 单步进 flash（该方法本身不可靠，原厂固件同样 fault）。
+1. **镜像格式**：`esp_app_desc_t@0x20`、段表连续、长度含补齐、XOR 校验和、SHA-256 附录
+   —— `esptool image-info` 双 valid，bootloader 接受并跳转。
+2. **MMU**：表项值是**正确**的（bit14=无效位，我们的 `2`/`3` 是有效映射）。
+   恒等/重映射/关 cache 手写都试过。
+3. **ICache/DCache**：使能位、`SHUT_CORE0/1_BUS`、`TAG_POWER_CTRL`，以及
+   **模式位 `WAY_MODE`/`BLOCKSIZE`**（已按 IDF 值设成 `0x0b`/`0x09`）——都对齐了。
+4. **ICACHE 失效**：`EXTMEM_ICACHE_SYNC_CTRL` 的 `INVALIDATE_ENA` 能完成。
+   ROM 的 `Cache_Invalidate_ICache_All()` 一调不返回。
+5. **SPI_MEM**：`CLOCK` 已按 IDF 值 `0x00010001`、`CTRL` 按 `0x00000000` 写入并回读确认；
+   也试过 DIO/DOUT/QOUT 三种 flash 模式。
+6. **权限**：`SYSCON_FLASH_ACEn_*` 全 `0xFF`；TRM §16 说明 World 控制默认关闭。
+7. **时钟**：`SYSTEM_SYSCLK_CONF` 等与 IDF app 一致；`CACHE_CONTROL` 的时钟位也一致。
+8. **flash 内容**：`esptool read-flash` + `cmp` 逐字节校验过。
+
+**结论：上述全部对齐到和 IDF app 完全一致后，IROM 访问依旧静默返回 0。**
+差异不在"事后可改"的寄存器里，而在启动阶段的一次性配置。
 
 ## 最值得试的下一步
 
