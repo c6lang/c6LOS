@@ -2946,3 +2946,15 @@ trace 到这里，S3 上"让 cache 从 flash 读数"的可控手段已经全部�
 1. Espressif 官方支持（我们有完整的对照实验记录）
 2. 或者换思路：不用 IROM，改用其它方式容纳 WiFi 栈（例如只保留 scan 路径裁到
    IRAM——工作量大但可行）
+
+## 75. 备选路线评估：把 WiFi 栈裁到 IRAM（不可行）
+
+之前链接 WiFi 时链接器报过 `region IRAM overflowed by ~421KB`（IRAM 只有 66KB），
+即 `esp_wifi_init` 的符号闭包约 **490KB**，是可用 IRAM 的 **7 倍**。
+
+802.11 协议栈（libpp + libnet80211 + libcore + libwapi + libphy）是**单体闭源**的，
+`--gc-sections` 对没有函数级 section 的闭源 .o 无效，只保留 scan/connect 路径也不能
+显著缩小闭包（协议状态机、PHY 校准表、crypto 都在一起）。
+
+⇒ **"裁栈到 IRAM" 不是可行路线**，必须解决 IROM 才能上 WiFi。
+这一条现在有依据了，不用再花时间尝试。
