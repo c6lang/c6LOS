@@ -2131,3 +2131,18 @@ slot2 = 0x00004010   （MMU 表项 valid ✓）
 - 板子刷的是 `build/won`：背光常亮 + 每秒心跳，不碰 PHY，串口/esptool/JTAG 都可用
 - 排查工具：`tools/dbg.sh`、`tools/flashmon.sh`、`tools/beacon.sh`、`tools/idfcc.sh`、
   `tools/{gphy,gfin2,gusb,gtrap2,gidf2,gspi,gwhere2}.gdb`
+
+### 第 38 轮末补充：EXTMEM 寄存器块的读取
+
+再 dump 原厂固件的 `0x600C4000` 起：
+
+```
+0x600c4000: 0x00000001  0x00000000  0x00000005  0x00000000
+（0x600C4010 之后读出被 abort，说明那一段没有寄存器/需要别的访问方式）
+```
+
+和之前读 `0x600C4060/4068` 得到的 `1 / 5` 是**同一组值** ⇒ ICACHE 块可能存在镜像地址，
+或者我们对偏移的理解要按 TRM 再核一遍（`EXTMEM_ICACHE_CTRL` 的确切地址）。
+
+这条线索留给下一次：**用 S3 的 TRM 核对 ICACHE/EXTMEM 寄存器映射**，
+而不是继续靠读值猜。原厂固件备份和刷回命令都在 §54。
