@@ -1385,3 +1385,36 @@ slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了
 - 工具链：`flash.sh`、`usbreset.py`、`reset.py`、`cap.py`、`beacon.sh`
 - 本文档 40 节，把 ABI、内存坏区、看门狗、下载模式、DTR、USB PHY 抢占、
   镜像段布局、函数表这些坑全部记录在案
+
+## 41. 【网上查证】其他人的非 IDF 移植经验（第 29 轮，非常有价值）
+
+### ① PHY 函数表的正确初始化方式（直接解决我们的卡点）
+
+- `g_phyFuns` 是 **DRAM 里的一张函数指针表**（ESP32 上是 0x3fcef3d8），
+  WiFi/BT 闭源代码里几乎全是 `(*(g_phyFuns + 0xec))(...)` 这种间接调用。
+- **正确入口是 libphy.a 自己导出的 `phy_get_romfunc_addr()`（S3 上 .text 偏移 0x88）**，
+  IDF 的 `components/esp_wifi/include/phy.h` 原文：
+  *"Initialize function pointer table in PHY library… must be called before
+  register_chipv7_phy"*。
+  我们之前调的是 **ROM** 里的 `phy_get_romfuncs`（0x40005c58）——同名不同物，
+  它填的是 ROM 内部的表，跟我们的 `g_phyFuns` 无关（实测返回值是 2）。
+- 已改成调 `phy_get_romfunc_addr()`（`port/s3/win_island.c`），构建通过，
+  待真板验证（`slot2 = g_phyFuns` 非 0 就说明表初始化成功）。
+
+### ② 已有的非 IDF 移植可以直接抄
+
+| 项目 | 位置 | 用处 |
+|---|---|---|
+| **NuttX** | `arch/xtensa/src/esp32s3/esp32s3_wifi_adapter.c` | 最完整的参考：怎么用 `esp_wifi_init(&wifi_cfg)`、`esp_phy_*`、tx_done 回调 |
+| **tinygo espradio** | `tinygo-org/espradio` 的 `radio.c` | 裸机下初始化顺序 + 坑：`phy_get_romfunc_addr()` 在某些构建里会崩，他们改用**静态 stub 表**；`g_phyFuns` 非 0 当"已初始化"标志；`wifi_init_config_t` 要 512 字节对齐（Xtensa/Clang 的 OR-offset bug）；不要预先设置 `g_osi_funcs_p` |
+| **esp-hal (Rust)** | `esp-phy` crate | `register_chipv7_phy(PHY_INIT_DATA_DEFAULT, cal, PHY_RF_CAL_PARTIAL/FULL)` 的调用方式与校准结果保存 |
+| **Zephyr** | `hal_espressif` + `esp_wifi_adapter.c` | 走 IDF 组件封装，不是裸调 |
+
+### ③ WiFi 移植真正需要的东西（有心理准备）
+
+1. 厂商 `.a`：`libphy` + `libpp`(710KB) + `libnet80211`(1.5MB) + `libcore` + `libwapi`
+   + 芯片 ROM 符号 `.ld`（我们已有 `port/s3/rom/`）
+2. **~30 个函数的 OS 适配层**（`esp_wifi_os_adapter`）：`wifi_calloc/free`、
+   `wifi_thread_semphr_get`、`queue_send`、`task_ms_to_tick`、`wifi_int_disable/restore`、
+   任务创建、软件定时器 —— 需要**真正的调度器**（c6LOS 有），不一定非要 FreeRTOS
+3. PHY 初始化 + `esp_wifi_init` + 定时器/事件循环（Xtensa 上占用 TIMG1/TIMER0 + CCOMPARE0，单核）
