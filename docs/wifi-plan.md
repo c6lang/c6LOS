@@ -2722,3 +2722,34 @@ docs/zh_CN/api-reference/network/esp-wifi-mesh.rst   Mesh
 
 剩下唯一的门槛就是**这些 blob 要能放在 flash 里执行**（合计约 500KB，而可用 IRAM 只有
 66KB），也就是 IROM 取指那个问题。官方文档在这件事上帮不上忙——它默认你就在跑 IDF。
+
+## 70. 在 "bootloader 刚跳进我们 app 的第一条指令" 处抓现场
+
+用硬件断点停在我们 app 的入口（`_start` = 0x403788f0），此时**我们的代码一行都没执行**，
+读到的状态：
+
+```
+ICACHE_CTRL  (0x600C4060) = 0x00000001   已使能
+ICACHE_CTRL1 (0x600C4064) = 0x00000000   bus 未关
+DCACHE_CTRL  (0x600C4000) = 0x00000001   已使能
+MMU[3]       (0x600C500C) = 0x00000003   <- 映射到 flash 页 3，但**没有 valid 位**
+SPI_CTRL     (0x60002008) = 0x012CA008
+```
+
+**结论：这个"看起来有问题"的状态是 bootloader 自己留下的，不是我们代码破坏的**（我们
+的代码还没开始跑）。也就是说 bootloader 给我们建的表项就是 `0x00000003`，而它在给原厂
+app 建表时留的是 `0x4000` 这种带 bit14 的形式。
+
+这条也解释了为什么"事后手写 0x4003 补 valid 位"没用：bootloader 跳转前可能已经把这个
+无效表项读进 cache 的 tag 里了，而 `SYNC`（写回）不等于 `INVALIDATE`（失效），
+光 sync 不会让 tag 重新去查表。
+
+### 所以真正需要的是"让 ICache 忘掉这个 tag"
+
+S3 上做得到这件事的有三条路：
+1. ROM 的 `Cache_Invalidate_ICache_All()` —— 我们的镜像里一调就不返回（§59）
+2. `EXTMEM_ICACHE_PRELOAD_*` 系列寄存器（预取会重新走一遍取数路径）
+3. 在 cache 关闭（`ICACHE_CTRL.ENABLE=0`）状态下重写 MMU 表项再打开
+
+第 3 条最干净，也是 IDF/NuttX 的做法（NuttX 注释原文："写 MMU 寄存器时要挂起 cache"）。
+**下次直接从这里开始试**：关 ICACHE → 写 MMU[3]=0x4003 → 开 ICACHE → 跳 flash。
