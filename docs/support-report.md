@@ -108,6 +108,31 @@ IROM 页时会正常 `panic'ed (Cache error)`。
 
 **把上表右列全部改成和左列一致后，IROM 访问依然返回 0，且依然不抛 Cache error。**
 
+## 5b. 最关键的一条：IROM 访问根本进不了 cache 块
+
+清 cache 访问计数器后，做两次 IROM 读（`0x42030000` / `0x42030004`），再读差值：
+
+```
+EXTMEM_DBUS_ACS_CNT    (0x600C40D8) 增量 = 0    ← 访问计数完全没动
+EXTMEM_DBUS_FLASH_MISS (0x600C40D0) 增量 = 0    ← 也没有 flash 缺失
+EXTMEM_ICACHE_FREEZE   (0x600C4154)      = 0    ← 不是"假命中"(FREEZE_MODE) 模式
+EXTMEM_CACHE_ILG_INT_ST(0x600C40E4)      = 0    ← 没有非法访问记录
+EXTMEM_MMU_FAULT_VADDR (0x600C4124)      = 0    ← 没有 MMU 表项错误
+```
+
+**判读：这次访问在到达 cache 之前就被静默短路了** —— 既没有进访问计数器，
+也没有产生缺失、没有产生任何错误状态。
+
+而同一片 flash：
+- `esptool read-flash` 能逐字节正确读出；
+- 原厂 bootloader 能读它来引导我们的镜像；
+- 我们用 `SPI_MEM` 的 USER 通路手工发 `0x03` 读命令，**轮询 1 次就完成**；
+- 能正常工作的 IDF app 把同一个 MMU 表项（`MMU[3]=3`）写进去后，读 `0x42030000`
+  能拿到**真实数据 `0x20c02088`**。
+
+⇒ 唯独我们自己这个 app 从 IROM 窗口读数会得到 `0x00000000`，而且连 cache 的计数器
+都不动一下。
+
 ## 6. 想请教的问题
 
 1. ESP32-S3 上，**除了 MMU 表项、Cache 使能/模式位、SPI_MEM 时钟与控制、PMS 权限**
