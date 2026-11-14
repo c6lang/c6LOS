@@ -1125,3 +1125,31 @@ windowed 版能启动并打印 `c6os s3 boot`（说明 start.S + `port_init` 前
 若最终确认是 c6 代码生成器（`/home/winger/c6/tcc/c6`）的参数处理与 windowed
 不兼容，那么这条路要么改 c6 的输出（工作量在编译器侧），要么放弃 windowed
 （= 放弃 IDF 闭源 WiFi 库）。这一步必须在做 M1 之前定下来。
+
+### 【本轮重大进展】ABI 桥跑通 + 路线修正（务必先看这条）
+
+**别再试图整体迁移 ABI 了**：实测 c6 生成的函数在 windowed 下必然坏（它用
+`memcpy(frm+off, &param, 8)` 一次拷 8 字节来取参数，假设参数在栈上连续排列，
+windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制改不了。
+
+**改成 ABI 桥架构（已真板验证可行）**：
+
+| 文件 | ABI | 作用 |
+|---|---|---|
+| 其余所有代码（c6 + 我们的 C + 内核） | **call0（不动）** | 零回归风险 |
+| `port/s3/win_island.c` | windowed | IDF 闭源库 + 它们的 C 胶水放这里 |
+| `port/s3/idf_shim.c` | windowed | blob 要的胶水符号（临界区用内联汇编，避免跨 ABI 调用） |
+| `port/s3/win_bridge.S` | call0（汇编） | 跨 ABI trampoline：参数→a10~a15、`call8`、返回值从 a10 取；临时开 `PS.WOE` |
+
+真板证据（`tests/t_s3_abic.c6`，`build/wphy2`）：
+`ABC` / `L2 port_puts ok` / `L3=3` / `L4 put1 ok` / `L5 win=1003` / `abic done`
+—— 其中 `L5` 就是 call0 代码经桥调到 windowed 孤岛函数并拿到正确返回值。
+
+**新卡点**：把 `libphy.a` 一起链进去（孤岛版，`-DS3_WITH_LIBPHY`）后，
+镜像连 `_start` 都进不去（串口只有 ROM 的 `load:` 两行，RTC 标记是乱值）。
+- 不链 libphy → 正常；只有 libphy（配 call0 胶水）→ 也能启动；
+- 所以是"windowed 孤岛 + libphy"组合才炸。ELF 的 `_vecbase`/`_start`/段表/entry 都正常。
+- 下一轮先查：libphy 的 `.iram1` 等**孤儿段**是否被塞到不该去的地方
+  （试 `-Wl,-Map=...`、`-Wl,--orphan-handling=warn`）、
+  再试常规镜像（去掉 `--ram-only-header`）、
+  再试"只链 libphy 的单个 .o"逐步加。

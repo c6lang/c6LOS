@@ -1,56 +1,68 @@
-/* t_s3_abic.c6 —— windowed ABI 最小验证：指针参数、返回值、多层调用能不能活。
- * 用来定位"windowed 下 c6 生成的 C 参数丢失"到底出在哪一层。
+/* t_s3_abic.c6 —— windowed ABI 最小验证（第 2 版）
+ *
+ * 第 1 版（带 pstr/pu32/slen/add3）在 windowed 下一行都打不出来。这一版先从
+ * 最简单开始：os_main 里**不调用任何自己的函数**，直接 port_putc 打一串写死的
+ * 字符；然后逐级加：port_puts → 带指针参数的函数 → 带 u32 参数的函数。
+ * 用串口看到几行，就知道 windowed 断在第几层。
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
 
 void s3_lcd_delay(u32 n);
+void port_puts(const char *s);
+u32 s3_win_call_add(u32 a, u32 b);   /* 走 ABI 桥调 windowed 孤岛里的函数 */
+u32 s3_win_call_phy_cal(void);       /* 桥调 windowed 孤岛 → libphy.a */
 
-static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+static void put1(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
 
-static void pu32(u32 v)
-{
-    char b[12] = {0};
-    int i = 0;
-
-    if (v == 0u) { port_putc('0'); return; }
-    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
-    while (i > 0) { i--; port_putc((int)b[i]); }
-}
-
-static u32 slen(const char *s)
-{
-    u32 n = 0;
-
-    while (*s != '\0') { n++; s++; }
-    return n;
-}
-
-static u32 add3(u32 a, u32 b, u32 c) { return a + b + c; }
-
-static u32 mix(const char *s, u32 k)
-{
-    u32 n = slen(s);
-
-    return add3(n, k, 100u);
-}
+static u32 add2(u32 a, u32 b) { return a + b; }
 
 void os_main(void)
 {
-    pstr("abic 1: plain\n");
-    pstr("abic 2: slen=");
-    pu32(slen("hello"));
-    pstr(" (want 5)\n");
-    pstr("abic 3: add3=");
-    pu32(add3(1u, 2u, 3u));
-    pstr(" (want 6)\n");
-    pstr("abic 4: mix=");
-    pu32(mix("abcd", 10u));
-    pstr(" (want 114)\n");
-    pstr("abic done\n");
+    /* 第 1 级：完全内联，只调 port_putc */
+    port_putc('A');
+    port_putc('B');
+    port_putc('C');
+    port_putc('\n');
+
+    /* 第 2 级：调用运行库 port_puts（普通 C 函数，带指针参数） */
+    port_puts("L2 port_puts ok\n");
+
+    /* 第 3 级：先测 u32 参数（不涉及指针/字符串） */
+    port_putc('L');
+    port_putc('3');
+    port_putc('=');
+    port_putc((int)('0' + add2(1u, 2u)));
+    port_putc('\n');
+
+    /* 第 4 级：再测自己写的、带指针参数的函数 */
+    put1("L4 put1 ok\n");
+
+    /* 第 5 级：跨 ABI 桥 —— 调 windowed 孤岛里的 s3_win_add(1,2) = 1003 */
+    port_puts("L5 win=");
+    {
+        u32 v = s3_win_call_add(1u, 2u);
+        port_putc((int)('0' + (v / 1000u)));
+        port_putc((int)('0' + ((v / 100u) % 10u)));
+        port_putc((int)('0' + ((v / 10u) % 10u)));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    port_puts("L6 phy_cal=");
+    {
+        u32 v = s3_win_call_phy_cal();
+        if (v == 0u || v == 0xFFFFFFFFu) {
+            port_puts("(suspicious)");
+        }
+        port_putc((int)('0' + ((v >> 4) & 0xFu)));
+        port_putc((int)('0' + (v & 0xFu)));
+    }
+    port_putc('\n');
+
+    port_puts("abic done\n");
 
     for (;;) {
         s3_lcd_delay(4000000u);
-        pstr("alive\n");
     }
 }

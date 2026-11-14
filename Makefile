@@ -34,7 +34,8 @@ S3_OBJ  := $(BUILD)/obj/start.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o \
            $(BUILD)/obj/gfx.o $(BUILD)/obj/dash.o \
            $(BUILD)/obj/core1.o $(BUILD)/obj/s3fast.o \
-           $(BUILD)/obj/button.o $(BUILD)/obj/i2s.o $(BUILD)/obj/idf_shim.o
+           $(BUILD)/obj/button.o $(BUILD)/obj/i2s.o $(BUILD)/obj/idf_shim.o \
+           $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o
 
 .PHONY: rt-host run-rt-host rv32bare-rt run-rv32bare-rt perf-host run-perf-host rv32bare-perf run-rv32bare-perf all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
@@ -110,6 +111,14 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
+$(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=windowed $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
+$(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
+
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
@@ -122,9 +131,10 @@ $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
+# idf_shim.c 是给闭源库（windowed ABI）用的胶水，必须按 windowed 编译
 $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=windowed $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj

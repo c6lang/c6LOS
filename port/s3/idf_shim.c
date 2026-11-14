@@ -8,21 +8,23 @@
  * IDF 里的签名见 esp_phy/src/phy_init.c、esp_coex/src/lib_printf.c 等。
  */
 #include "c6os/types.h"
-#include "c6os/port.h"
 
 /* ---- 临界区：IDF 的 phy_enter_critical()/phy_exit_critical() -------------
  * 原版用 FreeRTOS 的 portENTER_CRITICAL 包住一个自旋锁，返回值恒为 0
  * （中断级别存在 TCB 里）。这里直接用关中断实现，语义等价且更省事。 */
 u32 phy_enter_critical(void)
 {
-    (void)port_irq_save();
+    u32 ps = 0;
+
+    /* 内联汇编，避免跨 ABI 调用（本文件是按 windowed 编译给闭源库用的） */
+    __asm__ __volatile__("rsil %0, 15" : "=r"(ps));
     return 0u;
 }
 
 void phy_exit_critical(u32 level)
 {
     (void)level;
-    port_irq_restore(0u);          /* 打开中断（我们只有"关/开"两态） */
+    __asm__ __volatile__("movi a2, 0\n\twsr a2, ps\n\trsync" : : : "a2");
 }
 
 /* ---- 调试输出：PHY/WiFi 库的 printf 全走这里 ---------------------------

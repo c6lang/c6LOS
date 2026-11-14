@@ -280,3 +280,58 @@ _vec_level1:
 - 没有 flash 文件系统 → 先做内存版 NVS（校准每次重做），SSID/密码先写死。
 - CPU 跑在 40MHz（XTAL，未开 PLL）——WiFi 对时延敏感，后面可能必须开 PLL 到
   160/240MHz，这会牵动 I2S 分频（音频用例要重测）。
+
+## 14. 【重大进展 + 路线修正】ABI 桥：call0 主世界 + windowed 孤岛
+
+### 实测结论（真板，都是串口/ELF 证据）
+
+1. **c6 生成的函数在 windowed 下必坏**。最小用例 `tests/t_s3_abic.c6`：
+   - 直接 `port_putc` 打字符 → 正常（`ABC`）；
+   - 调用运行库 `port_puts`（普通 C，指针参数）→ 正常（`L2 port_puts ok`）；
+   - 调用 c6 生成的 `add2(1,2)` → **返回 0**（`L3=0`）；
+   - 调用 c6 生成的 `put1("...")` → 直接跑飞。
+   原因在 c6 生成的 C（`build/<b>/c99/*.c`）：
+   ```c
+   memcpy(__c99_frm.f + 32 + (-8), &__c99_a0, 8);   /* 一次拷 8 字节取参数 */
+   ```
+   它**假设"参数在栈帧里按声明顺序连续排列、每个 4 字节"**。call0 下 GCC 恰好这样排；
+   windowed 下参数是经"调用者 a10~a15 ↔ 被调用者 a2~a7"的窗口别名 + 落栈，顺序/连续性
+   都不保证 → 参数全乱。c6 编译器是二进制（`/home/winger/c6/tcc/c6`），改不了。
+
+2. **ABI 桥可行（已真板验证）**。手写 trampoline 就能跨 ABI：
+   - call0 → windowed：参数搬到**调用者的 a10~a15**，`call8` 进去，返回值从 a10 取；
+     调之前临时打开 `PS.WOE`，返回后恢复 PS（call0 里 a12~a15 是 callee-saved，要先存）。
+   - windowed → call0：被调用者本来就从 a2~a7 取参数，直接 `call0` 即可；把 a0 存好、
+     调完放回 a0，最后 `retw` 转回窗口。
+   实现：`port/s3/win_bridge.S`（trampoline）、`port/s3/win_island.c`
+   （**按 `-mabi=windowed` 单独编译**，放 IDF 闭源库和它们的 C 胶水）、
+   `port/s3/idf_shim.c`（也改成 windowed 编译，内部全用内联汇编，不跨 ABI 调用）。
+   真板输出：`L5 win=1003` —— call0 的 c6 代码通过桥调到了 windowed 函数并拿回正确结果。
+
+**因此路线改为：现有 call0 全部不动（音频/面板/内核零风险），IDF 的 WiFi/PHY
+闭源库装进 windowed 孤岛，两端只用手写 trampoline 来往。**
+
+### 新的卡点（下一轮第一件事）
+
+把 `libphy.a` 链进"孤岛"后（`S3_WITH_LIBPHY`），镜像**连 `_start` 都进不去**：
+串口只有 ROM 的 `load:` 两行，RTC 标记（`_start` 第一件事就是写 0xA0）是**乱值**，
+说明 ROM 根本没跳到我们的入口。
+
+已排除/已知：
+- 同一个用例**不链 libphy** 时完全正常（`wphy2` 版：`ABC/L2/L3=3/L4/L5/L6/abic done`）；
+- **只有 libphy（配 call0 胶水）时也能启动**（早期 `wifim0` 版能打印 banner 并进陷阱）；
+- 所以是"windowed 孤岛 + libphy"这个**组合**才炸。
+- ELF 里 `_vecbase=0x403c9000`（1KB 对齐 ✓）、`_start=0x403c94bc`、
+  镜像 header 的 entry 与之相同 ✓、段表两项（DRAM 0x1890 / IRAM 0x12a78）都正常 ✓、
+  没有真正的符号冲突（只有 `__c99_d2/__c99_d3/out_u32` 这类各 TU 内部同名静态符号）。
+
+下一轮要查的方向（按可能性排序）：
+1. `libphy.a` 里的 `.iram1`（以及可能没见过的 `.dram0.*`）是**孤儿段**，
+   我们 `link.ld` 只按 `*(.text*)`/`*(.bss*)` 收集。用 `-Wl,--orphan-handling=warn`
+   或 `readelf -S` 比对，确认这些段最终落在 IRAM/DRAM 里、没有被塞到奇怪的位置。
+2. 用 `-Wl,-Map=build/wphy/map.txt` 看 `_vecbase`/`_start` 附近有没有被别的段插进来，
+   以及 IRAM 段尾是否越界（本次 0x403c9000+0x12a78）。
+3. 试 `elf2image` 改成常规（非 `--ram-only-header`）镜像，看是不是 RAM-only 镜像
+   对"混合 windowed 代码 + 大 blob"有额外限制。
+4. 把 `libphy.a` 换成只用其中**一个**目标文件（比如 `phy_debug.o`）先跑通，再逐个加。
+
