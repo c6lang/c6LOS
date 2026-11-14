@@ -45,7 +45,7 @@ SECTIONS
   /* flash 段固定放到 flash 偏移 0x100000、虚拟地址 0x42100000：
    * 这样可以用 esptool 单独把这段字节写到 flash 0x100000，
    * 再把 IROM 页映射过去验证"从 flash 取指"。 */
-  .flash.text 0x42100000 : AT (0x100000)
+  .flash.text 0x42030000 : AT (0x30000)
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
