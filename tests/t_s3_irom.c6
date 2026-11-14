@@ -58,26 +58,28 @@ static void blink(u32 n, u32 ms)
     }
 }
 
+volatile u32 g_gate = 0u;
+
 void os_main(void)
 {
     u32 v = 0u;
 
     /* 调试门：等 gdb 写 RTC_STORE4=0xDEADBEEF 再开跑 */
-    os_reg_wr(0x600080C0u, 0u);
-    while (os_reg_rd(0x600080C0u) != 0xDEADBEEFu) { }
+    g_gate = 0u;
+    while (g_gate != 0xDEADBEEFu) { }
 
     pstr("irom test start\n");
     bl_init();
     blink(2u, 150u);                    /* 开始 */
 
     /* 手动建立 IROM 映射并开 cache（含 SHUT_CORE0_BUS） */
-    (void)os_flash_map(0u, 0x42000000u, 0x20000u, OS_FLASH_IROM);
+    (void)os_flash_map(0x100000u, 0x42100000u, 0x10000u, OS_FLASH_IROM);
 
     /* 先把 MMU 表项打出来（**在开 cache 之前**，否则万一 cache 配置有问题，
      * 后面连打印都看不到，就分不清是映射错还是 cache 错）。 */
     pstr("mmu=0x");
     {
-        u32 e = os_flash_mmu_entry(0x42000000u);
+        u32 e = os_flash_mmu_entry(0x42100000u);
         int sh = 28;
 
         while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e >> (u32)sh) & 0xFu])); sh -= 4; }

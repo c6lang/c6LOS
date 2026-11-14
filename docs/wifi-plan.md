@@ -1917,3 +1917,20 @@ esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.
   0x8000 $B/partition_table/partition-table.bin 0x20000 $B/xiaozhi.bin
 ```
 （刷完是能正常运行的完整小智固件，说明硬件和 flash 都没问题。）
+
+### 第 35 轮末：IROM 端到端验证的半成品（精确交接）
+
+已经把 `.flash.text` 固定到 **vaddr 0x42100000 / LMA 0x100000**（`port/s3/link.ld`），
+并用 `objcopy -O binary --only-section=.flash.text` 抽出 24 字节、用
+`esptool write-flash 0x100000` 写进 flash（Hash verified ✓）。
+用例 `tests/t_s3_irom.c6` 会：映射 `0x100000 → 0x42100000` → 开 I-cache →
+`s3_win_call_flash42()`（期望返回 42）→ 结果写 RTC 信标 slot0/slot1。
+
+**当前状态**：信标 slot0/slot1 仍是 0 ⇒ 应用没走到写信标那一步。
+调试门（等调试器放行）用 RTC 寄存器做时发现 CPU 读到的值和 esptool 读到的不同步，
+已改成 DRAM 全局变量 `g_gate`（注意 `.c6` 里全局必须显式初始化：`volatile u32 g_gate = 0u;`）。
+
+下一步只需要：
+1. 确认门能放行（`set {int}g_gate = 0xDEADBEEF` 后 `detach`）
+2. 读信标 slot1：**42 = IROM 取指成功**（这是 WiFi 进 flash 的最后一道门）
+3. 若失败，用 JTAG 在 `s3_win_call_flash42` 上单步
