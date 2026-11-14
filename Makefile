@@ -1364,3 +1364,13 @@ run-rv32bare-rt: rv32bare-rt
 
 clean:
 	rm -rf $(BUILD) $(BUILDH)
+
+# ---- 便利目标（PHY/WiFi 调试用） ----------------------------------------
+# make ... wphy        构建"背光常亮 + PHY 分步诊断 + SWD 自恢复"的用例
+# make ... wphyflash   构建并刷机+即时监视（相当于 idf.py flash monitor）
+PHY_CDEFS = -DS3_WITH_LIBPHY -DS3_KEEP_SWD
+wphy:
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_LEAN=1 S3_CDEFS="$(PHY_CDEFS)" \
+		S3_MAIN=tests/t_s3_phy.c6 S3_EXTRA_LIBS=build/phy/libphy_win.a s3
+wphyflash: wphy
+	./tools/flashmon.sh build/phy/c6os.bin 15
