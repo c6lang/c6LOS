@@ -1,4 +1,7 @@
-# ESP32-S3 WiFi 联网：可行性盘点与分阶段计划
+# ESP32-S3 WiFi 联网设计（含 ABI 迁移）与分阶段计划
+
+> **最终目标**：真板上通过 WiFi 取到 `https://qq.com` 的页面数据。
+> 链路 = WiFi 关联 → DHCP → TCP → TLS → HTTP/1.1 GET。
 
 > 目标（待确认）：在 c6LOS 上让 S3 连上 AP 并能收发 IP 包（先 ping/HTTP GET 就算成功）。
 > 现状：内核已有任务/队列/信号量/互斥/定时器/tick（`include/c6os/*.h`），
@@ -163,3 +166,117 @@ M0 的成果（ROM 符号表 `port/s3/rom/*.ld`、`port/s3/idf_shim.c`、Makefil
 - level-1 入口：同文件 `_KernelExceptionVector` → `_xt_kernel_exc` → `_xt_lowint1`
 - 上下文保存：`components/xtensa/xtensa_context.S` 的 `_xt_context_save`/`_xt_context_restore`
 - 裸机骨架：`components/xtensa/baremetal/xtensa_rtos_bm.S`（85 行）
+
+## 9. 架构分层（目标形态）
+
+```
+  应用        HTTPS 客户端（最小 HTTP/1.1 GET，解析状态行+头部）
+   ↓
+  安全        mbedTLS（或先用 http:// 明文做中间里程碑）
+   ↓
+  传输        自研精简 TCP（推荐，代码可控；lwIP 功能全但端口大）
+   ↓
+  网络接口    arp / ipv4 / dhcp 客户端（几百行）
+   ↓
+  WiFi 驱动   IDF 的 esp_wifi/src/*.c（≈2000 行，需移植）
+   ↓
+  闭源 blob   libpp.a / libnet80211.a / libcore.a / libwapi.a（WPA2）/ libcoexist.a
+   ↓
+  射频        libphy.a + PHY 校准数据（phy_init_data）
+   ↓
+  底座        **windowed ABI** + FreeRTOS 垫片 + ROM 符号表 + 内存管理
+```
+
+底座这一层是当前的工作重点：没有它，上面的闭源 blob 一行都跑不起来。
+
+## 10. windowed ABI 的设计（实测出来的约定）
+
+用编译器实证（`-mabi=windowed -Os -S`）：
+
+```asm
+f:  entry   sp, 32
+    movi.n  a11, 0x22      /* 参数 1 */
+    movi.n  a10, 0x11      /* 参数 0 */
+    call8   g              /* 调用：窗口 base += 8 */
+    mov.n   a2, a10        /* 返回值从 a10 读 */
+    retw.n                 /* 返回：窗口 base -= 8 */
+```
+
+结论（写汇编时必须照这个来）：
+
+| 项目 | call0（现状） | windowed（迁移目标） |
+|---|---|---|
+| 参数 0..5 | a2..a7 | **a10..a15** |
+| 返回值 | a2 | **a10**(=callee 的 a2) |
+| 调用指令 | `call0` | `call8`（`callx8`）/ 大参数用 `call12` |
+| 函数入口/出口 | `addi a1,a1,-N` / `ret` | `entry sp, N` / `retw` |
+| PS | 无关 | **WOE=1** 才能正常分配窗口 |
+| 寄存器窗口 | 无 | 4 个窗口，调用深了会溢出 → 必须实现溢出/欠载向量 |
+
+### 中断入口（已实现，待验证）
+
+```
+_vec_level1:
+    保存 a0..a15 + epc1 + ps 到 80 字节陷阱帧（与 call0 版相同，窗口无关）
+    判断 exccause == 4（level-1 中断），否则走陷阱打印
+    wsr ps, 0x40021          /* INTLEVEL=1 | UM | WOE，清 EXCM */
+    mov  a10, a1             /* 参数＝陷阱帧指针 */
+    call8 s3_timer_irq
+    beqz a10, 恢复现场        /* 返回值也在 a10 */
+    l32i a1, a10, 64         /* 切到目标任务帧 */
+    恢复 a0..a15 + epc1 + ps，rfe
+```
+
+### 上下文切换（已实现，待验证）
+
+- 入口先 `call8 xthal_window_spill`（IDF 的 `libxt_hal.a` 提供）把所有**祖先窗口**
+  spill 到本任务栈上；
+- 然后只保存当前窗口的 a0..a15 + PS（80 字节帧，和 call0 版一致）；
+- 恢复时在 `rfe` 之前 `wsr windowstart, 1`，让祖先窗口由**欠载向量**按需 fill 回来；
+- 溢出/欠载向量本体在 `port/s3/irq.S` 的 `_win_ovf4/8/12`、`_win_unf4/8/12`
+  （照 Xtensa HAL 实现，`s32e/l32e` + `rfwo/rfwu`）。
+
+## 11. 当前状态（重要，接手先看这里）
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| call0 全功能 | ✅ 正常 | 面板/GUI/录音回放/duplex 用例全部通过 |
+| `libphy.a` 能链进来 | ✅ | `build/wifim0` 链接通过，只差 5 个胶水符号 |
+| ROM 符号表 | ⚠️ 部分 | `rom.ld`/`rom.api.ld`/`rom.version.ld` 可用；**`rom.libc.ld`/`rom.newlib.ld` 必须关**（把 memcpy/memset 钉到 ROM 后一启动就 LoadProhibited，pc=0x40056fc0） |
+| ABI 可切换 | ✅ | `make ... S3_ABI=windowed`（默认仍 call0） |
+| windowed 启动 | ⚠️ 到 `port_init` | windowed hello/duplex 能打印 `c6os s3 boot`，之后跑飞 |
+| windowed 中断 | ❌ 未跑通 | RTC 现场：`0xA1`(bss 清完) `0xB1`(关完看门狗) `0xBAD0`(进了未处理向量) `EXCCAUSE=0` `EXCVADDR=0` `EPC1=0x40045c06`（ROM 地址） |
+
+**下一步排查 windowed 中断的建议顺序**
+
+1. `EPC1=0x40045c06` 是 ROM 地址：先确认这个 PC 到底是谁 —— 可能是
+   `_vec_default` 里读到的 epc1 已经被二次异常覆盖，也可能真的跳到了 ROM。
+   办法：在 `_vec_default` 里同时记 `excvaddr`/`windowstart`/`windowbase`/`ps`，
+   并且把 `_vec_default` 自己的 PC 也记下来（`rsr a2, epc1` 已在做）。
+2. 先绕开中断验证 windowed 的**普通函数调用与上下文切换**：把
+   `s3_irq_init()` 里的 `rsil a2, 0`（开中断）临时去掉，看 windowed 版的
+   `os_main` 能不能打印出来、`os_task_delay` 之类的不能用的先不用。
+3. 再单独验证 `port_task_switch`（windowed）——它依赖 `xthal_window_spill`，
+   要确认 `libxt_hal.a` 链接进来了（`make ... S3_EXTRA_LIBS=.../libxt_hal.a`）。
+4. 中断入口本身：先用"只置标志位、立刻返回"的空 ISR 验证 `call8`+`rfe` 往返，
+   确认 PS 的 WOE/EXCM/INTLEVEL 组合正确，再接真正的 tick。
+
+## 12. 里程碑（每步都要真板客观证据）
+
+| 里程碑 | 内容 | 客观证据 |
+|---|---|---|
+| A | windowed ABI 跑通 | 现有四个用例在 `S3_ABI=windowed` 下全部输出正常 |
+| B | PHY 点火 | `phy_get_rf_cal_version()` 返回非 0/0xFFFFFFFF，`esp_phy_enable()` 后能读到信道 |
+| C | 扫描 | `esp_wifi_scan_start` 后串口打印 AP 的 SSID/RSSI/信道（≥1 个） |
+| D | 关联 + DHCP | 连上 WPA2 AP，拿到 192.168.x.x 地址 |
+| E | TCP + HTTP | 取到 `http://` 明文页面（先用明文验证链路） |
+| F | **HTTPS** | 取到 `https://qq.com` 的页面数据（mbedTLS 握手 + HTTP GET） |
+
+## 13. 内存与其它约束（务必记住）
+
+- 可用 DRAM 323KB；**0x3FCD9500 之后有一段坏区**（密集读写会挂 CPU），
+  `.bss` 必须停在它下面；WiFi 需要 50~80KB 堆 → WiFi 用例必须单独一个镜像，
+  不要和录音/LCD 大缓冲共存。
+- 没有 flash 文件系统 → 先做内存版 NVS（校准每次重做），SSID/密码先写死。
+- CPU 跑在 40MHz（XTAL，未开 PLL）——WiFi 对时延敏感，后面可能必须开 PLL 到
+  160/240MHz，这会牵动 I2S 分频（音频用例要重测）。

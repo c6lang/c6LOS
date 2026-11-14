@@ -43,6 +43,19 @@ _start:
     and     a3, a3, a4
     s32i    a3, a2, 0
 
+#ifndef __XTENSA_CALL0_ABI__
+    /* windowed ABI：windowstart 只标当前窗口有效；PS.WOE=1 让 call8/12 能正常
+     * 分配新窗口（否则每次调用都会走窗口溢出向量，功能上能跑但慢很多）。 */
+    movi    a3, 1
+    wsr     a3, windowstart
+    rsr     a2, ps
+    movi    a3, 1
+    slli    a3, a3, 18              /* PS.WOE */
+    or      a2, a2, a3
+    wsr     a2, ps
+    rsync
+#endif
+
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
     wsr     a2, vecbase

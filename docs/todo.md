@@ -979,3 +979,84 @@ gfx 全屏填充优化；再往后才是原来列的 WiFi/mic/喇叭。
 - 工具链/环境：CPU 跑在 **40MHz**（XTAL，未开 PLL），`port_cycles()` 是 40MHz，
   算时间别按 80MHz；esptool 用 `--after watchdog-reset` 才能真的复位进应用
   （`--after hard_reset` 在本会话里经常把芯片留在 bootloader 里，看起来像"没输出"）。
+
+---
+
+## 【进行中】WiFi 联网（目标：真板取到 https://qq.com 页面）
+
+设计文档见 **`docs/wifi-plan.md`**（依赖清单、ABI 约定实测、里程碑 A~F、内存约束）。
+这里只记"做到哪、下一步动哪个文件"。
+
+### 已完成
+
+1. **音频录放全链路**（BOOT 键录音 → 循环播放）已合并到 main，真板确认有声。
+   相关修复：`tdm_en`、RX 侧矩阵信号 31/32、`rx_mono_fst_vld`、
+   `tx_mono`+`tx_chan_equal`(bit6)、启动期关中断、DRAM 坏区回避。
+2. **WiFi M0**：IDF 闭源库依赖盘点（6 个库、只需外部提供 129 个符号），
+   `libphy.a` 已能链进构建（`port/s3/idf_shim.c` 提供 `phy_enter_critical`/
+   `phy_exit_critical`/`phy_printf`/`coex_pti_print`/`sprintf` 五个胶水符号）。
+   ROM 符号表落在 `port/s3/rom/*.ld`，`link.ld` 里 `INCLUDE`。
+   ⚠️ `rom.libc.ld`/`rom.newlib.ld` 必须保持关闭（见 wifi-plan.md §11）。
+3. **ABI 可切换**：`Makefile` 里 `S3_ABI ?= call0`（默认 call0，硬件回归通过），
+   `make ... S3_ABI=windowed` 切到 windowed。
+4. **windowed 基础设施**：
+   - `port/s3/irq.S`：向量表改成显式 `.org` 布局 + 补 `_win_ovf4/8/12`、
+     `_win_unf4/8/12` 窗口溢出/欠载向量；level-1 入口在 windowed 下改用
+     `call8`（参数 a10、PS=INTLEVEL1|UM|WOE）；叶子函数用 `retw`。
+   - `port/s3/ctx.S`：windowed 下切换前 `call8 xthal_window_spill`，
+     恢复前 `wsr windowstart,1`；`s3_task_tramp` 用 `callx8/call8`。
+   - `port/s3/start.S`：windowed 下设 `windowstart=1`、`PS.WOE=1`。
+   - windowed 构建命令：
+     `make C6_ROOT=/home/winger/c6 BUILD=build/wdup S3_ABI=windowed \
+        S3_MAIN=tests/t_s3_i2s_duplex.c6 \
+        S3_EXTRA_LIBS=/media/winger/inst_26/esp/esp-idf/components/xtensa/esp32s3/libxt_hal.a s3`
+
+### 卡点（下一步就查这个）
+
+windowed 版能启动并打印 `c6os s3 boot`（说明 start.S + `port_init` 前半段正常），
+之后跑飞。RTC 慢速内存现场：
+
+```
+0x50000000 = 0xA1        bss 清零完成
+0x50000008 = 0xB1        port_init 关完三个看门狗
+0x50000100 = 0xBAD0      _vec_default（未处理向量/二次异常）跑过
+0x50000104 = 0x00000000  EXCCAUSE = 0
+0x50000108 = 0x00000000  EXCVADDR = 0
+0x5000010C = 0x40045c06  EPC1 → 落在 ROM 地址
+```
+
+`port_init` 里 `s3_irq_init()` 末尾会 `rsil a2, 0` 开中断，所以嫌疑集中在
+**第一次 level-1 tick 的中断入口**（`call8` + PS 组合 + 窗口溢出）。
+
+排查建议（按顺序，每步都只改一处）：
+
+1. 临时把 `port/s3/irq.c` 里 `s3_irq_init()` 的 `rsil a2, 0` 去掉（不开中断），
+   看 windowed 版能不能跑到 `os_main` 打出 duplex 用例的标题行。
+   - 能 → 问题就锁定在中断入口；
+   - 不能 → 问题在普通函数调用/窗口机制（`_win_ovf*` 或 `entry/retw` 路径）。
+2. 在 `_vec_default` 里多记 `windowbase`、`windowstart`、`ps`（RTC 0x50000110 起），
+   判断是"窗口溢出没处理好"还是"跳到了 ROM"。
+3. 中断入口先用"只置标志位立刻返回"的空 ISR 验证 `call8`+`rfe` 往返，
+   再逐步加回真正逻辑。
+4. 检查 `xthal_window_spill` 是否真的被链接进来（`nm build/*/c6os.elf | grep window_spill`）。
+5. 复核 `_vec_level1` 里写的 PS 常量 `0x40021`（bit18=WOE, bit5=UM, INTLEVEL=1）。
+
+### 之后的里程碑
+
+- **M1**：`esp_phy_enable()` 跑通（需要搬 IDF 的 `esp_phy/src/phy_init.c` +
+  `phy_init_data`，并做内存版 NVS）。
+- **M2**：`esp_wifi_init` + `esp_wifi_scan_start` → 串口打印扫到的 AP（射频客观证据）。
+- **M3**：连 WPA2 AP（`libwapi.a`）+ 自研 DHCP 客户端拿到 IP。
+- **M4**：自研最小 TCP → `http://` 明文页面。
+- **M5**：mbedTLS → **`https://qq.com` 页面数据**。
+
+### 环境备忘（这轮新增）
+
+- esptool 只有 `--after watchdog-reset` 能真正复位进应用；`--after hard-reset`
+  经常把芯片留在 bootloader 里（表现为"刷完没输出"）。
+- 串口节点会在 `/dev/ttyACM0` 与 `/dev/ttyACM1` 之间变化，命令里用
+  `P=$(ls /dev/ttyACM* | head -1)`。
+- RTC 慢速内存是"复位后不丢"的调试宝地：`0x50000000`=启动阶段标记、
+  `0x50000100`=异常现场。读法：
+  `sudo esptool --chip esp32s3 -p $P --before default-reset read-mem 0x50000100`
+- CPU 主频是 **40MHz**（`port_cycles()` 按 40MHz 算时间），`s3_lcd_delay(n)`≈n/16 µs。

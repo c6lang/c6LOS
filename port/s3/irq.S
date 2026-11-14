@@ -127,8 +127,13 @@ _win_unf12:
     .section .text, "ax", @progbits
     .align 4
 _vec_exc:
+#ifdef __XTENSA_CALL0_ABI__
     mov     a2, a1
     call0   s3_trap
+#else
+    mov     a10, a1              /* windowed ABI：参数在 a10~a15 */
+    call8   s3_trap
+#endif
 1:
     j       1b
 
@@ -182,12 +187,25 @@ _vec_level1:
     movi    a4, 4
     bne     a3, a4, _vec_exc
 
+#ifdef __XTENSA_CALL0_ABI__
     mov     a2, a1
     call0   s3_timer_irq
     beqz    a2, 2f
     /* a2 = 目标任务 ctx，ctx->sp 指向它自己的陷阱帧。 */
     l32i    a1, a2, 64
     j       2f
+#else
+    /* windowed：进 C 之前必须把 PS 设成 INTLEVEL=1 | UM | WOE。
+     * WOE=1 才能让 call8 正常分配新窗口（否则每次都走窗口溢出向量）。 */
+    movi    a2, 0x40021          /* bit18=WOE, bit5=UM, INTLEVEL=1 */
+    wsr     a2, ps
+    rsync
+    mov     a10, a1              /* 参数：陷阱帧指针 */
+    call8   s3_timer_irq
+    beqz    a10, 2f              /* 返回值也在 a10（callee 的 a2） */
+    l32i    a1, a10, 64
+    j       2f
+#endif
 
 2:
     /* 恢复 a1 指向的陷阱帧并用 rfe 返回。 */
@@ -227,11 +245,19 @@ s3_test_trap:
     .type   port_irq_save, @function
 port_irq_save:
     rsil    a2, 15
+#ifdef __XTENSA_CALL0_ABI__
     ret
+#else
+    retw
+#endif
 
     .global port_irq_restore
     .type   port_irq_restore, @function
 port_irq_restore:
     wsr     a2, ps
     rsync
+#ifdef __XTENSA_CALL0_ABI__
     ret
+#else
+    retw
+#endif
