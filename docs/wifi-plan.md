@@ -1628,3 +1628,57 @@ make C6_ROOT=/home/winger/c6 BUILD=build/wgate S3_LEAN=1 S3_CDEFS="-DS3_WITH_LIB
 或者干脆接受"PHY 之后没有串口"，改用 USB-JTAG 调试通道看结果（已验证可行）。
 
 **结论：PHY 之后请用 `./tools/dbg.sh` + `tools/gfin2.gdb` 观察，不要指望串口。**
+
+## 48. 第 32 轮：WiFi 闭源库接入的勘查结果（下一步的精确起点）
+
+### 依赖面比想象的小
+
+把 `libphy.a + libpp.a + libnet80211.a + libcore.a + libwapi.a` 用
+`ld -r --whole-archive` 部分链接后，**只剩 120 个未定义符号**，其中：
+
+- 一半是 **libgcc 的软浮点**（`__adddf3`/`__divdi3`/`__floatsidf`…）⇒ 直接链 libgcc 即可
+- 一小批 `g_xxx_ptr`（`g_ic_ptr`/`g_pm_ptr`/`g_lmac_cnt_ptr`…）⇒ .bss 全局指针
+- `esp_crc8`、`ets_delay_us`、`free`、`coex_pti_print` ⇒ 小函数
+- **`g_osi_funcs_p`** ⇒ 见下，S3 的关键缺口
+
+### `g_osi_funcs_p`：和当初 `g_phyFuns` 一模一样的情形
+
+```
+esp_rom/esp32c6/ld/esp32c6.rom.pp.ld:359:  g_osi_funcs_p = 0x4087ff6c;
+esp_rom/esp32c2/ld/esp32c2.rom.ld:789:     g_osi_funcs_p = 0x3fcdfdd8;
+esp_rom/esp32c61/ld/esp32c61.rom.pp.ld:339:g_osi_funcs_p = 0x4084ff60;
+```
+
+**别的芯片 ROM ld 里都有，S3 没有** ⇒ 必须由我们自己定义（和 `g_phyFuns` 完全同类问题）：
+
+```c
+wifi_osi_funcs_t g_wifi_osi_funcs;          /* 填好 OS 适配层 */
+void *g_osi_funcs_p = &g_wifi_osi_funcs;    /* blob 读这个指针 */
+```
+
+结构定义已经搬进标准库：`include/c6os/wifi_osi.h`（从 IDF
+`esp_private/wifi_os_adapter.h` 逐行拷贝生成，字段顺序一致，21 个函数指针）。
+
+### 适配层要做的实际工作
+
+IDF 自己的参考实现是 `components/esp_wifi/esp32s3/esp_adapter.c`（119 处赋值，
+其中一大半是 `coex_*` 共存相关的 wrapper —— 只做 WiFi 时全部可以空实现）。
+真正需要的底层能力：
+
+- 内存：`malloc/free/calloc/realloc/zalloc`（内部堆）
+- 队列：`queue_create/send/recv/delete`
+- 信号量/互斥：`semphr_create/take/give/delete`、`mutex_create/lock/unlock/delete`
+- 定时器：`timer_setfn/arm_us/disarm/done`
+- 线程：`task_create/delete/yield/yield_from_isr`
+- 中断：`set_intr/clear_intr/set_isr/ints_on/ints_off/int_disable/int_restore`
+- 日志：`log_write`、`log_timestamp`
+- 事件：`event_post`
+- 其余：`random`、`slowclk_cal_get`、`phy_get_romfunc_addr`（已有 ✓）
+
+### 建议的推进顺序
+
+1. `port/s3/wifi_glue.c`：先全部填 `(void*)glue_ret0` 的假实现，让
+   `esp_wifi_init()` 能**链接**通过（这是可验证的里程碑）
+2. 用 USB-JTAG（`tools/dbg.sh`）在 `esp_wifi_init` 里单步/断点，按崩溃顺序
+   把假实现替换成真的（内存 → 队列 → 信号量 → 定时器 → 线程 → 中断）
+3. 能返回 `ESP_OK` 后，接 `esp_wifi_set_mode/start/scan`
