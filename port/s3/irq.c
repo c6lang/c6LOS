@@ -137,6 +137,15 @@ void s3_trap(u32 frame_sp)
     (void)f;
     s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
 
+    port_puts("*** TRAP sp=");
+    trap_hex(frame_sp);
+    port_puts(" cause=");
+    trap_hex(cause);
+    port_puts(" pc=");
+    trap_hex(pc);
+    port_puts(" ps=");
+    trap_hex(ps);
+    port_puts("\n");
     /* 串口不可靠时用 LCD 背光(GPIO13)把异常码闪出来：
      *   先长亮 1 下（表示"进陷阱了"），然后慢慢闪 (cause + 1) 下。 */
     {
@@ -165,15 +174,6 @@ void s3_trap(u32 frame_sp)
             { u32 k = 0; while (k < 8000000u) { k++; } }
         }
     }
-    port_puts("*** TRAP sp=");
-    trap_hex(frame_sp);
-    port_puts(" cause=");
-    trap_hex(cause);
-    port_puts(" pc=");
-    trap_hex(pc);
-    port_puts(" ps=");
-    trap_hex(ps);
-    port_puts("\n");
     port_panic_halt();
 }
 

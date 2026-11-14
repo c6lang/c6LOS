@@ -18,9 +18,23 @@
  * （实测：PHY 初始化会挂住，被看门狗反复复位）。 */
 static u32 g_phy_ps;
 
+/* 调试：闭源库回调我们的胶水函数时打一个字符（限 40 个），用来定位它卡在哪 */
+int  ets_printf(const char *fmt, ...);
+static u32 g_trace_n;
+
+void s3_win_trace(const char *s)
+{
+    if (g_trace_n < 40u) {
+        g_trace_n = g_trace_n + 1u;
+        ets_printf("%s", s);
+    }
+}
+
 u32 phy_enter_critical(void)
 {
     u32 ps = 0;
+
+    s3_win_trace("e");
 
     /* 内联汇编，避免跨 ABI 调用（本文件是按 windowed 编译给闭源库用的） */
     __asm__ __volatile__("rsil %0, 15" : "=r"(ps));
@@ -31,6 +45,7 @@ u32 phy_enter_critical(void)
 void phy_exit_critical(u32 level)
 {
     (void)level;
+    s3_win_trace("x");
     __asm__ __volatile__("wsr %0, ps\n\trsync" : : "a"(g_phy_ps));
 }
 

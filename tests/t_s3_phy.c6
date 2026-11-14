@@ -12,6 +12,29 @@ void port_delay_ms(u32 ms);
 #include "c6os/reg.h"
 u32  s3_win_call_phy_enable(void);      /* 经 ABI 桥调 register_chipv7_phy */
 u32  s3_win_call_phy_cal_word(u32 i);   /* 读回校准数据里的字 */
+void s3_win_call_log(const char *s);    /* 经孤岛用 ROM 的 ets_printf 打印 */
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 0;
+
+    b[0] = '0'; b[1] = 'x';
+    i = 2;
+    {
+        int sh = 28;
+
+        while (sh >= 0) {
+            b[i] = "0123456789abcdef"[(v >> (u32)sh) & 0xFu];
+            i++;
+            sh -= 4;
+        }
+    }
+    b[10] = '\0';
+    pstr(b);
+}
 
 #define GPIO_BASE 0x60004000u
 #define PIN_BL    13u
@@ -68,15 +91,24 @@ static void swd_off(void)
     os_reg_wr(0x600080B8u, 0u);
 }
 
+/* 纯忙等延时（不等 tick，避免依赖中断） */
+static void busy_ms(u32 ms)
+{
+    volatile u32 i = 0;
+    u32 n = ms * 13000u;
+
+    while (i < n) { i = i + 1u; }
+}
+
 static void blink(u32 n, u32 ms)
 {
     u32 i = 0;
 
     while (i < n) {
         bl(1u);
-        port_delay_ms(ms);
+        busy_ms(ms);
         bl(0u);
-        port_delay_ms(ms);
+        busy_ms(ms);
         i++;
     }
 }
@@ -87,14 +119,23 @@ void os_main(void)
     u32 cal0 = 0u;
     u32 n = 0u;
 
+    pstr("phy: enter os_main\n");
     bl_init();
+    pstr("phy: bl ok\n");
     blink(3u, 150u);                    /* 开始：快闪 3 下 */
+    pstr("phy: blink ok\n");
 
+    pstr("phy: clock+call\n");
     timg_wdt_arm(160000000u);            /* 约 2 秒；挂住 -> 硬件复位 */
     swd_on();
     rc = s3_win_call_phy_enable();       /* 0 = 成功 */
     swd_off();
     timg_wdt_off();
+    pstr("phy: rc=");
+    phex(rc);
+    pstr(" cal1=");
+    phex(cal0);
+    pstr("\n");
     cal0 = s3_win_call_phy_cal_word(1); /* 校准数据里应该出现非零 */
 
     if (rc == 0u && cal0 != 0u) {
@@ -104,11 +145,11 @@ void os_main(void)
         n = (rc & 0x7u) + 1u;
         for (;;) {
             blink(n, 600u);              /* 慢闪 rc+1 下 = 失败码 */
-            port_delay_ms(1200u);
+            busy_ms(1200u);
         }
     }
 
     for (;;) {
-        port_delay_ms(500u);
+        busy_ms(500u);
     }
 }

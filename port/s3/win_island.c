@@ -131,6 +131,8 @@ void s3_win_log(const char *s)
     ets_printf("%s", s);
 }
 
+void s3_win_trace(const char *s);
+
 /* ---- 最小 PHY 初始化（M1） ------------------------------------------
  * register_chipv7_phy(init_data, cal_data, cal_mode) 是 libphy 的初始化主入口
  * （IDF 的 esp_phy_enable() 最终也是调它）。cal_mode: 0=部分校准 1=不校准 2=完整校准。
