@@ -17,4 +17,6 @@ $(find $IDF/components -maxdepth 4 -type d -name include 2>/dev/null \
 exec $XT -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
     -mlongcalls -mtext-section-literals $INCS \
     -I$IDF/components/esp_wifi/esp32s3 -Iport/s3/idf_compat \
+    -I$IDF/components/soc/esp32s3/register -I$IDF/components/soc/esp32s3/include \
+    -I$IDF/components/soc/include \
     -c "$SRC" -o "$OUT"
