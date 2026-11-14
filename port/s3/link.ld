@@ -32,6 +32,7 @@ SECTIONS
      （那个段会让 ROM 往地址 0 写数据，直接挂）。 */
   .flash.text 0x42000020 : AT (0x20)
   {
+    _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text) *(.flash.text.*) *(.flash.rodata) *(.flash.rodata.*)
     *libphy.a:(.literal .literal.* .text .text.*)

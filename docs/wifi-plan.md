@@ -668,3 +668,38 @@ RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU �
 **下一步**：用这个带日志的 bootloader 跑一次，看到它拒绝 app 的具体原因
 （最常见的几种：镜像头/校验、segment 的 flash 偏移、分区不匹配、"invalid header"），
 然后按提示修 `elf2image`/`link.ld` 的镜像形态。
+
+## 18. c6 标准库能复用什么（第 9 轮盘点，重要）
+
+`/home/winger/c6/std/` 里已经有一整套网络/加密模块，**上层的协议栈不用自己写**：
+
+| 标准库模块 | 能干什么 | 我们能直接用吗 |
+|---|---|---|
+| `std/net/https` | 同步 HTTP/1.1 客户端（fd 可插拔，可选 TLS 记录层） | ✅ 只要 port 提供 fd 的 read/write |
+| `std/net/tlsrec` · `tlskdf` · `x25519` | TLS 1.3 记录层、密钥派生、密钥交换 | ✅ 纯 c6 代码 |
+| `std/data/x509` · `std/encoding/{aes,sha256,sha512,asn1}` | 证书解析、AES、SHA、ASN.1 | ✅ |
+| `std/net/dhcp` · `dns` · `inet` · `cidr` · `url` · `mime` · `http` | DHCP/DNS 报文编解码、地址工具、URL、MIME、HTTP 解析 | ✅ 纯逻辑 |
+| `std/net/tcp` · `udp` · `poll`(os) · `io`(os) | POSIX socket 薄封装 | ⚠️ 需要 port 提供 `socket/connect/send/recv/poll/read/write` |
+
+⇒ **结论：协议层几乎全部可复用**。`https.c6` 的注释也写明："TLS 那层只做记录层，
+握手与证书校验不在这里" —— 也就是说我们只需把 `tlskdf`+`x25519`+`x509`+`tlsrec`
+串成一个 **TLS 1.3 握手状态机**（几百行，纯逻辑）。
+
+### 因此 c6LOS 这边要补的只有三块
+
+1. **WiFi 链路层**（最难，依赖 IDF 闭源库）：关联 + 原始 802.3 帧收发。
+   当前卡在"闭源库代码放哪"：IROM 需要 MMU+cache 初始化（`include/c6os/flash.h`
+   已经做了，实测 MMU 表项/I-cache 都设对了但取指仍失败，见 §17），
+   纯 IRAM 又装不下 76KB 闭包。
+2. **IP 层**：ARP/IPv4/ICMP + UDP + TCP（自己写，或找 std 里有没有用户态实现）。
+3. **POSIX 垫片**：fd 表 + `socket/bind/connect/send/recv/poll/read/write/close`，
+   让 `std/net/tcp.c6`、`std/net/https.c6` 直接跑起来 —— 这一层是"胶水"，
+   放在 `port/s3/socket.c` + `include/c6os/socket.h`（按 c6 标准库规范）。
+
+### 新增到 c6 标准库的东西（本轮已做）
+
+- `include/c6os/flash.h` + `port/s3/flash.c`：
+  `os_flash_map()` / `os_flash_init()` / `os_icache_enable()` / `os_flash_mmu_entry()` /
+  `os_icache_state()` —— flash 窗口(IROM/DROM)映射与 cache 使能，
+  按"arch 相关实现放 port/、接口放 include/c6os/"的既有规范加入。
+- `include` 侧的 `g_boot_marks`（`port/s3/marks.c`）+ 调试读法，作为启动期诊断的标准做法。

@@ -6,6 +6,7 @@
  * 基址 0x60038000（TRM）。 */
 
 #include "c6os/types.h"
+#include "c6os/flash.h"
 #include "c6os/port.h"
 #include "c6os/tick.h"
 #include "c6os/config.h"
@@ -265,6 +266,10 @@ void port_init(void)
      * 0x50000008 就能看出死在 port_init 的第几步（0xB0 进函数 / 0xB1 关完看门狗 /
      * 0xB2 USB 就绪 / 0xB3 打完 banner）。start.S 里另有 0xA0/0xA1 两个标记。 */
     g_boot_marks[2] = 0xB0u;
+
+    /* 如果镜像里有 flash 段（IROM），在这里把 MMU 映射建好、打开 I-cache ——
+     * 没有二级 bootloader 时 ROM 不会做这件事，不建映射 flash 里的代码就取指失败。 */
+    os_flash_init();
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);

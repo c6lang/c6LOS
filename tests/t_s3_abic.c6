@@ -7,6 +7,7 @@
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/flash.h"
 
 void s3_lcd_delay(u32 n);
 void port_puts(const char *s);
@@ -75,7 +76,8 @@ void os_main(void)
     }
     port_putc('\n');
 
-    port_puts("L5d IROM=");
+    port_puts("L5d IROM=(skip: IROM 只能取指，读数据要走 DROM)\n");
+    if (0) { port_puts("L5d IROM=");
     {
         u32 a = s3_win_call_flash_pat();
         u32 i = 0;
@@ -87,6 +89,23 @@ void os_main(void)
             port_putc(' ');
             i++;
         }
+    }
+    port_putc('\n'); }
+
+    port_puts("L5e mmu=");
+    {
+        u32 e0 = os_flash_mmu_entry(0x42000000u);
+        u32 e1 = os_flash_mmu_entry(0x42010000u);
+        u32 ic = os_icache_state();
+        int sh = 28;
+
+        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e0 >> (u32)sh) & 0xFu])); sh -= 4; }
+        port_putc(',');
+        sh = 28;
+        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e1 >> (u32)sh) & 0xFu])); sh -= 4; }
+        port_putc(',');
+        sh = 28;
+        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(ic >> (u32)sh) & 0xFu])); sh -= 4; }
     }
     port_putc('\n');
 
