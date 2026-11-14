@@ -1567,3 +1567,43 @@ a2=0x600080cc  a3=0xffffffffb0b0b0b0                                        ← 
 - PHY 抢 USB PHY 时 JTAG 会一起断；所以 PHY 用例里加了 **90 秒调试窗口**，
   要在窗口内附着
 - `pkill -f openocd` 会把自己这条 shell 命令一起杀掉 —— 用 `pkill -x openocd`
+
+## 47. 第 32 轮：**M1 达成 —— PHY 初始化真的成功了**（JTAG 实证）
+
+用第 31 轮打通的 USB-JTAG 通道，配合"调试门"（应用启动后卡在
+`while (RTC_STORE4 != 0xDEADBEEF)`；gdb 里 `set {int}0x600080C0 = 0xDEADBEEF` 放行），
+逐步验证 `s3_win_phy_step(1..5)`：
+
+```
+--- STEP1 进入 pc=0x403cdb03   --- STEP1 返回 a2=0x1
+--- STEP2 进入 pc=0x403cdb03   --- STEP2 返回 a2=0x2
+--- STEP3 进入 pc=0x403cdb03   --- STEP3 返回 a2=0x3
+--- STEP4 进入 pc=0x403cdb03   --- STEP4 返回 a2=0x4
+--- STEP5 进入 pc=0x403cdb03   --- STEP5 返回 a2=0x5
+```
+
+`s3_trap` 断点**一次都没命中** ⇒ **PHY 初始化没有崩溃**。
+
+之前那条 `IllegalInstruction (pc 落在指令中间)` 的真相是：
+**PHY 抢走内部 USB PHY ⇒ USB-CDC 掉枚举 ⇒ 我们随后调用 ROM 的 `ets_printf` 打印
+"rc=..." 时在 ROM 里跑飞**（跟 PHY 无关）。也就是说：
+
+- ✅ `phy_get_romfunc_addr()` 填表
+- ✅ `register_chipv7_phy_init_param()`
+- ✅ `register_chipv7_phy()`（含射频校准）
+- ❌ 之后**不能再用 USB-CDC 打印**
+
+结论：**卡了 20 多轮的 PHY 初始化已经通了**，剩下的只是"PHY 之后没有串口可看"，
+而这已经被 USB-JTAG 调试通道补上了。
+
+### 复现命令
+
+```sh
+make C6_ROOT=/home/winger/c6 BUILD=build/wgate S3_LEAN=1 S3_CDEFS="-DS3_WITH_LIBPHY" \
+     S3_MAIN=tests/t_s3_phy.c6 S3_STACK_TOP=0x3FCD9000 build/wgate/libphy_win.a
+make C6_ROOT=/home/winger/c6 BUILD=build/wgate S3_LEAN=1 S3_CDEFS="-DS3_WITH_LIBPHY" \
+     S3_MAIN=tests/t_s3_phy.c6 S3_STACK_TOP=0x3FCD9000 \
+     S3_EXTRA_LIBS=build/wgate/libphy_win.a s3
+./tools/flashmon.sh build/wgate/c6os.bin 5      # 刷进去，应用会卡在调试门
+./tools/dbg.sh build/wgate/c6os.elf tools/gfin2.gdb   # 逐个读 5 步的返回值
+```

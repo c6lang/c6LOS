@@ -38,8 +38,13 @@ void os_main(void)
     u32 step = 1u;
     u32 rc = 0u;
 
-    /* 调试窗口：给 openocd/gdb 90 秒接入时间（USB-JTAG，不需要 UART）*/
-/* 先把上一轮（可能是被看门狗复位掉的）信标打出来：RTC 域在 CPU 复位时不清，
+    /* 调试门：一直等到调试器把 RTC_STORE4(0x600080C0) 写成 0xDEADBEEF。
+     * 用法：gdb 里 `set {int}0x600080C0 = 0xDEADBEEF` 后 continue。
+     * 这样附着和断点都不赶时间，USB 也不会因为跑进 PHY 而掉线。 */
+    os_reg_wr(0x600080C0u, 0u);
+    while (os_reg_rd(0x600080C0u) != 0xDEADBEEFu) { }
+
+    /* 先把上一轮（可能是被看门狗复位掉的）信标打出来：RTC 域在 CPU 复位时不清，
      * 只有真断电才丢，所以看门狗复位能让我们看到"卡在第几步"。 */
     pstr("prev: step=");
     phex(*(volatile u32 *)0x600080C0u);
