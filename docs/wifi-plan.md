@@ -1147,3 +1147,28 @@ c6os s3 boot / phy: enter os_main / phy: bl ok / phy: blink ok / phy: clock+call
 → 卡在 `register_chipv7_phy()` 里面（modem 时钟已按 §30 补上，仍然卡）。
 闭源库回调我们的胶水函数（`win_memset`/`phy_enter_critical`）时都会打一个字符，
 下次板子能正常出串口时，就能看到它走到哪一步。
+
+## 34. 诊断通道现状（第 26 轮末）
+
+现在同时有四条通道，按可靠性排序：
+
+| 通道 | 怎么用 | 状态 |
+|---|---|---|
+| **RTC 信标** `RTC_CNTL_STORE4..7`（0x600080C0..CC） | `s3_beacon(slot, val)`，然后 `esptool read-mem 0x600080C0` | 已实现；CPU/看门狗复位都不丢，**不需要串口** |
+| **ROM printf**（`ets_printf`，走 windowed 孤岛 `s3_win_call_log`） | 测试里 `pstr()` | 不依赖我们自己的 USB 初始化，只要芯片正常引导就能出 |
+| 我们自己的 USB-CDC 控制台 | `port_puts` | 可用，但 `port_init` 里的 USB 重枚举偶发失败；**PHY 挂死后还会把 USB 搞掉**（要用 `S3_NO_USB_REINIT` 构建避免） |
+| 背光（GPIO13） | `blink()` / 陷阱处理 | 只能表达"是/否"，用户反馈难以判读 |
+
+工具：`tools/reset.py`（干净复位，**必须用**，否则芯片留在下载模式）、
+`tools/cap.py`（同时监听所有 ttyACM）、`tools/usbreset.py`（救 EPROTO）、
+`tools/flash.sh`（失败自动 usbreset 重试）。
+
+### 下一步（板子能正常出日志后 5 分钟就能有结论）
+
+flash 里的 `build/wphyG`（`-DS3_NO_USB_REINIT -DS3_WITH_LIBPHY`）已经把信标打在：
+- slot0：`0xB0000001` 进 os_main、`0xB0000004` 正要调 PHY、`0xB0000005` PHY 返回
+- slot1：PHY 的返回值
+- slot3：`0xC0000000|n` 闭源库回调我们胶水函数的次数（`win_memset`/`phy_enter_critical`）
+
+按 RST 后读一次这 4 个字，就能确定它卡在 `register_chipv7_phy()` 的哪一段，
+以及闭源库到底有没有回调我们。
