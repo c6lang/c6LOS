@@ -26,7 +26,7 @@ SECTIONS
      只在真的链接了这些库时才非空，普通构建里是空段、不产生 flash 段。
      注意字面量池必须跟代码一起搬：l32r 是 PC 相对（往低地址 ±256KB），
      代码和字面量都在 flash 段里就没问题。 */
-  .flash.text 0x42000000 : AT (0x20000)
+  .flash.text 0x42000000 : AT (0x10000)
   {
     _flash_text_start = .;
     *libphy.a:(.literal .literal.* .text .text.*)

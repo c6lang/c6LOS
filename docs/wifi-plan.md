@@ -449,3 +449,27 @@ DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 
   （做法：把 `.flash.text` 的 LMA 设到 `0x20000` 之外，再保证前面所有段
   总长 < 0x20000；或显式加一个 `. = 0x20000` 的填充段在链接脚本里，
   不让 elf2image 自己插入 PADDING 段）。
+
+### 15.2 IROM 版本仍然起不来（本轮最后的实测状态）
+
+镜像段表（`build/wifim6`，LMA 已改 0x10000）：
+
+```
+0  0x01890  0x3fca0000  off 0x00000018  DRAM
+1  0x09674  0x403c9000  off 0x000018b0  IRAM     ← 结束 0x403D2674，安全区 ✓
+2  0x050c4  0x00000000  off 0x0000af2c  PADDING  ← 8 字节段头落在 0xfff8
+3  0x09700  0x42000000  off 0x0000fff8  IROM     ← 数据实际从 flash 0x10000 开始 ✓
+```
+
+仍然启动不了（`Saved PC` 落在 ROM，RTC 标记全乱 = `_start` 没跑）。
+怀疑点（下一轮按顺序查）：
+1. ROM 对 IROM 段要求 **flash 偏移 64KB 对齐**，而 elf2image 把"段头"放在
+   0xfff8、数据放 0x10000；要确认 ROM 认的是哪个（把 bin 的段头解析出来，
+   看记录的 load addr 到底是 0x42000000 + 哪个 flash page）。
+2. 可能必须让镜像走 `esptool` 的标准**分段烧写**（app image → 0x10000，
+   IROM 在其后），而不是"整个镜像写到 0x0"。可以试
+   `esptool write-flash 0x0 boot.bin 0x10000 irom.bin` 这种方式。
+3. 或者干脆不用 IROM：把闭源库里真正用到的少数函数**复制到 IRAM**
+   （用链接脚本的 `.text` + `--only-section` 抽出必要目标文件），
+   把 IRAM 控制在 66KB 以内（当前 libphy 闭包 76KB，只差 10KB，
+   可以先用 `-Os`/裁剪无关函数试试）。
