@@ -3031,3 +3031,30 @@ esp_err_t IRAM_ATTR spi_flash_init_chip_state(void)
 `read_command`(DIO=0x3B) / `addr_bitlen`(24) / `dummy_cyclelen`，再调
 `host->driver->configure_host_io_mode()` 去写 `SPI_MEM_*` 寄存器。
 **下一步就是把这个函数最终写下的寄存器值扒出来**（已派子代理专门做这件事）。
+
+## 80. 新线索：cache 读 flash 可能依赖"连续读(XIP)模式"的 dummy 位配置
+
+读 IDF 的 `esp_hal_mspi/spi_flash_hal_common.inc` 里 `spi_flash_hal_configure_host_io_mode`
+的实现，有一段注释非常关键：
+
+> Some flash chips, when working under some IO modes (DIO, QIO and OIO in the future),
+> **treat the first 8 bits of the dummy bits as the [continuous mode] bits**. When the bits
+> meet some pattern, the chip will go into a **"continuous (XIP)" mode**, where the command
+> field will be skipped in the next [transaction]...
+
+也就是说：**S3 的 cache 从 flash 取数，依赖 flash 芯片进入"连续读(XIP)模式"**，而这个模式
+是靠 **dummy 位里的 8 位模式值** 触发的，由 `spi_flash_ll_set_dummy_out(dev, 1, 1)`
+这类调用去配置 `SPI_MEM_CTRL` 的 `FDUMMY_OUT`/`FDOUT_OCT` 相关位。
+
+而我们的 app：
+- `SPI_MEM_CTRL = 0x012ca008`（bootloader 留的）
+- IDF app 运行态 = `0x00000000`
+
+两者的 dummy-out / 连续模式配置不同。**这解释了为什么 cache 读回 0 却不报 Cache error**
+——cache 发出了读命令，但芯片没有按预期进入连续读模式，返回的数据相位错位/全 0。
+
+### 下一步
+
+扒出 `spi_flash_ll_set_dummy_out` 在 ESP32-S3 上到底写 `SPI_MEM_CTRL` 的哪些位、
+连续模式值是多少（通常是 0xA0），然后在我们 app 里**在 cache 使能之前**把这些位配好。
+这一条已交给子代理深入（`sub-2`）。
