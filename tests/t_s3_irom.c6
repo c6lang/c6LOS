@@ -72,8 +72,9 @@ void os_main(void)
 
     /* 手动建立 IROM 映射并开 cache（含 SHUT_CORE0_BUS） */
     (void)os_flash_map(0u, 0x42000000u, 0x20000u, OS_FLASH_IROM);
-    os_icache_enable();
 
+    /* 先把 MMU 表项打出来（**在开 cache 之前**，否则万一 cache 配置有问题，
+     * 后面连打印都看不到，就分不清是映射错还是 cache 错）。 */
     pstr("mmu=0x");
     {
         u32 e = os_flash_mmu_entry(0x42000000u);
@@ -82,6 +83,9 @@ void os_main(void)
         while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e >> (u32)sh) & 0xFu])); sh -= 4; }
     }
     pstr("\n");
+    pstr("icache on ...\n");
+    os_icache_enable();
+    pstr("icache on done\n");
 
     s3_beacon(0u, 0x10000001u);          /* 进到映射之后 */
     v = s3_win_call_flash42();           /* 期望 42 */
