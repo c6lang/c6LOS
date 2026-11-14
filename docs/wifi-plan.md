@@ -918,3 +918,27 @@ RST/电源键），单纯重插如果板子还有独立供电就不算断电。
 
 恢复后仍按 §25 的三步走：
 `build/wirom2`（等 `L5irom=42`）→ `build/wphyen7`（PHY 校准）→ WiFi 库放 flash。
+
+## 27. 第 18~19 轮：板子仍然不跑应用（不依赖串口的判断）
+
+用"不依赖串口"的办法确认了应用确实没在跑：
+
+| 探针 | 读到的值 | 说明 |
+|---|---|---|
+| `g_boot_marks[0]`（.data，`port_init` 一进来写 0xB0） | **0** | 应用没跑到 `port_init` |
+| `tests/t_s3_alive.c6` 往 RTC `0x50000008` 写的心跳 | `0x1a588d90` 恒定不变 | 不是心跳 |
+| 同一个探针往 DRAM `0x3FCEE000` 写的魔数 | `0x400559e8`（ROM 地址） | 那是 ROM/bootloader 自己的栈数据，说明这块 DRAM 每启动都被 ROM 覆写（**这个地址不能当探针用**，改用 `g_boot_marks`） |
+| `tools/flash.sh` | `Hash of data verified` ✓ | 下载协议正常，写进去的内容是对的 |
+| 串口（含 ROM banner） | 0 字节 | USB-Serial/JTAG 的 **console 通路**不通 |
+
+结论：芯片能被 esptool 读写（ROM 下载模式），但**没有运行我们的应用**，且
+console 输出到不了主机。这两件事同时出现，最可能是：
+1. 板子没有真正断电（如果板子另有供电，只拔 USB 数据线不算断电）；
+2. 或 BOOT(GPIO0) 被按住/卡住 → 每次复位都进下载模式，应用不会跑。
+
+**需要人工确认**：①把 USB 从板子/电脑两端都拔掉等 10 秒；②检查 BOOT 键有没有
+卡住；③插回后看板上电源灯/串口。
+
+恢复后仍按 §25：`build/wirom2`（等 `L5irom=42`）→ `build/wphyen7`（PHY 校准）。
+另：`g_boot_marks` 是比 RTC/0x3FCEE000 更可靠的"应用跑没跑"探针
+（地址用 `nm build/<b>/c6os.elf | grep g_boot_marks` 查）。

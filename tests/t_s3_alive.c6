@@ -7,16 +7,19 @@
 
 void port_delay_ms(u32 ms);
 
-#define HEART (*(volatile u32 *)0x50000008u)
+#define HEART (*(volatile u32 *)0x50000008u)   /* RTC 慢速内存 */
+#define HEART2 (*(volatile u32 *)0x3FCEE000u)  /* DRAM（栈顶下面，没人用） */
 
 void os_main(void)
 {
     u32 n = 0u;
 
     HEART = 0x100u;                 /* 0x100 = 进了 os_main */
+    HEART2 = 0xC6A11FE5u;           /* 独特的魔数，证明 DRAM 也能写 */
     for (;;) {
         n = n + 1u;
         HEART = 0x100u + (n & 0xFFFu);
+        HEART2 = 0xC6A11FE5u + (n & 0xFFu);
         port_delay_ms(20u);
     }
 }
