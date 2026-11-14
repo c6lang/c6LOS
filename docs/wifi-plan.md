@@ -1089,3 +1089,61 @@ LMA 排段的，而我们的 `.data/.text` 的 LMA 还没真正排到 flash 段�
 
 有了上面任意一条的日志，就能定位"ROM 为什么不吃我们的镜像"，然后
 PHY 时钟修复（§30 新增的 `SYSCON_WIFI_CLK_EN` 使能）就能验证了。
+
+## 33. 第 26 轮的重大发现：芯片卡在"下载模式"（这是"应用不跑"的真凶）
+
+用"**先开抓、再复位**"的方式（`tools/cap.py`）终于抓到了 ROM 的原始输出：
+
+```
+ESP-ROM:esp32s3-20210327
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x0 (DOWNLOAD(USB/UART0))
+waiting for download                 ← 芯片在等下载指令，根本没引导 flash！
+```
+
+也就是说：`esptool` 的复位走的是 **USB-Serial/JTAG 的"复位进下载模式"通道**，
+一旦进了下载模式，**DTR/strap 状态会粘住**，之后的软件复位（watchdog reset、
+纯 RTS 复位）都还在下载模式里，`/dev/ttyACM*` 上看不到任何我们的输出
+——之前"镜像不跑、屏幕黑"全是这个原因，不是镜像的问题。
+
+**证据**：用 `tools/reset.py`（只拉 RTS/EN，DTR=0 保持 GPIO0 高）那一次复位，
+ROM 输出变成：
+
+```
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)   ← 正常引导！
+load:0x3fca0000,len:0xb90
+load:0x403c9000,len:0x8294
+entry 0x403c98e8
+c6os s3 boot                                                    ← 我们的固件跑起来了！
+```
+
+### 这一轮新增的工具（都很关键）
+
+| 工具 | 作用 |
+|---|---|
+| `tools/reset.py` | **干净的硬件复位**（DTR=0 保持 GPIO0 高，只脉冲 RTS/EN），让芯片正常引导 flash 里的固件 |
+| `tools/cap.py` | 串口抓取，**同时监听所有 `/dev/ttyACM*`**（复位后常残留僵尸节点，之前的抓法抓错节点就会"0 字节"） |
+| `tools/usbreset.py` | 用 `USBDEVFS_RESET` 救卡成 EPROTO 的 USB 端口（不需要拔插） |
+| `tools/flash.sh` | 刷机失败时自动 `usbreset` 重试 |
+
+### 另一个坑（已回退）
+
+为了让 IDF bootloader 接受我们的 app，我试过补 `esp_app_desc_t` 并把 DROM 段排最前，
+结果 `elf2image` 在镜像里插了一个 `load=0x00000000` 的填充段，
+**ROM 直接引导时往地址 0 写数据 → 立刻 StoreProhibited 崩溃**：
+```
+load:0x00000000,len:0x755c
+Guru Meditation Error: Core 0 panic'ed (StoreProhibited)  EXCVADDR: 0x00000000
+```
+⇒ ROM 直接引导这条路**必须保持 RAM-only 镜像**（`--ram-only-header`）。
+要走 bootloader 那条路，得让每个段的 LMA 在 flash 里连续（IDF 的段布局），
+这事还没做完（`link.ld` 里加了 `AT(...)` 但生成的镜像没变）。
+
+### PHY 初始化：仍然挂死，但已能定位
+
+`build/wphyE`（带追踪）：串口能看到
+```
+c6os s3 boot / phy: enter os_main / phy: bl ok / phy: blink ok / phy: clock+call
+```
+→ 卡在 `register_chipv7_phy()` 里面（modem 时钟已按 §30 补上，仍然卡）。
+闭源库回调我们的胶水函数（`win_memset`/`phy_enter_critical`）时都会打一个字符，
+下次板子能正常出串口时，就能看到它走到哪一步。

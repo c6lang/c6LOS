@@ -23,7 +23,7 @@ try:
     TIOCM_DTR, TIOCM_RTS = 0x002, 0x004
     fcntl.ioctl(fd, TIOCMBIC, struct.pack('i', TIOCM_DTR))
     fcntl.ioctl(fd, TIOCMBIS, struct.pack('i', TIOCM_RTS))
-    time.sleep(0.15)
+    time.sleep(0.5)
     fcntl.ioctl(fd, TIOCMBIC, struct.pack('i', TIOCM_RTS))
     print('已复位:', port)
 finally:
