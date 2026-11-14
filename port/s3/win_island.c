@@ -134,6 +134,9 @@ u32 phy_get_romfuncs(void);
  * must be called before register_chipv7_phy"。ROM 里那个 phy_get_romfuncs()
  * 是另一回事（它填 ROM 内部的表，跟我们的 g_phyFuns 无关）。 */
 void phy_get_romfunc_addr(void);
+/* IDF 用它让 PHY 初始化时**不要抢走内部 USB PHY**（否则 USB-CDC 立刻掉枚举，
+ * 串口和 esptool 一起失联，什么都看不到）。必须在 register_chipv7_phy 之前调用。 */
+void phy_bbpll_en_usb(u32 enable);
 
 void s3_win_log(const char *s)
 {
@@ -266,7 +269,9 @@ int s3_win_phy_step(int step)
         u32 tab = 0;
 
         (void)tab;
-        /* 就这一步：初始化 PHY 库自己的函数指针表（g_phyFuns）。 */
+        /* ① 让 PHY 知道 USB 也在用内部 PHY（IDF 的 CONFIG_ESP_PHY_ENABLE_USB 等价物） */
+        phy_bbpll_en_usb(1u);
+        /* ② 初始化 PHY 库自己的函数指针表（g_phyFuns）——必须在 register_chipv7_phy 之前 */
         phy_get_romfunc_addr();
     }
     if (step <= 2) {
