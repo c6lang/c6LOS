@@ -1309,3 +1309,36 @@ ROM 填的是它自己那份，两边不是同一个变量。
 - `port/s3/win_bridge.S`：`s3_win_call_phy_step`、`s3_win_call_phy_funcs`
 - `tools/beacon.sh`、`tools/cap.py`（抓所有 ttyACM + 释放 DTR）
 - `tests/t_s3_phy.c6`：分步诊断，结果只写 RTC 信标（崩溃也不丢）
+
+## 39. 第 29 轮补充实测：`phy_get_romfuncs()` 不是答案
+
+安全探测（`build/wphyQ`，只写 RTC 信标）结果：
+
+```
+slot0 = 0xF1        ← 进到 os_main 并开始探测
+slot1 = 0x00000002  ← phy_get_romfuncs() 的**返回值是 2**（不是表指针）
+slot2 = 0x00000000  ← 返回值不像指针，没解引用（防崩）
+slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了）
+```
+
+⇒ ROM 的 `phy_get_romfuncs()` **既不填我们的 `g_phyFuns`，也不返回表指针**。
+另外**去扫描 ROM 数据区（0x3FCEF000 起）会把总线读死**（不是 trap，是挂住），
+所以"扫内存找表"这条路不要再用。
+
+### 下次开工的三条路（按性价比排序）
+
+1. **接一根 USB-UART 到 GPIO43/44（UART0）**：现在每次 PHY 一初始化 USB 就掉，
+   什么也看不到；UART0 不受 PHY 影响，能直接看到卡在哪条指令。
+   （我们的 `port_putc` 也可以顺手加一条"同时写 UART0"的分支。）
+2. **用 JTAG**（S3 内置 USB-JTAG 支持 OpenOCD）：下断点看 `g_phyFuns` 在 ROM 里
+   到底被写到哪个地址。
+3. **自己造表**：`g_phyFuns` 只需要是一张函数指针表，`register_chipv7_phy`
+   用到的表项（0x204 等）指向 ROM 里已有的 `phy_*` 函数
+   （`port/s3/rom/esp32s3.rom.ld` 里有 1200+ 个 ROM 符号可查）。
+
+### 已经确定无误的部分（不用再怀疑）
+
+- 镜像内容/刷机/引导：`boot:0x8 (SPI_FAST_FLASH_BOOT)` + `c6os s3 boot` ✓
+- ABI 桥、libphy 能执行 ✓（`phy_get_rf_cal_version()` = 0x2C7）
+- modem 时钟已开 ✓（step1 rc=0）
+- 卡点**唯一且明确**：`g_phyFuns` 空表 ⇒ `callx8 0` ⇒ `cause=0x14 pc=0`
