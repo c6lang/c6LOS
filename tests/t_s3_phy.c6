@@ -37,14 +37,27 @@ void os_main(void)
     u32 step = 1u;
     u32 rc = 0u;
 
-    /* 1) 先把**上一轮**留下的信标打印出来（本轮还没覆盖它们） */
-    pstr("prev beacons: step=");
-    phex(*(volatile u32 *)0x600080C0u);
-    pstr(" rc=");
-    phex(*(volatile u32 *)0x600080C4u);
-    pstr(" g_phyFuns=");
-    phex(*(volatile u32 *)0x600080C8u);
-    pstr("\n");
+    /* 1) 把**上一轮**留下的信标连续打印 10 秒（每 0.5 秒一次）：
+     *    这样主机侧不必掐着点上电，什么时候接上串口都能看到结果。 */
+    {
+        u32 n = 0;
+
+        while (n < 20u) {
+            pstr("prev: step=");
+            phex(*(volatile u32 *)0x600080C0u);
+            pstr(" rc=");
+            phex(*(volatile u32 *)0x600080C4u);
+            pstr(" g_phyFuns=");
+            phex(*(volatile u32 *)0x600080C8u);
+            pstr("\n");
+            {
+                volatile u32 k = 0;
+
+                while (k < 10000000u) { k = k + 1u; }
+            }
+            n = n + 1u;
+        }
+    }
 
     /* 2) 本轮重新跑一遍 */
     s3_beacon(2u, s3_win_call_phy_funcs());
