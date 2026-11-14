@@ -1,0 +1,12 @@
+/* H7: SYSTEM_CACHE_CONTROL / EXTMEM_CLOCK_GATE / CACHE_MMU_POWER / CACHE_STATE */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000050u);
+    s3_beacon(1u, os_reg_rd(0x600C0048u));   /* SYSTEM_CACHE_CONTROL  期望 0x5   */
+    s3_beacon(2u, os_reg_rd(0x600C4164u));   /* EXTMEM_CLOCK_GATE     期望 bit0=1 */
+    s3_beacon(3u, os_reg_rd(0x600C412Cu));   /* CACHE_MMU_POWER_CTRL  期望 0x5   */
+    for (;;) { }
+}

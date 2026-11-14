@@ -83,3 +83,31 @@ slot3 = 0x00000000   EXTMEM_MMU_FAULT_VADDR       <- 没有 MMU 表项错误
 IDF app 在 160MHz PLL 下用 `0x00010001`（÷2 = 80MHz），也自洽。
 **别再在运行期写 `0x60002008/0x60002014`** —— 从 flash 取指时改自己的读时钟就是当场自杀，
 "写就崩"是这个原因，不是"配置缺失"的证据。
+
+## 又排除两条（真板实测）
+
+### H7：cache 的时钟/电源/MMU 内存供电全部正常
+
+```
+SYSTEM_CACHE_CONTROL_REG (0x600C0048) = 0x00000005   ← ICACHE_CLK_ON + DCACHE_CLK_ON 都开
+EXTMEM_CLOCK_GATE        (0x600C4164) = 0x00000001   ← 时钟门控打开
+EXTMEM_CACHE_MMU_POWER_CTRL (0x600C412C) = 0x00000005 ← MMU 内存已上电
+```
+
+### H5：IROM 在 512 项表里的范围是完整的
+
+```
+Cache_Get_IROM_MMU_End() = 0x200 (=512)   ← IROM 拥有整张表
+Cache_Get_DROM_MMU_End() = 0x400 (=1024)
+```
+
+我们的 entry 3 落在 IROM 范围内，切分点没有问题。
+
+### 小结
+
+至此，cache 之前/之后的每一层都验证过是正常的：
+时钟 ✓ 电源 ✓ MMU 供电 ✓ 表项有效 ✓ cache 使能与模式 ✓ 总线未 SHUT ✓
+flash 内容 ✓ 无非法访问记录 ✓ 无 MMU 错误记录 ✓ —— **读回仍是 0**。
+
+唯一还没做的是 **H8**：用 SPI_MEM 的 USER 通路（不走 cache）手工读 flash，
+把"flash 通路"和"cache 通路"彻底分开。这是下一步最有价值的实验。

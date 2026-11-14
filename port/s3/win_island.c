@@ -420,3 +420,14 @@ u32 s3_win_cache_invalidate(void)
     fn();
     return 0u;
 }
+
+/* 读 ROM 的 Cache_Get_IROM_MMU_End / Cache_Get_DROM_MMU_End（判断 IROM 在 512 项表里的切分点） */
+u32 s3_win_irom_mmu_end(void)
+{
+    return ((u32 (*)(void))0x4000195cu)();
+}
+
+u32 s3_win_drom_mmu_end(void)
+{
+    return ((u32 (*)(void))0x40001968u)();
+}

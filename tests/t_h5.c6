@@ -1,0 +1,13 @@
+/* H5: IROM/DROM 在 512 项 MMU 表里的切分点 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+u32 s3_win_call_irom_mmu_end(void);
+u32 s3_win_call_drom_mmu_end(void);
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000051u);
+    s3_beacon(1u, s3_win_call_irom_mmu_end());   /* IROM 表项结束位置 */
+    s3_beacon(2u, s3_win_call_drom_mmu_end());   /* DROM 表项结束位置 */
+    for (;;) { }
+}
