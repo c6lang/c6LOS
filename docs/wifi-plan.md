@@ -646,3 +646,25 @@ RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU �
 第 1、2 步各自都是"数天到一两周"量级的活，第 5 步又是同等量级。
 **距离"真板取到 https://qq.com 页面"还有相当长的路**，不建议在最近几轮里
 承诺完成；建议按里程碑推进，每个里程碑都留下真板证据（本文件第 12 节 M1~M5）。
+
+## 17. 方案修正（第 8 轮）：用 IDF 的标准 bootloader，而不是自己造半个
+
+上一轮推断"ROM 不建 flash MMU 映射"之后，最省事、最标准的路是：
+**把 IDF 的二级 bootloader 补上**（它本来就是干这件事的）：
+1. `bootloader.bin` 烧到 `0x0`、`partition-table.bin` 烧到 `0x8000`；
+2. 我们的 `c6os.bin` 作为 **app 镜像** 烧到 app 分区（默认 single-app 工厂分区 `0x10000`）；
+3. bootloader 负责：读分区表 → 校验 app → **用 SPI MMU 映射 IROM/DROM** → 开 cache → 跳 entry。
+
+已做：
+- 先试了上游 xiaozhi 现成的 `bootloader.bin`+分区表（app 在 0x20000）：
+  bootloader 能启动（串口出现 `entry 0x403c88f4`），但**立刻软复位**，
+  且它的 `CONFIG_BOOTLOADER_LOG_LEVEL=0`（完全静默），看不到原因。
+- 因此新建最小 IDF 工程 `tools/idfboot/`（`main.c` 空壳，只为产出 bootloader +
+  分区表），`sdkconfig.defaults` 里：`BOOTLOADER_LOG_LEVEL=3`（要日志）、
+  `FLASHMODE=dio`、`40m`、`16MB`、`CONSOLE_USB_SERIAL_JTAG=y`、
+  `PARTITION_TABLE_SINGLE_APP=y`（工厂分区 0x10000）、关 PSRAM。
+  构建命令：`cd tools/idfboot && source $IDF/export.sh && idf.py -B build -DIDF_TARGET=esp32s3 build`
+
+**下一步**：用这个带日志的 bootloader 跑一次，看到它拒绝 app 的具体原因
+（最常见的几种：镜像头/校验、segment 的 flash 偏移、分区不匹配、"invalid header"），
+然后按提示修 `elf2image`/`link.ld` 的镜像形态。
