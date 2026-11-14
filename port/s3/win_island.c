@@ -150,6 +150,20 @@ static phy_cal_data_t g_phy_cal;
 #define S3_PHY_CAL_MODE 0
 #endif
 
+/* IDF 在 register_chipv7_phy() 之前必须先给 modem 开时钟（见 esp_phy/src/phy_init.c
+ * 的 esp_phy_enable：esp_phy_common_clock_enable() + phy_module_enable()）。
+ * S3 上就是往 SYSCON_WIFI_CLK_EN(0x60026014) 塞两组位：
+ *   WIFI_BT_COMMON = 0x78078F   （WiFi/BLE 共用时钟）
+ *   PHY_EN         = 0x400000   （PHY 校准模块时钟）
+ * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。 */
+static void s3_win_phy_clock_enable(void)
+{
+    volatile u32 *clk = (volatile u32 *)0x60026014u;
+
+    *clk = *clk | 0x78078Fu;
+    *clk = *clk | 0x400000u;
+}
+
 int s3_win_phy_enable(void)
 {
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
@@ -161,6 +175,7 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[7] = 0xecu;
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
+    s3_win_phy_clock_enable();
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
@@ -169,6 +184,20 @@ u32 s3_win_phy_cal_word(u32 i)
     return ((const u32 *)(const void *)g_phy_cal.v)[i & 0x1FFu];
 }
 #else
+/* IDF 在 register_chipv7_phy() 之前必须先给 modem 开时钟（见 esp_phy/src/phy_init.c
+ * 的 esp_phy_enable：esp_phy_common_clock_enable() + phy_module_enable()）。
+ * S3 上就是往 SYSCON_WIFI_CLK_EN(0x60026014) 塞两组位：
+ *   WIFI_BT_COMMON = 0x78078F   （WiFi/BLE 共用时钟）
+ *   PHY_EN         = 0x400000   （PHY 校准模块时钟）
+ * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。 */
+static void s3_win_phy_clock_enable(void)
+{
+    volatile u32 *clk = (volatile u32 *)0x60026014u;
+
+    *clk = *clk | 0x78078Fu;
+    *clk = *clk | 0x400000u;
+}
+
 int s3_win_phy_enable(void)
 {
     return -1;      /* 没链 libphy */
