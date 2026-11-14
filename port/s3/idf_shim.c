@@ -33,11 +33,45 @@ void phy_exit_critical(u32 level)
 #define IDF_SHIM_PRINT 0
 #endif
 
+/* ---- 闭源库的调试输出飞行记录仪 ----------------------------------------
+ * 不能直接往串口打（本文件是 windowed 编译，port_putc 是 call0 的，跨 ABI 会炸），
+ * 所以把格式化结果写进 DRAM 里的环形缓冲；崩溃后用
+ *   esptool read-mem <g_idf_log 地址>
+ * 读出来，就能看到库死在哪一步（复位后 DRAM 内容还在）。
+ */
+static int vsprintf_internal(char *dst, int cap, const char *fmt, __builtin_va_list ap);
+
+#define IDF_LOG_CAP 2048u
+volatile u32 g_idf_log_len = 0u;
+char g_idf_log[IDF_LOG_CAP];
+
+static void idf_log_append(const char *s, int n)
+{
+    u32 len = g_idf_log_len;
+    int i = 0;
+
+    while (i < n && len < (IDF_LOG_CAP - 1u)) {
+        char c = s[i];
+
+        if (c == '\n' || c == '\r') { c = ' '; }
+        g_idf_log[len] = c;
+        len++;
+        i++;
+    }
+    g_idf_log[len] = '\0';
+    g_idf_log_len = len;
+}
+
 int phy_printf(const char *fmt, ...)
 {
-#if IDF_SHIM_PRINT
-    (void)fmt;
-#endif
+    char tmp[160];
+    __builtin_va_list ap;
+    int n = 0;
+
+    __builtin_va_start(ap, fmt);
+    n = vsprintf_internal(tmp, (int)sizeof(tmp), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) { idf_log_append(tmp, n); }
     return 0;
 }
 
@@ -68,12 +102,13 @@ static char *shim_num(char *p, u32 v, u32 base, int upper, int width, int zero)
     return p + i;
 }
 
-int sprintf(char *dst, const char *fmt, ...)
+static int vsprintf_internal(char *dst, int cap, const char *fmt, __builtin_va_list ap)
 {
-    __builtin_va_list ap;
     char *p = dst;
+    char *end = dst + cap - 1;
 
-    __builtin_va_start(ap, fmt);
+    (void)end;
+
     while (*fmt != '\0') {
         if (*fmt != '%') { *p = *fmt; p++; fmt++; continue; }
         fmt++;
@@ -114,6 +149,16 @@ int sprintf(char *dst, const char *fmt, ...)
         fmt++;
     }
     *p = '\0';
-    __builtin_va_end(ap);
     return (int)(p - dst);
+}
+
+int sprintf(char *dst, const char *fmt, ...)
+{
+    __builtin_va_list ap;
+    int n = 0;
+
+    __builtin_va_start(ap, fmt);
+    n = vsprintf_internal(dst, 1024, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
 }
