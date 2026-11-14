@@ -77,6 +77,8 @@ void os_main(void)
     /* D: 再按原厂值配 SPI_MEM */
     os_reg_wr(R_SPI08, 0x00608000u);
     os_reg_wr(R_SPI14, 0x00030103u);
+    pstr("D 写后回读 SPI08="); phex(os_reg_rd(R_SPI08));
+    pstr(" SPI14="); phex(os_reg_rd(R_SPI14)); pstr("\n");
     os_reg_wr(R_CTRL, os_reg_rd(R_CTRL) | 1u);
     v = probe();
     pstr("D +SPI_MEM 原厂值         => "); phex(v); pstr("\n");
@@ -97,6 +99,28 @@ void os_main(void)
     v = *(volatile u32 *)0x42000000u;
     pstr("F2 flash0x0 头             => "); phex(v); pstr("\n");
     os_reg_wr(R_CTRL, 0u);
+
+    /* G: 同时正确打开 D-cache(0x600C4000/04) 和 I-cache(0x600C4060/64) */
+    pstr("G 之前 DCACHE_CTRL=");  phex(os_reg_rd(0x600C4000u));
+    pstr(" CTRL1=");               phex(os_reg_rd(0x600C4004u));
+    pstr(" ICACHE_CTRL=");         phex(os_reg_rd(0x600C4060u));
+    pstr(" CTRL1=");               phex(os_reg_rd(0x600C4064u)); pstr("\n");
+
+    os_reg_wr(0x600C4004u, os_reg_rd(0x600C4004u) & ~0x3u);   /* D: 清 SHUT */
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) & ~0x3u);   /* I: 清 SHUT */
+    os_reg_wr(0x600C4000u, os_reg_rd(0x600C4000u) | 0x1u);    /* D: 使能 */
+    os_reg_wr(0x600C4060u, os_reg_rd(0x600C4060u) | 0x1u);    /* I: 使能 */
+
+    /* 清一下 cache（写 CTRL1 的 invalidate 位再清） */
+    os_reg_wr(0x600C4004u, os_reg_rd(0x600C4004u) | 0x4u);
+    os_reg_wr(0x600C4004u, os_reg_rd(0x600C4004u) & ~0x4u);
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) | 0x4u);
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) & ~0x4u);
+
+    v = *(volatile u32 *)PROBE;
+    pstr("G 双 cache 打开后 probe    => "); phex(v); pstr("\n");
+    os_reg_wr(0x600C4060u, 0u);
+    os_reg_wr(0x600C4000u, 0u);
 
     pstr("=== 完 ===\n");
     for (;;) { }

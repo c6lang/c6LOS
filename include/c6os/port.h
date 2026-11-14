@@ -47,4 +47,6 @@ void s3_beacon(u32 slot, u32 val);
 
 u32 s3_win_call_cache_enable(void);
 
+u32 s3_win_call_cache_invalidate(void);
+
 #endif

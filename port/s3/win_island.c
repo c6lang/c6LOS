@@ -410,3 +410,13 @@ u32 s3_win_cache_enable(void)
     return 0u;
 }
 
+/* 清 I-cache：ROM 的 Cache_Invalidate_ICache_All(0x400016d4)。
+ * 之前从 call0 直接调会"一调就死"，其实是 ROM 的 windowed ABI 问题；
+ * 放在这个 windowed 孤岛里调才是对的。 */
+u32 s3_win_cache_invalidate(void)
+{
+    void (*fn)(void) = (void (*)(void))0x400016d4u;
+
+    fn();
+    return 0u;
+}

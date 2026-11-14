@@ -2239,3 +2239,56 @@ F ROM Cache_Enable_ICache    => 0x00000000   <- 走 windowed 孤岛调 ROM 0x400
 
 结论：**S3 上要让闭源 WiFi 栈跑起来，"从 flash 取指"基本是硬需求**，
 这块平台能力没打通之前，WiFi 目标无法推进。所有其他环节（PHY、ABI、链接、调试）都已就绪。
+
+## 59. 两个重要纠正（推翻前两轮的结论）
+
+### (1) gdb/JTAG **读不了 IROM**，"探针=0" 的结论全部作废
+
+在**能正常跑的原厂固件**上 halt，读它自己的代码地址：
+
+```
+ORIG_IROM_0x42020000: 0x00000000     <- 原厂固件正在从 flash 取指执行，这里也读回 0
+ORIG_MMU10:              0x00004000
+```
+
+⇒ JTAG 读 IROM 窗口恒为 0，**不能用来判断 cache 是否工作**。
+（§58 里 A~G 全部读 0 是因为这个方法本身无效，不是配置不对。）
+
+### (2) ROM 的 `Cache_Invalidate_ICache_All()` 一调就挂
+
+为了清 I-cache，把 ROM 函数经 windowed 孤岛正确调用（ABI 这次是对的）：
+
+```
+s3_win_call_cache_invalidate()   -> ROM 0x400016d4 Cache_Invalidate_ICache_All
+s3_win_call_cache_enable()       -> ROM 0x40001878 Cache_Enable_ICache
+```
+
+真板信标（`tests/t_s3_irom5.c6`，每个调用后都写信标）：
+
+```
+slot0 = 0xB0000002   进 os_main
+slot2 = 0x00004010   MMU 映射有效
+slot3 = 0xB0B0B0B0   <- 一直是初值：**invalidate 没返回**
+slot1 = 0x00000000   所以后面的 flash 调用根本没执行
+```
+
+⇒ 即使走正确的 windowed ABI，ROM 的 cache 维护函数在我们的 RAM-only 镜像里
+也跑不通（这也是以前 call0 直调"一调就死"的真正原因之一）。
+
+### 有效的判据（以后只用这个）
+
+**唯一有效的方法是"跳进去执行"**：`s3_win_call_flash42()` 调 flash 里的
+`s3_asm_flash_42`(`0x42100014`: `movi.n a2,42; retw.n`)，返回值写进信标。
+- 返回 42 → IROM 通了
+- 不返回 / `exccause=0` + `epc1=0x42100014` → 取指失败
+
+已知寄存器状态（`0x600C4000~0x600C40FF` 完整 dump，与原厂逐字一致）：
+
+```
+DCACHE_CTRL=1  DCACHE_CTRL1=0  DCACHE_TAG_PWR=5  DCACHE_SYNC=4
+ICACHE_CTRL=1  ICACHE_CTRL1=0  ICACHE_TAG_PWR=5  ICACHE_SYNC=4
+MMU[0x10]=0x4010   (page 0x10 -> flash 0x100000, valid)
+```
+
+即：**cache 硬件配置与能工作的原厂固件逐位相同，MMU 映射正确，flash 内容已校验，
+但取指仍然拿到 0x00000000。**
