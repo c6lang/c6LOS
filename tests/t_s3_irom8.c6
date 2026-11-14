@@ -30,6 +30,16 @@ void os_main(void)
 
     s3_beacon(0u, 0xB0000008u);
 
+    /* 0) 照 IDF cpu_start.c 的做法：两个 cache 一起 disable -> 重设 bus mask -> enable。
+     *    IDF 注释原文："It helps to fix missed cache settings for other cores.
+     *    It happens when bootloader is unicore." —— 正是我们的情况。 */
+    os_reg_wr(0x600C4060u, 0x0u);      /* ICACHE disable */
+    os_reg_wr(0x600C4000u, 0x0u);      /* DCACHE disable */
+    os_reg_wr(0x600C4064u, 0x0u);      /* ICACHE bus 0/1 不关 */
+    os_reg_wr(0x600C4004u, 0x0u);      /* DCACHE bus 0/1 不关 */
+    os_reg_wr(0x600C4000u, 0x1u);      /* DCACHE enable */
+    os_reg_wr(0x600C4060u, 0x1u);      /* ICACHE enable */
+
     /* 1) 数据读 IROM 窗口（0x42030000 << flash 0x30000） */
     v = *(volatile u32 *)0x42030000u;
     s3_beacon(1u, v);

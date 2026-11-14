@@ -9,7 +9,7 @@
 
 用法: mkimg.py <elf> <out.bin> [base]   (base 默认 0x20000 = app 分区偏移)
 """
-import os, struct, subprocess, sys
+import hashlib, os, struct, subprocess, sys
 
 ELF  = sys.argv[1]
 OUT  = sys.argv[2]
@@ -110,6 +110,12 @@ for _v, d in records:
     for b in d:
         chk ^= b
 out.append(chk)
+
+# 原厂镜像是 hash_appended=1 + 末尾 32 字节 SHA-256（覆盖到校验和字节为止）。
+# 我们也照做，去掉这一处结构差异。
+hdr[0x17] = 1
+out[0x17] = 1
+out += hashlib.sha256(bytes(out)).digest()
 
 open(OUT, 'wb').write(bytes(out))
 print('wrote %s: %d bytes, %d segments, entry 0x%08x' % (OUT, len(out), len(records), entry_point()))

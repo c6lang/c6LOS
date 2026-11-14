@@ -2808,3 +2808,34 @@ bootloader 按不同模式配置 flash），三种模式结果完全一样（slo
 要继续推进，必须先用同一套 IDF 编一个最小 app 跑通（确认 `install.sh` 能装上、
 IDF app 能跑 IROM），再把它 app 侧的 flash/cache 初始化逐步搬过来二分。
 `install.sh` 需要约 1.5~2 GB 空间，而 `/home` 目前只剩 441 MB（用户在清理中）。
+
+## 72. 又排除三条，并把官方文档摘录固化进仓库
+
+本轮做的三件新实验（全部真板实测）：
+
+1. **镜像补上 SHA-256**（`hash_appended=1` + 正确摘要），让我们的镜像结构与原厂完全一致
+   → `esptool image-info` 报 `Checksum valid` + `Validation hash valid`
+   → 取指/数据读**仍然**返回 0
+2. **照 IDF `cpu_start.c` 的做法**把 ICache + DCache 一起 disable → 重设 bus mask → enable
+   （IDF 注释原文："It helps to fix missed cache settings for other cores.
+   It happens when bootloader is unicore." —— 正是我们的情形）
+   → 仍然返回 0
+3. **PMS 权限**（TRM §15，文档里最有力的线索：CPU 通过 CACHE 访问外部存储器必须被授权）
+   → 实测 `SYSCON_FLASH_ACEn_ATTR/ADDR/SIZE` 与能跑 IROM 的原厂固件**逐字相同**
+     （ATTR 全 0xFF 完全开放）⇒ 排除
+
+同时把官方文档摘录固化到仓库 `docs/refs/`：
+`README.md`（索引）、`trm-cache-mmu.md`、`trm-pms.md`、`trm-system-cache.md`、
+`image-format.md`（我们实测出来的镜像格式四条铁律）。
+
+### 关键观察
+
+数据读 IROM 返回 **0 而不 trap** —— 这正是"MMU 表项对 cache 而言无效"的典型表现，
+尽管寄存器回读表项确实是 `3`（有效页号）。也就是说**bootloader 写的表项，
+cache 那边没认**。
+
+### 唯一已知的剩余差异
+
+原厂 app 会在自己启动时做一整套 flash/cache 初始化（`spi_flash_init_chip_state()`
++ `ext_mem_init()`），我们的 app 没做。要验证这一点，必须有一个"能跑 IROM 的对照物" ——
+即用同一套 IDF 编一个最小 app（`install.sh` 需要约 2 GB，磁盘现已腾出 8 GB）。
