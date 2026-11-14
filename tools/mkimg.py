@@ -18,7 +18,7 @@ TC   = os.path.expanduser('~/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-e
 
 # (section, paddr 或 None=RAM 段)
 SECS = [
-    ('.flash.rodata', 0x20020),    # DROM: 数据落文件偏移 0x20
+    ('.flash.rodata', 0x20008),    # DROM: 数据落文件偏移 0x20 (= paddr-BASE+0x18)
     ('.flash.text',   0x30000),    # IROM: flash 0x30000（64KB 对齐，且离镜像头近，避免巨大空洞）
     ('.eh_frame',     None),
     ('.vector',       None),
@@ -79,8 +79,10 @@ hdr[23] = 0                              # 不附 SHA256
 records = []                          # [vaddr, bytearray]
 for name, vaddr, paddr, data in segs:
     if paddr is not None:
-        need = paddr - BASE           # 这段数据在镜像内的偏移
-        cur = 24 + sum(8 + len(d) + ((4 - len(d) % 4) % 4) for _v, d in records)
+        # bootloader 用 paddr = BASE + (文件偏移 - 0x18) 反推 flash 地址，
+        # 所以数据要放在 (paddr - BASE + 0x18) 这个文件偏移上。
+        need = paddr - BASE + 0x18
+        cur = 24 + sum(8 + len(d) for _v, d in records)
         if cur > need - 8:
             raise SystemExit('%s: 需要偏移 0x%x，已用到 0x%x' % (name, need, cur))
         gap = need - 8 - cur
@@ -88,17 +90,23 @@ for name, vaddr, paddr, data in segs:
             if not records:
                 raise SystemExit('%s: 第一段前不能有空白' % name)
             records[-1][1].extend(b'\x00' * gap)
-    records.append([vaddr, bytearray(data)])
+    d = bytearray(data)
+    while len(d) % 4:                 # IDF 风格：补齐计入段长度（原厂各段长度都是 4 的倍数）
+        d.append(0)
+    records.append([vaddr, d])
 
 out = bytearray(hdr)
-for i, (vaddr, d) in enumerate(records):
+for vaddr, d in records:
     out += struct.pack('<II', vaddr, len(d))
     out += d
-    if i != len(records) - 1:
-        while len(out) % 4:
-            out.append(0)
 
-# IDF 校验和：对所有段数据 XOR（初值 0xEF）
+# 最后一段之后补到 16 字节边界，再放 1 字节校验和（esptool/IDF 会先对齐再读校验和）
+# 校验和本身占 1 字节，且整个镜像必须是 16 的倍数 —— 所以补到 (len+1)%16==0
+while (len(out) + 1) % 16:
+    out.append(0)
+    records[-1][1].append(0)
+
+# IDF 校验和：对所有段数据 XOR（初值 0xEF，含补齐）
 chk = 0xEF
 for _v, d in records:
     for b in d:

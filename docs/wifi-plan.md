@@ -2379,3 +2379,53 @@ ERROR: End of file reading segment 0x887c0000, length 2100052023
 - 一旦 `esptool image-info` 通过，bootloader 必然接受；那时 bootloader 会替我们
   建好 MMU+cache，**IROM 取指这个卡了很久的根本问题就自然解开**，WiFi 闭源库
   （~500KB）也就有地方放了
+
+## 62. 里程碑：我们的 C 代码已经能以"标准 IDF app 镜像"被 bootloader 引导起来
+
+### 打通的完整链路（都有真板证据）
+
+```
+flash: 0x0     原厂 bootloader
+       0x8000  我们自己的分区表 (tools/ → p2.bin, factory @0x20000, 4MB)
+       0x20000 我们自己生成的 app 镜像 (tools/mkimg.py)
+```
+
+真板串口实际输出：
+
+```
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x544
+load:0x403c8700,len:0xcc8
+load:0x403cb700,len:0x2ea0
+entry 0x403c88f4          <- bootloader 自己的入口
+c6os s3 boot              <- ★ 我们的应用起来了（我们自己的 banner）
+*** TRAP sp=3fceef60 cause=00000000 pc=42100014 ps=00060910
+```
+
+信标同时证明 `os_main` 真的执行到了：`slot0 = 0xB0000003`。
+
+### 生成合法镜像的四个必备条件（全部实测确认）
+
+1. **`esp_app_desc_t` 必须在镜像文件偏移 0x20**（魔数 `32 54 cd ab`）
+2. **段表必须连续**，段与段之间不能留空洞；flash 段的"对齐空洞"要并入上一段的长度
+3. **每段长度补齐计入长度本身**（原厂各段长度全是 4 的倍数；我们的 `.vector` 是 0x47A
+   不补就会被解析错位 4 字节）
+4. **整个镜像长度必须是 16 的倍数**，且最后 1 字节是校验和
+   （`checksum = 0xEF; 对各段数据 XOR`）——满足后 `esptool image-info` 报
+   `Checksum: 0xdd (valid)`
+
+### bootloader 侧实测状态（JTAG 读寄存器）
+
+```
+MMU[0x10] = 0x00000003     -> 0x42100000 映射到 flash page 3 = 0x30000  ✓ 映射正确
+ICACHE_CTRL = 1, CTRL1 = 0 ✓ I-cache 已使能、bus 未关
+DCACHE_CTRL = 1, CTRL1 = 0 ✓
+SPI08 = 0x016CA008         vs 原厂 0x00608000   <- 仍不一致
+```
+
+⇒ 映射、cache 都是对的，但跳进 flash（`0x42100014` = `movi.n a2,42`）仍然
+`cause=0`（IllegalInstruction）⇒ 取指拿到 0。
+**最后一个疑点是 `SPI_MEM` 的 cache 读配置（0x60002008）**：bootloader 配出来是
+`0x016CA008`，而能正常跑 IROM 的原厂固件是 `0x00608000`。下一步就是在调 flash 之前
+把这两个寄存器改成原厂值再试（用例已改成这么写，但那次构建的镜像尺寸变了导致
+bootloader 又不认，需要重新对齐镜像布局）。

@@ -3,6 +3,7 @@
  * 判据：slot0=0xB0000003(进入)，slot1=0xF100002A(成功，低字节=42)。 */
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/reg.h"
 
 u32 s3_win_call_flash42(void);
 
@@ -11,6 +12,12 @@ void os_main(void)
     u32 v = 0u;
 
     s3_beacon(0u, 0xB0000003u);
+
+    /* 把 SPI_MEM 的 cache 读配置改成"原厂能跑 IROM 的固件"里的值 */
+    os_reg_wr(0x60002008u, 0x00608000u);
+    os_reg_wr(0x60002014u, 0x00030103u);
+    s3_beacon(2u, os_reg_rd(0x60002008u));
+
     v = s3_win_call_flash42();
     s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
     for (;;) { }
