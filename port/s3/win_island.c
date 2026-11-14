@@ -129,6 +129,11 @@ int ets_printf(const char *fmt, ...);
 /* ROM 0x40005c58：返回 PHY 的函数表指针（调用者负责存进 g_phyFuns）；
  * 注意 ROM 是 windowed，返回值在 a10，本文件也是 windowed 编译，直接收就对。 */
 u32 phy_get_romfuncs(void);
+/* **正确的入口**：libphy.a 自己导出的 phy_get_romfunc_addr()（.text, 偏移 0x88）。
+ * IDF 的 include/phy.h 写明："Initialize function pointer table in PHY library…
+ * must be called before register_chipv7_phy"。ROM 里那个 phy_get_romfuncs()
+ * 是另一回事（它填 ROM 内部的表，跟我们的 g_phyFuns 无关）。 */
+void phy_get_romfunc_addr(void);
 
 void s3_win_log(const char *s)
 {
@@ -260,19 +265,9 @@ int s3_win_phy_step(int step)
          * 所以必须自己接上。 */
         u32 tab = 0;
 
-        u32 r = 0;
-
-        phy_get_romfuncs();
-        r = phy_get_romfuncs();            /* 有些实现靠返回值给表指针 */
-        if (r >= 0x3FC00000u && r < 0x3FD00000u) {
-            tab = r;
-        } else {
-            r = s3_win_phy_romfuncs_ret();
-            if (r >= 0x3FC00000u && r < 0x3FD00000u) {
-                tab = *(volatile u32 *)r;  /* 也可能是指向表的指针 */
-            }
-        }
-        g_phyFuns = tab;
+        (void)tab;
+        /* 就这一步：初始化 PHY 库自己的函数指针表（g_phyFuns）。 */
+        phy_get_romfunc_addr();
     }
     if (step <= 2) {
         return 0;
