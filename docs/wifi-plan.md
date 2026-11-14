@@ -613,3 +613,36 @@ RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU �
 
 （另一条路是纯 IRAM + LEAN 构建，见 15.7；两条都记着，先试 MMU 因为
 一个 bootloader 级的 MMU 初始化也就几十行寄存器操作。）
+
+## 16. 总体评估（第 7 轮，给后面接手的人）
+
+### 已经拿到的、真板验证过的地基
+
+| 能力 | 证据 |
+|---|---|
+| 音频录放（BOOT 键录音 → 循环播放） | 已合并 main，真板确认有声、速度正确 |
+| call0 ↔ windowed ABI 桥 | `L5 win=1003`、`L5b deep=11`（深递归触发窗口溢出/欠载也能过） |
+| 寄存器窗口溢出/欠载向量 | 同上（10 层递归必然溢出/欠载） |
+| 启动期看门狗加固 | 加完后小镜像不用掉电就能启动 |
+| 闭源库能链进构建（含 ROM 符号表 + 胶水） | `libphy.a` 链接通过，只缺 5 个胶水符号（已补） |
+| flash(IROM) 段布局 | ELF 程序头正确（VMA 0x42000020 / LMA 0x20），IRAM 段缩到 66KB 以内 |
+| SRAM 坏区定位 | 纯填充实验：IRAM 越过 0x403D9500 镜像就不启动 |
+
+### 还差什么（按依赖顺序）
+
+1. **flash 执行（MMU + cache）**：ROM 只加载 RAM 段，从不建立 IROM 映射。
+   要么自己写 MMU/cache 初始化（相当于写半个二级 bootloader），要么回到
+   "纯 IRAM"（但 libphy 闭包 76KB + 我们自己的代码，得先做 LEAN 构建 + 分两段放置，
+   余量几乎为零）。
+2. **移植 IDF 的 WiFi/PHY C 胶水**：`esp_wifi/src`（~2000 行）+ `esp_phy/src`（~2100 行）
+   + `esp_coex`（~700 行），并实现 FreeRTOS 垫片（task/queue/sem/event/timer）+
+   内存版 NVS + PHY 校准数据。
+3. **关联 WPA2**：`libwapi.a` + 事件流。
+4. **IP 层**：自研 ARP/IPv4/DHCP/TCP（或移植 lwIP）。
+5. **HTTPS**：mbedTLS 移植（另一大块）+ HTTP 客户端。
+
+### 现实评估
+
+第 1、2 步各自都是"数天到一两周"量级的活，第 5 步又是同等量级。
+**距离"真板取到 https://qq.com 页面"还有相当长的路**，不建议在最近几轮里
+承诺完成；建议按里程碑推进，每个里程碑都留下真板证据（本文件第 12 节 M1~M5）。
