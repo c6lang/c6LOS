@@ -119,7 +119,7 @@ void os_main(void)
     u32 cal0 = 0u;
     u32 n = 0u;
 
-    s3_beacon(0u, 0xB0000001u);
+    s3_beacon(0u, 0xB0000001u);   /* 进 os_main */
     pstr("phy: enter os_main\n");
     bl_init();
     pstr("phy: bl ok\n");

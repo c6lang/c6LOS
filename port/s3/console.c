@@ -260,6 +260,7 @@ u32 port_core_id(void)
 
 void port_init(void)
 {
+    s3_beacon(3u, 0xB0B0B0B0u);   /* 进了 port_init */
     volatile u32 i;
 
     /* 启动阶段标记（RTC_SLOW_MEM）：万一启动期死掉，复位后 esptool read-mem

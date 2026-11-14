@@ -21,6 +21,13 @@
     .global _start
     .type   _start, @function
 _start:
+    /* 【诊断信标】RTC_CNTL_STORE7(0x600080CC)：掉电域、CPU 复位不丢、
+     * esptool 可以直接 read-mem 读。这里写 0xA0 表示"进了 _start"。
+     * 用它可以把"芯片到底跑没跑我们的代码"和串口是否可用彻底分开。 */
+    movi    a3, 0x600080CC
+    movi    a4, 0xA0A0A0A0
+    s32i    a4, a3, 0
+
     /* 确保内核模式（UM=0）；**INTLEVEL 先拉到 15 关中断**。
      *
      * 原来是清成 0（开中断），启动期就有中断可乘之机：.bss 还没清、内核结构

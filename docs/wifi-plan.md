@@ -1172,3 +1172,52 @@ flash 里的 `build/wphyG`（`-DS3_NO_USB_REINIT -DS3_WITH_LIBPHY`）已经把�
 
 按 RST 后读一次这 4 个字，就能确定它卡在 `register_chipv7_phy()` 的哪一段，
 以及闭源库到底有没有回调我们。
+
+## 35. 关键硬件事实：板子有电池 ⇒ 拔 USB 不算断电（第 27 轮）
+
+用户确认这块板子**带电池**。所以：
+
+- 拔 USB 只切了外部供电，芯片仍由电池供电 → **没有真正的上电复位**；
+- 每次复位都来自 USB-Serial/JTAG（串口里一直是 `rst:0x15 (USB_UART_CHIP_RESET)`），
+  而且它会把 strapping 顶成下载模式（`boot:0x0 (DOWNLOAD(USB/UART0))`），
+  **一进去就粘住**，之后 watchdog 复位、RTS 复位全还在下载模式；
+- 这就是"刷写成功、镜像内容正确、但应用就是不跑、串口 0 字节、屏幕黑"的全部原因。
+
+**要么**：断开电池（或关电源开关）5 秒再上电 —— 才有真正的 `POWERON` 复位，
+ROM 才会正常引导 flash 里的固件；
+**要么**：不要用 esptool 的复位；如果芯片还在跑固件，用 `tools/reset.py`
+（DTR 恒 0 = GPIO0 高，只脉冲 RTS/EN）能正常引导（实测成功过一次）。
+
+### 信标（beacon）通道已确认可用
+
+`RTC_CNTL_STORE4..7`（0x600080C0/C4/C8/CC）在 RTC 掉电域里：
+
+- 用 `esptool write-mem 0x600080C0 0x12345678` 写入，复位后再读，**值还在** ✓
+- 所以它是"不依赖串口、不依赖 USB"的执行进度记录通道 ✓
+
+当前固件（`build/wbeacon`）的信标约定：
+
+| 地址 | 值 | 含义 |
+|---|---|---|
+| 0x600080CC | `0xA0A0A0A0` | 进了 `_start`（上电后第一条指令附近就写） |
+| 0x600080CC | `0xB0B0B0B0` | 进了 `port_init`（覆盖上一条） |
+| 0x600080C0 | `0xB0000001` | 进了 `os_main` |
+| 0x600080C0 | `0xB0000004` | 正要调 `register_chipv7_phy()` |
+| 0x600080C0 | `0xB0000005` / 0x600080C4 | PHY 返回了 / 返回码 |
+| 0x600080CC | `0xC0000000|n` | 闭源库第 n 次回调我们的胶水函数 |
+
+## 36. 下一步的架构方案：自己当"二级引导"（不依赖 IDF bootloader）
+
+因为 ROM 直接引导**只支持 RAM-only 镜像**（flash 段会被当成 `load=0` 填充段，
+往地址 0 写 → StoreProhibited），而 WiFi 闭源库（libpp 708KB + libnet80211 1.4MB）
+**必须放 flash**，所以需要自己做一个"两段式"：
+
+- **第 1 段（stage1）**：就是现在的 RAM-only 镜像 = c6OS 内核 + `port/s3/flash.c`。
+  它负责用 MMU 把第 2 段所在的 flash 区域映射到 IROM(0x42000000+)/DROM(0x3C000000+)，
+  **清 `EXTMEM_ICACHE_CTRL1.SHUT_CORE0_BUS`**（§24 的修复）、使能 cache、
+  清掉 ROM 遗留的 cache tag，然后跳到第 2 段入口。
+- **第 2 段（stage2）**：我们的"大块头"代码 + IDF 闭源库，链接地址在 IROM/DROM 上，
+  LMA 紧跟在 stage1 的镜像之后；刷机时一次 `write-flash 0x0` 把两段一起写进去。
+
+这条路完全绕开了 IDF bootloader 的段布局要求，而且用到的每个部件
+（`os_flash_map`、MMU 表 0x600C5000、`SHUT_CORE0_BUS`）我们都已经有了。
