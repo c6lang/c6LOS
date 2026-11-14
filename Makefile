@@ -5,27 +5,62 @@ C6_ROOT ?= $(HOME)/superc
 C6CC    := $(C6_ROOT)/tcc/c6
 XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
 XTGCC   := $(XTP)gcc
-XTFLAGS := -mabi=call0 -Os -ffreestanding -fno-builtin -fno-common \
+# Xtensa 的两种 ABI：call0（本项目原来的选择）/ windowed（IDF 的闭源 WiFi·PHY
+# 库都是这个）。想用 WiFi 就得把 S3_ABI 切成 windowed，同时用 windowed 版的
+# port/s3/irq.S / ctx.S（见 docs/wifi-plan.md「ABI 迁移」）。
+# 注意：必须定义在 XTFLAGS（立即展开）之前。
+S3_ABI ?= call0
+# 额外 C 宏（排查用，例如 S3_CDEFS=-DS3_IRQ_HOLD_OFF 先不开中断）
+# LEAN=1：只保留内核 + 控制台 + WiFi 需要的最小对象（给"闭源库塞进 IRAM"腾地方）
+S3_LEAN ?= 0
+S3_CDEFS ?=
+# idf_shim.c 的 ABI：默认 windowed（要和闭源库一致）；做对照实验时可设 call0
+S3_SHIM_ABI ?= windowed
+
+XTFLAGS := -mabi=$(S3_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common \
            -mlongcalls -mtext-section-literals -Wall -Wextra
 PORT    ?= /dev/ttyACM0
 
 BUILD   := build/s3
 S3_MAIN ?= kernel/os.c6
+S3_EXTRA_LIBS ?=
+# 闭源库是 windowed ABI，但它们引用的 memcpy/memset 是我们 call0 编译的 ——
+# windowed call8 进来、call0 ret 返回会跳飞。所以链接前用 objcopy 把这些引用
+# 改名成 win_*，由 port/s3/win_island.c 里的 windowed 版提供。
+LIBPHY_SRC ?= /media/winger/inst_26/esp/esp-idf/components/esp_phy/lib/esp32s3/libphy.a
+LIBPHY_WIN := $(BUILD)/libphy_win.a
+OBJCOPY    := $(dir $(XTGCC))xtensa-esp32s3-elf-objcopy
 S3_C6FLAGS ?=
 S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/heap.c6
 S3_SKIP_C6 := kernel/heap.c6 kernel/sem.c6 kernel/queue.c6
 S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(filter-out $(S3_SKIP_C6),$(S3_EXTRA_C6))
 S3_NAMES := $(notdir $(S3_C6))
 S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
-S3_OBJ  := $(BUILD)/obj/start.o \
+# 内核/控制台等必需对象（LEAN 也保留）
+S3_OBJ_CORE := $(BUILD)/obj/start.o \
            $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
-           $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
-           $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o $(BUILD)/obj/panel.o \
-           $(BUILD)/obj/gfx.o $(BUILD)/obj/dash.o \
-           $(BUILD)/obj/core1.o $(BUILD)/obj/s3fast.o \
-           $(BUILD)/obj/button.o $(BUILD)/obj/i2s.o
+           $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o \
+           $(BUILD)/obj/marks.o $(BUILD)/obj/flash.o $(BUILD)/obj/reg.o \
+           $(BUILD)/obj/app_desc.o
+
+# 面板/音频/UI 相关对象：LEAN=1 时全部去掉（给闭源库腾 IRAM）
+S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
+           $(BUILD)/obj/panel.o $(BUILD)/obj/s3fast.o \
+           $(BUILD)/obj/button.o $(BUILD)/obj/i2s.o $(BUILD)/obj/gfx.o \
+           $(BUILD)/obj/dash.o $(BUILD)/obj/core1.o
+
+# IDF 闭源库的 ABI 桥与胶水：始终保留
+S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
+           $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
+           $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o
+
+ifeq ($(S3_LEAN),1)
+S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_WIFI)
+else
+S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_FULL) $(S3_OBJ_WIFI)
+endif
 
 .PHONY: rt-host run-rt-host rv32bare-rt run-rv32bare-rt perf-host run-perf-host rv32bare-perf run-rv32bare-perf all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
 .PRECIOUS: $(S3_C)
@@ -40,7 +75,7 @@ S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
-	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 
@@ -66,7 +101,7 @@ $(BUILD)/obj/cobs.o: rt/cobs.c
 
 $(BUILD)/obj/kprintf.o: rt/kprintf.c
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -Os -ffreestanding -fno-builtin -mlongcalls -mtext-section-literals \
+	$(XTGCC) -mabi=$(S3_ABI) -Os -ffreestanding -fno-builtin -mlongcalls -mtext-section-literals \
 		-Iinclude -c $< -o $@
 
 $(BUILD)/obj/c6rt.o: rt/c6rt.c
@@ -101,25 +136,72 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
+$(BUILD)/obj/app_desc.o: port/s3/app_desc.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/reg.o: port/s3/reg.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/flash.o: port/s3/flash.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(LIBPHY_WIN): $(LIBPHY_SRC)
+	@mkdir -p $(BUILD)
+	$(OBJCOPY) --redefine-sym memcpy=win_memcpy --redefine-sym memset=win_memset \
+	  --redefine-sym memmove=win_memmove --redefine-sym memcmp=win_memcmp \
+	  $< $@
+
+$(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -c $< -o $@
+
+$(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
+$(BUILD)/obj/marks.o: port/s3/marks.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
+$(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=call0 -mtext-section-literals -c $< -o $@
+
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
 $(BUILD)/obj/irq_asm.o: port/s3/irq.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
 $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
+
+# idf_shim.c 是给闭源库（windowed ABI）用的胶水，必须按 windowed 编译
+$(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
-	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/link.ld \
-		-o $@ $(S3_OBJ) -lgcc
+	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
+		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
@@ -778,7 +860,7 @@ s3-min: $(BUILD)/min.bin
 
 $(BUILD)/min.elf: port/s3/min.S port/s3/min.ld
 	@mkdir -p $(BUILD)
-	$(XTGCC) -mabi=call0 -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
+	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/min.ld -o $@ port/s3/min.S
 
 $(BUILD)/min.bin: $(BUILD)/min.elf
 	esptool --chip esp32s3 elf2image --flash-mode dio --flash-size 16MB --flash-freq 40m -o $@ $<

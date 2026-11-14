@@ -1,0 +1,145 @@
+/* t_s3_abic.c6 —— windowed ABI 最小验证（第 2 版）
+ *
+ * 第 1 版（带 pstr/pu32/slen/add3）在 windowed 下一行都打不出来。这一版先从
+ * 最简单开始：os_main 里**不调用任何自己的函数**，直接 port_putc 打一串写死的
+ * 字符；然后逐级加：port_puts → 带指针参数的函数 → 带 u32 参数的函数。
+ * 用串口看到几行，就知道 windowed 断在第几层。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/flash.h"
+
+void port_puts(const char *s);
+u32 s3_win_call_add(u32 a, u32 b);   /* 走 ABI 桥调 windowed 孤岛里的函数 */
+u32 s3_win_call_phy_cal(void);       /* 桥调 windowed 孤岛 → libphy.a */
+u32 s3_win_call_phy_enable(void);    /* 桥调 register_chipv7_phy（完整 RF 校准） */
+u32 s3_win_call_phy_cal_word(u32 i); /* 读回校准数据里的一个字 */
+u32 s3_win_call_deep(u32 n);         /* 桥调 windowed 深递归（测窗口溢出/欠载） */
+u32 s3_win_call_flash_add(u32 a, u32 b);  /* 桥调放在 flash 段里的 windowed 函数 */
+u32 s3_win_call_flash_pat(void);          /* flash 段里已知图案数组的地址 */
+u32 s3_win_call_flash_addr(void);         /* flash 里那个函数的地址 */
+u32 s3_win_call_deep12(u32 n);            /* 12 参数递归（验 call12 窗口溢出/欠载） */
+u32 s3_win_call_flash42(void);            /* 调 flash 里手写的 movi+retw（无 entry） */
+
+static void put1(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static u32 add2(u32 a, u32 b) { return a + b; }
+
+void os_main(void)
+{
+    /* 第 1 级：完全内联，只调 port_putc */
+    port_putc('A');
+    port_putc('B');
+    port_putc('C');
+    port_putc('\n');
+
+    /* 第 2 级：调用运行库 port_puts（普通 C 函数，带指针参数） */
+    port_puts("L2 port_puts ok\n");
+
+    /* 第 3 级：先测 u32 参数（不涉及指针/字符串） */
+    port_putc('L');
+    port_putc('3');
+    port_putc('=');
+    port_putc((int)('0' + add2(1u, 2u)));
+    port_putc('\n');
+
+    /* 第 4 级：再测自己写的、带指针参数的函数 */
+    put1("L4 put1 ok\n");
+
+    /* 第 5 级：跨 ABI 桥 —— 调 windowed 孤岛里的 s3_win_add(1,2) = 1003 */
+    port_puts("L5 win=");
+    {
+        u32 v = s3_win_call_add(1u, 2u);
+        port_putc((int)('0' + (v / 1000u)));
+        port_putc((int)('0' + ((v / 100u) % 10u)));
+        port_putc((int)('0' + ((v / 10u) % 10u)));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    /* L5b：深递归（必然触发寄存器窗口溢出/欠载） */
+    port_puts("L5b deep=");
+    {
+        u32 v = s3_win_call_deep(10u);
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    /* L5d：读 flash 段里的已知图案（应打印 11 22 33 44 55 66 77 88） */
+    /* flash 段（IROM）实验已经结案（见 docs/wifi-plan.md §15~19），这里不再跑；
+     * 需要复现时看 build/wok2 那次的历史构建。 */
+
+    port_puts("L5c12 deep12=");
+    {
+        u32 v = s3_win_call_deep12(8u);
+
+        port_putc((int)('0' + (v / 100u) % 10u));
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+        port_puts(" (want 074)");
+    }
+    port_putc('\n');
+
+    /* L5irom：映射 IROM + 开 cache，调 flash 段里的手写函数（应返回 42） */
+    port_puts("L5irom=");
+    {
+        u32 v = s3_win_call_flash42();
+
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+        port_puts(" (want 42)");
+    }
+    port_putc('\n');
+
+    port_puts("L6 phy_cal=");
+    {
+        u32 v = s3_win_call_phy_cal();
+        int sh = 28;
+
+        if (v == 0u || v == 0xFFFFFFFFu) {
+            port_puts("(suspicious) ");
+        }
+        port_puts("0x");
+        while (sh >= 0) {
+            port_putc((int)("0123456789abcdef"[(v >> (u32)sh) & 0xFu]));
+            sh -= 4;
+        }
+    }
+    port_putc('\n');
+
+    port_puts("L7 phy_enable=");
+    {
+        u32 rc = s3_win_call_phy_enable();
+        int sh = 28;
+
+        port_putc((int)('0' + (rc % 10u)));
+        port_puts(" cal=");
+        {
+            u32 i = 1u;
+
+            while (i <= 4u) {
+                u32 w = s3_win_call_phy_cal_word(i);
+
+                if (w == 0u) {
+                    port_puts("0 ");
+                } else {
+                    sh = 28;
+                    while (sh >= 0) {
+                        port_putc((int)("0123456789abcdef"[(w >> (u32)sh) & 0xFu]));
+                        sh -= 4;
+                    }
+                    port_putc(' ');
+                }
+                i++;
+            }
+        }
+    }
+    port_putc('\n');
+
+    port_puts("abic done\n");
+
+    for (;;) {
+        port_delay_ms(250u);
+    }
+}

@@ -1,0 +1,41 @@
+/* t_s3_phy.c6 —— PHY 初始化（M1），结果只写 RTC 信标（崩溃/复位都不丢）。
+ * 读法: ./tools/beacon.sh
+ *   slot0 = 当前步骤（0xE1..0xE5 = step1..5，0xEF = 全部完成）
+ *   slot1 = 该步骤返回值（step5 的返回码就是 register_chipv7_phy 的结果）
+ *   slot2 = g_phyFuns（PHY 函数表指针，非 0 才算初始化成功）
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+u32 s3_win_call_phy_step(u32 step);
+u32 s3_win_call_phy_funcs(void);
+
+void os_main(void)
+{
+    u32 step = 1u;
+    u32 rc = 0u;
+
+    /* 先等 6 秒再动 PHY：PHY 初始化会抢走内部 USB PHY 导致 USB-CDC 掉枚举，
+     * 留出这段时间，主机侧才来得及用 esptool 读上一轮留下的 RTC 信标。 */
+    {
+        volatile u32 k = 0;
+
+        while (k < 120000000u) { k = k + 1u; }
+    }
+
+    s3_beacon(2u, s3_win_call_phy_funcs());
+    while (step <= 5u) {
+        s3_beacon(0u, 0xE0u + step);
+        rc = s3_win_call_phy_step(step);
+        s3_beacon(1u, rc);
+        s3_beacon(2u, s3_win_call_phy_funcs());
+        step = step + 1u;
+    }
+    s3_beacon(0u, 0xEFu);
+
+    for (;;) {
+        volatile u32 i = 0;
+
+        while (i < 2000000u) { i = i + 1u; }
+    }
+}

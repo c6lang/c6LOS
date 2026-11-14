@@ -20,6 +20,11 @@ import time
 DTR_RTS = 0x006
 
 
+TIOCMBIC = 0x5417
+TIOCM_DTR = 0x002
+TIOCM_RTS = 0x004
+
+
 def open_port(path, baud, wait=10.0):
     """等设备重新枚举出来再打开（复位后 /dev/ttyACM* 会消失几秒）。"""
     deadline = time.time() + wait
@@ -39,6 +44,14 @@ def open_port(path, baud, wait=10.0):
     attrs[4] = baud
     attrs[5] = baud
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
+
+    # DTR=1 会让 ESP32-S3 把 GPIO0 顶低 -> 任何复位都进下载模式。
+    # 抓日志时必须放开 DTR/RTS（等价于"松开 BOOT 键"）。
+    import fcntl, struct
+    try:
+        fcntl.ioctl(fd, TIOCMBIC, struct.pack('i', TIOCM_DTR | TIOCM_RTS))
+    except OSError:
+        pass
     fcntl.ioctl(fd, 0x5416, struct.pack("i", DTR_RTS))
     return fd
 

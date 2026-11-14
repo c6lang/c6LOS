@@ -1,0 +1,97 @@
+/* t_s3_irom.c6 —— 验证 IROM(flash 执行) 修好没有（SHUT_CORE0_BUS 那一步）。
+ * 判读（背光，不需要串口）：
+ *   开始：快闪 2 下
+ *   成功：慢闪 5 下（每下 0.6 秒）
+ *   失败：慢闪 1 下
+ * 循环重复，方便随时看。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+
+void port_delay_ms(u32 ms);
+
+void s3_win_call_log(const char *s);   /* 经桥用 ROM 的 ets_printf 打印 */
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+u32  s3_win_call_flash42(void);       /* 经桥调 flash 段里的手写函数(movi a2,42;retw) */
+
+#define GPIO_BASE 0x60004000u
+#define PIN_BL    13u
+
+static void bl_init(void)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * PIN_BL;
+    u32 v = os_reg_rd(a);
+
+    os_reg_wr(a, (v & ~(7u << 12)) | (1u << 12));
+    os_reg_wr(GPIO_BASE + 0x554u + 4u * PIN_BL, 0x100u);
+    os_reg_wr(GPIO_BASE + 0x24u, 1u << PIN_BL);
+}
+
+static void bl(u32 on)
+{
+    os_reg_wr(on != 0u ? (GPIO_BASE + 0x08u) : (GPIO_BASE + 0x0Cu), 1u << PIN_BL);
+}
+
+static void blink(u32 n, u32 ms)
+{
+    u32 i = 0;
+
+    while (i < n) {
+        bl(1u);
+        port_delay_ms(ms);
+        bl(0u);
+        port_delay_ms(ms);
+        i++;
+    }
+}
+
+void os_main(void)
+{
+    u32 v = 0u;
+
+    pstr("irom test start\n");
+    bl_init();
+    blink(2u, 150u);                    /* 开始 */
+
+    /* 手动建立 IROM 映射并开 cache（含 SHUT_CORE0_BUS） */
+    (void)os_flash_map(0u, 0x42000000u, 0x20000u, OS_FLASH_IROM);
+    os_icache_enable();
+
+    pstr("mmu=0x");
+    {
+        u32 e = os_flash_mmu_entry(0x42000000u);
+        int sh = 28;
+
+        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e >> (u32)sh) & 0xFu])); sh -= 4; }
+    }
+    pstr("\n");
+
+    s3_beacon(0u, 0x10000001u);          /* 进到映射之后 */
+    v = s3_win_call_flash42();           /* 期望 42 */
+    s3_beacon(1u, v);                    /* **结果就写进信标：42 = IROM 通了** */
+    pstr("flash42 returned ");
+    pu32(v);
+    pstr(" (want 42)\n");
+
+    for (;;) {
+        if (v == 42u) {
+            blink(5u, 600u);             /* 成功 */
+        } else {
+            blink(1u, 600u);             /* 失败 */
+        }
+        port_delay_ms(1500u);
+    }
+}

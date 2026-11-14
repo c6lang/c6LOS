@@ -6,6 +6,7 @@
  * 基址 0x60038000（TRM）。 */
 
 #include "c6os/types.h"
+#include "c6os/flash.h"
 #include "c6os/port.h"
 #include "c6os/tick.h"
 #include "c6os/config.h"
@@ -93,6 +94,9 @@ void port_mark(u32 v)
 #define S3_SYSTEM_PERIP_RST_EN1 (*(volatile u32 *)0x600C0024u)
 #define S3_USB_DEVICE_BIT       (1u << 10)
 #define S3_RTC_USB_CONF         (*(volatile u32 *)0x60008120u)
+
+/* 启动进度标记（.data 里，复位后保留；见 port/s3/marks.c） */
+extern volatile u32 g_boot_marks[8];
 #define S3_SYS_CLK_EN0          (*(volatile u32 *)0x600C0018u)
 #define S3_TIMG0_BASE           0x6001F000u
 
@@ -256,12 +260,17 @@ u32 port_core_id(void)
 
 void port_init(void)
 {
+    s3_beacon(3u, 0xB0B0B0B0u);   /* 进了 port_init */
     volatile u32 i;
 
     /* 启动阶段标记（RTC_SLOW_MEM）：万一启动期死掉，复位后 esptool read-mem
      * 0x50000008 就能看出死在 port_init 的第几步（0xB0 进函数 / 0xB1 关完看门狗 /
      * 0xB2 USB 就绪 / 0xB3 打完 banner）。start.S 里另有 0xA0/0xA1 两个标记。 */
-    *(volatile u32 *)0x50000008u = 0xB0u;
+    g_boot_marks[2] = 0xB0u;
+
+    /* 如果镜像里有 flash 段（IROM），在这里把 MMU 映射建好、打开 I-cache ——
+     * 没有二级 bootloader 时 ROM 不会做这件事，不建映射 flash 里的代码就取指失败。 */
+    os_flash_init();
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);
@@ -284,8 +293,9 @@ void port_init(void)
     *(volatile u32 *)0x600080B8u = 0x8F1D312Au;   /* RTC_CNTL_SWD_WPROTECT */
     *(volatile u32 *)0x600080B4u |= (1u << 30);   /* SWD_DISABLE = 1 */
     *(volatile u32 *)0x600080B8u = 0u;
-    *(volatile u32 *)0x50000008u = 0xB1u;   /* 三个看门狗都关了 */
+    g_boot_marks[3] = 0xB1u;   /* 三个看门狗都关了 */
 
+#ifndef S3_NO_USB_REINIT
     /* CPU 复位会把 USB-Serial/JTAG 的枚举打断，应用必须重新使能时钟和 PAD。
      * 只置位时钟、确保退出复位，不做 assert-reset（会再次掉枚举）。 */
     /* 内部 USB FSLS PHY 默认可能映射给 USB-OTG；USJ 要先抢回 PHY：
@@ -308,11 +318,13 @@ void port_init(void)
         __asm__ __volatile__("" ::: "memory");
     }
 
-    *(volatile u32 *)0x50000008u = 0xB2u;   /* USB 已重新使能 */
+    g_boot_marks[4] = 0xB2u;   /* USB 已重新使能 */
+#endif /* S3_NO_USB_REINIT */
+
     port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
     port_puts("c6os s3 boot\n");
     s3_irq_init();
-    *(volatile u32 *)0x50000008u = 0xB3u;
+    g_boot_marks[5] = 0xB3u;
 }
 
 void port_reboot(void)

@@ -979,3 +979,177 @@ gfx 全屏填充优化；再往后才是原来列的 WiFi/mic/喇叭。
 - 工具链/环境：CPU 跑在 **40MHz**（XTAL，未开 PLL），`port_cycles()` 是 40MHz，
   算时间别按 80MHz；esptool 用 `--after watchdog-reset` 才能真的复位进应用
   （`--after hard_reset` 在本会话里经常把芯片留在 bootloader 里，看起来像"没输出"）。
+
+---
+
+## 【进行中】WiFi 联网（目标：真板取到 https://qq.com 页面）
+
+设计文档见 **`docs/wifi-plan.md`**（依赖清单、ABI 约定实测、里程碑 A~F、内存约束）。
+这里只记"做到哪、下一步动哪个文件"。
+
+### 已完成
+
+1. **音频录放全链路**（BOOT 键录音 → 循环播放）已合并到 main，真板确认有声。
+   相关修复：`tdm_en`、RX 侧矩阵信号 31/32、`rx_mono_fst_vld`、
+   `tx_mono`+`tx_chan_equal`(bit6)、启动期关中断、DRAM 坏区回避。
+2. **WiFi M0**：IDF 闭源库依赖盘点（6 个库、只需外部提供 129 个符号），
+   `libphy.a` 已能链进构建（`port/s3/idf_shim.c` 提供 `phy_enter_critical`/
+   `phy_exit_critical`/`phy_printf`/`coex_pti_print`/`sprintf` 五个胶水符号）。
+   ROM 符号表落在 `port/s3/rom/*.ld`，`link.ld` 里 `INCLUDE`。
+   ⚠️ `rom.libc.ld`/`rom.newlib.ld` 必须保持关闭（见 wifi-plan.md §11）。
+3. **ABI 可切换**：`Makefile` 里 `S3_ABI ?= call0`（默认 call0，硬件回归通过），
+   `make ... S3_ABI=windowed` 切到 windowed。
+4. **windowed 基础设施**：
+   - `port/s3/irq.S`：向量表改成显式 `.org` 布局 + 补 `_win_ovf4/8/12`、
+     `_win_unf4/8/12` 窗口溢出/欠载向量；level-1 入口在 windowed 下改用
+     `call8`（参数 a10、PS=INTLEVEL1|UM|WOE）；叶子函数用 `retw`。
+   - `port/s3/ctx.S`：windowed 下切换前 `call8 xthal_window_spill`，
+     恢复前 `wsr windowstart,1`；`s3_task_tramp` 用 `callx8/call8`。
+   - `port/s3/start.S`：windowed 下设 `windowstart=1`、`PS.WOE=1`。
+   - windowed 构建命令：
+     `make C6_ROOT=/home/winger/c6 BUILD=build/wdup S3_ABI=windowed \
+        S3_MAIN=tests/t_s3_i2s_duplex.c6 \
+        S3_EXTRA_LIBS=/media/winger/inst_26/esp/esp-idf/components/xtensa/esp32s3/libxt_hal.a s3`
+
+### 卡点（下一步就查这个）
+
+windowed 版能启动并打印 `c6os s3 boot`（说明 start.S + `port_init` 前半段正常），
+之后跑飞。RTC 慢速内存现场：
+
+```
+0x50000000 = 0xA1        bss 清零完成
+0x50000008 = 0xB1        port_init 关完三个看门狗
+0x50000100 = 0xBAD0      _vec_default（未处理向量/二次异常）跑过
+0x50000104 = 0x00000000  EXCCAUSE = 0
+0x50000108 = 0x00000000  EXCVADDR = 0
+0x5000010C = 0x40045c06  EPC1 → 落在 ROM 地址
+```
+
+`port_init` 里 `s3_irq_init()` 末尾会 `rsil a2, 0` 开中断，所以嫌疑集中在
+**第一次 level-1 tick 的中断入口**（`call8` + PS 组合 + 窗口溢出）。
+
+排查建议（按顺序，每步都只改一处）：
+
+1. 临时把 `port/s3/irq.c` 里 `s3_irq_init()` 的 `rsil a2, 0` 去掉（不开中断），
+   看 windowed 版能不能跑到 `os_main` 打出 duplex 用例的标题行。
+   - 能 → 问题就锁定在中断入口；
+   - 不能 → 问题在普通函数调用/窗口机制（`_win_ovf*` 或 `entry/retw` 路径）。
+2. 在 `_vec_default` 里多记 `windowbase`、`windowstart`、`ps`（RTC 0x50000110 起），
+   判断是"窗口溢出没处理好"还是"跳到了 ROM"。
+3. 中断入口先用"只置标志位立刻返回"的空 ISR 验证 `call8`+`rfe` 往返，
+   再逐步加回真正逻辑。
+4. 检查 `xthal_window_spill` 是否真的被链接进来（`nm build/*/c6os.elf | grep window_spill`）。
+5. 复核 `_vec_level1` 里写的 PS 常量 `0x40021`（bit18=WOE, bit5=UM, INTLEVEL=1）。
+
+### 之后的里程碑
+
+- **M1**：`esp_phy_enable()` 跑通（需要搬 IDF 的 `esp_phy/src/phy_init.c` +
+  `phy_init_data`，并做内存版 NVS）。
+- **M2**：`esp_wifi_init` + `esp_wifi_scan_start` → 串口打印扫到的 AP（射频客观证据）。
+- **M3**：连 WPA2 AP（`libwapi.a`）+ 自研 DHCP 客户端拿到 IP。
+- **M4**：自研最小 TCP → `http://` 明文页面。
+- **M5**：mbedTLS → **`https://qq.com` 页面数据**。
+
+### 环境备忘（这轮新增）
+
+- esptool 只有 `--after watchdog-reset` 能真正复位进应用；`--after hard-reset`
+  经常把芯片留在 bootloader 里（表现为"刷完没输出"）。
+- 串口节点会在 `/dev/ttyACM0` 与 `/dev/ttyACM1` 之间变化，命令里用
+  `P=$(ls /dev/ttyACM* | head -1)`。
+- RTC 慢速内存是"复位后不丢"的调试宝地：`0x50000000`=启动阶段标记、
+  `0x50000100`=异常现场。读法：
+  `sudo esptool --chip esp32s3 -p $P --before default-reset read-mem 0x50000100`
+- CPU 主频是 **40MHz**（`port_cycles()` 按 40MHz 算时间），`s3_lcd_delay(n)`≈n/16 µs。
+
+### 【本轮新发现：windowed 跑到哪一步、死在哪个地址】
+
+1. **修掉一个真 bug**：`port/s3/start.S` 原来用 `call0 port_init` / `call0 os_main`。
+   windowed 的 C 函数是 `entry sp,N` 进、`retw` 出，用 call0 进去它 `retw` 就会
+   退到错误窗口 → 直接跑飞。现在 windowed 下改成 `call8`（`#ifdef` 分支）。
+   —— 这条解释了"只打出 `c6os s3 boot` 就没了"（banner 是 port_init 打的，
+   port_init 一 return 就炸）。
+2. 关掉中断（`port/s3/irq.c` 里 `s3_irq_init()` 的 `rsil a2, 0` 有个
+   `#ifndef S3_IRQ_HOLD_OFF` 钩子可临时关）后**仍然**崩，说明问题不在中断，
+   而在普通 C 函数调用链。RTC 现场：`0xA1`、`0xB1`、
+   `_vec_default` 跑过、`EXCCAUSE=0`、`EXCVADDR=0`、`EPC1=0x403c966d`。
+3. `addr2line` 解出 `0x403c966d` = **`pstr` 里的 `l8ui a10, a8, 0`**，而
+   `a8` 是从帧里取回的字符串指针，值是 **0**（所以 EXCVADDR=0）。
+   看一下 pstr 的汇编就能明白可疑点：
+   ```
+   pstr: entry a1,144
+         s32i a2, a1, 96        /* 参数 a2 存到帧里 */
+         addi a10, a1, 88 ; addi a11, a1, 96 ; movi a12,8
+         call8 memcpy           /* 把 8 字节从 +96 拷到 +88 */
+         l32i a8, a1, 88        /* 取回指针 → 竟然是 0 */
+         l8ui a10, a8, 0        /* ← 在这里 LoadProhibited */
+   ```
+   注意 c6 编译器生成的 C 是这种风格（`build/wdup/c99/t_s3_i2s_duplex.c`）：
+   ```c
+   union { ... } __c99_frm;
+   memcpy(__c99_frm.f + 32 + (-8), &__c99_a0, 8);   /* 取参数地址，拷 8 字节 */
+   ```
+   即**它依赖"参数在内存里有可寻址的实体"**并且按 8 字节搬运。call0 下没问题，
+   windowed 下参数是通过"调用者 a10~a15 ↔ 被调用者 a2~a7"这种窗口别名传的，
+   取 `&参数` 会强制落栈槽，这条路径和窗口机制怎么交互需要单独验证。
+
+### 下一步（精确到文件）
+
+1. 先做**最小 windowed 验证**：写一个只有
+   `pstr` / 一个带指针参数的函数 / 一个返回值的极小用例（比如打印 3 个数），
+   确认"windowed 下 c6 生成的 C 能不能正确传指针参数"。
+   - 若不行 → 需要改 c6 代码生成器的参数处理（`__c99_frm` 那套），
+     或者让 c6 输出改成 `-mno-windowed` 风格不取参数地址（工作量大）；
+   - 若行 → 说明是别的函数（如 `memcpy` 在 windowed 下的行为）把参数弄丢了。
+2. 检查 `rt/c6rt.c` 的 `memcpy` 在 windowed 下被调用的寄存器约定
+   （调用点用 a10/a11/a12 ✓ 与实测一致），必要时换成内联/汇编实现。
+3. windowed 能跑到 `os_main` 之后，再按 wifi-plan.md §11 的顺序回到中断入口。
+
+### 【本轮补充实测】关中断后仍然崩 → 不是中断，是普通调用/参数
+
+- 新增 `Makefile` 变量 `S3_CDEFS`（例如 `S3_CDEFS=-DS3_IRQ_HOLD_OFF` 可先不开中断）。
+- 新增最小用例 `tests/t_s3_abic.c6`（只做：打印、`slen("hello")`、`add3(1,2,3)`、
+  `mix("abcd",10)`），windowed 下**连第一行 `abic 1: plain` 都打不出来**；
+  关中断（`-DS3_IRQ_HOLD_OFF`）也一样 → 与中断无关。
+- RTC 现场：`0xA1` / `0xB1` / `_vec_default` 跑过 / `EXCCAUSE=0` / `EXCVADDR=0` /
+  `EPC1=0x403c9675`（在 `pstr` 里）。注意 `0xB1` 说明**最近一次复位**是在
+  port_init 的 USB 段就死了（0xB2 还没写），说明现象是非确定性的（复位循环里
+  每次死的位置略有不同）—— 典型的栈/帧被踩，而不是一个固定的坏指令。
+
+**下一轮的第一步（很小的实验，能定性）**：把 `tests/t_s3_abic.c6` 里的 `pstr`
+改成不取参数地址的写法（比如直接 `port_putc` 逐字符打一个写死的字符串、
+参数用 `u32` 而不是指针），看 windowed 下：
+- 纯 `u32` 参数调用是否正常 → 正常则问题在"取参数地址 + 8 字节 memcpy"这个
+  c6 代码生成模式与 windowed 帧布局的冲突；
+- 若 `u32` 也乱 → 是窗口/栈帧整体布局问题（`entry` 帧与 `__c99_frm` 的对齐）。
+
+若最终确认是 c6 代码生成器（`/home/winger/c6/tcc/c6`）的参数处理与 windowed
+不兼容，那么这条路要么改 c6 的输出（工作量在编译器侧），要么放弃 windowed
+（= 放弃 IDF 闭源 WiFi 库）。这一步必须在做 M1 之前定下来。
+
+### 【本轮重大进展】ABI 桥跑通 + 路线修正（务必先看这条）
+
+**别再试图整体迁移 ABI 了**：实测 c6 生成的函数在 windowed 下必然坏（它用
+`memcpy(frm+off, &param, 8)` 一次拷 8 字节来取参数，假设参数在栈上连续排列，
+windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制改不了。
+
+**改成 ABI 桥架构（已真板验证可行）**：
+
+| 文件 | ABI | 作用 |
+|---|---|---|
+| 其余所有代码（c6 + 我们的 C + 内核） | **call0（不动）** | 零回归风险 |
+| `port/s3/win_island.c` | windowed | IDF 闭源库 + 它们的 C 胶水放这里 |
+| `port/s3/idf_shim.c` | windowed | blob 要的胶水符号（临界区用内联汇编，避免跨 ABI 调用） |
+| `port/s3/win_bridge.S` | call0（汇编） | 跨 ABI trampoline：参数→a10~a15、`call8`、返回值从 a10 取；临时开 `PS.WOE` |
+
+真板证据（`tests/t_s3_abic.c6`，`build/wphy2`）：
+`ABC` / `L2 port_puts ok` / `L3=3` / `L4 put1 ok` / `L5 win=1003` / `abic done`
+—— 其中 `L5` 就是 call0 代码经桥调到 windowed 孤岛函数并拿到正确返回值。
+
+**新卡点**：把 `libphy.a` 一起链进去（孤岛版，`-DS3_WITH_LIBPHY`）后，
+镜像连 `_start` 都进不去（串口只有 ROM 的 `load:` 两行，RTC 标记是乱值）。
+- 不链 libphy → 正常；只有 libphy（配 call0 胶水）→ 也能启动；
+- 所以是"windowed 孤岛 + libphy"组合才炸。ELF 的 `_vecbase`/`_start`/段表/entry 都正常。
+- 下一轮先查：libphy 的 `.iram1` 等**孤儿段**是否被塞到不该去的地方
+  （试 `-Wl,-Map=...`、`-Wl,--orphan-handling=warn`）、
+  再试常规镜像（去掉 `--ram-only-header`）、
+  再试"只链 libphy 的单个 .o"逐步加。

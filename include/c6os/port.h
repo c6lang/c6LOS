@@ -38,4 +38,11 @@ int port_getc(void);
 void port_puts(const char *s);
 void port_delay_ms(u32 ms);
 
+/* ---- 掉电域信标（RTC_CNTL_STORE4..7 = 0x600080C0..CC）------------------
+ * CPU 复位/看门狗都不会清，esptool 可以直接 read-mem 读出来。
+ * 串口不可靠时用它记录"执行到哪一步了"。
+ *   例：s3_beacon(0, 0x1234);  ->  esptool read-mem 0x600080C0
+ */
+void s3_beacon(u32 slot, u32 val);
+
 #endif

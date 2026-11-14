@@ -33,12 +33,26 @@
     l32i    a14, a1, 52
     l32i    a15, a1, 56
     addi    a1, a1, 80
+#ifdef __XTENSA_CALL0_ABI__
     rfe
+#else
+    /* windowed：只让当前窗口 live，祖先窗口由欠载向量按需 fill 回来 */
+    movi    a2, 1
+    wsr     a2, windowstart
+    isync
+    rfe
+#endif
     .endm
 
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
+#ifndef __XTENSA_CALL0_ABI__
+    /* windowed ABI：先把祖先窗口全部 spill 到当前任务的栈上，
+     * 之后只保存当前窗口的 a0..a15 就够了（恢复时靠欠载向量 fill）。 */
+    movi    a10, 0
+    call8   xthal_window_spill
+#endif
     /* 双核各用 g_sched[core]/g_s3_cur[core]。
      *
      * 顺序很关键：**必须先把现场（a0..a15/EPC/PS）原样压栈**，再去算本核
@@ -107,6 +121,12 @@ port_task_yield:
     add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
+#ifndef __XTENSA_CALL0_ABI__
+    /* windowed ABI：先把祖先窗口全部 spill 到当前任务的栈上，
+     * 之后只保存当前窗口的 a0..a15 就够了（恢复时靠欠载向量 fill）。 */
+    movi    a10, 0
+    call8   xthal_window_spill
+#endif
 
     addi    a1, a1, -80
     s32i    a0, a1, 0
@@ -138,13 +158,21 @@ port_task_yield:
     l32i    a1, a3, 64
     RESTORE_FRAME
 1:
+#ifdef __XTENSA_CALL0_ABI__
     ret
+#else
+    retw
+#endif
 
     .global port_ps_get
     .type   port_ps_get, @function
 port_ps_get:
     rsr     a2, ps
+#ifdef __XTENSA_CALL0_ABI__
     ret
+#else
+    retw
+#endif
 
     .weak os_task_exit
     .global s3_task_tramp
@@ -153,6 +181,11 @@ s3_task_tramp:
     /* 初始帧把 entry 放在 a2、arg 放在 a3。 */
     mov     a12, a2
     mov     a2, a3
+#ifdef __XTENSA_CALL0_ABI__
     callx0  a12
     call0   os_task_exit
+#else
+    callx8  a12
+    call8   os_task_exit
+#endif
 1:  j       1b

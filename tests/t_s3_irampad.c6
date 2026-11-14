@@ -1,0 +1,40 @@
+/* t_s3_irampad.c6 —— 验证"IRAM 内容越过 0x403D9500（= DRAM 0x3FCD9500 的别名，
+ * 那块 SRAM 实测密集读写会把 CPU 挂住）时镜像还能不能启动"。
+ * PAD_N 用 -DS3_PAD_N=... 指定。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#ifndef S3_PAD_N
+#define S3_PAD_N 30000u
+#endif
+
+/* 塞进 .text（= IRAM），把 IRAM 结尾推到指定位置 */
+static const u8 g_pad[S3_PAD_N] __attribute__((section(".text.pad"), used)) = {1u};
+
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+void os_main(void)
+{
+    pstr("irampad alive, pad=");
+    pu32(S3_PAD_N);
+    pstr(" pad0=");
+    pu32((u32)g_pad[0]);
+    pstr("\n");
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive\n");
+    }
+}

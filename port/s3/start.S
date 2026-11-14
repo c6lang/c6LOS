@@ -16,10 +16,18 @@
     .literal .Lrtc,     0x50000000
     .literal .Lm0,      0x000000A0
     .literal .Lm1,      0x000000A1
+    .literal .Lmarks,   g_boot_marks
 
     .global _start
     .type   _start, @function
 _start:
+    /* 【诊断信标】RTC_CNTL_STORE7(0x600080CC)：掉电域、CPU 复位不丢、
+     * esptool 可以直接 read-mem 读。这里写 0xA0 表示"进了 _start"。
+     * 用它可以把"芯片到底跑没跑我们的代码"和串口是否可用彻底分开。 */
+    movi    a3, 0x600080CC
+    movi    a4, 0xA0A0A0A0
+    s32i    a4, a3, 0
+
     /* 确保内核模式（UM=0）；**INTLEVEL 先拉到 15 关中断**。
      *
      * 原来是清成 0（开中断），启动期就有中断可乘之机：.bss 还没清、内核结构
@@ -43,6 +51,19 @@ _start:
     and     a3, a3, a4
     s32i    a3, a2, 0
 
+#ifndef __XTENSA_CALL0_ABI__
+    /* windowed ABI：windowstart 只标当前窗口有效；PS.WOE=1 让 call8/12 能正常
+     * 分配新窗口（否则每次调用都会走窗口溢出向量，功能上能跑但慢很多）。 */
+    movi    a3, 1
+    wsr     a3, windowstart
+    rsr     a2, ps
+    movi    a3, 1
+    slli    a3, a3, 18              /* PS.WOE */
+    or      a2, a2, a3
+    wsr     a2, ps
+    rsync
+#endif
+
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
     wsr     a2, vecbase
@@ -51,7 +72,43 @@ _start:
     /* 栈 */
     l32r    a1, .Lsp
 
-    /* TIMG0 看门狗留给 C 侧在时钟确定后关闭；此处不碰外设。 */
+    /* **先把看门狗关掉，再干活**：TIMG0 / RTC 的看门狗寄存器跨 CPU 复位不清零
+     * （只有掉电才复位），之前任何固件（或 esptool 的 watchdog-reset）把它武装成
+     * 很短的超时后，就会出现"每次都还没跑到 port_init 就被复位"——现象是串口只有
+     * ROM 的 load 两行、RTC 标记全是乱值。这里用最少的指令先关 TIMG0 和 RTC 的狗。 */
+    movi    a2, 0x6001F000          /* TIMG0 */
+    movi    a3, 0x50D83AA1
+    s32i    a3, a2, 0x64            /* WDTWPROTECT */
+    movi    a3, 0
+    s32i    a3, a2, 0x48            /* WDTCONFIG0：关 */
+    s32i    a3, a2, 0x4C
+    s32i    a3, a2, 0x64            /* 重新上锁 */
+
+    movi    a2, 0x60008000          /* RTC_CNTL */
+    s32i    a3, a2, 0xB0            /* 先写 0（解锁前的旧 key 之后会被覆盖） */
+    movi    a3, 0x50D83AA1
+    s32i    a3, a2, 0xB0            /* WDTWPROTECT */
+    movi    a3, 0
+    s32i    a3, a2, 0x98            /* RTC WDTCONFIG0：关 */
+    s32i    a3, a2, 0xB0            /* 重新上锁 */
+
+    /* RTC 超级看门狗（SWD）：esptool 的 watchdog-reset 会把它也装上，超时几秒；
+     * 它同样跨 CPU 复位保留，必须一起关掉。SWD_CONF.SWD_DISABLE = bit30。 */
+    movi    a3, 0x8F1D312A
+    s32i    a3, a2, 0xB8            /* SWD_WPROTECT */
+    l32i    a3, a2, 0xB4
+    movi    a4, 1
+    slli    a4, a4, 30
+    or      a3, a3, a4
+    s32i    a3, a2, 0xB4            /* SWD_CONF |= SWD_DISABLE */
+    movi    a3, 0
+    s32i    a3, a2, 0xB8            /* 重新上锁 */
+
+    /* 进 _start 的第一件事：往 .data 里的 marks[1] 写 0xA0（这个不会被
+     * 清 .bss 抹掉，比 RTC 可靠）。看到 0xEE 就说明连 _start 都没进来。 */
+    l32r    a2, .Lmarks
+    movi    a3, 0xA0
+    s32i    a3, a2, 4
 
     /* 清 .bss。
      *
@@ -75,9 +132,20 @@ _start:
 2:
     l32r    a2, .Lrtc
     l32r    a3, .Lm1
-    s32i    a3, a2, 0            /* 标记 A1：清 bss 完成 */
+    s32i    a3, a2, 0            /* RTC 里的 A1（可能被 ROM 覆写，仅作参考） */
+    l32r    a2, .Lmarks
+    l32r    a3, .Lm1
+    s32i    a3, a2, 0            /* DRAM 标记 [0] = 0xA1：清 bss 完成（可靠） */
+#ifdef __XTENSA_CALL0_ABI__
     call0   port_init
     call0   os_main
+#else
+    /* windowed ABI：C 函数入口是 `entry sp,N`、出口是 `retw`，必须用 call8 进去
+     * （窗口 base += 8），否则它 retw 时会退回到错误的窗口直接跑飞。
+     * 之前就是这里用 call0 调 port_init：banner 打完一返回就炸。 */
+    call8   port_init
+    call8   os_main
+#endif
 3:
     j       3b
 
