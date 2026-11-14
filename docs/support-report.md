@@ -1,0 +1,105 @@
+# ESP32-S3 自建应用无法从 flash(IROM)执行 —— 问题报告
+
+> 用途：可直接发到 Espressif 论坛 / 提交工单。
+> 整理自 `docs/wifi-plan.md` §58~§74 与 `docs/refs/idf-reference-app.md` 的全部真板实验。
+
+---
+
+## 1. 背景
+
+我们在 ESP32-S3 上移植一个自研 RTOS（c6LOS），不用 ESP-IDF 的框架，但希望复用
+ESP-IDF 的闭源 WiFi 库（libphy/libpp/libnet80211/libcore/libwapi，合计约 500 KB 代码）。
+可用的 IRAM 只有约 66 KB，所以**必须让这些代码跑在 flash 上（IROM）**。
+
+为此我们自己生成了符合 IDF 格式的 app 镜像（`tools/mkimg.py`），用**原厂 bootloader**
+引导。镜像本身已被接受并正常启动（`esptool image-info` 报
+`Checksum: valid` + `Validation hash: valid`）。
+
+## 2. 现象
+
+应用能正常启动、跑 IRAM 里的代码、写 RTC 寄存器、打印串口。**唯独访问 IROM 窗口
+不行**：
+
+```c
+/* IROM 段 vaddr = 0x42030000，对应的 flash 物理地址 0x30000，内容已用
+   esptool read-flash + cmp 逐字节校验过：2c a2 1d f0（movi.n a2,42; retw.n）*/
+uint32_t v = *(volatile uint32_t *)0x42030000u;   /* 得到 0x00000000，不报错 */
+```
+
+跳进去执行则：
+
+```
+*** TRAP cause=00000000 (IllegalInstruction)  epc1=0x42030014  excvaddr=0x00000000
+```
+
+即：**取指/数据读都被"静默地"返回 0**，而且**不抛 Cache error**。
+
+作为对照，一个最小的 ESP-IDF 应用（只 `printf`）在同一块板子上完全正常，它能读回
+自己 IROM 页的真实指令字（`0x42000000 -> 0xc0208890`）；而当它去读一个未映射的
+IROM 页时会正常 `panic'ed (Cache error)`。
+
+## 3. 硬件与软件环境
+
+| 项目 | 值 |
+|---|---|
+| 芯片 | ESP32-S3（`esptool` 报 chip_id 9，Xtensa LX7 双核） |
+| Flash | 16 MB，DIO，40 MHz |
+| bootloader | 原厂固件自带的 2nd-stage bootloader（未修改） |
+| 分区表 | `nvs@0x9000`、`phy_init@0xf000`、`factory/app@0x20000`（4 MB） |
+| app 镜像 | 我们自己生成，烧到 0x20000 |
+| 段布局 | DROM vaddr `0x3C000020`；IROM vaddr `0x42030000`（数据在 flash 0x30000）；其余为 IRAM/DRAM 段 |
+
+## 4. 已经在本板上逐项实测排除的因素
+
+每一项都做过真板实验并有记录（寄存器写后都回读确认生效）：
+
+1. **镜像格式**：`esp_app_desc_t` 在偏移 0x20、段表连续、长度含补齐、末尾 1 字节 XOR
+   校验和、SHA-256 附录 —— `esptool image-info` 全部 valid，bootloader 也接受并跳转。
+2. **MMU 表项**：`MMU[3] = 0x00000003`（按 `SOC_MMU_INVALID=BIT(14)` 的语义，bit14 为 0
+   即有效；页号 3 = flash 0x30000）——**映射是正确的**。恒等映射、重映射、cache 关闭
+   状态下手写表项都试过。
+3. **ICache/DCache**：`ENABLE` 已置位；`SHUT_CORE0/1_BUS` 为 0；`TAG_POWER_CTRL=5`。
+4. **Cache 模式位**：已按 IDF app 的运行态值设为 `ICACHE_CTRL=0x0b`、
+   `DCACHE_CTRL=0x09`（含 `WAY_MODE`、`BLOCKSIZE`），回读一致。
+5. **ICACHE 失效**：`EXTMEM_ICACHE_SYNC_CTRL(0x600C4088)` 写 `INVALIDATE_ENA`(bit0)
+   并轮询 `DONE`(bit1) —— 实测能完成。ROM 的 `Cache_Invalidate_ICache_All()` 调了不返回。
+6. **SPI_MEM**：`SPI_MEM_CLOCK` 已按 IDF 值设为 `0x00010001`、`SPI_MEM_CTRL` 设为
+   `0x00000000`（均回读确认）。也试过 DIO/DOUT/QOUT 三种 flash 模式。
+7. **权限**：`SYSCON_FLASH_ACEn_ATTR/ADDR/SIZE` 实测全 `0xFF`（完全开放）；
+   TRM §16 说明 World 控制器默认关闭。`SYSTEM_CACHE_CONTROL_REG` 的
+   `ICACHE_CLK_ON/DCACHE_CLK_ON` 位与 IDF app 相同。
+8. **时钟**：`SYSTEM_SYSCLK_CONF` 等 SYSCON 时钟寄存器与 IDF app 完全一致。
+
+## 5. 最关键的对照数据
+
+两边都用**各自应用内的代码**读取（JTAG 读这个寄存器块不可靠，实测 IDF app 的 MMU 表
+经 JTAG 全读成 `0x4000`，实际是 `0x00000002`）：
+
+| 寄存器 | IDF app（IROM 正常） | 我们的 app |
+|---|---|---|
+| `MMU[0]` 0x600C5000 | `0x00000002` | `0x00000002` |
+| `EXTMEM_ICACHE_CTRL` 0x600C4060 | `0x0000000b` | `0x00000001` → 已改为 `0x0b` |
+| `EXTMEM_DCACHE_CTRL` 0x600C4000 | `0x00000009` | `0x00000001` → 已改为 `0x09` |
+| `SPI_MEM_CLOCK` 0x60002014 | `0x00010001` | `0x80000000` → 已改为 `0x00010001` |
+| `SPI_MEM_CTRL` 0x60002008 | `0x00000000` | `0x012ca008` → 已改为 `0x00000000` |
+| 读 IROM 页 | `0xc0208890`（真实指令） | `0x00000000` |
+
+**把上表右列全部改成和左列一致后，IROM 访问依然返回 0，且依然不抛 Cache error。**
+
+## 6. 想请教的问题
+
+1. ESP32-S3 上，**除了 MMU 表项、Cache 使能/模式位、SPI_MEM 时钟与控制、PMS 权限**
+   之外，还有哪些**一次性/启动阶段**的配置决定"CPU 能否通过 cache 访问外部 flash"？
+   （我们怀疑差异在 bootloader 引导阶段，事后写寄存器无法弥补。）
+2. 为什么访问 IROM 窗口时是**静默返回 0** 而不是像 IDF app 那样抛 `Cache error`？
+   这种"不响应"是否对应某个具体的权限/时钟/复位状态？
+3. 用**自定义镜像 + 原厂 2nd-stage bootloader** 时，是否有一些隐式契约（例如
+   bootloader 只在特定条件下才真正启用 cache）需要满足？
+4. 是否提供 `spi_flash_init_chip_state()` / `ext_mem_init()` 这类初始化在
+   **非 IDF 环境**下的最小可用参考实现？
+
+## 7. 可提供的复现材料
+
+- 我们生成的 app 镜像与生成脚本（`tools/mkimg.py`，纯 Python，可读）
+- 全部实验记录：`docs/wifi-plan.md` §58~§74、`docs/refs/*.md`
+- 一个最小 ESP-IDF 参照工程（同一块板上正常），含寄存器探测代码
