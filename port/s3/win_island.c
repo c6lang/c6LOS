@@ -142,9 +142,9 @@ void s3_win_trace(const char *s);
  * （IDF 的 esp_phy_enable() 最终也是调它）。cal_mode: 0=部分校准 1=不校准 2=完整校准。
  * 校准数据先放内存（我们还没有 NVS 落盘）。
  */
-#ifdef S3_WITH_LIBPHY
 typedef struct { u8 v[1904]; } phy_cal_data_t;      /* esp_phy_calibration_data_t */
 
+#ifdef S3_WITH_LIBPHY
 extern const u8 s3_phy_init_data[128];              /* port/s3/phy_init_data.c */
 int register_chipv7_phy(const void *init_data, void *cal_data, int cal_mode);
 
@@ -322,143 +322,30 @@ u32 s3_win_phy_cal_word(u32 i)
     return ((const u32 *)(const void *)g_phy_cal.v)[i & 0x1FFu];
 }
 #else
-/* IDF 在 register_chipv7_phy() 之前必须先给 modem 开时钟（见 esp_phy/src/phy_init.c
- * 的 esp_phy_enable：esp_phy_common_clock_enable() + phy_module_enable()）。
- * S3 上就是往 SYSCON_WIFI_CLK_EN(0x60026014) 塞两组位：
- *   WIFI_BT_COMMON = 0x78078F   （WiFi/BLE 共用时钟）
- *   PHY_EN         = 0x400000   （PHY 校准模块时钟）
- * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。 */
-static void s3_win_phy_clock_enable(void)
-{
-    volatile u32 *clk = (volatile u32 *)0x60026014u;
-
-    *clk = *clk | 0x78078Fu;
-    *clk = *clk | 0x400000u;
-}
-
-/* PHY 初始化会动内部 USB PHY（IDF 里由 phy_bbpll_en_usb 之类处理），
- * 结果是我们的 USB-Serial/JTAG 掉枚举 —— 串口/esptool 全没了（实测）。
- * 调用返回后把 USB PHY 重新抢回来。 */
-static void s3_win_usb_reclaim(void)
-{
-    volatile u32 *rtc_usb = (volatile u32 *)0x60008120u;   /* RTC_CNTL_USB_CONF */
-
-    *rtc_usb = (*rtc_usb & ~(1u << 19)) | (1u << 20);      /* USJ 抢回 PHY */
-    *(volatile u32 *)0x600C001Cu |= (1u << 10);            /* PERIP_CLK_EN1: USB device */
-    *(volatile u32 *)0x600C0024u &= ~(1u << 10);           /* PERIP_RST_EN1: 解除复位 */
-    *(volatile u32 *)0x60038018u &= ~(1u << 16);           /* USB_JTAG_CONF0: 清 disconnect */
-    *(volatile u32 *)0x60038018u |= (1u << 14);            /*               置 pullup */
-}
-
-/* 分步诊断：逐步执行 PHY 初始化的前置动作，每步都返回，方便用串口/信标
- * 定位"到底哪一步开始卡"。step 含义见 tests/t_s3_phy.c6。
- * 返回：0 成功；否则是失败的步骤号。
- * 另外把 g_phyFuns 的内容也暴露出去（step 2 用它确认 ROM 真的填了表）。 */
-extern volatile u32 g_phyFuns;
-int register_chipv7_phy_init_param(const void *init_data, void *cal_data, int mode);
-
-u32 s3_win_phy_funcs_word(void)
-{
-    return g_phyFuns;
-}
-
-/* 调 no-op 返回，专门拿 phy_get_romfuncs() 的返回值（有些实现会返回表指针） */
-u32 s3_win_phy_romfuncs_ret(void)
-{
-    return phy_get_romfuncs();
-}
-
-/* 在 ROM 数据区里找 PHY 函数表：
- * 特征 —— 某个 4 字节位置存着指向 DRAM 的指针 V，而 *(V + 0x204) 是一个
- * ROM 代码地址（0x4000_0000..0x400F_FFFF）。register_chipv7_phy 正是
- * 用 l32i a5, [表+0x204]; callx8 a5 起手，所以这个特征很强。 */
-u32 s3_win_find_phytab(void)
-{
-    /* ROM 数据区：esp32s3.rom.ld 里有 phy_param_rom = 0x3fcef81c，
-     * 说明 0x3FCEF000 往上这块是 ROM 自己的数据结构区（映射好的）。
-     * 0x3FC88000..0x3FCA0000 反而没映射，去读会 LoadStoreError。 */
-    u32 a = 0x3FCEF000u;
-
-    while (a < 0x3FD00000u) {
-        u32 v = *(volatile u32 *)a;
-
-        /* 只在**确定映射的 DRAM** 里解引用，否则会 LoadStoreError（踩过） */
-        if (v >= 0x3FC88000u && v < 0x3FCF0000u) {
-            u32 e = *(volatile u32 *)(v + 0x204u);
-
-            if (e >= 0x40000000u && e < 0x40100000u) {
-                return v;
-            }
-        }
-        a = a + 4u;
-    }
-    return 0u;
-}
-
-/* 在 [start,end) 里 4 字节步进扫描，把值落在 0x3FC00000..0x3FD00000（ROM 数据区）
- * 的**地址**收集出来（这些就是"某处存着指向 DRAM 的指针"，很可能就是函数表）。 */
-u32 s3_win_scan_dram(u32 start, u32 end, u32 *out, u32 max)
-{
-    u32 a = start;
-    u32 n = 0;
-
-    while (a < end && n < max) {
-        u32 v = *(volatile u32 *)a;
-
-        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
-            out[n] = a;
-            n = n + 1u;
-        }
-        a = a + 4u;
-    }
-    return n;
-}
-
-int s3_win_phy_step(int step)
-{
-    s3_win_phy_clock_enable();
-    if (step <= 1) {
-        return 0;
-    }
-    {
-        /* 把 ROM 返回的函数表指针存进 g_phyFuns —— 这正是 register_chipv7_phy
-         * 一上来就要用的那张表。S3 的 ROM 不导出 g_phyFuns 符号（S2 才导出），
-         * 所以必须自己接上。 */
-        u32 tab = 0;
-
-        u32 r = 0;
-
-        phy_get_romfuncs();
-        r = phy_get_romfuncs();            /* 有些实现靠返回值给表指针 */
-        if (r >= 0x3FC00000u && r < 0x3FD00000u) {
-            tab = r;
-        } else {
-            r = s3_win_phy_romfuncs_ret();
-            if (r >= 0x3FC00000u && r < 0x3FD00000u) {
-                tab = *(volatile u32 *)r;  /* 也可能是指向表的指针 */
-            }
-        }
-        g_phyFuns = tab;
-    }
-    if (step <= 2) {
-        return 0;
-    }
-    if (g_phyFuns == 0u) {
-        return 0x100 + 2;          /* 表没填上 */
-    }
-    if (step <= 3) {
-        return 0;
-    }
-    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-    if (step <= 4) {
-        return 0;
-    }
-    return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-}
-
 int s3_win_phy_enable(void)
 {
     return -1;      /* 没链 libphy */
+}
+
+u32 s3_win_phy_step(u32 step)
+{
+    (void)step;
+    return 0xFFFFFFFFu;   /* 没链 libphy */
+}
+
+u32 s3_win_phy_funcs_word(void)
+{
+    return 0u;
+}
+
+u32 s3_win_phy_romfuncs_ret(void)
+{
+    return 0u;
+}
+
+u32 s3_win_find_phytab(void)
+{
+    return 0u;
 }
 
 u32 s3_win_phy_cal_word(u32 i)
