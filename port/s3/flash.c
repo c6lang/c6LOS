@@ -84,6 +84,9 @@ extern void Cache_Invalidate_ICache_All(void);
 extern const u8 _flash_text_start[];
 extern const u8 _flash_text_end[];
 extern const u8 _flash_text_lma[];
+extern const u8 _flash_rodata_start[];
+extern const u8 _flash_rodata_end[];
+extern const u8 _flash_rodata_lma[];
 
 void os_flash_init(void)
 {
@@ -116,6 +119,18 @@ void os_flash_init(void)
                      size + 0xFFFFu, OS_FLASH_IROM) == 0) {
         Cache_Invalidate_ICache_All();     /* 清掉 ROM 遗留的旧 tag */
         os_icache_enable();
+    }
+
+    /* flash 里的只读数据（DROM 窗口），闭源大库的 .rodata 会走这条路 */
+    va = (u32)_flash_rodata_start;
+    size = (u32)_flash_rodata_end - va;
+    if (size != 0u) {
+        lma = (u32)_flash_rodata_lma;
+        if ((os_flash_mmu_entry(va & ~(S3_MMU_PAGE - 1u)) & 0x4000u) != 0u) {
+            (void)os_flash_map(lma & ~(S3_MMU_PAGE - 1u), va & ~(S3_MMU_PAGE - 1u),
+                               size + 0xFFFFu, OS_FLASH_DROM);
+        }
+        os_dcache_enable();
     }
 #endif /* S3_FLASH_NO_AUTO_MAP */
 }

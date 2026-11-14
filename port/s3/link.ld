@@ -41,6 +41,17 @@ SECTIONS
     _flash_text_end = .;
   }
 
+  /* flash 里的只读数据 → DROM 窗口（0x3C000000）。闭源大库的 .rodata 放这里，
+     LMA 紧跟在 .flash.text 的数据之后。 */
+  .flash.rodata 0x3C000000 : AT (LOADADDR(.flash.text) + SIZEOF(.flash.text))
+  {
+    _flash_rodata_lma = LOADADDR(.flash.rodata);
+    _flash_rodata_start = .;
+    *(.flash.rodata) *(.flash.rodata.*)
+    *(.rodata.flash*)
+    _flash_rodata_end = .;
+  }
+
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的
      （M1 之后代码变大时改用 -mno-text-section-literals + --auto-litpools）。 */
   .vector : {
