@@ -1221,3 +1221,41 @@ ROM 才会正常引导 flash 里的固件；
 
 这条路完全绕开了 IDF bootloader 的段布局要求，而且用到的每个部件
 （`os_flash_map`、MMU 表 0x600C5000、`SHUT_CORE0_BUS`）我们都已经有了。
+
+## 37. 第 29 轮：USB 失联的两个真因（已修）+ 现状
+
+### 真因 1：我们自己的抓取工具在"按着 BOOT"
+
+`cap.py`/`serial.py` 用 termios 打开端口时，cdc_acm 会让 **DTR 保持有效**；
+而 ESP32-S3 的 USB-Serial/JTAG 把 **DTR=1 当作"GPIO0 拉低"**。
+结果：只要我们在抓串口，芯片任何复位都会进下载模式
+（`boot:0x0 (DOWNLOAD(USB/UART0))`），固件永远不跑 —— **不是用户按着 BOOT**。
+已在两个工具里改成打开后 `TIOCMBIC` 清掉 DTR/RTS。
+
+### 真因 2：PHY 初始化会把内部 USB PHY 抢走
+
+`register_chipv7_phy()` 配置射频/USB PHY 后，USB-Serial/JTAG **掉枚举**：
+串口没了、`/dev/ttyACM*` 消失、esptool 也连不上（这就是"板子不在总线上"）。
+已在 `s3_win_phy_enable()` 返回后加 `s3_win_usb_reclaim()`
+（重新设置 `RTC_CNTL_USB_CONF` 抢回 PHY + USB 设备时钟/复位 + CONF0 pullup）。
+**但如果 PHY 调用本身卡死，这段代码永远执行不到** ⇒ 卡死时 USB 仍然是掉的。
+
+### 因此现在的现实
+
+- PHY 初始化仍然卡死（`phy: clock+call` 之后没有任何输出）；
+- 卡死 → USB 掉 → 既看不到串口也读不了 RTC 信标（读信标也要 esptool 连上 USB）；
+- 要打破这个循环，最省事的是**一根 USB-UART 适配器接 GPIO43/44**（UART0 不依赖
+  USB PHY，PHY 怎么折腾都能看到日志），或者让 PHY 不抢 USB PHY（需要搞清
+  IDF 的 `phy_bbpll_en_usb()` / `CONFIG_ESP_PHY_ENABLE_USB` 的寄存器细节）。
+
+### 已经稳稳到手的（都在仓库里，真板验证过）
+
+- 音频录放（BOOT 按键录音→循环播放，已合并 main）
+- call0 ↔ windowed ABI 桥 + 寄存器窗口向量（含 12 参数递归）
+- 闭源 `libphy.a` 在 c6LOS 里执行、`phy_get_rf_cal_version()` = 0x2C7
+- 闭源库用的 `mem*` 全部改成 windowed 版（objcopy 改名 + 孤岛实现）
+- c6 标准库新增：`include/c6os/flash.h`（IROM/DROM 映射、cache 使能含
+  `SHUT_CORE0_BUS` 修复）、`include/c6os/reg.h`
+- 一套硬件诊断工具（`tools/flash.sh`、`reset.py`、`cap.py`、`usbreset.py`、
+  `beacon.sh`）+ RTC 信标通道
+- `docs/wifi-plan.md` 37 节，把这十几次踩的坑全部记录在案
