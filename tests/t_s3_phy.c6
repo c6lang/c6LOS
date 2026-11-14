@@ -1,79 +1,39 @@
-/* t_s3_phy.c6 —— PHY 初始化分步诊断（M1 的关键一步）。
+/* t_s3_phy.c6 —— PHY 初始化分步诊断，结果**只写 RTC 信标**（崩溃也不丢）。
  *
- * 逐步执行 PHY 初始化的每个前置动作，每步返回后打印，从而定位"到底哪一步开始卡"：
- *   step1: 开 modem 时钟（SYSCON_WIFI_CLK_EN）
- *   step2: 调 ROM 的 phy_get_romfuncs()（填 g_phyFuns 函数表）
- *   step3: 检查 g_phyFuns 是否非空
- *   step4: register_chipv7_phy_init_param()
- *   step5: register_chipv7_phy()  ← 之前就是卡在这里
- * 打印走 ROM 的 ets_printf（不依赖我们自己的 USB 控制台），同时也写 RTC 信标。
+ * 信标约定：
+ *   0x600080C0 slot0 = 当前步骤号（0xE1..0xE5 = step1..5，0xEF = 全部完成）
+ *   0x600080C4 slot1 = 该步骤的返回值
+ *   0x600080C8 slot2 = g_phyFuns（PHY 函数表指针）的内容
+ *   0x600080CC slot3 = port_init / _start 的标记
+ * 读法： ./tools/beacon.sh
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
-#include "c6os/reg.h"
 
-void port_delay_ms(u32 ms);
-void s3_win_call_log(const char *s);
-u32  s3_win_call_phy_step(u32 step);
-u32  s3_win_call_phy_funcs(void);
-
-static void pstr(const char *s) { s3_win_call_log(s); }
-
-static void phex(u32 v)
-{
-    char b[11] = {0};
-    int i = 0;
-    int sh = 28;
-
-    b[0] = '0'; b[1] = 'x';
-    i = 2;
-    sh = 28;
-    while (sh >= 0) {
-        b[i] = "0123456789abcdef"[(v >> (u32)sh) & 0xFu];
-        i++;
-        sh -= 4;
-    }
-    b[10] = '\0';
-    pstr(b);
-}
-
-static void busy_ms(u32 ms)
-{
-    volatile u32 i = 0;
-    u32 n = ms * 13000u;
-
-    while (i < n) { i = i + 1u; }
-}
+u32 s3_win_call_phy_step(u32 step);
+u32 s3_win_call_phy_funcs(void);
+u32 s3_win_find_phytab(void);
 
 void os_main(void)
 {
     u32 step = 1u;
     u32 rc = 0u;
 
-    s3_beacon(0u, 0xE0000001u);
-    pstr("phy: enter os_main\n");
+    s3_beacon(3u, s3_win_find_phytab());      /* 扫描出来的表地址 */
+    s3_beacon(2u, s3_win_call_phy_funcs());   /* 调用前的表 */
 
-    s3_beacon(3u, s3_win_call_phy_funcs());   /* 调用前 g_phyFuns 的内容 */
-    pstr("phyFuns before = ");
-    phex(s3_win_call_phy_funcs());
-    pstr("\n");
-
-    for (step = 1u; step <= 5u; step++) {
-        s3_beacon(0u, 0xE0000000u + step);
-        pstr("step ");
-        phex(step);
-        pstr(" ... ");
+    while (step <= 5u) {
+        s3_beacon(0u, 0xE0u + step);
         rc = s3_win_call_phy_step(step);
-        pstr("rc=");
-        phex(rc);
-        pstr("\n");
+        s3_beacon(1u, rc);
+        s3_beacon(2u, s3_win_call_phy_funcs());
+        step = step + 1u;
     }
 
-    s3_beacon(0u, 0xE00000FFu);
-    s3_beacon(1u, rc);
-    s3_beacon(2u, s3_win_call_phy_funcs());
-
+    s3_beacon(0u, 0xEFu);
     for (;;) {
-        busy_ms(500u);
+        volatile u32 i = 0;
+
+        while (i < 1000000u) { i = i + 1u; }
     }
 }

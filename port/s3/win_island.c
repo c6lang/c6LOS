@@ -126,7 +126,9 @@ u32 s3_win_deep(u32 n)
  */
 int ets_printf(const char *fmt, ...);
 /* ROM：0x40005c58，填 g_phyFuns 函数表（见 esp32s3.rom.ld） */
-void phy_get_romfuncs(void);
+/* ROM 0x40005c58：返回 PHY 的函数表指针（调用者负责存进 g_phyFuns）；
+ * 注意 ROM 是 windowed，返回值在 a10，本文件也是 windowed 编译，直接收就对。 */
+u32 phy_get_romfuncs(void);
 
 void s3_win_log(const char *s)
 {
@@ -194,13 +196,73 @@ u32 s3_win_phy_funcs_word(void)
     return g_phyFuns;
 }
 
+/* 调 no-op 返回，专门拿 phy_get_romfuncs() 的返回值（有些实现会返回表指针） */
+u32 s3_win_phy_romfuncs_ret(void)
+{
+    return phy_get_romfuncs();
+}
+
+/* 在 ROM 数据区里找 PHY 函数表：
+ * 特征 —— 某个 4 字节位置存着指向 DRAM 的指针 V，而 *(V + 0x204) 是一个
+ * ROM 代码地址（0x4000_0000..0x400F_FFFF）。register_chipv7_phy 正是
+ * 用 l32i a5, [表+0x204]; callx8 a5 起手，所以这个特征很强。 */
+u32 s3_win_find_phytab(void)
+{
+    u32 a = 0x3FC80000u;
+
+    while (a < 0x3FCA0000u) {
+        u32 v = *(volatile u32 *)a;
+
+        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+            u32 e = *(volatile u32 *)(v + 0x204u);
+
+            if (e >= 0x40000000u && e < 0x40100000u) {
+                return v;
+            }
+        }
+        a = a + 4u;
+    }
+    return 0u;
+}
+
+/* 在 [start,end) 里 4 字节步进扫描，把值落在 0x3FC00000..0x3FD00000（ROM 数据区）
+ * 的**地址**收集出来（这些就是"某处存着指向 DRAM 的指针"，很可能就是函数表）。 */
+u32 s3_win_scan_dram(u32 start, u32 end, u32 *out, u32 max)
+{
+    u32 a = start;
+    u32 n = 0;
+
+    while (a < end && n < max) {
+        u32 v = *(volatile u32 *)a;
+
+        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+            out[n] = a;
+            n = n + 1u;
+        }
+        a = a + 4u;
+    }
+    return n;
+}
+
 int s3_win_phy_step(int step)
 {
     s3_win_phy_clock_enable();
     if (step <= 1) {
         return 0;
     }
-    phy_get_romfuncs();            /* 填 g_phyFuns */
+    {
+        /* 把 ROM 返回的函数表指针存进 g_phyFuns —— 这正是 register_chipv7_phy
+         * 一上来就要用的那张表。S3 的 ROM 不导出 g_phyFuns 符号（S2 才导出），
+         * 所以必须自己接上。 */
+        u32 tab = 0;
+
+        phy_get_romfuncs();
+        tab = s3_win_find_phytab();
+        if (tab == 0u) {
+            tab = s3_win_phy_romfuncs_ret();   /* 兜底：用返回值 */
+        }
+        g_phyFuns = tab;
+    }
     if (step <= 2) {
         return 0;
     }
@@ -289,13 +351,73 @@ u32 s3_win_phy_funcs_word(void)
     return g_phyFuns;
 }
 
+/* 调 no-op 返回，专门拿 phy_get_romfuncs() 的返回值（有些实现会返回表指针） */
+u32 s3_win_phy_romfuncs_ret(void)
+{
+    return phy_get_romfuncs();
+}
+
+/* 在 ROM 数据区里找 PHY 函数表：
+ * 特征 —— 某个 4 字节位置存着指向 DRAM 的指针 V，而 *(V + 0x204) 是一个
+ * ROM 代码地址（0x4000_0000..0x400F_FFFF）。register_chipv7_phy 正是
+ * 用 l32i a5, [表+0x204]; callx8 a5 起手，所以这个特征很强。 */
+u32 s3_win_find_phytab(void)
+{
+    u32 a = 0x3FC80000u;
+
+    while (a < 0x3FCA0000u) {
+        u32 v = *(volatile u32 *)a;
+
+        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+            u32 e = *(volatile u32 *)(v + 0x204u);
+
+            if (e >= 0x40000000u && e < 0x40100000u) {
+                return v;
+            }
+        }
+        a = a + 4u;
+    }
+    return 0u;
+}
+
+/* 在 [start,end) 里 4 字节步进扫描，把值落在 0x3FC00000..0x3FD00000（ROM 数据区）
+ * 的**地址**收集出来（这些就是"某处存着指向 DRAM 的指针"，很可能就是函数表）。 */
+u32 s3_win_scan_dram(u32 start, u32 end, u32 *out, u32 max)
+{
+    u32 a = start;
+    u32 n = 0;
+
+    while (a < end && n < max) {
+        u32 v = *(volatile u32 *)a;
+
+        if (v >= 0x3FC00000u && v < 0x3FD00000u) {
+            out[n] = a;
+            n = n + 1u;
+        }
+        a = a + 4u;
+    }
+    return n;
+}
+
 int s3_win_phy_step(int step)
 {
     s3_win_phy_clock_enable();
     if (step <= 1) {
         return 0;
     }
-    phy_get_romfuncs();            /* 填 g_phyFuns */
+    {
+        /* 把 ROM 返回的函数表指针存进 g_phyFuns —— 这正是 register_chipv7_phy
+         * 一上来就要用的那张表。S3 的 ROM 不导出 g_phyFuns 符号（S2 才导出），
+         * 所以必须自己接上。 */
+        u32 tab = 0;
+
+        phy_get_romfuncs();
+        tab = s3_win_find_phytab();
+        if (tab == 0u) {
+            tab = s3_win_phy_romfuncs_ret();   /* 兜底：用返回值 */
+        }
+        g_phyFuns = tab;
+    }
     if (step <= 2) {
         return 0;
     }
