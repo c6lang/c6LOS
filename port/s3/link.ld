@@ -106,8 +106,11 @@ SECTIONS
      （寄存器窗口 spill 会一路往下写），写到坏区就丢数据，`retw` 恢复出错误
      返回地址，表现就是 "PC 落在指令中间" 的 IllegalInstruction。
      因此栈顶压到坏区以下，栈区间 = [_bss_end+0x1F00, 0x3FCD9000)。 */
-  _stack_top = 0x3FCD9000;
-  _stack_limit = _bss_end + 0x1F00;
+  /* 栈顶可由构建选项覆盖（Makefile 的 S3_STACK_TOP）：
+   *   - 普通/音频图像构建（bss 很大）：默认 0x3FCEF000
+   *   - PHY/闭源库调试构建（深调用）：用 make wphy 传 0x3FCD9000，避开坏区 */
+  _stack_top = DEFINED(S3_STACK_TOP) ? S3_STACK_TOP : 0x3FCEF000;
+  _stack_limit = _bss_end + 0x800;   /* 2KB 护栏；大 bss 的构建（音频/图像）也能容下 */
   ASSERT(_stack_limit <= _stack_top, "S3 BSS/stack collision")
 
   _text_start = ADDR(.text);

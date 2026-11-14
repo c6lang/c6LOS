@@ -201,6 +201,7 @@ $(BUILD)/obj/start.o: port/s3/start.S
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
+		$(if $(S3_STACK_TOP),-Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP),) \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
@@ -1372,6 +1373,7 @@ PHY_CDEFS = -DS3_WITH_LIBPHY -DS3_KEEP_SWD
 wphy:
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_CDEFS="$(PHY_CDEFS)" build/phy/libphy_win.a
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_LEAN=1 S3_CDEFS="$(PHY_CDEFS)" \
+		S3_STACK_TOP=0x3FCD9000 \
 		S3_MAIN=tests/t_s3_phy.c6 S3_EXTRA_LIBS=build/phy/libphy_win.a s3
 wphyflash: wphy
 	./tools/flashmon.sh build/phy/c6os.bin 15
