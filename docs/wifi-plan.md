@@ -3058,3 +3058,16 @@ esp_err_t IRAM_ATTR spi_flash_init_chip_state(void)
 扒出 `spi_flash_ll_set_dummy_out` 在 ESP32-S3 上到底写 `SPI_MEM_CTRL` 的哪些位、
 连续模式值是多少（通常是 0xA0），然后在我们 app 里**在 cache 使能之前**把这些位配好。
 这一条已交给子代理深入（`sub-2`）。
+
+### 补充：`FDUMMY_OUT` 位我们其实是设着的
+
+`SPI_MEM_CTRL` 的位定义（`spi_mem_reg.h`）：bit3 = `FDUMMY_OUT`、bit4 = `FDOUT_OCT`。
+
+我们的值 `0x012ca008` 拆开：bit15 + bit13 + **bit3(FDUMMY_OUT 已置位)**；
+IDF app 运行态是 `0`（没置位）。
+
+⇒ 这一位我们是**更"配全"**的一方，所以"缺 dummy-out 配置"这条假设不成立。
+连续读模式的触发值（M7-M0）在 `SPI_MEM_SPI_FMEM_...` 那几个高位里，
+我们和 IDF 也不同，但方向是"我们有、它没有"，不能简单照搬。
+
+结论：XIP/连续读这条线也只能算"待子代理确认"，不能直接当作修复方案。
