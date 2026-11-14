@@ -1370,6 +1370,7 @@ clean:
 # make ... wphyflash   构建并刷机+即时监视（相当于 idf.py flash monitor）
 PHY_CDEFS = -DS3_WITH_LIBPHY -DS3_KEEP_SWD
 wphy:
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_CDEFS="$(PHY_CDEFS)" build/phy/libphy_win.a
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_LEAN=1 S3_CDEFS="$(PHY_CDEFS)" \
 		S3_MAIN=tests/t_s3_phy.c6 S3_EXTRA_LIBS=build/phy/libphy_win.a s3
 wphyflash: wphy
