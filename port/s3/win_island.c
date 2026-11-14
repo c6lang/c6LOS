@@ -166,6 +166,20 @@ static void s3_win_phy_clock_enable(void)
     *clk = *clk | 0x400000u;
 }
 
+/* PHY 初始化会动内部 USB PHY（IDF 里由 phy_bbpll_en_usb 之类处理），
+ * 结果是我们的 USB-Serial/JTAG 掉枚举 —— 串口/esptool 全没了（实测）。
+ * 调用返回后把 USB PHY 重新抢回来。 */
+static void s3_win_usb_reclaim(void)
+{
+    volatile u32 *rtc_usb = (volatile u32 *)0x60008120u;   /* RTC_CNTL_USB_CONF */
+
+    *rtc_usb = (*rtc_usb & ~(1u << 19)) | (1u << 20);      /* USJ 抢回 PHY */
+    *(volatile u32 *)0x600C001Cu |= (1u << 10);            /* PERIP_CLK_EN1: USB device */
+    *(volatile u32 *)0x600C0024u &= ~(1u << 10);           /* PERIP_RST_EN1: 解除复位 */
+    *(volatile u32 *)0x60038018u &= ~(1u << 16);           /* USB_JTAG_CONF0: 清 disconnect */
+    *(volatile u32 *)0x60038018u |= (1u << 14);            /*               置 pullup */
+}
+
 int s3_win_phy_enable(void)
 {
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
@@ -178,7 +192,12 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
     s3_win_phy_clock_enable();
-    return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    {
+        int rc = register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+
+        s3_win_usb_reclaim();      /* 把 USB PHY 抢回来，否则串口/esptool 都失联 */
+        return rc;
+    }
 }
 
 u32 s3_win_phy_cal_word(u32 i)
@@ -198,6 +217,20 @@ static void s3_win_phy_clock_enable(void)
 
     *clk = *clk | 0x78078Fu;
     *clk = *clk | 0x400000u;
+}
+
+/* PHY 初始化会动内部 USB PHY（IDF 里由 phy_bbpll_en_usb 之类处理），
+ * 结果是我们的 USB-Serial/JTAG 掉枚举 —— 串口/esptool 全没了（实测）。
+ * 调用返回后把 USB PHY 重新抢回来。 */
+static void s3_win_usb_reclaim(void)
+{
+    volatile u32 *rtc_usb = (volatile u32 *)0x60008120u;   /* RTC_CNTL_USB_CONF */
+
+    *rtc_usb = (*rtc_usb & ~(1u << 19)) | (1u << 20);      /* USJ 抢回 PHY */
+    *(volatile u32 *)0x600C001Cu |= (1u << 10);            /* PERIP_CLK_EN1: USB device */
+    *(volatile u32 *)0x600C0024u &= ~(1u << 10);           /* PERIP_RST_EN1: 解除复位 */
+    *(volatile u32 *)0x60038018u &= ~(1u << 16);           /* USB_JTAG_CONF0: 清 disconnect */
+    *(volatile u32 *)0x60038018u |= (1u << 14);            /*               置 pullup */
 }
 
 int s3_win_phy_enable(void)

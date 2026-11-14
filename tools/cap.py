@@ -2,7 +2,25 @@
 """持续抓串口（自动重连）：刷机/复位导致 USB 重新枚举也不会漏日志。
 用法: sudo -n python3 tools/cap.py -t 20
 """
-import argparse, glob, os, termios, time
+import argparse, fcntl, glob, os, struct, termios, time
+
+TIOCMBIC = 0x5417
+TIOCM_DTR = 0x002
+TIOCM_RTS = 0x004
+
+
+def release_dtr_rts(fd):
+    """把 DTR/RTS 都放开。
+
+    ESP32-S3 的 USB-Serial/JTAG 用 DTR/RTS 模拟 EN/GPIO0：
+    只要 DTR=1（低），芯片在任何复位后都会进**下载模式**（boot:0x0 DOWNLOAD），
+    固件永远跑不起来。抓日志时必须让 DTR=0（GPIO0 高），否则等于一直按着 BOOT。
+    """
+    try:
+        fcntl.ioctl(fd, TIOCMBIC, struct.pack('i', TIOCM_DTR))
+        fcntl.ioctl(fd, TIOCMBIC, struct.pack('i', TIOCM_RTS))
+    except OSError:
+        pass
 
 def open_port(path):
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -13,6 +31,7 @@ def open_port(path):
     a[1] = 0
     a[3] = 0
     termios.tcsetattr(fd, termios.TCSANOW, a)
+    release_dtr_rts(fd)
     return fd
 
 def main():
