@@ -4,7 +4,10 @@
     .section .text.start, "ax", @progbits
     .align 4
     .literal_position
-    .literal .Lsp,      0x3FCEF000
+    /* 栈顶用链接符号 _stack_top（port/s3/link.ld 里定义在 DRAM 坏区以下）。
+     * 注意：不要在这里硬编码地址 —— 原来硬写 0x3FCEF000，改 link.ld 是不生效的，
+     * 栈的高端会一直压在 0x3FCD9500 以上的坏区里。 */
+    .literal .Lsp,      _stack_top
     .literal .Lbss0,    _bss_start
     .literal .Lbss1,    _bss_end
     .literal .Lpms,     0x600C11C0

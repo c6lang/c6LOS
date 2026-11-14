@@ -256,9 +256,37 @@ u32 s3_win_scan_dram(u32 start, u32 end, u32 *out, u32 max)
     return n;
 }
 
+/* IDF 的 esp_wifi_bt_power_domain_on() 等价物 —— **必须在 PHY 初始化之前**：
+ *   1) 解除 WiFi 掉电：RTC_CNTL_DIG_PWC.WIFI_FORCE_PD(bit17) = 0
+ *   2) 打开 WiFi/BT 共用时钟 + PHY 校准时钟（SYSCON_WIFI_CLK_EN）
+ *   3) 给 modem 打一次复位脉冲：SYSCON_WIFI_RST_EN 的 MODEM_RESET_FIELD_WHEN_PU
+ *      = bits 0,1,2,3,4,9,11,13 = 0x2A1F
+ *   4) 解除隔离：RTC_CNTL_DIG_ISO.WIFI_FORCE_ISO(bit28) = 0
+ * 没有这些，PHY 里的寄存器读回来全是垃圾 —— 实测表现就是程序跑到奇怪的地方
+ * （IllegalInstruction，PC 落在指令中间，而且随校准模式漂移）。
+ */
+static void s3_win_phy_clock_enable(void);
+
+static void s3_win_phy_power_on(void)
+{
+    volatile u32 *pwc = (volatile u32 *)0x60008090u;   /* RTC_CNTL_DIG_PWC */
+    volatile u32 *iso = (volatile u32 *)0x60008094u;   /* RTC_CNTL_DIG_ISO */
+    volatile u32 *rst = (volatile u32 *)0x60026018u;   /* SYSCON_WIFI_RST_EN */
+    volatile u32 k = 0;
+
+    *pwc = *pwc & ~(1u << 17);              /* 解除 WiFi 掉电 */
+    while (k < 400u) { k = k + 1u; }        /* ~10us @40MHz */
+    s3_win_phy_clock_enable();              /* 打开 modem 时钟 */
+    *rst = *rst | 0x2A1Fu;                  /* modem 复位：assert */
+    *rst = *rst & ~0x2A1Fu;                 /* modem 复位：release */
+    *iso = *iso & ~(1u << 28);              /* 解除隔离 */
+    k = 0;
+    while (k < 400u) { k = k + 1u; }
+}
+
 int s3_win_phy_step(int step)
 {
-    s3_win_phy_clock_enable();
+    s3_win_phy_power_on();
     if (step <= 1) {
         return 0;
     }

@@ -1464,3 +1464,32 @@ PC 落在指令中间 ⇒ 典型的**返回地址不对**（窗口 ABI 的 `retw
   所以"下一轮再读"的 self-report 机制在 SWD 自恢复模式下不成立。
 - 结论：要看 step5 的结果，仍然需要 UART0（GPIO43/44）或 OpenOCD；
   或者让 PHY 不再抢 USB PHY（需要 `esp_phy_enable()` 里那套 USB 共存细节）。
+
+## 44. 第 30 轮：补齐 IDF 的 modem 上电序列 + 稳定亮屏固件
+
+按 IDF `phy_init.c` 的 `esp_wifi_bt_power_domain_on()` 补齐了 PHY 之前必须做的三件事
+（`port/s3/win_island.c` 的 `s3_win_phy_power_on()`）：
+
+1. 解除 WiFi 掉电：`RTC_CNTL_DIG_PWC`(0x60008090) 的 `WIFI_FORCE_PD`(bit17) = 0
+2. 打开 modem 时钟：`SYSCON_WIFI_CLK_EN`(0x60026014) |= `0x78078F`（WiFi/BT 共用）
+   + `0x400000`（PHY 校准）
+3. modem 复位脉冲：`SYSCON_WIFI_RST_EN`(0x60026018) 的 `MODEM_RESET_FIELD_WHEN_PU`
+   = bits 0,1,2,3,4,9,11,13 = **0x2A1F**，先置位再清零
+4. 解除隔离：`RTC_CNTL_DIG_ISO`(0x60008094) 的 `WIFI_FORCE_ISO`(bit28) = 0
+
+另外按 IDF 的用法加了 `phy_bbpll_en_usb(1)`（`CONFIG_ESP_PHY_ENABLE_USB` 等价物）。
+
+**结果**：`register_chipv7_phy()` 仍然在 `set_chan_freq_hw_init` 里跑飞
+（IllegalInstruction，PC 落在指令中间、随校准模式漂移）。栈顶坏区问题已排除
+（改链接符号后 `sp` 已落在 0x3FCD9000 以下，崩溃依旧）。
+
+### 留给板子的稳定状态
+
+刷了 `tests/t_s3_on.c6`（`build/won`）：
+
+- LCD **背光常亮**（GPIO13，LEAN 构建直接操作 GPIO）
+- 每 ~5 秒串口打印 `alive n=...`（走 ROM 的 `ets_printf`，不依赖我们自己的 USB 初始化）
+- **不碰 PHY**，所以 USB 不会掉、esptool 随时能连上。
+
+上午接着搞时直接从 `./tools/flashmon.sh build/phy/c6os.bin 20` 开始即可
+（`make wphy` 会构建 PHY 分步诊断版本）。

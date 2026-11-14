@@ -1,0 +1,51 @@
+/* t_s3_on.c6 —— 稳定的"亮屏 + 心跳"固件（不碰 PHY，不惹 USB）。
+ * 用途：把板子留在一个干净、肉眼可见、串口也能看日志的状态。
+ *   背光常亮（GPIO13），每 10 秒打印一次心跳和 RTC 信标。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) {
+        b[i] = h[(v >> (u32)sh) & 0xFu];
+        i++;
+        sh -= 4;
+    }
+    b[10] = '\0';
+    pstr(b);
+}
+
+void os_main(void)
+{
+    u32 n = 0;
+
+    /* LCD 背光常亮（LEAN 构建没有 panel.c，直接操作 GPIO13） */
+    os_reg_wr(0x60009034u, (os_reg_rd(0x60009034u) & ~(7u << 12)) | (1u << 12));
+    os_reg_wr(0x60004554u, 0x100u);
+    os_reg_wr(0x60004024u, 1u << 13);
+    os_reg_wr(0x60004008u, 1u << 13);
+
+    for (;;) {
+        volatile u32 k = 0;
+
+        pstr("alive n=");
+        phex(n);
+        pstr(" beacon=");
+        phex(*(volatile u32 *)0x600080C0u);
+        pstr("\n");
+        n = n + 1u;
+        while (k < 200000000u) { k = k + 1u; }
+    }
+}
