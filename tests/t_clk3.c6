@@ -1,0 +1,12 @@
+/* SYSTEM_SYSCLK_CONF 在 0x600C0060（SOC_CLK_SEL 在 bit11:10） */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000071u);
+    s3_beacon(1u, os_reg_rd(0x600C0060u));   /* SYSCLK_CONF: PRE_DIV + SOC_CLK_SEL */
+    s3_beacon(2u, os_reg_rd(0x600C0010u));   /* CPU_PER_CONF */
+    s3_beacon(3u, os_reg_rd(0x600C0064u));   /* 附近寄存器做参考 */
+    for (;;) { }
+}

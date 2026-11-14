@@ -139,3 +139,15 @@ slot3 = 0x00000000   CMD.USR 已清零
 
 **因此问题确实是 cache 侧特有的**：SPI 能读、bootloader 能读、`esptool` 能读，
 唯独 cache 从 flash 取数返回 0。
+
+## 时钟源也排除了：我们其实就跑在 PLL 上
+
+`SYSTEM_SYSCLK_CONF` 的真实地址是 **0x600C0060**（不是 0x60026000）：
+
+```
+0x600C0060 = 0x000A8400   -> SOC_CLK_SEL(bits 11:10) = 1 = PLL_CLK  ✓
+0x600C0010 = 0x0000000C   -> CPU_PER_CONF
+```
+
+⇒ **我们的 app 本来就在 PLL 时钟源下**，和 IDF app 一样。
+"两边 CPU 频率不同（40MHz XTAL vs 160MHz PLL）"这条最后也排除了。

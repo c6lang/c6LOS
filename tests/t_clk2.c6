@@ -1,0 +1,12 @@
+/* 对比时钟源配置：SYSTEM_CPU_PER_CONF(0x600C0010) / SYSCLK_CONF(0x60026000) */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000070u);
+    s3_beacon(1u, os_reg_rd(0x600C0010u));   /* CPU_PER_CONF */
+    s3_beacon(2u, os_reg_rd(0x60026000u));   /* SYSCLK_CONF  */
+    s3_beacon(3u, os_reg_rd(0x60026010u));   /* 备用：可能是 SOC_CLK_SEL 所在 */
+    for (;;) { }
+}
