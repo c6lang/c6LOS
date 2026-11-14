@@ -74,7 +74,7 @@ S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
-	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 

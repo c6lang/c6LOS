@@ -828,3 +828,23 @@ windowed 的 `call8` 进来、call0 的 `ret` 返回 → 跳到"带窗口位的�
 **环境问题（本轮结束时的状态）**：板子的 USB-CDC 又卡死了
 （`esptool` 报 `OSError: [Errno 71] Protocol error`，RTS ioctl 失败），
 需要**拔插一次 USB** 才能继续刷机/读串口。
+
+## 23. 坏消息：c6 标准库（std/）用当前工具链用不了（第 13 轮）
+
+想直接 `import std.net.dhcp;` 复用标准库里的网络模块，实测：
+
+1. 先要加模块搜索路径：`$(C6CC) ... -I$(C6_ROOT)`（已加到 Makefile），
+   否则报 `cannot find module 'std.net.dhcp'`。
+2. 加上之后报 **`/home/winger/c6/std/net/dhcp.c6:40: error: function definition expected`**
+   —— 那一行是 `module std.net.dhcp;`，而我们的编译器
+   （`/home/winger/c6/tcc/c6`，tcc 0.9.28rc，2026-11-13）**不支持
+   `module`/`import` 这种新方言**（std 库是按新方言写的）。
+
+也就是说 §18 里"协议层几乎全部可复用"的结论**要用的话得先解决工具链**：
+- 要么换上支持 `module`/`import` 的新版 c6 编译器；
+- 要么把需要的那几个模块（`dhcp`/`dns`/`tlsrec`/`tlskdf`/`x25519`/`x509`/`https`）
+  按当前方言**手工移植**（每个文件去掉 `module`/`import`，把依赖类型内联）。
+  这些模块本身是纯逻辑（几百行/个），移植是体力活但不是难事。
+
+顺带说明：`tests/t_s3_stdnet.c6`（验证用的用例）因为编不过已经删掉，
+结论就记在这里。
