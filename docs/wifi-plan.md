@@ -37,7 +37,17 @@
    也试过 DIO/DOUT/QOUT 三种 flash 模式。
 6. **权限**：`SYSCON_FLASH_ACEn_*` 全 `0xFF`；TRM §16 说明 World 控制默认关闭。
 7. **时钟**：`SYSTEM_SYSCLK_CONF` 等与 IDF app 一致；`CACHE_CONTROL` 的时钟位也一致。
-8. **flash 内容**：`esptool read-flash` + `cmp` 逐字节校验过。
+8. **flash 内容 / flash 通路**：`esptool read-flash` + `cmp` 逐字节校验过；bootloader 能读；
+   我们还绕过 cache 用 `SPI_MEM` USER 通路手工发 `0x03` 读命令，**轮询 1 次就完成** ——
+   SPI 控制器与 flash 通路完全正常。
+9. **cache 错误状态**：清状态后做一次 IROM 读，`EXTMEM_CACHE_ILG_INT_ST=0`、
+   `EXTMEM_MMU_FAULT_VADDR=0` —— **连错误记录都没有**。
+   （注意：该中断复位默认关闭，IDF app 是靠 `esp_cache_err_int_init()` 才看得到 panic。）
+10. **cache 时钟/电源/MMU 供电**：`SYSTEM_CACHE_CONTROL=0x5`、`EXTMEM_CLOCK_GATE=0x1`、
+    `EXTMEM_CACHE_MMU_POWER_CTRL=0x5`。
+11. **MMU 表项范围**：`Cache_Get_IROM_MMU_End=0x200`（整表归 IROM），entry 3 在范围内。
+12. **eFuse**：`DIS_ICACHE/DIS_DCACHE/DIS_DIRECT_BOOT` 全 False。
+13. **flash 芯片内部状态**：`read-flash-status` 两边都是 `0x0200`。
 
 **结论：上述全部对齐到和 IDF app 完全一致后，IROM 访问依旧静默返回 0。**
 差异不在"事后可改"的寄存器里，而在启动阶段的一次性配置。
