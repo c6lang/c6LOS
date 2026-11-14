@@ -33,8 +33,7 @@ void os_main(void)
     (void)os_flash_map(0x100000u, 0x42100000u, 0x10000u, OS_FLASH_IROM);
     s3_beacon(2u, os_flash_mmu_entry(0x42100000u));
 
-    s3_win_call_cache_invalidate();   /* ROM Cache_Invalidate_ICache_All */
-    s3_beacon(3u, 0x1CAC0001u);       /* invalidate 返回了 */
+    s3_beacon(3u, 0x1CAC0001u);       /* 映射后 */
     s3_win_call_cache_enable();       /* ROM Cache_Enable_ICache */
     s3_beacon(3u, 0x1CAC0002u);       /* enable 返回了 */
 

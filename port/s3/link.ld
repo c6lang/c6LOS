@@ -13,7 +13,7 @@ MEMORY
   /* IRAM 只能用 0x403C9000..0x403D9500 这 66KB：再往上 0x403D9500 是 SRAM 坏区
      （DRAM 侧别名 0x3FCD9500，密集 CPU 访问会挂死 CPU，实测越过它的镜像根本
      启动不了）。所以 IDF 闭源大库（libphy/libpp/libnet80211）的代码要放 flash。 */
-  IRAM (rx) : ORIGIN = 0x403C9000, LENGTH = 0x10500
+  IRAM (rx) : ORIGIN = 0x40378000, LENGTH = 0x10700
   /* 原来只用 DRAM 顶部 116KB（0x3FCE3000 起）。实测 0x3FCA0000 起、下方留 96KB
      给 ROM 之后，RAM-only 镜像在 app 运行期可自由读写整段，240x240 RGB565
      帧缓冲（115200B）因此可以放进内部 RAM。 */

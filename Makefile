@@ -210,6 +210,7 @@ $(BUILD)/obj/start.o: port/s3/start.S
 # 默认栈顶 0x3FCEF000（大 bss 的音频/图像构建需要）；make wphy 传 0x3FCD9000
 # 把栈挪到 DRAM 坏区(0x3FCD9500+)以下，给闭源 PHY 的深调用用。
 S3_STACK_TOP ?= 0x3FCEF000
+S3_IMG_FLAGS ?= --ram-only-header
 S3_STACK_LD := -Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP)
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
@@ -219,7 +220,7 @@ $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
-	esptool --chip esp32s3 elf2image --ram-only-header --flash-mode dio \
+	esptool --chip esp32s3 elf2image $(S3_IMG_FLAGS) --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
 
 image-info: $(BUILD)/c6os.bin

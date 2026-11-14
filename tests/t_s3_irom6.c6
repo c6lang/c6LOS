@@ -1,0 +1,17 @@
+/* t_s3_irom6.c6 —— 做成"普通 flash 镜像"后，ROM 引导时会替我们建好 MMU+cache，
+ * 这时直接调用 flash 里的函数应该能返回 42。
+ * 判据：slot0=0xB0000003(进入)，slot1=0xF100002A(成功，低字节=42)。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+u32 s3_win_call_flash42(void);
+
+void os_main(void)
+{
+    u32 v = 0u;
+
+    s3_beacon(0u, 0xB0000003u);
+    v = s3_win_call_flash42();
+    s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
+    for (;;) { }
+}

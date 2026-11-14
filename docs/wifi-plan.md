@@ -2292,3 +2292,41 @@ MMU[0x10]=0x4010   (page 0x10 -> flash 0x100000, valid)
 
 即：**cache 硬件配置与能工作的原厂固件逐位相同，MMU 映射正确，flash 内容已校验，
 但取指仍然拿到 0x00000000。**
+
+## 60. 走"普通 flash 镜像"路线的进展（本轮最大突破方向）
+
+思路：IROM 取指需要 cache 建好，而**建 cache 正是 bootloader 的职责**。所以不再做
+RAM-only 镜像（ROM 直接引导、跳过 cache 初始化），改成"bootloader + app 镜像"。
+
+### 踩到并解决的三个真问题
+
+1. **`esp_app_desc_t` 必须在镜像文件偏移 0x20**
+   `esptool elf2image` 把 DRAM 段排在最前，app_desc 落不到 0x20 ⇒ bootloader 直接复位。
+   解决：自己写 `tools/mkimg.py`，第一段放 DROM(`.flash.rodata`)，数据正好从 0x20 开始。
+
+2. **IRAM 段不能压在 bootloader 身上**
+   我们原来 IRAM 在 `0x403C9000`，而 bootloader 正跑在 `0x403C8700..0x403CB700` ⇒
+   `abort() at mmu_hal_map_region`。把 IRAM 挪到 **0x40378000**（长度 0x10700）后解决。
+
+3. **flash 段的 vaddr 必须 64KB 对齐**，且镜像内偏移 = `paddr - 镜像基址`，
+   这样 bootloader 的 MMU 映射才成立。
+
+### 当前状态
+
+改完之后：`abort()` 消失、bootloader 正常加载并跳到我们的 app（`entry 0x403c88f4`），
+但随后 **bootloader 仍判定镜像无效并软复位**（`rst:0x3 RTC_SW_SYS_RST` 循环）。
+
+剩下的疑点是镜像的 **XOR 校验字节**：
+
+```
+$ esptool image-info /tmp/img3.bin
+Checksum: 0x00 (invalid - calculated 0x10)
+```
+
+我们自己算（`checksum = 0xEF; for each byte: ^= b`，范围到校验字节之前）得到 0x2E，
+且整镜像 XOR（含校验字节）恰好为 0，和 IDF 的约定一致；但 esptool 报的期望值是 0x10，
+说明它取的 `image_len` 和我们不一致（差 1~2 字节）。**下一步就是把这一字节对齐**，
+esptool 认可后 bootloader 就会接受镜像。
+
+一旦接受，bootloader 会替我们建好 MMU+cache，IROM 取指这个卡了很久的问题就自然解开，
+WiFi 闭源库（~500KB）也就有地方放了。
