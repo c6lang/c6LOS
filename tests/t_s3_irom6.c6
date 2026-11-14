@@ -18,6 +18,13 @@ void os_main(void)
     os_reg_wr(0x60002014u, 0x00030103u);
     s3_beacon(2u, os_reg_rd(0x60002008u));
 
+    /* A) 关键试验：bootloader 建的表项是 0x00000003（没有 valid 位）。事后补写无效，
+     *    因为 tag 里已经缓存了那个无效表项，而 SYNC≠INVALIDATE。
+     *    正确做法：关 ICACHE -> 重写表项(带 valid) -> 开 ICACHE -> 再跳。 */
+    os_reg_wr(0x600C4060u, 0x0u);          /* 关 ICACHE */
+    os_reg_wr(0x600C500Cu, 0x4003u);       /* MMU[3] = valid | flash 页 3 */
+    os_reg_wr(0x600C4060u, 0x1u);          /* 开 ICACHE */
+
     /* 0) TRM §17 SYSTEM_CACHE_CONTROL_REG(0x60026048): bit0=ICACHE_CLK_ON bit2=DCACHE_CLK_ON
      *    这两个时钟位如果没打开，cache 根本无法访问外部存储器 —— 先读、再打开。 */
     s3_beacon(1u, os_reg_rd(0x60026048u));

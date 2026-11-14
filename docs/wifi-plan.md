@@ -2753,3 +2753,25 @@ S3 上做得到这件事的有三条路：
 
 第 3 条最干净，也是 IDF/NuttX 的做法（NuttX 注释原文："写 MMU 寄存器时要挂起 cache"）。
 **下次直接从这里开始试**：关 ICACHE → 写 MMU[3]=0x4003 → 开 ICACHE → 跳 flash。
+
+### 试过"关 ICACHE → 重写表项 → 开 ICACHE"——仍然不行
+
+严格按 NuttX 注释的建议做（信标逐步确认每步都执行到）：
+
+```
+1. ICACHE_CTRL = 0         关 I-cache
+2. MMU[3] = 0x4003         重写表项（valid | flash 页 3）
+3. ICACHE_CTRL = 1         重新打开
+4. 跳 0x42030014           执行 flash 里的 movi.n a2,42; retw.n
+```
+
+结果：**仍然 `cause=0`，取回 0x0000**。
+
+至此，S3 上"让 CPU 从 flash 取到指令"这条路，寄存器层面能做的**全部**做完了：
+镜像格式、bootloader 引导、MMU（恒等/重映射/手写/关 cache 重写）、双 cache、
+cache 时钟位、ICACHE sync、SPI_MEM 全块（与原厂逐字节一致）、ROM cache 函数。
+全部有真板实测记录，全部无效。
+
+**结论：这个问题已经超出"配置"范畴**，怀疑落在 flash 芯片内部状态或该 bootloader 与
+自建镜像之间的某种隐性契约上。要再往前推，必须先有一个"能跑 IROM 的对照物"——
+也就是用同一套 IDF 编一个最小 app 跑通（需要 `install.sh`，而 `/home` 磁盘目前 100% 满）。
