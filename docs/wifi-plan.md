@@ -2978,3 +2978,18 @@ app_desc 段移到 IROM 段内（.flash.text.desc），保证仍在镜像偏移 
 
 ⇒ 说明 bootloader 对段布局有额外要求（很可能与"第一个段必须是 DROM"有关），
 这一条也记进问题报告。
+
+## 77. 又一排除：flash 芯片内部状态寄存器相同
+
+`esptool read-flash-status` 读的是 flash 芯片自己的状态寄存器（QE 位、工作模式等，
+掉电不丢）。分别在"我们固件跑过"和"原厂固件跑过"两种状态下读取：
+
+```
+Flash memory status: 0x0200     <- 我们固件
+Flash memory status: 0x0200     <- 原厂固件
+```
+
+⇒ **flash 芯片内部模式一致**，不是"芯片被配成了某种 cache 读不了的模式"。
+
+同时新增了 `tools/try.sh`（一条命令完成 构建→生成镜像→烧三件套→复位→抓串口→读信标），
+后续验证假设可以一条命令搞定。
