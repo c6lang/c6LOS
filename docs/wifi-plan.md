@@ -881,3 +881,22 @@ void os_dcache_enable(void) { /* D 总线同理：EXTMEM_DCACHE_CTRL1 &= ~1 */ }
 `tests/t_s3_abic.c6` 里加回了 `L5irom=` 检查（调 flash 段里的手写函数，期望 42）。
 **等板子插拔后验证** —— 如果通过，IROM 就通了，`libpp/libnet80211`（2MB+）
 也就能放 flash，WiFi 才算真正有了路。
+
+## 25. 【板子 USB 卡死】恢复步骤（第 17 轮）
+
+现象：`esptool` 报 `OSError: [Errno 71] Protocol error`（RTS ioctl 失败），
+`/dev/ttyACM*` 不存在或打不开。软件办法（sysfs unbind/bind、重新 bind 接口）
+都恢复不了 —— **只能拔插一次 USB**。
+
+插拔后的第一件事（按顺序）：
+1. `./tools/flash.sh build/wirom2/c6os.bin`（这个版本含有 IROM 修复 + `L5irom` 检查）
+   - 期望串口出现 `L5irom=42 (want 42)` → **IROM 通了**（§24 的 SHUT_CORE0_BUS 修复生效）
+   - 如果还是崩，看 `L5irom` 之前最后一行输出，并读 `g_idf_log`（§21）
+2. `./tools/flash.sh build/wphyen7/c6os.bin`（PHY 校准 + 飞行记录仪）
+   - 期望 `L7 phy_enable=0 cal=...`（非零）
+   - 若崩，用 `esptool read-mem <g_idf_log>`（地址见 `nm build/wphyen7/c6os.elf | grep g_idf_log`）
+     看闭源库最后打印了什么
+3. 然后才谈 libpp/libnet80211 放 flash + 端口 WiFi 胶水。
+
+注：`tools/flash.sh` 会自动等串口、失败重试（但这块板的 USB 卡死是硬件层面，
+重试也救不回来，只能拔插）。
