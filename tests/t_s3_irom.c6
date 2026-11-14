@@ -79,7 +79,9 @@ void os_main(void)
     }
     pstr("\n");
 
+    s3_beacon(0u, 0x10000001u);          /* 进到映射之后 */
     v = s3_win_call_flash42();           /* 期望 42 */
+    s3_beacon(1u, v);                    /* **结果就写进信标：42 = IROM 通了** */
     pstr("flash42 returned ");
     pu32(v);
     pstr(" (want 42)\n");
