@@ -2839,3 +2839,51 @@ cache 那边没认**。
 原厂 app 会在自己启动时做一整套 flash/cache 初始化（`spi_flash_init_chip_state()`
 + `ext_mem_init()`），我们的 app 没做。要验证这一点，必须有一个"能跑 IROM 的对照物" ——
 即用同一套 IDF 编一个最小 app（`install.sh` 需要约 2 GB，磁盘现已腾出 8 GB）。
+
+## 73. 参照 app 带来的新认知：我们是"静默返回 0"，而正常应该是抛 Cache error
+
+### 实验：让 IDF 参照 app 去读未映射的 IROM 页
+
+```c
+printf(..., *(uint32_t*)0x42030000u, ...);
+```
+
+真板输出：
+
+```
+I (166) cpu_start: cpu freq: 160000000 Hz
+Guru Meditation Error: Core 0 panic'ed (Cache error)
+```
+
+对比我们自己的固件（同样的地址、同样"未映射"）：
+
+```
+read 0x42030000 = 0x00000000     <- 静默返回 0，不 panic
+```
+
+**这是一个本质差别**：正常硬件行为是"访问未映射的外部存储器 → Cache error"，
+而我们得到的是"静默 0"。也就是说**我们的那次访问压根没有被当作外部存储器访问处理**。
+
+### 按照 IDF 运行态值逐项对齐后仍然失败
+
+```
+SPI_MEM_CLOCK 0x60002014 : 写 0x00030103 -> 回读确认生效 ✓（IDF app 里就是这个值）
+SPI_MEM_CTRL  0x60002008 : 写 0x00608000
+MMU[3]        0x600C500C : 写 0x4003（valid|页3） -> 回读确认生效 ✓
+顺序：关双 cache -> 写上述 -> 开双 cache -> 数据读
+结果：仍返回 0，且仍不报 Cache error
+```
+
+### 另外发现
+
+IDF app 运行在 **160 MHz（PLL_CLK）**，而我们跑 **40 MHz XTAL**。
+TRM §7.2.4.3 只要求 Wi-Fi/BLE 用 PLL，没要求 cache/flash——但这是目前唯一还
+没对齐的系统级差异。`SYSTEM_SYSCLK_CONF`(0x60026060) 的 `SYSTEM_SOC_CLK_SEL`
+（0=PLL? 1=PLL，TRM 表 7.2-1：0=XTAL_CLK，1=PLL_CLK）可以切。
+
+### 下一步（按优先级）
+
+1. **把 IDF app 的 IROM vaddr ↔ MMU 表项对应关系彻底搞清楚**：它自己的代码落在
+   哪个 vaddr、对应表项里写的是什么值。这个"正确样例"能直接告诉我们表项该长什么样。
+2. 切到 PLL_CLK(160MHz) 后再试（唯一还没对齐的系统级差异）。
+3. 若还不行，就需要 Espressif 支持或硬件层面手段了。
