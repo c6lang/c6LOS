@@ -33,6 +33,7 @@ SECTIONS
   .flash.text 0x42000020 : AT (0x20)
   {
     _flash_text_start = .;
+    *(.flash.text) *(.flash.text.*) *(.flash.rodata) *(.flash.rodata.*)
     *libphy.a:(.literal .literal.* .text .text.*)
     *libpp.a:(.literal .literal.* .text .text.*)
     *libnet80211.a:(.literal .literal.* .text .text.*)

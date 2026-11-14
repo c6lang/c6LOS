@@ -79,3 +79,102 @@ s3_win_call_phy_cal:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* u32 s3_win_call_deep(u32 n) —— 从 call0 调 windowed 的深递归函数 */
+    .align  4
+    .global s3_win_call_deep
+    .type   s3_win_call_deep, @function
+s3_win_call_deep:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    mov     a10, a2
+    call8   s3_win_deep
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+
+/* u32 s3_win_call_flash_add(u32 a, u32 b) —— 调放在 flash 段里的 windowed 函数 */
+    .align  4
+    .global s3_win_call_flash_add
+    .type   s3_win_call_flash_add, @function
+s3_win_call_flash_add:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    mov     a10, a2
+    mov     a11, a3
+    /* 注意：IRAM→IROM 的 call8 超出 ±128KB 范围，所以这里只调 IRAM 里的
+     * 包装函数，跨到 flash 的那一步交给编译器（它会用 l32r+callx8）。 */
+    call8   s3_win_flash_chain
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+
+/* u32 s3_win_call_flash_pat(void) —— 取 flash 段里图案数组的地址 */
+    .align  4
+    .global s3_win_call_flash_pat
+    .type   s3_win_call_flash_pat, @function
+s3_win_call_flash_pat:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    rsr     a13, ps
+    s32i    a13, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_flash_pat
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret

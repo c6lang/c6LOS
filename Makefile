@@ -128,7 +128,7 @@ $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -c $< -o $@
+	$(XTGCC) -mabi=call0 -mtext-section-literals -c $< -o $@
 
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj

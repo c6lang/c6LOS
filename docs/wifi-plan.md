@@ -534,3 +534,33 @@ DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 
   3. 实在不行：把整个 libphy 闭包（76KB）里真正需要的少数函数用
      `--gc-sections` + 手写精简 glue 裁到 30KB 以内，直接放 IRAM（IRAM 预算 66KB，
      我们自己的代码只占 ~30KB），彻底绕开 IROM。
+
+### 15.6 IROM 执行的最新实测（本轮结束时的状态）
+
+用我们自己放在 flash 段里的函数做对照（不涉及 libphy）：
+
+- ELF 里 `s3_win_flash_add` 在 VMA `0x42000020`，紧跟的图案数组 `g_flash_pat` 在
+  `0x42000029`；在**镜像文件里**图案字节 `11 22 33 44…` 正好出现在偏移 `0x29`
+  → 说明链接脚本把"VMA 页内偏移 == flash 页内偏移"这件事做对了（都是 0x20/0x29）。
+- 真板调这个 flash 里的函数：陷阱 `cause=0 (IllegalInstruction) pc=0x42000022`
+  —— **正好是 `entry` 指令（3 字节）的第 3 个字节**。libphy 那边也是同样的现象
+  （`phy_get_rf_cal_version` 在 0x420094fc，陷阱在 0x420094fe）。
+- 想用"读数据"来验证映射是行不通的：IROM(0x42xxxxxx) 只能取指，读数据会
+  `LoadStoreError`（cause=3）；要看数据必须走 DROM(0x3C000000) 别名。
+- 另外确认：IRAM→IROM 的 `call8` 超出 ±128KB，**必须**用 `l32r`+`callx8`
+  （链接器会直接报 `dangerous relocation: call8: call target out of range`）。
+
+**下一轮的三个候选（按性价比）**
+
+1. 在 flash 段函数最前面塞 4 个 NOP（或 `.align 4` + 前置填充），让真正的入口在
+   4 字节边界上，看陷阱地址是否变成 +4/+6 —— 这样能判断是不是"取指从 +2 开始"
+   的映射偏移问题。
+2. 做一个"只有一个 flash 段"的极简镜像（不加 DRAM/IRAM 段，或者把 flash 段
+   LMA 放在 0x20、其它段排在它后面），排除多段布局对 MMU 映射的干扰。
+3. 若 IROM 始终不行 → 回到"纯 IRAM"方案：写一个裁剪脚
+   （`objcopy` + 只保留 `phy_api.o` 里用到的几个函数）把闭包压到 30KB 以内，
+   或者退一步先不做 PHY，改从 WiFi 的 `esp_wifi_init` 侧验证（同样受 IRAM 限制）。
+
+**注意**：不要让整体进度卡在 IROM 上——这是一个 ROM/MMU 细节，可以并行推进
+"把 IDF 的 `esp_wifi`/`esp_phy` C 源码移植进孤岛 + FreeRTOS 垫片"这些不依赖
+IROM 的工作（它们的代码都是我们编译的，可以放 IRAM，等 IROM 通了再挪）。

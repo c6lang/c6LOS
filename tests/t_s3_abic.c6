@@ -12,6 +12,9 @@ void s3_lcd_delay(u32 n);
 void port_puts(const char *s);
 u32 s3_win_call_add(u32 a, u32 b);   /* 走 ABI 桥调 windowed 孤岛里的函数 */
 u32 s3_win_call_phy_cal(void);       /* 桥调 windowed 孤岛 → libphy.a */
+u32 s3_win_call_deep(u32 n);         /* 桥调 windowed 深递归（测窗口溢出/欠载） */
+u32 s3_win_call_flash_add(u32 a, u32 b);  /* 桥调放在 flash 段里的 windowed 函数 */
+u32 s3_win_call_flash_pat(void);          /* flash 段里已知图案数组的地址 */
 
 static void put1(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
 
@@ -45,6 +48,40 @@ void os_main(void)
         port_putc((int)('0' + (v / 1000u)));
         port_putc((int)('0' + ((v / 100u) % 10u)));
         port_putc((int)('0' + ((v / 10u) % 10u)));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    /* L5b：深递归（必然触发寄存器窗口溢出/欠载） */
+    port_puts("L5b deep=");
+    {
+        u32 v = s3_win_call_deep(10u);
+        port_putc((int)('0' + (v / 10u) % 10u));
+        port_putc((int)('0' + (v % 10u)));
+    }
+    port_putc('\n');
+
+    /* L5d：读 flash 段里的已知图案（应打印 11 22 33 44 55 66 77 88） */
+    port_puts("L5d IROM=");
+    {
+        u32 a = s3_win_call_flash_pat();
+        u32 i = 0;
+
+        while (i < 8u) {
+            u32 b = *(volatile u8 *)(a + i);
+            port_putc((int)("0123456789abcdef"[(b >> 4) & 0xFu]));
+            port_putc((int)("0123456789abcdef"[b & 0xFu]));
+            port_putc(' ');
+            i++;
+        }
+    }
+    port_putc('\n');
+
+    /* L5c：flash 段里的 windowed 函数（1+2+7=10） */
+    port_puts("L5c flash=");
+    {
+        u32 v = s3_win_call_flash_add(1u, 2u);
+        port_putc((int)('0' + (v / 10u) % 10u));
         port_putc((int)('0' + (v % 10u)));
     }
     port_putc('\n');
