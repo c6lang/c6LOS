@@ -1726,3 +1726,40 @@ g_espnow_user_oui, g_mt
 - `port/s3/wifi_glue.c`：`g_wifi_osi_funcs` + 自建 `g_osi_funcs_p` + 全桩适配层，已进构建
 - `Makefile`：`wifi_glue.o` 编译规则 + 进 `S3_OBJ_WIFI`
 - `tests/t_s3_wifi2.c6`：调用 `esp_wifi_init_internal()` 的第一版接线用例（含调试门）
+
+## 50. 第 33 轮末：IDF 源码层交叉编译的进展与最后一个卡点
+
+`tools/idfcc.sh` + `port/s3/idf_compat/{sdkconfig.h,FreeRTOSConfig.h}` 已经能把
+`components/esp_wifi/src/wifi_init.c` 用我们的工具链按 **windowed ABI** 编译进去，
+头文件缺口一路收敛到：
+
+```
+fatal: sdkconfig.h            -> 我们自己补 port/s3/idf_compat/sdkconfig.h
+fatal: FreeRTOSConfig.h       -> port/s3/idf_compat/FreeRTOSConfig.h
+fatal: portmacro.h            -> -I.../FreeRTOS-Kernel/portable/xtensa/include/freertos
+fatal: soc/reg_base.h         -> -Icomponents/soc/esp32s3/register
+fatal: esp_newlib.h           -> -Icomponents/esp_libc/platform_include
+现在:  stdio.h: unknown type name '__FILE'
+```
+
+最后一个卡点是 **IDF 的 newlib 覆盖层 vs 我们裸工具链的 newlib**：
+IDF 的 `esp_libc/platform_include` 里有整套覆盖头（`stdio.h`/`time.h`…），
+它们假设 IDF 自己的 newlib 配置（`_REENT_SMALL`、`__FILE` 结构等）。
+两条路：
+
+1. **不引入 IDF 的 platform_include**，让 esp_wifi 源码用工具链自带 newlib 头
+   （可能需要少量 `#ifdef` 或提供一个小的 `esp_newlib.h` 空壳）
+2. 完全照 IDF 的方式配置 newlib（需要 IDF 的 newlib 补丁头）
+
+先试第 1 条（成本低）：把 `-I$IDF/components/esp_libc/platform_include` 换成
+我们自己写一个最小 `esp_newlib.h`（只声明 esp_wifi 源码真正用到的几个符号），
+放在 `port/s3/idf_compat/` 里，让头文件搜索优先命中我们的版本。
+
+### 整体判断（老实说）
+
+- ✅ **M1（PHY 初始化）已达成**，这是唯一有技术风险、需要逆向/调试的部分，
+  而且有真板 JTAG 逐指令证据
+- ⏳ **M2（WiFi）剩下的是一块体量大的移植工作**：IDF `components/esp_wifi/src/`
+  约 40 个文件 + FreeRTOS 兼容层 + newlib 兼容层 + `wifi_osi_funcs_t` 的 119 个实现。
+  路径完全清楚，但需要持续投入，不是几轮能收尾的
+- 观察手段已经彻底解决（USB-JTAG，不需要 UART）
