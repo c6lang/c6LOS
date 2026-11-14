@@ -1,0 +1,111 @@
+/* t_s3_dmacnt.c6 —— 客观量化：同一块矩形，CPU 通路 vs GDMA 通路 到底移出了多少 bit。
+ *
+ * 用 PCNT 数 SCLK(GPIO9) 边沿（硬件计数，40MHz 也数得准）。矩形取 60x20 = 2400
+ * 字节 = 19200 个边沿（16 位计数器够用）。
+ *   - 两边都 ≈19200 → 数据量对，问题在内容（中间夹 0）；
+ *   - DMA 明显更多 → 多打了时钟（面板光标会跑到窗口末尾，画面表现为"只有右下角
+ *     一小截是对的"）；
+ *   - DMA 明显更少 → 少发了数据。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define W 240u
+#define H 240u
+#define PIN_SCLK 9u
+#define PCNT_BASE 0x60017000u
+
+static u16 g_fb[W * H];
+
+void s3_lcd_init(void);
+void s3_lcd_bl(u32 on);
+void s3_lcd_delay(u32 n);
+void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h);
+void s3_lcd_use_dma(u32 on);
+void s3_lcd_set_clock(u32 clk);
+
+static u32 rd_(u32 a) { return *(volatile u32 *)a; }
+static void wr_(u32 a, u32 v) { *(volatile u32 *)a = v; }
+
+static void puts_(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void put_u32_(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void pcnt_setup(void)
+{
+    wr_(0x600C0018u, rd_(0x600C0018u) | (1u << 10));   /* PCNT 时钟 */
+    wr_(0x600C0020u, rd_(0x600C0020u) & ~(1u << 10));
+    wr_(PCNT_BASE + 0x00u, (1u << 18));
+    /* 把 PCNT 单元的输入选到 GPIO9（S3：GPIO_FUNC33_IN_SEL ← pad） */
+    wr_(0x60004000u + 0x154u + 4u * 33u, (PIN_SCLK & 0x3Fu) | (1u << 6));
+    wr_(0x60009000u + 0x04u + 4u * PIN_SCLK,
+        rd_(0x60009000u + 0x04u + 4u * PIN_SCLK) | (1u << 9));
+}
+
+static u32 edges_count(void (*job)(void))
+{
+    wr_(PCNT_BASE + 0x60u, 1u);
+    wr_(PCNT_BASE + 0x60u, 0u);
+    job();
+    return rd_(PCNT_BASE + 0x30u) & 0xFFFFu;
+}
+
+static void job_cpu(void) { s3_lcd_blit_rect(g_fb, W, 0u, 40u, 60u, 20u); }
+static void job_dma(void) { s3_lcd_blit_rect(g_fb, W, 0u, 120u, 60u, 20u); }
+
+void os_main(void)
+{
+    u32 i = 0;
+    u32 ecpu = 0;
+    u32 edma = 0;
+
+    while (i < W * H) { g_fb[i] = 0xF800u; i++; }
+
+    s3_lcd_init();
+    s3_lcd_bl(1u);
+    pcnt_setup();
+
+    /* CPU 通路 */
+    s3_lcd_use_dma(0u);
+    s3_lcd_blit_rect(g_fb, W, 0u, 40u, 60u, 20u);      /* 预热一次 */
+    ecpu = edges_count(job_cpu);
+
+    /* GDMA 通路 */
+    s3_lcd_use_dma(1u);
+    s3_lcd_blit_rect(g_fb, W, 0u, 120u, 60u, 20u);     /* 预热一次 */
+    edma = edges_count(job_dma);
+
+    puts_("cpu=");
+    put_u32_(ecpu);
+    puts_(" dma40=");
+    put_u32_(edma);
+
+    /* 降频再测：如果 DMA 只是"喂不上"，降频后边沿数应该回到 19200 */
+    {
+        u32 nn[2] = {4u, 8u};
+        u32 j = 0;
+        while (j < 2u) {
+            u32 v = nn[j];
+            u32 h = v / 2u;
+            u32 clk = (((v - 1u) & 0x3Fu) << 12) | (((h - 1u) & 0x3Fu) << 6) | ((v - 1u) & 0x3Fu);
+            s3_lcd_set_clock(clk);
+            s3_lcd_blit_rect(g_fb, W, 0u, 120u, 60u, 20u);
+            puts_(" dma");
+            put_u32_(v * 10u);
+            puts_("=");
+            put_u32_(edges_count(job_dma));
+            j++;
+        }
+    }
+    s3_lcd_set_clock(0x00001001u);
+    puts_(" want=19200\n");
+
+    for (;;) { s3_lcd_delay(4000000u); }
+}

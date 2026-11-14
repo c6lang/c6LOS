@@ -1,28 +1,52 @@
-/* t_s3_phy.c6 —— PHY 初始化（M1），结果只写 RTC 信标（崩溃/复位都不丢）。
- * 读法: ./tools/beacon.sh
- *   slot0 = 当前步骤（0xE1..0xE5 = step1..5，0xEF = 全部完成）
- *   slot1 = 该步骤返回值（step5 的返回码就是 register_chipv7_phy 的结果）
- *   slot2 = g_phyFuns（PHY 函数表指针，非 0 才算初始化成功）
+/* t_s3_phy.c6 —— PHY 初始化（M1），只靠 USB 串口就能自证结果。
+ *
+ * 思路：PHY 初始化会把内部 USB PHY 抢走导致 USB-CDC 掉枚举，所以**结果不在本轮读**：
+ *   本轮：把 5 个步骤的结果写进 RTC 信标（掉电域，掉电才丢）
+ *   下次上电：os_main 一开始就先把上一轮的信标打印出来（这时 USB 还活着）
+ *             然后再跑一轮 PHY。
+ * 读法：上电后直接看串口即可。
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
 
 u32 s3_win_call_phy_step(u32 step);
 u32 s3_win_call_phy_funcs(void);
+void s3_win_call_log(const char *s);
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) {
+        b[i] = h[(v >> (u32)sh) & 0xFu];
+        i++;
+        sh -= 4;
+    }
+    b[10] = '\0';
+    pstr(b);
+}
 
 void os_main(void)
 {
     u32 step = 1u;
     u32 rc = 0u;
 
-    /* 先等 6 秒再动 PHY：PHY 初始化会抢走内部 USB PHY 导致 USB-CDC 掉枚举，
-     * 留出这段时间，主机侧才来得及用 esptool 读上一轮留下的 RTC 信标。 */
-    {
-        volatile u32 k = 0;
+    /* 1) 先把**上一轮**留下的信标打印出来（本轮还没覆盖它们） */
+    pstr("prev beacons: step=");
+    phex(*(volatile u32 *)0x600080C0u);
+    pstr(" rc=");
+    phex(*(volatile u32 *)0x600080C4u);
+    pstr(" g_phyFuns=");
+    phex(*(volatile u32 *)0x600080C8u);
+    pstr("\n");
 
-        while (k < 120000000u) { k = k + 1u; }
-    }
-
+    /* 2) 本轮重新跑一遍 */
     s3_beacon(2u, s3_win_call_phy_funcs());
     while (step <= 5u) {
         s3_beacon(0u, 0xE0u + step);
@@ -32,6 +56,13 @@ void os_main(void)
         step = step + 1u;
     }
     s3_beacon(0u, 0xEFu);
+
+    /* 3) 如果 PHY 没把 USB 弄死，这里还能直接把结果打出来 */
+    pstr("this run: rc=");
+    phex(rc);
+    pstr(" g_phyFuns=");
+    phex(s3_win_call_phy_funcs());
+    pstr("\n");
 
     for (;;) {
         volatile u32 i = 0;

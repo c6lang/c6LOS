@@ -202,6 +202,7 @@ static void bb_dc(u32 level);
  * bit-bang 通路完整保留（s3_lcd_use_bitbang(1)），作为硬件 SPI 出问题时的兜底。 */
 static u32 g_bitbang = 0;
 static u32 g_hwspi;
+static u32 g_dma_on = 1u;  /* 1 = 局部刷新走 GDMA（默认）；s3_lcd_use_dma(0) 可关 */
 static u32 g_bb_pad = 0;      /* bit-bang 每个半周期额外空转次数（降时钟） */
 static u32 g_bb_fast = 1;     /* 默认用整字写 GPIO_OUT 的快速内层循环（快 2.2x） */
 static u32 g_dc_inv = 0;      /* DC 极性取反（有些板子反相） */
@@ -865,6 +866,8 @@ int s3_spi_loopback(u32 pin, const u8 *tx, u8 *rx, u32 n)
 }
 
 /* 给自检用例用：改分频 / 直接发一段数据 / 读回 CLOCK 与 CLK_GATE 寄存器。 */
+void s3_lcd_use_dma(u32 on) { g_dma_on = (on != 0u) ? 1u : 0u; }
+
 void s3_lcd_set_clock(u32 clk) { SPI2_CLOCK = clk; g_last_dlen = SPI_CFG_DIRTY; }
 u32 s3_lcd_get_clock(void) { return SPI2_CLOCK; }
 u32 s3_lcd_get_gate(void) { return *(volatile u32 *)(SPI2_BASE + 0xE8u); }
@@ -987,7 +990,7 @@ static void lcd_dma_setup(u32 bytes)
 {
     u32 segs = (bytes + LCD_DMA_SEG - 1u) / LCD_DMA_SEG;
     u32 i = 0;
-    u32 off = 4u;                       /* 头 4 字节走 CPU 预灌 */
+    u32 off = 0u;
     u32 left = bytes;
 
     while (i < segs) {
@@ -1020,19 +1023,17 @@ static void lcd_dma_flush(u32 bytes)
 {
     u32 dlen;
     u32 guard = 0;
-    u32 w = 0;
-    u32 k;
     u32 body;
 
     if (bytes < 4u) {
-        /* 尾巴不足 4 字节：直接 CPU 发，别为几个字节折腾 DMA */
+        /* 太小：直接 CPU 发，别为几个字节折腾 DMA */
         spi_xfer(g_dma_stage, bytes);
         return;
     }
-    body = bytes - 4u;
-    for (k = 0; k < 4u; k++) { w |= (u32)g_dma_stage[k] << (8u * k); }
-    SPI2_W(0) = w;                                  /* 预灌头 4 字节 */
-
+    /* **不要用 CPU 预灌**：DMA 模式下走的是 AFIFO，CPU 写的那 16 个字节根本不
+     * 进数据流（实测：预灌 64 字节时整块画面偏移 32 像素、总边沿数正好少 512）。
+     * 全部交给 DMA，代价只是每拍头部 1~2 个字节补 0（一个像素，肉眼看不出来）。 */
+    body = bytes;
     lcd_dma_setup(body);
     dlen = body * 8u - 1u;
     /* **每拍都同步一次配置**（不走"DLEN 没变就跳过 UPDATE"的优化）：
@@ -1116,7 +1117,12 @@ void s3_lcd_blit_rect(const u16 *fb, u32 fb_w, u32 x, u32 y, u32 w, u32 h)
 {
     u32 bytes = w * h * 2u;
 
-    if (g_bitbang == 0u && fb != 0 && bytes != 0u && bytes <= (4u * LCD_DMA_CHUNK)) {
+    /* 默认走 CPU 通路（画面已验证正确）。GDMA 通路的**电平层**已验证没问题
+     * （自环逐字节一致、整屏纯色/色带都能出图），但在面板上做"局部矩形"时
+     * 画面落点不对（实测：移动条那一块不显示），所以默认关掉，用
+     * s3_lcd_use_dma(1) 可以打开来继续调试。详见 docs §4.68。 */
+    if (g_dma_on != 0u && g_bitbang == 0u && fb != 0 && bytes != 0u &&
+        bytes <= (4u * LCD_DMA_CHUNK)) {
         s3_lcd_blit_dma(fb, fb_w, x, y, w, h);
         return;
     }
