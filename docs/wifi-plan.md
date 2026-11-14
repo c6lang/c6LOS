@@ -1838,3 +1838,44 @@ nm 一查：0x403d0d7c = memcpy
 ⇒ 不是 cache 的问题，而是 **`os_flash_map()` 里那次 `memcpy` 卡住了**
 （`port/s3/flash.c`）。下一步就看这次 memcpy 的长度/源地址算错了哪里
 （很可能是把 0x20000 这种长度当成了元素数，或者源地址跨了没映射的区域）。
+
+## 53. 第 35 轮：S3 的 IROM/cache 状态实测（重要数据）
+
+新增 `tests/t_s3_irom3.c6`：只读寄存器、不做任何配置，串口实测 **ROM 引导完之后**的状态：
+
+```
+ICACHE_CTRL  (0x600C4060) = 0x00000000     <- I-cache 是关的
+ICACHE_CTRL1 (0x600C4064) = 0x00000003     <- 两个核的 flash 访问都被 SHUT（bit0/bit1）
+MMU[0..3]    (0x600C5000) = 0x00004000     <- **MMU 表项已经建好了**（bit14=valid，page 0）
+*(u32*)0x42000000         = 0xbad00bad     <- 读 IROM 返回"坏数据"哨兵
+*(u32*)0x3C000000         = 0x00000000
+```
+
+⇒ **MMU 不用我们建**（ROM 已经映射好了 IROM 0x42000000 → flash page 0），
+缺的只是"清 SHUT + 开 cache"。
+
+按这个顺序打开之后：
+
+```
+ICACHE_CTRL  = 0x00000001   (bit0 = enable)
+ICACHE_CTRL1 = 0x00000000   (SHUT 已清)
+*(u32*)0x42000000 = 0x00000000   <- 不再是 0xbad00bad（总线通了），但还是 0
+*(u32*)0x42000004 = 0x00000000
+*(u32*)0x42001000 = 0x00000000
+```
+
+即：**总线从"拒绝访问"变成"能访问但读到 0"**，说明 cache 还没有真正从 flash 取数。
+可能的剩余因素（下一步排查顺序）：
+
+1. S3 除了 `EXTMEM_ICACHE_CTRL`，还有 **cache/MMU 的电源控制**（`CACHE_MMU_POWER_CTRL` 之类）
+2. flash 的读模式（ROM 是用 DIO @80MHz 引导的；cache 取指要求 SPI 控制器处于可读状态）
+3. `EXTMEM_ICACHE_CTRL1` 可能还有 invalidate/仲裁位需要配
+4. 建议对照：用 USB-JTAG 在 **原厂 IDF 固件** 上 halt，读同样的几个寄存器，
+   直接拿到"能跑 IROM 的配置长什么样"（这是最快的办法，板子上有原厂固件备份可刷回）
+
+### 结论
+
+- WiFi 闭源栈**链接已经完全通过**（0 未定义符号）
+- 唯一剩下的是 **IROM 执行（flash 取指）** 这一个平台能力；
+  它通了，WiFi 库就能进 image，`esp_wifi_init_internal()` 就能真板跑
+- 这条路上的所有测量手段（串口 + RTC 信标 + USB-JTAG + gdb 脚本）都已就位

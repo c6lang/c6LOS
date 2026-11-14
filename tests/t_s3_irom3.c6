@@ -1,0 +1,53 @@
+/* t_s3_irom3.c6 —— 只测量，不配置：ROM 引导完之后 I-cache / MMU 是什么状态？
+ * 串口输出（不碰 PHY，USB 正常）： */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+
+void s3_win_call_log(const char *s);
+
+static void pstr(const char *s) { s3_win_call_log(s); }
+
+static void phex(u32 v)
+{
+    char b[11] = {0};
+    int i = 2;
+    int sh = 28;
+    const char *h = "0123456789abcdef";
+
+    b[0] = '0'; b[1] = 'x';
+    while (sh >= 0) { b[i] = h[(v >> (u32)sh) & 0xFu]; i++; sh -= 4; }
+    b[10] = '\0';
+    pstr(b);
+}
+
+void os_main(void)
+{
+    pstr("--- S3 IROM/cache 现状 ---\n");
+    pstr("ICACHE_CTRL (0x600C4060) = ");  phex(os_reg_rd(0x600C4060u));  pstr("\n");
+    pstr("ICACHE_CTRL1(0x600C4064) = ");  phex(os_reg_rd(0x600C4064u));  pstr("\n");
+    pstr("ICACHE_SYNC (0x600C4080) = ");  phex(os_reg_rd(0x600C4080u));  pstr("\n");
+    /* MMU 表项：IROM 0x42000000 对应表项 0；DROM 0x3C000000 也是 0 */
+    pstr("MMU[0] (0x600C5000)     = ");  phex(os_reg_rd(0x600C5000u));  pstr("\n");
+    pstr("MMU[1]                   = ");  phex(os_reg_rd(0x600C5004u));  pstr("\n");
+    pstr("MMU[2]                   = ");  phex(os_reg_rd(0x600C5008u));  pstr("\n");
+    pstr("MMU[3]                   = ");  phex(os_reg_rd(0x600C500Cu));  pstr("\n");
+    /* 直接读 IROM 窗口的头 4 字节（如果映射好了，应该等于我们 flash 偏移 0 的内容） */
+    pstr("*(u32*)0x42000000        = ");  phex(*(volatile u32 *)0x42000000u);  pstr("\n");
+    pstr("*(u32*)0x3C000000        = ");  phex(*(volatile u32 *)0x3C000000u);  pstr("\n");
+    /* 现在按 S3 要求的顺序打开：先清 SHUT_CORE0/1_BUS，再使能 I-cache */
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) & ~0x3u);
+    os_reg_wr(0x600C4060u, os_reg_rd(0x600C4060u) | 0x1u);
+    /* 再补一次 invalidate（S3: EXTMEM_ICACHE_CTRL1 bit2） */
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) | 0x4u);
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) & ~0x4u);
+    pstr("=== 开 cache 之后 ===\n");
+    pstr("ICACHE_CTRL  = "); phex(os_reg_rd(0x600C4060u)); pstr("\n");
+    pstr("ICACHE_CTRL1 = "); phex(os_reg_rd(0x600C4064u)); pstr("\n");
+    pstr("*(u32*)0x42000000 = "); phex(*(volatile u32 *)0x42000000u); pstr("\n");
+    pstr("*(u32*)0x42000004 = "); phex(*(volatile u32 *)0x42000004u); pstr("\n");
+    pstr("*(u32*)0x42001000 = "); phex(*(volatile u32 *)0x42001000u); pstr("\n");
+    pstr("*(u32*)0x42010000 = "); phex(*(volatile u32 *)0x42010000u); pstr("\n");
+    pstr("--- done ---\n");
+    for (;;) { }
+}
