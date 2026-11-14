@@ -113,3 +113,32 @@ s3_beacon(3u, *(volatile u32 *)0x42030000u);   /* 页3 -> flash 0x30000 */
 访问权限**……未授权则访问不被响应"的描述高度一致——但 `SYSCON_FLASH_ACEn_*`
 实测是全 0xFF（完全开放），所以问题可能在更上层的 **World 控制（TRM §16 WCL）**
 或 cache 通路本身。
+
+## 新线索：时钟树（RTC_CNTL）差异巨大
+
+对比两个 app 运行时的 `0x60008000 ~ 0x600080FF`（RTC_CNTL 时钟区，共 64 个寄存器），
+**26 个不同**，其中几个很关键：
+
+```
+0x60008000 RTC_CNTL_OPTIONS0  idf=0x1c008002  ours=0x1c00a000   <- PLL 相关位不同
+0x60008010 RTC_CNTL_CLK_CONF  idf=0x0009e249  ours=0x00000000   <- 我们这边整个是 0
+0x6000801C                    idf=0x14140143  ours=0x28140143
+0x60008054                    idf=0x003be033  ours=0x00000000
+...
+```
+
+**这个发现的意义**：SPI flash 控制器的时钟是从 PLL/APB 派生的。如果时钟树没建立起来，
+SPI 控制器就拿不到有效时钟 —— 这正好能解释：
+
+- 为什么 `SPI_MEM_CLOCK(0x60002014)` 在 IDF app 里是合理的分频值 `0x00030103`，
+  在我们这边却是 `0x80000000`
+- 为什么我们的 IROM 访问**静默返回 0**（时钟不工作 → 读请求得不到响应 → 也不会报 Cache error）
+
+而 SYSCON 那几个时钟寄存器（0x60026000 等）两边完全一致，说明差异确实在 RTC_CNTL/PLL 这一层。
+
+### 试过的粗暴办法（失败）
+
+把 IDF app 那 26 个 RTC 寄存器值原样写进我们的 app —— 结果我们的 app 直接起不来
+（信标还是 bootloader 的残留值），说明直接写 RTC 时钟寄存器有副作用（可能触发了复位）。
+**下次要用正规做法**：按 IDF 的 `rtc_clk_cpu_freq_set_config()` 流程
+（含 LDO slave 配置、REGI2C 的 dbias 调整），而不是快照移植。
