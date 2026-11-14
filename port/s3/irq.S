@@ -22,15 +22,15 @@ _vecbase:
     .org 0x140
     j   _win_unf12
     .org 0x180
-    j   _vec_default            /* level-2 */
+    j   _vec_lvl2
     .org 0x1C0
-    j   _vec_default            /* level-3 */
+    j   _vec_lvl3
     .org 0x200
-    j   _vec_default            /* level-4 */
+    j   _vec_lvl4
     .org 0x240
-    j   _vec_default            /* level-5 */
+    j   _vec_lvl5
     .org 0x280
-    j   _vec_default            /* level-6 */
+    j   _vec_lvl6
     .org 0x2C0
     j   _vec_default            /* level-7 / NMI */
     .org 0x300
@@ -123,6 +123,62 @@ _win_unf12:
     l32e    a10, a11, -24
     l32e    a11, a11, -20
     rfwu
+
+/* level-2..6 的中断：闪背光 N 下（N = 等级）后停住。
+ * 这样"闭源库触发了哪个等级的中断"就能用眼睛看出来。 */
+    .macro  VEC_LVL n
+    .align  4
+_vec_lvl\n:
+    movi    a2, \n
+    j       _vec_lvl_common
+    .endm
+
+    .section .text, "ax", @progbits
+    .align 4
+    VEC_LVL 2
+    VEC_LVL 3
+    VEC_LVL 4
+    VEC_LVL 5
+    VEC_LVL 6
+
+    .align  4
+_vec_lvl_common:
+    /* a2 = 等级。背光在 GPIO13：先配 IO_MUX/OUT_SEL/输出使能。 */
+    movi    a3, 0x60009034          /* IO_MUX(13) = 0x60009000+4+4*13 */
+    l32i    a4, a3, 0
+    movi    a5, -28673              /* 清 MCU_SEL(14:12) */
+
+    and     a4, a4, a5
+    movi    a5, 0x1000              /* MCU_SEL = 1 (GPIO) */
+    or      a4, a4, a5
+    s32i    a4, a3, 0
+    movi    a3, 0x60004554          /* GPIO_OUT_SEL(13) = 0x60004000+0x554+4*13 */
+    movi    a4, 0x100               /* 256 = 普通 GPIO */
+    s32i    a4, a3, 0
+    movi    a3, 0x60004024          /* GPIO_ENABLE_W1TS */
+    movi    a4, 0x2000
+    s32i    a4, a3, 0
+
+    movi    a6, 0                   /* 已闪次数 */
+1:
+    movi    a3, 0x60004008          /* OUT_W1TS */
+    s32i    a4, a3, 0
+    movi    a7, 0
+2:
+    addi    a7, a7, 1
+    movi    a3, 200000
+    bltu    a7, a3, 2b
+    movi    a3, 0x6000400C          /* OUT_W1TC */
+    s32i    a4, a3, 0
+    movi    a7, 0
+3:
+    addi    a7, a7, 1
+    movi    a3, 200000
+    bltu    a7, a3, 3b
+    addi    a6, a6, 1
+    bltu    a6, a2, 1b
+4:
+    j       4b
 
     .section .text, "ax", @progbits
     .align 4

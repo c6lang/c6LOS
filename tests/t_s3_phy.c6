@@ -31,6 +31,27 @@ static void bl(u32 on)
     os_reg_wr(on != 0u ? (GPIO_BASE + 0x08u) : (GPIO_BASE + 0x0Cu), 1u << PIN_BL);
 }
 
+/* 危险调用前后开关 TIMG0 看门狗（硬件定时器：即使 CPU 卡在死循环里、
+ * 中断也关着，时间到照样整片复位）。这块板上 esptool 的 watchdog-reset
+ * 用的就是它，实测有效。
+ *   WDT_CONFIG0(0x48): EN=bit31, STG0=bits30:29 (2 = 系统复位), SYS_RESET_LENGTH=bits17:15
+ *   WDT_CONFIG1(0x4C): STG0 超时 ticks（APB 时钟，按 80MHz 估算）
+ */
+static void timg_wdt_arm(u32 ticks)
+{
+    os_reg_wr(0x6001F064u, 0x50D83AA1u);                       /* WDTWPROTECT */
+    os_reg_wr(0x6001F04Cu, ticks);                             /* STG0 hold */
+    os_reg_wr(0x6001F048u, (1u << 31) | (2u << 29) | (1u << 15));
+    os_reg_wr(0x6001F064u, 0u);
+}
+
+static void timg_wdt_off(void)
+{
+    os_reg_wr(0x6001F064u, 0x50D83AA1u);
+    os_reg_wr(0x6001F048u, 0u);
+    os_reg_wr(0x6001F064u, 0u);
+}
+
 /* 危险调用（可能挂死）前后开关 RTC 超级看门狗（SWD）：
  * 打开后约 3.5 秒没被喂就会整片复位 —— 这样挂住也能自己恢复，不用人工拔插。 */
 static void swd_on(void)
@@ -69,9 +90,11 @@ void os_main(void)
     bl_init();
     blink(3u, 120u);                    /* 开始 */
 
-    swd_on();                            /* 挂住 -> 3.5s 后自己复位 */
+    timg_wdt_arm(160000000u);            /* 约 2 秒；挂住 -> 硬件复位 */
+    swd_on();
     rc = s3_win_call_phy_enable();       /* 0 = 成功 */
     swd_off();
+    timg_wdt_off();
     cal0 = s3_win_call_phy_cal_word(1); /* 校准数据里应该出现非零 */
 
     if (rc == 0u && cal0 != 0u) {

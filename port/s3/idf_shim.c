@@ -12,19 +12,26 @@
 /* ---- 临界区：IDF 的 phy_enter_critical()/phy_exit_critical() -------------
  * 原版用 FreeRTOS 的 portENTER_CRITICAL 包住一个自旋锁，返回值恒为 0
  * （中断级别存在 TCB 里）。这里直接用关中断实现，语义等价且更省事。 */
+/* 临界区：把进入前的 PS 存起来，退出时**原样恢复**。
+ * 千万不要把 PS 直接写成 0 —— 那会把 PS.WOE（窗口溢出使能）也清掉，
+ * 之后闭源库里的 windowed 调用全部走窗口溢出异常，深调用里容易卡死
+ * （实测：PHY 初始化会挂住，被看门狗反复复位）。 */
+static u32 g_phy_ps;
+
 u32 phy_enter_critical(void)
 {
     u32 ps = 0;
 
     /* 内联汇编，避免跨 ABI 调用（本文件是按 windowed 编译给闭源库用的） */
     __asm__ __volatile__("rsil %0, 15" : "=r"(ps));
-    return 0u;
+    g_phy_ps = ps;
+    return 0u;                 /* IDF 也是恒返回 0（中断级别存在别处） */
 }
 
 void phy_exit_critical(u32 level)
 {
     (void)level;
-    __asm__ __volatile__("movi a2, 0\n\twsr a2, ps\n\trsync" : : : "a2");
+    __asm__ __volatile__("wsr %0, ps\n\trsync" : : "a"(g_phy_ps));
 }
 
 /* ---- 调试输出：PHY/WiFi 库的 printf 全走这里 ---------------------------
@@ -41,25 +48,28 @@ void phy_exit_critical(u32 level)
  */
 static int vsprintf_internal(char *dst, int cap, const char *fmt, __builtin_va_list ap);
 
-#define IDF_LOG_CAP 2048u
-volatile u32 g_idf_log_len = 0u;
-char g_idf_log[IDF_LOG_CAP];
+/* 日志写进 **RTC 慢速内存**（0x50000400 起），因为：
+ *  - 复位后不丢（读它也能照常进行）；
+ *  - DRAM 里的东西会被 ROM/bootloader 冲掉（实测读回来是 0）。
+ * 每个字符存一个 u32（RTC 只支持按 4 字节访问），另有长度存在 0x500003FC。 */
+#define RTC_LOG_LEN (*(volatile u32 *)0x500003FCu)
+#define RTC_LOG_W(i) (*(volatile u32 *)(0x50000400u + 4u * (i)))
 
 static void idf_log_append(const char *s, int n)
 {
-    u32 len = g_idf_log_len;
+    u32 len = RTC_LOG_LEN;
     int i = 0;
 
-    while (i < n && len < (IDF_LOG_CAP - 1u)) {
-        char c = s[i];
+    if (len > 200u) { len = 0u; }              /* 简单环形：满了从头再来 */
+    while (i < n && len < 200u) {
+        u32 c = (u32)(unsigned char)s[i];
 
-        if (c == '\n' || c == '\r') { c = ' '; }
-        g_idf_log[len] = c;
+        if (c == 10u || c == 13u) { c = (u32)' '; }
+        RTC_LOG_W(len) = c;
         len++;
         i++;
     }
-    g_idf_log[len] = '\0';
-    g_idf_log_len = len;
+    RTC_LOG_LEN = len;
 }
 
 int phy_printf(const char *fmt, ...)
