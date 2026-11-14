@@ -191,8 +191,13 @@ static void flush_bar(void)
     if (g_state == ST_REC) {
         if (g_target != 0u) { pct = (s3_i2s_rx_filled() * 100u) / g_target; }
     } else if (g_state == ST_PLAY) {
-        u32 el = ((u32)port_cycles() - g_t0) / 40u;                /* 微秒(40MHz) */
-        u32 total = (g_frames * 1000000u) / RATE;
+        u32 el = ((u32)port_cycles() - g_t0) / 40u;   /* 已播放微秒（CPU 40MHz） */
+        u32 per = 1000000u / RATE;                    /* 每个样本的微秒数（62） */
+        u32 total = g_frames * per;                   /* 整段时长：先除后乘，不溢出
+                                                       * （原来 g_frames*1000000u
+                                                       * 在 4.2 万帧时溢出 u32，
+                                                       * 算出来的时长只有 205ms，
+                                                       * 进度条跟声音完全对不上） */
         if (total != 0u) { pct = (el % total) * 100u / total; }
     }
     if (pct > 100u) { pct = 100u; }
@@ -324,11 +329,16 @@ void os_main(void)
         }
 
         now = (u32)port_cycles();
-        if (g_state != g_drawn_state || (now - last_bar) > 40u * 200000u) {
-            last_bar = now;
-            if (g_state == ST_REC) { g_frames = s3_i2s_rx_filled() / 4u; }
-            flush_state();
-            flush_bar();
+        /* 播放时 100ms 刷新一次（2.6 秒的循环能看到 ~26 格），其它状态 200ms */
+        {
+            u32 gap = (g_state == ST_PLAY) ? (40u * 100000u) : (40u * 200000u);
+
+            if (g_state != g_drawn_state || (now - last_bar) > gap) {
+                last_bar = now;
+                if (g_state == ST_REC) { g_frames = s3_i2s_rx_filled() / 4u; }
+                flush_state();
+                flush_bar();
+            }
         }
         s3_lcd_delay(4000u);                    /* ≈0.25ms 采一次按键 */
     }
