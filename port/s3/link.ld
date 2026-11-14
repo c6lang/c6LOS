@@ -46,7 +46,7 @@ SECTIONS
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
-    *(.flash.text) *(.flash.text.*) *(.flash.rodata) *(.flash.rodata.*)
+    *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
     /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：
      * LEAN 构建下 libphy 闭包约 38KB、我们自己的代码约 26KB，合计约 64KB，
      * 正好在 IRAM 预算（66.8KB，坏区 0x403D9500 以下）之内。 */
@@ -67,8 +67,10 @@ SECTIONS
   {
     *(.literal.start)
     *(.text.start)
-    *(.literal*)
-    *(.text*)
+    /* **关键**：literal 与 text 必须按"同一个输入目标文件"成对放置，
+     * 否则 Xtensa 的 l32r（±256KB 字面量池）会 out of range。
+     * 用一个模式同时匹配 .literal/.text 就能让 ld 对每个 .o 就地配对。 */
+    *(.literal .literal.* .text .text.*)
     /* IDF 闭源库（libphy/libpp/libnet80211…）把自己的代码放在 .iram1 里，
      * 不显式收集就会变成"孤儿段"，被链接器塞到段尾甚至不该去的地方。 */
     *(.iram1*)

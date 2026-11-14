@@ -34,3 +34,67 @@ void *s3_wifi_osi_funcs_ptr(void)
 {
     return (void *)&g_wifi_osi_funcs;
 }
+
+/* ---- 链接期还需要的一些小符号（先给最小实现，跑起来再按崩溃顺序替换）---- */
+void esp_log_level_set(const char *tag, int level)
+{
+    (void)tag;
+    (void)level;
+}
+
+u32 g_espnow_user_oui;
+u32 g_mt;
+
+int hexstr2bin(const char *hex, u8 *buf, u32 len)
+{
+    u32 i = 0;
+    u32 n = 0;
+
+    (void)len;
+    while (hex[0] != '\0' && hex[1] != '\0' && i < len) {
+        u32 v = 0u;
+        int k = 0;
+        while (k < 2) {
+            char c = hex[k];
+            u32 d;
+            if (c >= '0' && c <= '9') { d = (u32)(c - '0'); }
+            else if (c >= 'a' && c <= 'f') { d = (u32)(c - 'a') + 10u; }
+            else if (c >= 'A' && c <= 'F') { d = (u32)(c - 'A') + 10u; }
+            else { return -1; }
+            v = (v << 4) | d;
+            k++;
+        }
+        buf[i] = (u8)v;
+        i++;
+        n = n + 2u;
+        hex = hex + 2;
+    }
+    return (int)i;
+}
+
+int esp_supplicant_init(void) { return 0; }
+int esp_supplicant_deinit(void) { return 0; }
+
+/* 我们 -nostdlib，newlib 的这几个函数自己给最小实现 */
+void *malloc(u32 n);
+void free(void *p) { (void)p; }
+int puts(const char *s) { (void)s; return 0; }
+char *strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++) != '\0') { } return r; }
+u32 strlen(const char *s) { u32 n = 0; while (s[n] != '\0') { n++; } return n; }
+int strncmp(const char *a, const char *b, u32 n) { u32 i = 0; while (i < n) { if (a[i] != b[i]) { return (int)(u8)a[i] - (int)(u8)b[i]; } if (a[i] == '\0') { return 0; } i++; } return 0; }
+char *strncpy(char *d, const char *s, u32 n) { u32 i = 0; while (i < n && s[i] != '\0') { d[i] = s[i]; i++; } while (i < n) { d[i] = '\0'; i++; } return d; }
+u32 strnlen(const char *s, u32 n) { u32 i = 0; while (i < n && s[i] != '\0') { i++; } return i; }
+int vsnprintf(char *buf, u32 n, const char *fmt, void *ap);
+int vsnprintf(char *buf, u32 n, const char *fmt, void *ap) { (void)ap; if (n > 0u) { buf[0] = '\0'; } (void)fmt; return 0; }
+
+/* esp_event（先给最小实现；WiFi 事件回调以后要接真的） */
+u32 esp_event_handler_register(u32 a, int b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 0u; }
+u32 esp_event_handler_unregister(u32 a, int b, void *c) { (void)a; (void)b; (void)c; return 0u; }
+u32 esp_event_post(u32 a, int b, const void *c, u32 d, u32 e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0u; }
+
+int snprintf(char *buf, u32 n, const char *fmt, ...)
+{
+    (void)fmt;
+    if (n > 0u) { buf[0] = '\0'; }
+    return 0;
+}

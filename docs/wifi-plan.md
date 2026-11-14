@@ -1763,3 +1763,42 @@ IDF 的 `esp_libc/platform_include` 里有整套覆盖头（`stdio.h`/`time.h`�
   约 40 个文件 + FreeRTOS 兼容层 + newlib 兼容层 + `wifi_osi_funcs_t` 的 119 个实现。
   路径完全清楚，但需要持续投入，不是几轮能收尾的
 - 观察手段已经彻底解决（USB-JTAG，不需要 UART）
+
+## 51. 第 34 轮：**WiFi 全部链接通过**（0 个未定义符号），卡点变成 IRAM 容量
+
+这一轮把 WiFi 栈从"120 个未定义符号"推到了 **0**：
+
+1. **IDF 源码层能编译**：`tools/idfcc.sh`（windowed ABI）+ `port/s3/idf_compat/`
+   （`sdkconfig.h`/`FreeRTOSConfig.h`/最小 `esp_newlib.h`）⇒
+   `components/esp_wifi/src/*.c` **7/8 通过**（只有 `smartconfig_ack.c` 缺头，我们用不到），
+   `components/esp_wifi/regulatory/esp_wifi_regulatory.c` 也通过
+2. **归档顺序坑**：`libnet80211.a` 引用 `libpp.a` 里的 `ic_*`，必须用
+   `-Wl,--start-group … -Wl,--end-group` 包起来（177 → 30 个未定义）
+3. **mesh/espnow 库**：加 `libmesh.a` `libespnow.a`（30 → 4）
+4. **小符号**：`hexstr2bin`/`esp_log_level_set`/`g_mt`/`g_espnow_user_oui`/
+   `esp_supplicant_init`/`esp_event_*` + libc 的 `str*`/`puts`/`free`/`snprintf`/`vsnprintf`
+   ⇒ **0 个未定义符号**
+5. **`l32r` 越界坑**：链接脚本必须把 `.literal` 和 `.text` **按同一个 .o 成对**放置：
+   ```ld
+   *(.literal .literal.* .text .text.*)
+   ```
+   （分成 `*(.literal*)` + `*(.text*)` 两个模式会让跨目标文件的字面量池超出 ±256KB）
+
+### 现在唯一的卡点：IRAM 装不下
+
+```
+ld: region `IRAM' overflowed by 421187 bytes
+```
+
+WiFi 闭源栈（libpp + libnet80211 + libcore + mesh + espnow）约 **500KB**，
+而我们的 IRAM 只有 **66.8KB**（而且 0x403D9500 以上是坏区，不能再扩）。
+
+⇒ **必须把闭源库放进 flash（IROM，0x42000000 起）**，用 I-cache 取指。
+这正是文档 §24 里记的 `SHUT_CORE0_BUS` 问题：S3 复位后 `EXTMEM_ICACHE_CTRL1`
+的 bit0（SHUT_CORE0_BUS）默认是 1，必须清掉再开 I-cache，否则取指全错。
+
+标准库里已经有 `os_icache_enable()`（先清 SHUT_CORE0_BUS 再使能），
+下一步就是：
+1. 把 libpp/libnet80211/libcore/mesh/espnow 放进 `.flash.text`（0x42000000）
+2. 启动时 `os_flash_map()` + `os_icache_enable()`（映射 0x42000000 到 flash 偏移 0）
+3. 真板验证：能不能从 IROM 正常取指执行（用一个放在 flash 里的自证函数）
