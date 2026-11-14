@@ -199,9 +199,16 @@ $(BUILD)/obj/start.o: port/s3/start.S
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
 
+# 栈顶：普通构建用 link.ld 的默认值；make wphy 这类调试构建传 S3_STACK_TOP
+# 把栈挪到 DRAM 坏区(0x3FCD9500+)以下。
+# 默认栈顶 0x3FCEF000（大 bss 的音频/图像构建需要）；make wphy 传 0x3FCD9000
+# 把栈挪到 DRAM 坏区(0x3FCD9500+)以下，给闭源 PHY 的深调用用。
+S3_STACK_TOP ?= 0x3FCEF000
+S3_STACK_LD := -Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP)
+
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
-		$(if $(S3_STACK_TOP),-Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP),) \
+		$(S3_STACK_LD) \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
@@ -1371,6 +1378,7 @@ clean:
 # make ... wphyflash   构建并刷机+即时监视（相当于 idf.py flash monitor）
 PHY_CDEFS = -DS3_WITH_LIBPHY -DS3_KEEP_SWD
 wphy:
+	@rm -f build/phy/c6os.elf build/phy/c6os.bin
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_CDEFS="$(PHY_CDEFS)" build/phy/libphy_win.a
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=build/phy S3_LEAN=1 S3_CDEFS="$(PHY_CDEFS)" \
 		S3_STACK_TOP=0x3FCD9000 \

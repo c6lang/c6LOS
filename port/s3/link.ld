@@ -109,7 +109,7 @@ SECTIONS
   /* 栈顶可由构建选项覆盖（Makefile 的 S3_STACK_TOP）：
    *   - 普通/音频图像构建（bss 很大）：默认 0x3FCEF000
    *   - PHY/闭源库调试构建（深调用）：用 make wphy 传 0x3FCD9000，避开坏区 */
-  _stack_top = DEFINED(S3_STACK_TOP) ? S3_STACK_TOP : 0x3FCEF000;
+  _stack_top = S3_STACK_TOP;   /* 由 Makefile 用 --defsym 传入，永远有值 */
   _stack_limit = _bss_end + 0x800;   /* 2KB 护栏；大 bss 的构建（音频/图像）也能容下 */
   ASSERT(_stack_limit <= _stack_top, "S3 BSS/stack collision")
 
