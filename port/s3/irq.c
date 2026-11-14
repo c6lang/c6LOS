@@ -136,6 +136,35 @@ void s3_trap(u32 frame_sp)
     __asm__ __volatile__("rsr %0, ps" : "=r"(ps));
     (void)f;
     s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
+
+    /* 串口不可靠时用 LCD 背光(GPIO13)把异常码闪出来：
+     *   先长亮 1 下（表示"进陷阱了"），然后慢慢闪 (cause + 1) 下。 */
+    {
+        u32 i = 0;
+        u32 n = (cause & 0xFu) + 1u;
+
+        *(volatile u32 *)(0x60009000u + 0x04u + 4u * 13u) =
+            (*(volatile u32 *)(0x60009000u + 0x04u + 4u * 13u) & ~(7u << 12)) | (1u << 12);
+        *(volatile u32 *)(0x60004000u + 0x554u + 4u * 13u) = 0x100u;
+        *(volatile u32 *)(0x60004000u + 0x24u) = 1u << 13;
+
+        *(volatile u32 *)(0x60004000u + 0x08u) = 1u << 13;      /* 长亮 */
+        for (i = 0; i < 4000000u; i++) { }
+        *(volatile u32 *)(0x60004000u + 0x0Cu) = 1u << 13;
+        for (i = 0; i < 2000000u; i++) { }
+
+        while (1) {
+            i = 0;
+            while (i < n) {
+                *(volatile u32 *)(0x60004000u + 0x08u) = 1u << 13;
+                { u32 k = 0; while (k < 1500000u) { k++; } }
+                *(volatile u32 *)(0x60004000u + 0x0Cu) = 1u << 13;
+                { u32 k = 0; while (k < 1500000u) { k++; } }
+                i++;
+            }
+            { u32 k = 0; while (k < 8000000u) { k++; } }
+        }
+    }
     port_puts("*** TRAP sp=");
     trap_hex(frame_sp);
     port_puts(" cause=");

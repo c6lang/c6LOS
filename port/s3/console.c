@@ -294,6 +294,7 @@ void port_init(void)
     *(volatile u32 *)0x600080B8u = 0u;
     g_boot_marks[3] = 0xB1u;   /* 三个看门狗都关了 */
 
+#ifndef S3_NO_USB_REINIT
     /* CPU 复位会把 USB-Serial/JTAG 的枚举打断，应用必须重新使能时钟和 PAD。
      * 只置位时钟、确保退出复位，不做 assert-reset（会再次掉枚举）。 */
     /* 内部 USB FSLS PHY 默认可能映射给 USB-OTG；USJ 要先抢回 PHY：
@@ -317,6 +318,8 @@ void port_init(void)
     }
 
     g_boot_marks[4] = 0xB2u;   /* USB 已重新使能 */
+#endif /* S3_NO_USB_REINIT */
+
     port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
     port_puts("c6os s3 boot\n");
     s3_irq_init();

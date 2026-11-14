@@ -90,7 +90,7 @@ extern const u8 _flash_rodata_lma[];
 
 void os_flash_init(void)
 {
-#ifndef S3_FLASH_NO_AUTO_MAP
+#ifdef S3_FLASH_AUTO_MAP
     /* 默认关闭：我们的 flash 窗口（IROM/DROM）映射 + cache 使能还在调试中
      * （见 docs/wifi-plan.md §15~17：MMU 表项和 I-cache 使能都确认生效，
      * 但在 IROM 里取指仍 IllegalInstruction）。在搞定之前不要自动动它，
@@ -117,7 +117,8 @@ void os_flash_init(void)
 #endif
     if (os_flash_map(lma & ~(S3_MMU_PAGE - 1u), va & ~(S3_MMU_PAGE - 1u),
                      size + 0xFFFFu, OS_FLASH_IROM) == 0) {
-        Cache_Invalidate_ICache_All();     /* 清掉 ROM 遗留的旧 tag */
+        /* 注意：**不要**在这里调 ROM 的 Cache_Invalidate_ICache_All() ——
+         * 实测那句一调应用就死（无输出、屏幕黑）。需要清 cache 时在测试里显式做。 */
         os_icache_enable();
     }
 
@@ -132,7 +133,7 @@ void os_flash_init(void)
         }
         os_dcache_enable();
     }
-#endif /* S3_FLASH_NO_AUTO_MAP */
+#endif /* S3_FLASH_AUTO_MAP */
 }
 
 u32 os_icache_state(void)

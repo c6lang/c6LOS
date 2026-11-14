@@ -1,0 +1,91 @@
+/* t_s3_phy.c6 —— 用"背光当指示灯"来验证 PHY 初始化结果（不依赖串口）。
+ *
+ * 板子的 LCD 背光在 GPIO13，这里不走 panel.c（LEAN 构建里没有），直接操作 GPIO：
+ *   开始：快速闪 3 下
+ *   成功（register_chipv7_phy 返回 0）：背光常亮
+ *   失败：慢闪 (|rc| + 1) 下，然后停一下重复
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void port_delay_ms(u32 ms);
+#include "c6os/reg.h"
+u32  s3_win_call_phy_enable(void);      /* 经 ABI 桥调 register_chipv7_phy */
+u32  s3_win_call_phy_cal_word(u32 i);   /* 读回校准数据里的字 */
+
+#define GPIO_BASE 0x60004000u
+#define PIN_BL    13u
+
+static void bl_init(void)
+{
+    u32 a = 0x60009000u + 0x04u + 4u * PIN_BL;
+    u32 v = os_reg_rd(a);
+
+    os_reg_wr(a, (v & ~(7u << 12)) | (1u << 12));       /* IO_MUX: 选 GPIO */
+    os_reg_wr(GPIO_BASE + 0x554u + 4u * PIN_BL, 0x100u); /* OUT_SEL = 普通 GPIO */
+    os_reg_wr(GPIO_BASE + 0x24u, 1u << PIN_BL);          /* 输出使能 */
+}
+
+static void bl(u32 on)
+{
+    os_reg_wr(on != 0u ? (GPIO_BASE + 0x08u) : (GPIO_BASE + 0x0Cu), 1u << PIN_BL);
+}
+
+/* 危险调用（可能挂死）前后开关 RTC 超级看门狗（SWD）：
+ * 打开后约 3.5 秒没被喂就会整片复位 —— 这样挂住也能自己恢复，不用人工拔插。 */
+static void swd_on(void)
+{
+    os_reg_wr(0x600080B8u, 0x8F1D312Au);                  /* SWD_WPROTECT */
+    os_reg_wr(0x600080B4u, os_reg_rd(0x600080B4u) & ~(1u << 30));  /* SWD_DISABLE=0 */
+    os_reg_wr(0x600080B8u, 0u);
+}
+
+static void swd_off(void)
+{
+    os_reg_wr(0x600080B8u, 0x8F1D312Au);
+    os_reg_wr(0x600080B4u, os_reg_rd(0x600080B4u) | (1u << 30));
+    os_reg_wr(0x600080B8u, 0u);
+}
+
+static void blink(u32 n, u32 ms)
+{
+    u32 i = 0;
+
+    while (i < n) {
+        bl(1u);
+        port_delay_ms(ms);
+        bl(0u);
+        port_delay_ms(ms);
+        i++;
+    }
+}
+
+void os_main(void)
+{
+    u32 rc = 0u;
+    u32 cal0 = 0u;
+    u32 n = 0u;
+
+    bl_init();
+    blink(3u, 120u);                    /* 开始 */
+
+    swd_on();                            /* 挂住 -> 3.5s 后自己复位 */
+    rc = s3_win_call_phy_enable();       /* 0 = 成功 */
+    swd_off();
+    cal0 = s3_win_call_phy_cal_word(1); /* 校准数据里应该出现非零 */
+
+    if (rc == 0u && cal0 != 0u) {
+        bl(1u);                          /* 常亮 = 成功 */
+    } else {
+        bl(0u);
+        n = (rc & 0x7u) + 1u;
+        for (;;) {
+            blink(n, 250u);              /* 慢闪 rc+1 下 = 失败码 */
+            port_delay_ms(1200u);
+        }
+    }
+
+    for (;;) {
+        port_delay_ms(500u);
+    }
+}
