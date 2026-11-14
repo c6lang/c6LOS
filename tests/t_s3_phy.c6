@@ -1,39 +1,37 @@
-/* t_s3_phy.c6 —— PHY 初始化分步诊断，结果**只写 RTC 信标**（崩溃也不丢）。
+/* t_s3_phy.c6 —— 安全探测 ROM 的 PHY 函数表入口（结果只写 RTC 信标）。
  *
- * 信标约定：
- *   0x600080C0 slot0 = 当前步骤号（0xE1..0xE5 = step1..5，0xEF = 全部完成）
- *   0x600080C4 slot1 = 该步骤的返回值
- *   0x600080C8 slot2 = g_phyFuns（PHY 函数表指针）的内容
- *   0x600080CC slot3 = port_init / _start 的标记
- * 读法： ./tools/beacon.sh
+ * 信标：
+ *   slot0 = 0xF1 表示开始探测
+ *   slot1 = phy_get_romfuncs() 的返回值
+ *   slot2 = 若返回值像个指针，则取 *(返回值)（表指针的常见形态）
+ *   slot3 = 最终 g_phyFuns 的值
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
 
-u32 s3_win_call_phy_step(u32 step);
+u32 s3_win_phy_romfuncs_ret(void);
 u32 s3_win_call_phy_funcs(void);
-u32 s3_win_find_phytab(void);
+u32 s3_win_phy_step(u32 step);
 
 void os_main(void)
 {
-    u32 step = 1u;
-    u32 rc = 0u;
+    u32 r = 0u;
+    u32 d = 0u;
 
-    s3_beacon(3u, s3_win_find_phytab());      /* 扫描出来的表地址 */
-    s3_beacon(2u, s3_win_call_phy_funcs());   /* 调用前的表 */
-
-    while (step <= 5u) {
-        s3_beacon(0u, 0xE0u + step);
-        rc = s3_win_call_phy_step(step);
-        s3_beacon(1u, rc);
-        s3_beacon(2u, s3_win_call_phy_funcs());
-        step = step + 1u;
+    s3_beacon(0u, 0xF1u);
+    r = s3_win_phy_romfuncs_ret();
+    s3_beacon(1u, r);
+    if (r >= 0x3FC00000u && r < 0x3FD00000u) {
+        d = *(volatile u32 *)r;
     }
+    s3_beacon(2u, d);
+    (void)s3_win_phy_step(2u);          /* 这一步会把表填进 g_phyFuns */
+    s3_beacon(3u, s3_win_call_phy_funcs());
+    s3_beacon(0u, 0xF2u);
 
-    s3_beacon(0u, 0xEFu);
     for (;;) {
         volatile u32 i = 0;
 
-        while (i < 1000000u) { i = i + 1u; }
+        while (i < 2000000u) { i = i + 1u; }
     }
 }

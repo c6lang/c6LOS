@@ -208,9 +208,12 @@ u32 s3_win_phy_romfuncs_ret(void)
  * 用 l32i a5, [表+0x204]; callx8 a5 起手，所以这个特征很强。 */
 u32 s3_win_find_phytab(void)
 {
-    u32 a = 0x3FC80000u;
+    /* ROM 数据区：esp32s3.rom.ld 里有 phy_param_rom = 0x3fcef81c，
+     * 说明 0x3FCEF000 往上这块是 ROM 自己的数据结构区（映射好的）。
+     * 0x3FC88000..0x3FCA0000 反而没映射，去读会 LoadStoreError。 */
+    u32 a = 0x3FCEF000u;
 
-    while (a < 0x3FCA0000u) {
+    while (a < 0x3FD00000u) {
         u32 v = *(volatile u32 *)a;
 
         /* 只在**确定映射的 DRAM** 里解引用，否则会 LoadStoreError（踩过） */
@@ -257,10 +260,17 @@ int s3_win_phy_step(int step)
          * 所以必须自己接上。 */
         u32 tab = 0;
 
+        u32 r = 0;
+
         phy_get_romfuncs();
-        tab = s3_win_find_phytab();
-        if (tab == 0u) {
-            tab = s3_win_phy_romfuncs_ret();   /* 兜底：用返回值 */
+        r = phy_get_romfuncs();            /* 有些实现靠返回值给表指针 */
+        if (r >= 0x3FC00000u && r < 0x3FD00000u) {
+            tab = r;
+        } else {
+            r = s3_win_phy_romfuncs_ret();
+            if (r >= 0x3FC00000u && r < 0x3FD00000u) {
+                tab = *(volatile u32 *)r;  /* 也可能是指向表的指针 */
+            }
         }
         g_phyFuns = tab;
     }
@@ -364,9 +374,12 @@ u32 s3_win_phy_romfuncs_ret(void)
  * 用 l32i a5, [表+0x204]; callx8 a5 起手，所以这个特征很强。 */
 u32 s3_win_find_phytab(void)
 {
-    u32 a = 0x3FC80000u;
+    /* ROM 数据区：esp32s3.rom.ld 里有 phy_param_rom = 0x3fcef81c，
+     * 说明 0x3FCEF000 往上这块是 ROM 自己的数据结构区（映射好的）。
+     * 0x3FC88000..0x3FCA0000 反而没映射，去读会 LoadStoreError。 */
+    u32 a = 0x3FCEF000u;
 
-    while (a < 0x3FCA0000u) {
+    while (a < 0x3FD00000u) {
         u32 v = *(volatile u32 *)a;
 
         /* 只在**确定映射的 DRAM** 里解引用，否则会 LoadStoreError（踩过） */
@@ -413,10 +426,17 @@ int s3_win_phy_step(int step)
          * 所以必须自己接上。 */
         u32 tab = 0;
 
+        u32 r = 0;
+
         phy_get_romfuncs();
-        tab = s3_win_find_phytab();
-        if (tab == 0u) {
-            tab = s3_win_phy_romfuncs_ret();   /* 兜底：用返回值 */
+        r = phy_get_romfuncs();            /* 有些实现靠返回值给表指针 */
+        if (r >= 0x3FC00000u && r < 0x3FD00000u) {
+            tab = r;
+        } else {
+            r = s3_win_phy_romfuncs_ret();
+            if (r >= 0x3FC00000u && r < 0x3FD00000u) {
+                tab = *(volatile u32 *)r;  /* 也可能是指向表的指针 */
+            }
         }
         g_phyFuns = tab;
     }
