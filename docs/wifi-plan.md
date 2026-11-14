@@ -3098,3 +3098,17 @@ chip rev 0x63 都已对齐），给我们镜像留下的是 `spiclk=0x80000000`�
 看它依赖镜像的哪个字段（很可能是**段表里 flash 段的描述方式**，而不是 24 字节头）。
 
 已交给子代理 `sub-2` 深挖。
+
+### 反向实验：镜像里不放 flash 段 —— bootloader 直接 abort
+
+用 `MKIMG_NO_FLASH=1` 生成一个只有 RAM 段的镜像（4 段、36KB），真板结果：
+
+```
+abort() was called at PC 0x403cdbe0
+```
+
+（就是之前那个 `mmu_hal_map_region` 的断言）
+
+⇒ **bootloader 要求镜像里必须有 flash 段**，不能绕开。所以"不放 flash 段"这条
+排除法走不通，必须从"为什么我们镜像的 flash 段让它配出 `SPI_MEM_CLOCK=0x80000000`"
+这个角度继续查。

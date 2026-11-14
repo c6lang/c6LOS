@@ -55,6 +55,8 @@ def entry_point():
 
 segs = []
 for name, paddr in SECS:
+    if os.environ.get('MKIMG_NO_FLASH') and paddr is not None:
+        continue    # 实验：整个镜像不含 flash 段
     v = section_vaddr(name)
     if v is None:
         continue
