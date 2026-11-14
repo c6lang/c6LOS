@@ -15,6 +15,13 @@ u32 s3_win_add(u32 a, u32 b)
 __attribute__((section(".flash.rodata"), used))
 const u8 g_flash_pat[8] = {0x11u, 0x22u, 0x33u, 0x44u, 0x55u, 0x66u, 0x77u, 0x88u};
 
+u32 s3_win_flash_add(u32 a, u32 b);   /* 前向声明（下面取它的地址） */
+
+u32 s3_win_flash_addr(void)
+{
+    return (u32)(const void *)s3_win_flash_add;
+}
+
 u32 s3_win_flash_pat(void)
 {
     return (u32)(const void *)g_flash_pat;

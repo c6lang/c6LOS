@@ -15,6 +15,7 @@ u32 s3_win_call_phy_cal(void);       /* 桥调 windowed 孤岛 → libphy.a */
 u32 s3_win_call_deep(u32 n);         /* 桥调 windowed 深递归（测窗口溢出/欠载） */
 u32 s3_win_call_flash_add(u32 a, u32 b);  /* 桥调放在 flash 段里的 windowed 函数 */
 u32 s3_win_call_flash_pat(void);          /* flash 段里已知图案数组的地址 */
+u32 s3_win_call_flash_addr(void);         /* flash 里那个函数的地址 */
 
 static void put1(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
 
@@ -62,6 +63,18 @@ void os_main(void)
     port_putc('\n');
 
     /* L5d：读 flash 段里的已知图案（应打印 11 22 33 44 55 66 77 88） */
+    port_puts("L5d0 flash_addr=");
+    {
+        u32 v = s3_win_call_flash_addr();
+        int sh = 28;
+
+        while (sh >= 0) {
+            port_putc((int)("0123456789abcdef"[(v >> (u32)sh) & 0xFu]));
+            sh -= 4;
+        }
+    }
+    port_putc('\n');
+
     port_puts("L5d IROM=");
     {
         u32 a = s3_win_call_flash_pat();

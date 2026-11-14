@@ -564,3 +564,27 @@ DRAM 侧坏区 `0x3FCD9500`（同一块物理 SRAM 的两种映射，密集 CPU 
 **注意**：不要让整体进度卡在 IROM 上——这是一个 ROM/MMU 细节，可以并行推进
 "把 IDF 的 `esp_wifi`/`esp_phy` C 源码移植进孤岛 + FreeRTOS 垫片"这些不依赖
 IROM 的工作（它们的代码都是我们编译的，可以放 IRAM，等 IROM 通了再挪）。
+
+### 15.7 IROM 执行问题的精确数据（本轮收尾）
+
+- `s3_win_flash_addr()` 返回 **0x42000020** ✓（调用目标是对的）；
+  ELF/镜像里该处确实是 `entry a1, 32`（字节 `36 41 00`），后面是
+  `addi.n`/`add.n`/`retw.n`，图案数组在 0x42000029（镜像偏移 0x29 ✓ 一致）。
+- 但真板一执行就 `IllegalInstruction`，PC = **0x42000022**（= `entry` 的第 3 个
+  字节），`ps` 里 WOE=1。也就是说：调用地址正确、镜像内容正确，但 CPU 在
+  `entry` 中间取到了非法指令 → **IROM 侧取指拿到的字节不是 flash 里那份**
+  （MMU 映射或指令 cache 没按我们以为的方式工作）。
+- 顺带确认：**IROM(0x42xxxxxx) 只能取指**，用 `ld` 读数据会 `LoadStoreError`
+  （cause=3）；要读 flash 数据得走 DROM(0x3C000000) 别名。
+
+**下一轮两个方向（都不依赖运气）**
+
+1. **继续查 IROM（首选，因为 IRAM 装不下 76KB）**：
+   - 试着同时提供 DROM 段（把 `.flash.rodata` 放到 `0x3C000000` + 紧随其后的
+     LMA），因为 ROM 建立 flash 映射时可能要求 DROM/IROM 成对出现；
+   - 或者显式打开指令 cache / 查 `SPI_MEM_MMU` 相关寄存器在启动后的实际值
+     （在 `_start` 里读 `0x600C8000` 附近的 MMU 表，串口打印出来看 ROM 建了什么映射）。
+2. **纯 IRAM 兜底**：给 Makefile 加 `S3_LEAN=1`（去掉 panel/gfx/i2s/dash/shell/button
+   这些对象），把我们的代码压到 ~5KB；然后按"坏区以下 66KB + 坏区以上 24KB"两段
+   放置（`link.ld` 用两个输出段 + `libphy.a:xxx.o(.text)` 指定成员），
+   把 76KB 的 libphy 闭包塞进去。紧但可行。
