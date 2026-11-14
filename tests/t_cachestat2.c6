@@ -1,0 +1,22 @@
+/* H1 纯信标版：读 cache 错误状态，定位失败层次 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000041u);
+
+    os_reg_wr(0x600C40C4u, 0x3u);
+    os_reg_wr(0x600C40E4u, 0x3Fu);
+    os_reg_wr(0x600C40F0u, 0x1Fu);
+
+    v = *(volatile u32 *)0x42030000u;      /* 触发一次 IROM 读 */
+
+    /* 用 4 个信标装 4 个关键值 */
+    s3_beacon(1u, v);                       /* read 结果 */
+    s3_beacon(2u, os_reg_rd(0x600C40E4u));  /* ILG 状态（bit5 = MMU entry fault） */
+    s3_beacon(3u, os_reg_rd(0x600C40F0u));  /* CORE0_ACS 状态 */
+    s3_beacon(0u, os_reg_rd(0x600C4124u));  /* MMU_FAULT_VADDR */
+    for (;;) { }
+}

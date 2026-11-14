@@ -1,0 +1,12 @@
+/* 最小：只读 IROM，然后记 ILG 状态 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000042u);
+    s3_beacon(1u, *(volatile u32 *)0x42030000u);   /* IROM 读结果 */
+    s3_beacon(2u, os_reg_rd(0x600C40E4u));         /* ILG 状态 */
+    s3_beacon(3u, os_reg_rd(0x600C4124u));         /* MMU_FAULT_VADDR */
+    for (;;) { }
+}
