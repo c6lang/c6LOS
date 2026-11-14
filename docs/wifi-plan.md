@@ -1934,3 +1934,20 @@ esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.
 1. 确认门能放行（`set {int}g_gate = 0xDEADBEEF` 后 `detach`）
 2. 读信标 slot1：**42 = IROM 取指成功**（这是 WiFi 进 flash 的最后一道门）
 3. 若失败，用 JTAG 在 `s3_win_call_flash42` 上单步
+
+### 第 36 轮末：IROM 验证的实际阻塞点（最新）
+
+去掉调试门后真板实测，串口只到 `irom test start` 就没了。用 USB-JTAG halt 看：
+
+```
+#0  port_delay_ms ()
+#1  blink ()
+```
+
+即卡在用例开头那个 `blink(2, 150)`（2 次、每次 150ms，本该 0.6 秒）里出不来；
+`port_delay_ms` 本身是纯忙等（`for (i=0;i<40000u;i++)`，无溢出问题），
+所以更可能是**应用在反复复位**（每次复位都从头跑，我们抓到的永远是开头那一段）。
+
+下一步要确认的是：`blink()` 之后到底有没有走到 `os_flash_map`（读信标 slot0 即可判断，
+slot0 = 0x10000001 表示映射那段代码执行过了）。若没走到，就先查
+`bl_init()`/`bl()` 里的 GPIO 写法有没有把背光引脚配成特殊功能导致异常。
