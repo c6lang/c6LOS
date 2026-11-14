@@ -1,0 +1,56 @@
+/* t_s3_abic.c6 —— windowed ABI 最小验证：指针参数、返回值、多层调用能不能活。
+ * 用来定位"windowed 下 c6 生成的 C 参数丢失"到底出在哪一层。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static u32 slen(const char *s)
+{
+    u32 n = 0;
+
+    while (*s != '\0') { n++; s++; }
+    return n;
+}
+
+static u32 add3(u32 a, u32 b, u32 c) { return a + b + c; }
+
+static u32 mix(const char *s, u32 k)
+{
+    u32 n = slen(s);
+
+    return add3(n, k, 100u);
+}
+
+void os_main(void)
+{
+    pstr("abic 1: plain\n");
+    pstr("abic 2: slen=");
+    pu32(slen("hello"));
+    pstr(" (want 5)\n");
+    pstr("abic 3: add3=");
+    pu32(add3(1u, 2u, 3u));
+    pstr(" (want 6)\n");
+    pstr("abic 4: mix=");
+    pu32(mix("abcd", 10u));
+    pstr(" (want 114)\n");
+    pstr("abic done\n");
+
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive\n");
+    }
+}

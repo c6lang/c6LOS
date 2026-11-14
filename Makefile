@@ -10,8 +10,10 @@ XTGCC   := $(XTP)gcc
 # port/s3/irq.S / ctx.S（见 docs/wifi-plan.md「ABI 迁移」）。
 # 注意：必须定义在 XTFLAGS（立即展开）之前。
 S3_ABI ?= call0
+# 额外 C 宏（排查用，例如 S3_CDEFS=-DS3_IRQ_HOLD_OFF 先不开中断）
+S3_CDEFS ?=
 
-XTFLAGS := -mabi=$(S3_ABI) -Os -ffreestanding -fno-builtin -fno-common \
+XTFLAGS := -mabi=$(S3_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common \
            -mlongcalls -mtext-section-literals -Wall -Wextra
 PORT    ?= /dev/ttyACM0
 

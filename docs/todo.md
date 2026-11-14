@@ -1103,3 +1103,25 @@ windowed 版能启动并打印 `c6os s3 boot`（说明 start.S + `port_init` 前
 2. 检查 `rt/c6rt.c` 的 `memcpy` 在 windowed 下被调用的寄存器约定
    （调用点用 a10/a11/a12 ✓ 与实测一致），必要时换成内联/汇编实现。
 3. windowed 能跑到 `os_main` 之后，再按 wifi-plan.md §11 的顺序回到中断入口。
+
+### 【本轮补充实测】关中断后仍然崩 → 不是中断，是普通调用/参数
+
+- 新增 `Makefile` 变量 `S3_CDEFS`（例如 `S3_CDEFS=-DS3_IRQ_HOLD_OFF` 可先不开中断）。
+- 新增最小用例 `tests/t_s3_abic.c6`（只做：打印、`slen("hello")`、`add3(1,2,3)`、
+  `mix("abcd",10)`），windowed 下**连第一行 `abic 1: plain` 都打不出来**；
+  关中断（`-DS3_IRQ_HOLD_OFF`）也一样 → 与中断无关。
+- RTC 现场：`0xA1` / `0xB1` / `_vec_default` 跑过 / `EXCCAUSE=0` / `EXCVADDR=0` /
+  `EPC1=0x403c9675`（在 `pstr` 里）。注意 `0xB1` 说明**最近一次复位**是在
+  port_init 的 USB 段就死了（0xB2 还没写），说明现象是非确定性的（复位循环里
+  每次死的位置略有不同）—— 典型的栈/帧被踩，而不是一个固定的坏指令。
+
+**下一轮的第一步（很小的实验，能定性）**：把 `tests/t_s3_abic.c6` 里的 `pstr`
+改成不取参数地址的写法（比如直接 `port_putc` 逐字符打一个写死的字符串、
+参数用 `u32` 而不是指针），看 windowed 下：
+- 纯 `u32` 参数调用是否正常 → 正常则问题在"取参数地址 + 8 字节 memcpy"这个
+  c6 代码生成模式与 windowed 帧布局的冲突；
+- 若 `u32` 也乱 → 是窗口/栈帧整体布局问题（`entry` 帧与 `__c99_frm` 的对齐）。
+
+若最终确认是 c6 代码生成器（`/home/winger/c6/tcc/c6`）的参数处理与 windowed
+不兼容，那么这条路要么改 c6 的输出（工作量在编译器侧），要么放弃 windowed
+（= 放弃 IDF 闭源 WiFi 库）。这一步必须在做 M1 之前定下来。
