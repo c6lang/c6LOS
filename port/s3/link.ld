@@ -100,7 +100,13 @@ SECTIONS
 
   /* 主栈从 0x3FCEF000 向下；链接期强制给栈留 8KB 安全垫，
      防止 BSS 增长后静默压栈。 */
-  _stack_top = 0x3FCEF000;
+  /* **重要**：这块板子的 DRAM 从 0x3FCD9500 往上是不稳定的（纯填充实验证明：
+     代码/数据越过它就起不来）。栈顶原来设在 0x3FCEF000，等于把栈的高端
+     ~106KB 放进了坏区 —— 我们自己用栈浅，没踩到；但闭源 PHY 初始化调用很深
+     （寄存器窗口 spill 会一路往下写），写到坏区就丢数据，`retw` 恢复出错误
+     返回地址，表现就是 "PC 落在指令中间" 的 IllegalInstruction。
+     因此栈顶压到坏区以下，栈区间 = [_bss_end+0x1F00, 0x3FCD9000)。 */
+  _stack_top = 0x3FCD9000;
   _stack_limit = _bss_end + 0x1F00;
   ASSERT(_stack_limit <= _stack_top, "S3 BSS/stack collision")
 
