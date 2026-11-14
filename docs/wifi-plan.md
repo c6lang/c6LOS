@@ -588,3 +588,28 @@ IROM 的工作（它们的代码都是我们编译的，可以放 IRAM，等 IRO
    这些对象），把我们的代码压到 ~5KB；然后按"坏区以下 66KB + 坏区以上 24KB"两段
    放置（`link.ld` 用两个输出段 + `libphy.a:xxx.o(.text)` 指定成员），
    把 76KB 的 libphy 闭包塞进去。紧但可行。
+
+### 15.8 关键推断：ROM 只 load 了 RAM 段，没管 IROM 段
+
+回看所有 IROM 版本的启动日志：**ROM 只打印了两行 `load:`（DRAM、IRAM），
+从来没有为 IROM 段打印过 load 行**。而标准 ESP-IDF 镜像之所以能用 IROM，是因为
+**二级 bootloader** 会：① 读分区表；② 用 `spi_flash_mmap` 把 flash 页写进
+SPI MMU；③ 打开 I/D cache；④ 跳到 app 入口。我们这条路是"ROM 直接加载
+RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU 映射根本没人建**。
+
+这正好解释了所有现象：
+- IROM 段被跳过（不 load）；
+- 执行 0x42xxxxxx 时取指拿到的不是 flash 里的内容 → IllegalInstruction；
+- 用 `ld` 读 0x42xxxxxx 报 LoadStoreError（DROM/IROM 都要先映射）。
+
+**因此要启用 IROM，必须自己当 bootloader**，步骤（下轮做）：
+
+1. 用 SPI0/SPI1 的 MMU 寄存器把 IROM 页映射到 flash 页：
+   S3 上 MMU 表项在 `SPI_MEM_MMU_ITEM_INDEX/CONTENT`（`spi_mem_reg.h`）或
+   `EXTMEM` 侧，表项格式是 `[page_num:13:0] + [valid:8?]`；每 64KB 一个表项，
+   IROM 0x42000000 对应页号 0..N。
+2. 打开 I-cache（`EXTMEM_ICACHE_CTRL` 的 enable 位）并 invalidate 一次。
+3. 之后 IROM 代码即可执行。
+
+（另一条路是纯 IRAM + LEAN 构建，见 15.7；两条都记着，先试 MMU 因为
+一个 bootloader 级的 MMU 初始化也就几十行寄存器操作。）
