@@ -18,8 +18,8 @@ TC   = os.path.expanduser('~/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-e
 
 # (section, paddr 或 None=RAM 段)
 SECS = [
-    ('.flash.rodata', 0x20020),    # DROM: 数据落文件偏移 0x20 (= paddr-BASE+0x18)
-    ('.flash.text',   0x30000),    # IROM: flash 0x30000（64KB 对齐，且离镜像头近，避免巨大空洞）
+    ('.flash.rodata', 0x20020),    # DROM: 数据落文件偏移 0x20（app_desc 要求）
+    ('.flash.text',   0x30000),    # IROM: flash 0x30000
     ('.eh_frame',     None),
     ('.vector',       None),
     ('.text',         None),

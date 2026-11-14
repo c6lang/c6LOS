@@ -2958,3 +2958,23 @@ trace 到这里，S3 上"让 cache 从 flash 读数"的可控手段已经全部�
 
 ⇒ **"裁栈到 IRAM" 不是可行路线**，必须解决 IROM 才能上 WiFi。
 这一条现在有依据了，不用再花时间尝试。
+
+## 76. 试过"把 IROM 段放到页 0"（模仿 IDF app 的结构）—— bootloader 不接受
+
+既然能工作的 IDF app 的 IROM 段在 **vaddr 0x42000000（页 0）**，而我们的在页 3，
+就把布局改成和它一样：
+
+```
+.flash.text   0x42000000 : AT (0x20)    ← IROM 放最前，数据从文件偏移 0x20 开始
+.flash.rodata 0x3C000020 : AT (0x30000) ← DROM 随后
+app_desc 段移到 IROM 段内（.flash.text.desc），保证仍在镜像偏移 0x20
+```
+
+镜像生成成功、`Checksum: valid`，但真板**bootloader 不接受**
+（信标停在 bootloader 的残留值 `0x00280028`，应用没起来）。
+
+已回退到能引导的布局（`.flash.rodata@AT(0x20)` + `.flash.text 0x42030000`），
+真板恢复正常（信标 `slot0=0xB0000016`，寄存器打印正常）。
+
+⇒ 说明 bootloader 对段布局有额外要求（很可能与"第一个段必须是 DROM"有关），
+这一条也记进问题报告。
