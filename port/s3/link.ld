@@ -1,3 +1,11 @@
+/* ROM 函数表：WiFi/PHY 这些闭源库要调用 ROM 里的函数（memcpy、ets_delay_us…）。
+ * IDF 官方就是用这几个 linker script 把符号直接钉到 ROM 地址上的，这里原样引用。 */
+INCLUDE port/s3/rom/esp32s3.rom.ld
+INCLUDE port/s3/rom/esp32s3.rom.api.ld
+INCLUDE port/s3/rom/esp32s3.rom.libc.ld
+INCLUDE port/s3/rom/esp32s3.rom.newlib.ld
+INCLUDE port/s3/rom/esp32s3.rom.version.ld
+
 ENTRY(_start)
 
 MEMORY

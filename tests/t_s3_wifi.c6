@@ -1,0 +1,56 @@
+/* t_s3_wifi.c6 —— WiFi 里程碑 M0：把闭源 PHY 库（libphy.a）链进来并真的调用它。
+ *
+ * 目的只有一个：客观证明"IDF 的闭源 blob 能被我们的工具链链接、能在我们的
+ * 启动流程里跑起来"。顺便把还缺的符号暴露出来（链接器会直接报）。
+ * 后面 M1/M2（PHY 初始化、扫描 AP）见 docs/wifi-plan.md。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+u32 phy_get_rf_cal_version(void);       /* libphy.a 里的入口 */
+void phy_init_param_set(u32 a);         /* 另一个入口，只做一次无害的写入测试 */
+
+void s3_lcd_delay(u32 n);
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void pu32(u32 v)
+{
+    char b[12] = {0};
+    int i = 0;
+
+    if (v == 0u) { port_putc('0'); return; }
+    while (v > 0u) { b[i] = (char)('0' + (v % 10u)); i++; v = v / 10u; }
+    while (i > 0) { i--; port_putc((int)b[i]); }
+}
+
+static void hex32(u32 v)
+{
+    int i = 28;
+    u32 nib = 0u;
+
+    pstr("0x");
+    while (i >= 0) {
+        nib = (v >> (u32)i) & 0xFu;
+        port_putc((int)(nib < 10u ? ('0' + nib) : ('a' + nib - 10u)));
+        i -= 4;
+    }
+}
+
+void os_main(void)
+{
+    u32 v = 0;
+
+    pstr("c6os wifi M0: libphy link test\n");
+    v = phy_get_rf_cal_version();
+    pstr("rf_cal_version=");
+    pu32(v);
+    pstr(" (");
+    hex32(v);
+    pstr(")\n");
+    pstr("done\n");
+    for (;;) {
+        s3_lcd_delay(4000000u);
+        pstr("alive\n");
+    }
+}
