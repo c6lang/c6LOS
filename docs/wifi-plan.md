@@ -335,3 +335,24 @@ _vec_level1:
    对"混合 windowed 代码 + 大 blob"有额外限制。
 4. 把 `libphy.a` 换成只用其中**一个**目标文件（比如 `phy_debug.o`）先跑通，再逐个加。
 
+
+### 卡点补充实测（同上一条，本轮又排除两种可能）
+
+- 已经在 `link.ld` 里**显式收集** IDF 风格的段（`.iram1*`/`.iram*`/`.dram1*`/
+  `.dram0.data*`/`.dram0.bss*`），重新链接后仍然起不来（IRAM 段 0x1296c）。
+  → 不是"孤儿段被塞错位置"。
+- 失败的启动日志都停在 ROM 的 `load:` 之后、`SHA-256 comparison failed` 之前，
+  且 `Saved PC` 落在 **ROM 地址**（0x40045ab3 / 0x40045abc / 0x40056fc0 之类）。
+  正常启动时会出现 `SHA-256 comparison failed … Attempting to boot anyway` 再
+  `entry 0x403c94xx`。**所以怀疑卡在 ROM 的 SHA-256 校验阶段**（WDT 再复位，形成循环）。
+- 对比：`build/wifim0`（同一个 libphy、但胶水是 call0 写的）**能启动**，
+  镜像大小几乎一样（82,912 vs 82,752）。唯一差别就是"windowed 编译的孤岛对象"。
+
+**下一轮的三个候选实验（按性价比排序）**
+
+1. 用**常规镜像**（`elf2image` 去掉 `--ram-only-header`，或加 DROM/IROM 段）试，
+   看是不是 RAM-only 镜像 + windowed 对象触发了 ROM 的校验分支。
+2. 把 libphy 拆开：先只链 `phy_debug.o` 这类小对象（`.o` 直接进链接列表），
+   逐个加，找出"哪一个目标文件"让镜像过不了 ROM 校验。
+3. 用 esptool `read-flash 0 0x20000` 把写进去的内容读回来和 bin 逐字节 diff，
+   排除写入/压缩路径的问题（虽然 esptool 已报 hash 校验通过）。

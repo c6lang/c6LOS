@@ -33,12 +33,20 @@ SECTIONS
     *(.text.start)
     *(.literal*)
     *(.text*)
+    /* IDF 闭源库（libphy/libpp/libnet80211…）把自己的代码放在 .iram1 里，
+     * 不显式收集就会变成"孤儿段"，被链接器塞到段尾甚至不该去的地方。 */
+    *(.iram1*)
+    *(.iram.*)
+    *(.iram0*)
   } > IRAM
 
   .data : {
     . = ALIGN(16);
     *(.rodata*)
     *(.data*)
+    *(.dram1*)
+    *(.dram0.data*)
+    *(.ext_ram.data*)
     . = ALIGN(16);
   } > DRAM
 
@@ -46,6 +54,8 @@ SECTIONS
     . = ALIGN(16);
     _bss_start = .;
     *(.bss*)
+    *(.dram0.bss*)
+    *(.ext_ram.bss*)
     *(COMMON)
     _bss_end = .;
     . = ALIGN(16);
