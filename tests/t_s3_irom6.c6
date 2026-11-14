@@ -18,6 +18,10 @@ void os_main(void)
     os_reg_wr(0x60002014u, 0x00030103u);
     s3_beacon(2u, os_reg_rd(0x60002008u));
 
+    /* 关键试验：bootloader 建的映射里 valid 位(bit14)是 0，这里手动补上 */
+    os_reg_wr(0x600C500Cu, 0x4000u | 3u);
+    s3_beacon(3u, os_reg_rd(0x600C500Cu));
+
     v = s3_win_call_flash42();
     s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
     for (;;) { }

@@ -2518,3 +2518,39 @@ epc1      = 0x42030014  <- 出错的那条指令地址（我们的 flash 段里�
 至此 IROM 取指问题的性质已经完全确定：**不是配置、不是映射、不是内容**，
 而是 cache 从 flash 取回的数据恒为 0。所有 IDF 官方路径（bootloader 引导、ROM 的
 Cache_Enable_ICache、原厂 SPI_MEM 值）都试过并验证生效，问题仍在。
+
+## 66. 联网查证：症状与官方文档/他项目经验完全对得上，且已排除最后两个猜测
+
+### 官方文档对 `IllegalInstruction`（EXCCAUSE 0）在 0x42xxxxxx PC 上的解释
+
+> "无法从 SPI flash 中读取下一条指令" —— 即 CPU 在 IROM 窗口执行，但 flash/MMU 路径没送出
+> 真正的指令；取回 `0x00000000`，而 `0x0000` 在 Xtensa 里正是 `ill` 指令。
+
+注意区分：真正的"PC 不在合法区域"是另一个 panic `InstrFetchProhibited`（cause 20）。
+我们的是 cause 0 + `excvaddr=0` ⇒ **取指被允许但取回垃圾**，与"映射/权限"无关。
+
+### 他项目踩过的同类坑（esp32-baremetal-zig / Zephyr / NuttX）
+
+- esp32-baremetal-zig 有一个 commit 标题就叫 *"fix IllegalInstruction crash on real
+  hardware flash-boot"*，原因写得和我们的处境一模一样：**S3 上 flash-cache 的 MMU 在
+  最开始那一刻还没准备好取指**，所以入口必须在 IRAM，进 IROM 必须用间接跳转
+  （`l32r` + `callx8`）。
+  → 我们已经是这么做的（`_start` 在 IRAM、经 windowed 孤岛的 `callx0` 进 flash）。
+- Zephyr 的做法是把 `esp_image_segment_header_t` 的 flash 偏移与
+  `_image_irom_vaddr` 都按 `MMU_FLASH_MASK` 对齐后写 MMU 表 —— 我们也对上了。
+- NuttX 的注记：**写 MMU 寄存器时要挂起 cache**，否则 cache 子系统的查表和 CPU 写
+  MMU 会互相干扰。
+
+### 本轮又验证（并排除）的两个猜测
+
+1. **bootloader 建的映射缺 valid 位**：实测 `MMU[3] = 0x00000003`（原厂表项是 `0x4000`），
+   于是我们自己写 `0x4003` 补上 valid 位（信标回读确认 `slot3 = 0x00004003`）
+   → **仍然 `cause=0, pc=42030014`**，不是这个原因。
+2. SPI_MEM 值、双 cache、页对齐、恒等映射 —— 前面几节已逐项排除。
+
+### 剩下最可能的一条
+
+**改完 MMU 之后 cache 的 TAG 需要失效**（NuttX 那句注记），而 S3 上唯一能做失效的
+`Cache_Invalidate_ICache_All()`（ROM 0x400016d4）在我们的镜像里一调就不返回
+（§59 实测）。所以下一步的关键是**找一个不依赖 ROM 的 I-cache 失效办法**
+（例如直接操作 `EXTMEM_ICACHE_CTRL` 的 preload/sync 位，或在 cache 关闭状态下写表）。
