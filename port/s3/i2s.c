@@ -55,11 +55,12 @@
  * 少了这一位，槽/通道掩码那套逻辑根本没生效，TX FIFO 也就不会向 GDMA 要数据
  * （实测：BCLK/WS 正常、DOUT 恒 0、GDMA int_raw 恒 0、链路 park=0 干等）。
  * 左对齐(bit15) + pcm_bypass(bit12) 一起带上。 */
-/* **tx_mono(bit5) + tx_mono_fst_vld(bit9) 必须开**：IDF 的
- * i2s_ll_tx_enable_mono_mode() 就是同时置这两位。不开的话硬件会认为一帧要
- * 从 FIFO 取两个样本（左槽 + 右槽），喂单声道语音就会**以 2 倍速播放**。
- * 之前只放方波听不出来，换成录音回放立刻就露馅。 */
-#define TX_CONF_BASE  ((1u << 19) | (1u << 15) | (1u << 12) | (1u << 9) | (1u << 5))
+/* **单声道播放要置 tx_mono(bit5) + tx_chan_equal(bit6)** —— 这是 IDF
+ * i2s_ll_tx_enable_mono_mode() 干的事（注意它置的是 bit6，不是 bit9！bit9 是
+ * RX 的 rx_mono_fst_vld）。不开的话一帧要从 FIFO 取两个样本（左槽+右槽），
+ * 喂单声道语音会**以 2 倍速播放**；而错置 bit9 会把 TX FIFO 直接憋死
+ * （实测：DOUT 一条边沿都没有、GDMA int_raw 一直 0，喇叭完全没声）。 */
+#define TX_CONF_BASE  ((1u << 19) | (1u << 15) | (1u << 12) | (1u << 6) | (1u << 5))
 /* 麦克风侧同理，另外加 rx_mono(bit5)：每帧只把左槽的 32bit 样本压进 FIFO。
  * **bit9(rx_mono_fst_vld) 必须一起置**：IDF 的 i2s_ll_rx_enable_mono_mode() 就是
  * 同时写 rx_mono 和 rx_mono_fst_vld 两位。bit9=0 的含义是"单声道模式取第二个槽"，

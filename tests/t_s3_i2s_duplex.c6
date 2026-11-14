@@ -14,7 +14,7 @@
 #include "c6os/port.h"
 
 #define PCNT_BASE 0x60017000u
-#define RATE      8000u
+#define RATE      16000u
 #define SEG       4092u
 #define SEGS      6u
 #define CAP_BYTES (SEG * SEGS)          /* 24552 字节 ≈ 0.38 秒 */
@@ -144,6 +144,23 @@ void os_main(void)
 
     pcnt_pin(15u);
     s3_lcd_delay(1000000u);                 /* ≈0.06 秒 */
+    /* 用已知 BCLK(=40MHz/div) 标定 CPU 主频：同一时间窗内数 cycles 和 BCLK 边沿 */
+    {
+        u32 c0 = 0;
+        u32 e = 0;
+        u32 dummy = 0;
+
+        (void)dummy;
+        c0 = (u32)port_cycles();
+
+        s3_lcd_delay(1200000u);
+        e = pcnt_take();
+        pstr("clk: cycles=");
+        pu32((u32)port_cycles() - c0);
+        pstr(" bclk_edges=");
+        pu32(e);
+        pstr("\n");
+    }
     pstr("tx bclk_edges=");
     pu32(pcnt_take());
     pstr(" tx_conf=");
