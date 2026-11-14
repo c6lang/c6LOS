@@ -1057,3 +1057,35 @@ CPU 卡死也有效）复位，程序重跑了。
    再刷我们的镜像试一次。
 
 **这一步必须解决，否则后面所有真板验证都做不了。**
+
+## 32. 第 26 轮结论：真板验证通道断了，必须人工介入
+
+这一轮试过的所有办法与结果：
+
+| 尝试 | 结果 |
+|---|---|
+| 整片 `erase-flash` 后再刷我们的镜像（0x0 直接引导） | 黑屏，串口 0 字节 |
+| 带 `--ram-only-header` / 不带（有无 flash 段） | 都不跑 |
+| 补 `esp_app_desc_t`（magic 0xABCD5432，DROM 段最前）+ 走 IDF 二级 bootloader | bootloader 起来后 `bootloader_reset()`（`rst:0x3 RTC_SW_SYS_RST`, `Saved PC:0x403ccf15`）拒绝我们的 app |
+| 刷上游 xiaozhi 全套固件 | **正常跑**，串口有日志 ✓ |
+| `tools/usbreset.py`（USBDEVFS_RESET） | 能救"USB 卡死"，但救不了"镜像不跑" |
+
+判断：板子/串口/镜像内容都没问题，**问题在"我们的镜像不再被引导"**。
+标准 app 镜像的段布局还没对齐（我们的镜像会出现 `load=0x00000000` 的填充段，
+原厂镜像没有），这是 bootloader 拒绝我们 app 的直接嫌疑点：`elf2image` 是按
+LMA 排段的，而我们的 `.data/.text` 的 LMA 还没真正排到 flash 段后面
+（`link.ld` 里加了 `AT(...)` 但生成的镜像没变化，需要再查）。
+
+### 建议的人工介入方式（任选其一）
+
+1. **抓一次真实的上电串口日志**：用 USB 线接板子，`sudo -n python3 tools/serial.py -t 30`
+   **在按 RST 之前就开始抓**，然后按一下板上 RST。ROM 的报错（"invalid header"、
+   "SHA-256 comparison failed" 等）会第一时间出现在串口上 —— 我们现在的抓法
+   总是晚了几百毫秒，可能正好错过。
+2. 或者把板子接到另一台机器/另一个 USB 口，用官方 `idf.py` / esptool 刷一次
+   上游固件确认链路，再用我们的镜像试。
+3. 如果你手上有 USB-UART（CH340/CP2102），接 GPIO43/44 抓 UART0 的日志，
+   那比 USB-CDC 可靠得多。
+
+有了上面任意一条的日志，就能定位"ROM 为什么不吃我们的镜像"，然后
+PHY 时钟修复（§30 新增的 `SYSCON_WIFI_CLK_EN` 使能）就能验证了。

@@ -42,7 +42,8 @@ S3_OBJ_CORE := $(BUILD)/obj/start.o \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
            $(BUILD)/obj/irq.o $(BUILD)/obj/irq_asm.o \
-           $(BUILD)/obj/marks.o $(BUILD)/obj/flash.o $(BUILD)/obj/reg.o
+           $(BUILD)/obj/marks.o $(BUILD)/obj/flash.o $(BUILD)/obj/reg.o \
+           $(BUILD)/obj/app_desc.o
 
 # 面板/音频/UI 相关对象：LEAN=1 时全部去掉（给闭源库腾 IRAM）
 S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
@@ -135,6 +136,10 @@ $(BUILD)/obj/dash.o: rt/dash.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
+$(BUILD)/obj/app_desc.o: port/s3/app_desc.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+
 $(BUILD)/obj/reg.o: port/s3/reg.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
@@ -200,7 +205,7 @@ $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
-	esptool --chip esp32s3 elf2image --ram-only-header --flash-mode dio \
+	esptool --chip esp32s3 elf2image --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
 
 image-info: $(BUILD)/c6os.bin

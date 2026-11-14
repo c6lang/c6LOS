@@ -30,7 +30,19 @@ SECTIONS
      IDF 的 IROM 段也是从 0x42000020 开始），否则 ROM 建 MMU 映射会错位。
      放在最前面还能避免 elf2image 为了对齐插入"load 地址=0"的 PADDING 段
      （那个段会让 ROM 往地址 0 写数据，直接挂）。 */
-  .flash.text 0x42000020 : AT (0x20)
+  /* 先是 DROM（0x3C000000），开头必须是 256 字节的 esp_app_desc_t；
+     LMA 从 0x20 开始（镜像头之后）。 */
+  .flash.rodata 0x3C000000 : AT (0x20)
+  {
+    _flash_rodata_lma = LOADADDR(.flash.rodata);
+    _flash_rodata_start = .;
+    *(.flash.rodata.desc)
+    *(.flash.rodata) *(.flash.rodata.*)
+    *(.rodata.flash*)
+    _flash_rodata_end = .;
+  }
+
+  .flash.text 0x42000020 : AT (LOADADDR(.flash.rodata) + SIZEOF(.flash.rodata))
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
@@ -41,25 +53,18 @@ SECTIONS
     _flash_text_end = .;
   }
 
-  /* flash 里的只读数据 → DROM 窗口（0x3C000000）。闭源大库的 .rodata 放这里，
-     LMA 紧跟在 .flash.text 的数据之后。 */
-  .flash.rodata 0x3C000000 : AT (LOADADDR(.flash.text) + SIZEOF(.flash.text))
-  {
-    _flash_rodata_lma = LOADADDR(.flash.rodata);
-    _flash_rodata_start = .;
-    *(.flash.rodata) *(.flash.rodata.*)
-    *(.rodata.flash*)
-    _flash_rodata_end = .;
-  }
-
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的
      （M1 之后代码变大时改用 -mno-text-section-literals + --auto-litpools）。 */
-  .vector : {
+  /* 全部可加载段的 LMA 都排在 flash 里（标准 ESP app 镜像布局，
+     这样镜像里没有巨大的空洞、IDF bootloader 才会接受）。 */
+  .vector : AT (LOADADDR(.flash.text) + SIZEOF(.flash.text))
+  {
     . = ALIGN(1024);
     KEEP(*(.vector))
   } > IRAM
 
-  .text : {
+  .text : AT (LOADADDR(.vector) + SIZEOF(.vector))
+  {
     *(.literal.start)
     *(.text.start)
     *(.literal*)
@@ -71,7 +76,8 @@ SECTIONS
     *(.iram0*)
   } > IRAM
 
-  .data : {
+  .data : AT (LOADADDR(.text) + SIZEOF(.text))
+  {
     . = ALIGN(16);
     *(.rodata*)
     *(.data*)
