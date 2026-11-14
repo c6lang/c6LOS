@@ -2170,3 +2170,27 @@ slot2 = 0x00004010   （MMU 表项 valid ✓）
    作为**快速判据**——这个判据比跳进去执行安全得多
 3. 直到 `0x42000000` 读回 `0x000000e9` 一类非 0 值，就说明 cache 读通了，
    那时 IROM 执行自然就通了
+
+### 第 39 轮末：flash 段写入必须校验（踩过一个坑）
+
+之前几次 `esptool write-flash 0x100000 <段>` 我都用 `>/dev/null` 吞掉了输出，
+结果**根本没写进去**（端口 busy 之类）。读回校验才发现 flash 0x100000 是旧内容。
+
+正确做法（以后一律照这个来）：
+
+```sh
+esptool --chip esp32s3 -p /dev/ttyACM1 write-flash 0x100000 /tmp/fseg.bin | grep verified
+esptool --chip esp32s3 -p /dev/ttyACM1 read-flash 0x100000 24 /tmp/rb.bin
+cmp -s /tmp/rb.bin /tmp/fseg.bin && echo 一致
+```
+
+这次确认写进去了、读回也一致，但信标仍是：
+
+```
+slot0 = 0xB0000001   进 os_main
+slot1 = 0xAAAA0001   即将调用 flash 里的函数（没有变成 0xF100002A）
+slot2 = 0x00004010   MMU 表项 valid ✓
+```
+
+⇒ 排除了"flash 内容不对"，确认就是 **I-cache 不从 flash 取数**。
+（这也是本轮唯一没打通的平台能力，其余链路全部就绪。）
