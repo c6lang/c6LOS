@@ -64,34 +64,19 @@ void os_main(void)
 {
     u32 v = 0u;
 
-    /* 调试门：等 gdb 写 RTC_STORE4=0xDEADBEEF 再开跑 */
-    pstr("irom test start\n");
+    /* 注意：**开 I-cache 之后不要再打印**（实测 ROM 的 ets_printf 会跑死），
+     * 结果全部走 RTC 信标（掉电域，纯寄存器写，不依赖 cache）。 */
+    s3_beacon(0u, 0xB0000001u);          /* 进到 os_main */
     bl_init();
-    blink(2u, 150u);                    /* 开始 */
+    bl(1u);                              /* 背光亮着，肉眼可见 */
 
-    /* 手动建立 IROM 映射并开 cache（含 SHUT_CORE0_BUS） */
     (void)os_flash_map(0x100000u, 0x42100000u, 0x10000u, OS_FLASH_IROM);
-
-    /* 先把 MMU 表项打出来（**在开 cache 之前**，否则万一 cache 配置有问题，
-     * 后面连打印都看不到，就分不清是映射错还是 cache 错）。 */
-    pstr("mmu=0x");
-    {
-        u32 e = os_flash_mmu_entry(0x42100000u);
-        int sh = 28;
-
-        while (sh >= 0) { port_putc((int)("0123456789abcdef"[(e >> (u32)sh) & 0xFu])); sh -= 4; }
-    }
-    pstr("\n");
-    pstr("icache on ...\n");
+    s3_beacon(2u, os_flash_mmu_entry(0x42100000u));   /* 映射表项，期望 0x4010|valid */
     os_icache_enable();
-    pstr("icache on done\n");
+    s3_beacon(3u, 0x1CAC1E00u);          /* icache 已开 */
 
-    s3_beacon(0u, 0x10000001u);          /* 进到映射之后 */
-    v = s3_win_call_flash42();           /* 期望 42 */
-    s3_beacon(1u, v);                    /* **结果就写进信标：42 = IROM 通了** */
-    pstr("flash42 returned ");
-    pu32(v);
-    pstr(" (want 42)\n");
+    v = s3_win_call_flash42();           /* flash 里的函数，期望返回 42 */
+    s3_beacon(0u, 0xF1000000u | (v & 0xFFu));   /* 42 => 0xF100002A = **IROM 通了** */
 
     for (;;) {
         if (v == 42u) {

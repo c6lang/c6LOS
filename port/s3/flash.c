@@ -49,7 +49,10 @@ int os_flash_map(u32 flash_off, u32 vaddr, u32 bytes, u32 kind)
 
         if (e == 0) { return -2; }
         /* 物理页号 | 有效 | 目标=flash(bit15=0) */
-        *e = ((flash_off >> 16) + i) & 0x3FFFu;
+        /* **必须带上 valid 位**：S3 的 MMU 表项格式是
+         *   bit[13:0] = flash 页号, bit14 = valid, bit15 = 0(IROM/DROM)
+         * 原来这里只写了页号，把 bit14 清掉了 ⇒ 映射无效，读 flash 直接失败。 */
+        *e = (((flash_off >> 16) + i) & 0x3FFFu) | 0x4000u;
         i++;
     }
     (void)kind;      /* IROM 和 DROM 在表项格式上一致 */
@@ -68,7 +71,13 @@ void os_icache_enable(void)
     /* **关键**：SHUT_CORE0_BUS 复位默认是 1（关着），不清它的话 core0 的 I 总线
      * 根本不到 cache —— 映射再好也取不到指令（表现为 IllegalInstruction）。
      * IDF 的 bootloader 在建完 MMU 映射后就是干这两件事。 */
-    S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~1u;   /* 打开 core0 I 总线 */
+    /* 这两个值是从**原厂 IDF 固件**里用 JTAG halt 读出来的（它能正常从 flash 取指）：
+     *   0x600C4068 = 0x5, 0x600C407C = 0x4
+     * 不设它们，缓存虽然"使能"了，但取指仍然拿不到数据。 */
+    *(volatile u32 *)0x600C4068u = 0x5u;
+    *(volatile u32 *)0x600C407Cu = 0x4u;
+
+    S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~0x3u;  /* 打开 core0/core1 I 总线 */
     S3_EXTMEM_ICACHE_CTRL  = S3_EXTMEM_ICACHE_CTRL | 1u;     /* 使能 I-cache */
 }
 

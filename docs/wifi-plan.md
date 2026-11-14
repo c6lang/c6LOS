@@ -1951,3 +1951,48 @@ esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.
 下一步要确认的是：`blink()` 之后到底有没有走到 `os_flash_map`（读信标 slot0 即可判断，
 slot0 = 0x10000001 表示映射那段代码执行过了）。若没走到，就先查
 `bl_init()`/`bl()` 里的 GPIO 写法有没有把背光引脚配成特殊功能导致异常。
+
+## 55. 第 36 轮：修好 MMU 表项的 valid 位（真板验证），IROM 调用仍未返回
+
+### 已修（真板实证）
+
+`port/s3/flash.c` 的 `os_flash_map()` 原来只写页号：
+
+```c
+*e = ((flash_off >> 16) + i) & 0x3FFFu;      /* 错：把 valid 位清掉了 */
+```
+
+S3 的 MMU 表项格式是 **bit[13:0]=flash 页号、bit14=valid、bit15=0(IROM/DROM)**，
+少了 bit14 映射就是无效的。改成：
+
+```c
+*e = (((flash_off >> 16) + i) & 0x3FFFu) | 0x4000u;
+```
+
+真板验证（信标 slot2 = MMU 表项）：`0x00000010` → **`0x00004010`** ✓
+
+另外把从原厂固件读到的两个 cache 配置寄存器也补进了 `os_icache_enable()`：
+`0x600C4068 = 0x5`、`0x600C407C = 0x4`，`SHUT` 位同时清 core0/core1。
+
+### 仍未通
+
+用例现在的自证方式是纯 RTC 信标（开 I-cache 之后**不打印**，因为实测 ROM 的
+`ets_printf` 在这之后会跑死）：
+
+```
+slot0 = 0xB0000001   进到 os_main
+slot2 = 0x00004010   MMU 表项（valid ✓）
+slot3 = 0xB0B0B0B0   port_init 走过
+slot0 没有变成 0xF1xxxxxx  =>  s3_win_call_flash42() 没有返回
+```
+
+即：映射有效、cache 使能，但**跳到 flash 里的代码还是不通**。
+
+### 下一步（按优先级）
+
+1. 用 JTAG 在 `os_icache_enable` 之后单步，看 `s3_win_call_flash42` 里是
+   `callx0 0x42100000` 就挂住，还是取指失败进了异常（读 `$exccause`/`$epc1`）
+2. 确认 flash 里 0x100000 处的字节确实是那段代码（`esptool read-flash 0x100000` 对比
+   `objcopy` 出来的 24 字节）—— 我们写的时候是 verify 通过的，但值得复核一次
+3. 对照原厂固件再读几个相关寄存器（`0x600C406C`、`0x600C4070`、`0x600C4074`
+   以及 `SPI_MEM` 的 cache 控制位），把差异一次性补齐
