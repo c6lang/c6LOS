@@ -48,11 +48,12 @@ int os_flash_map(u32 flash_off, u32 vaddr, u32 bytes, u32 kind)
         volatile u32 *e = s3_mmu_entry(vaddr + i * S3_MMU_PAGE);
 
         if (e == 0) { return -2; }
-        /* 物理页号 | 有效 | 目标=flash(bit15=0) */
-        /* **必须带上 valid 位**：S3 的 MMU 表项格式是
-        /* 表项格式：bits[13:0]=flash 页号，bit14=SOC_MMU_INVALID(置1=无效!)，
-         * bit15=SOC_MMU_TYPE(0=flash)。所以正确写法是**只写页号**。
-         * 早期这里多写了 |0x4000u，等于把每个映射都标成无效。 */
+        /* S3 的 MMU 表项格式（soc/esp32s3/include/soc/ext_mem_defs.h）：
+         *   bits[13:0] = flash 物理页号 (paddr >> 16)
+         *   bit14      = SOC_MMU_INVALID —— **置 1 表示无效**（SOC_MMU_VALID 就是 0）
+         *   bit15      = SOC_MMU_TYPE，0 = flash
+         * 所以有效映射就是"只写页号"。历史上这里多写过 |0x4000u，
+         * 那等于把每个映射都标成无效（读 flash 会静默返回 0）。 */
         *e = ((flash_off >> 16) + i) & 0x3FFFu;
         i++;
     }
