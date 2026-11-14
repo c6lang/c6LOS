@@ -1418,3 +1418,26 @@ slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了
    `wifi_thread_semphr_get`、`queue_send`、`task_ms_to_tick`、`wifi_int_disable/restore`、
    任务创建、软件定时器 —— 需要**真正的调度器**（c6LOS 有），不一定非要 FreeRTOS
 3. PHY 初始化 + `esp_wifi_init` + 定时器/事件循环（Xtensa 上占用 TIMG1/TIMER0 + CCOMPARE0，单核）
+
+## 42. 第 30 轮：PHY 表已通，卡点前移到 set_chan_freq_hw_init
+
+真板实测（`tools/flashmon.sh` 一条命令：刷机 + 立即监视，无需人工断电）：
+
+```
+step 1 ... rc=0                tab=0
+step 2 ... rc=0                tab=0x3fcef3d8   ← phy_get_romfunc_addr() 填表成功
+step 3 ... rc=0                tab=0x3fcef3d8
+step 4 ... rc=0                tab=0x3fcef3d8   ← register_chipv7_phy_init_param()
+step 5 ... *** TRAP cause=0x00 pc=0x403d0468    ← IllegalInstruction
+```
+
+`0x403D0468` 落在闭源库的 `set_chan_freq_hw_init`（0x403d03d4..0x403d047f）里，
+而且**正好是 `memw` 指令的中间字节**（`memw` 在 0x403d0467，占 3 字节）。
+PC 落在指令中间 ⇒ 典型的**返回地址不对**（窗口 ABI 的 `retw` 回到了非 call8 的
+调用点，或 `callx8` 用了坏指针）。下一步就从这条线索查：确认这一步里闭源库
+回调的每个函数（含 `g_phyFuns` 表里的 ROM 入口）都是 windowed ABI。
+
+配套：`-DS3_KEEP_SWD` + 应用内重新武装 RTC 超级看门狗，挂住约 3.5 秒自复位重跑，
+所以现在**不需要人工断电**也能连续迭代。
+
+背光（GPIO13）已常亮：LEAN+libphy 构建里也能把 LCD 点亮，肉眼可确认板子在跑。
