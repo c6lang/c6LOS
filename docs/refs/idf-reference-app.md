@@ -180,3 +180,31 @@ flash 初始化改成 `0x00030103`。
 在"寄存器状态"这个层面，我们已经找不到能解释差异的东西了。剩下最靠谱的做法是：
 **在 IDF app 里单步跟踪它的 `spi_flash_init_chip_state()` / `esp_mmu_map()`，
 把我们缺的那一步找出来**；或者把这些对照实验整理成报告找 Espressif 支持。
+
+## 重大纠正：MMU 表项的 bit14 是 **INVALID**，不是 valid
+
+IDF 的定义（`soc/esp32s3/include/soc/ext_mem_defs.h`）：
+
+```c
+#define SOC_MMU_INVALID   BIT(14)   // bit14 = 1 表示【无效】
+#define SOC_MMU_VALID     0         // bit14 = 0 表示【有效】
+#define SOC_MMU_TYPE      BIT(15)   // 类型位
+```
+
+⇒ 完全理解反了：
+
+- IDF app 里那些 `0x4000` 表项 = **bit14 置位 = 无效/未映射**（正常的默认值）
+- 我们被 bootloader 映射的表项 `MMU[0]=2`、`MMU[3]=3`（bit14 清零）= **有效**
+  ⇒ 说明 bootloader 给我们的 MMU 映射**本来就是对的**
+
+而我在前面几轮实验里"补 valid 位"写的 `0x4003`，其实是**把表项标成无效** ✗，
+等于自己破坏了本来正确的映射。之前基于"表项缺 valid 位"的所有推理都要推翻。
+
+### 正确的理解
+
+```
+vaddr 0x42030000 -> entry 3，值 0x00000003 = 有效 + flash 页 3 = 0x30000 ✓ 完全正确
+```
+
+也就是说：**MMU 一直是对的**，flash 内容也是对的（已 read-flash + cmp 校验），
+但 cache 从 flash 读数据依旧返回 0。问题不在 MMU。
