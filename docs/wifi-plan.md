@@ -1879,3 +1879,41 @@ ICACHE_CTRL1 = 0x00000000   (SHUT 已清)
 - 唯一剩下的是 **IROM 执行（flash 取指）** 这一个平台能力；
   它通了，WiFi 库就能进 image，`esp_wifi_init_internal()` 就能真板跑
 - 这条路上的所有测量手段（串口 + RTC 信标 + USB-JTAG + gdb 脚本）都已就位
+
+## 54. 第 35 轮决定性的对照：把原厂 IDF 固件刷回去，用 JTAG 读同一批寄存器
+
+方法（很快、很有效）：刷回 `/media/winger/inst_26/esp/xiaozhi/build/` 的原厂固件，
+用 `tools/dbg.sh` halt 住，读 I-cache/MMU 寄存器，直接拿到"能正常跑 IROM"的配置。
+
+| 寄存器 | 原厂（能跑 IROM） | 我们（开 cache 之后） | 结论 |
+|---|---|---|---|
+| `ICACHE_CTRL` 0x600C4060 | 0x00000001 | 0x00000001 | ✅ 一致 |
+| `ICACHE_CTRL1` 0x600C4064 | 0x00000000 | 0x00000000 | ✅ 一致 |
+| `0x600C4068` | **0x00000005** | 0x00000000 | ❌ 我们没设 |
+| `0x600C407C` | **0x00000004** | 0x00000000 | ❌ 我们没设 |
+| `MMU[0]` 0x600C5000 | 0x00004000 | 0x00004000 | ✅ 一致（MMU 不用我们建） |
+| `*(u32*)0x42000000` | **0x00000000** | 0x00000000 | ✅ **一样！** |
+
+**重要更正**：之前把"读 0x42000000 得到 0"当成失败是错的 —— 原厂固件里也是 0
+（固件实际从 flash 0x20000 开始映射，IROM page 0 本来就空）。所以我们的
+"清 SHUT + 使能 I-cache"**很可能已经是对的**。
+
+### 下一步（很明确）
+
+把原厂设的另外两个寄存器补上，然后**用真实映射验证**（而不是读 page 0）：
+
+- `0x600C4068` = 0x5  → 每核的 cache 配置（`EXTMEM_ICACHE_CTRL2` 类）
+- `0x600C407C` = 0x4  → preload/autoload 配置类
+- 验证方法：把一段代码放到 `.flash.text`（flash 偏移 = 我们镜像的 LMA），
+  **用 esptool 单独把这段字节写到那个 flash 偏移**，然后在应用里把 MMU 对应的
+  IROM 页指过去、直接 `callx` 进去 —— 返回值写 RTC 信标（不需要串口）。
+  MMU 表项格式已验证：`page | 0x4000(valid)`。
+
+### 附：原厂固件已备份且能刷回
+
+```sh
+B=/media/winger/inst_26/esp/xiaozhi/build
+esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.bin \
+  0x8000 $B/partition_table/partition-table.bin 0x20000 $B/xiaozhi.bin
+```
+（刷完是能正常运行的完整小智固件，说明硬件和 flash 都没问题。）
