@@ -3006,3 +3006,28 @@ FLASH_TYPE      = 4 data lines
 ```
 
 ⇒ **没有任何 eFuse 位禁用 cache 或 flash 直启**，一次性配置里这一项也排除。
+
+## 79. `spi_flash_init_chip_state()` 在我们的场景下是空函数（重要简化）
+
+一直怀疑 IDF app 靠它做了什么神秘配置。读源码（`components/spi_flash/flash_ops.c:180`）：
+
+```c
+esp_err_t IRAM_ATTR spi_flash_init_chip_state(void)
+{
+#if SOC_SPI_MEM_SUPPORT_FLASH_OPI_MODE
+    if (bootloader_flash_is_octal_mode_enabled()) { ... }   // 我们是四线，跳过
+#endif
+#if CONFIG_SPI_FLASH_HPM_ON
+    return spi_flash_enable_high_performance_mode();        // 默认关闭，跳过
+#endif
+    return ESP_OK;                                          // ← 直接返回
+}
+```
+
+⇒ **四线 DIO + 默认配置下它是空操作**，不是我们缺的那一步。这个大嫌疑可以划掉了。
+
+那个初始化的真正入口是 flash **驱动**的 `spi_flash_chip_generic_config_host_io_mode()`
+（`spi_flash_chip_generic.c:485`）：它根据 read_mode 算出
+`read_command`(DIO=0x3B) / `addr_bitlen`(24) / `dummy_cyclelen`，再调
+`host->driver->configure_host_io_mode()` 去写 `SPI_MEM_*` 寄存器。
+**下一步就是把这个函数最终写下的寄存器值扒出来**（已派子代理专门做这件事）。
