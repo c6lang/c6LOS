@@ -305,13 +305,14 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         /* 按任务 id 分槽（id&3），每个任务只保留它最后一次阻塞的信息：
          * [0]=obj [1]=kind [2]=epc [3]=timeout */
         {
-            u32 sl_ = (g_cur->id & 3u) * 4u;
-            (void)n_;
-            (void)epcv;
+            /* 环形记录：把 port 视角的 ctx 一起记下来（它由
+             * port_task_switch / port_set_cur_ctx 维护，是权威的），
+             * 用它区分是哪个任务在阻塞，避开 g_cur->id 归属错误。 */
+            u32 sl_ = (n_ & 3u) * 4u;
             bd[sl_ + 0u] = (u32)obj;
             bd[sl_ + 1u] = (u32)kind;
-            bd[sl_ + 2u] = epcv;
-            bd[sl_ + 3u] = timeout;
+            bd[sl_ + 2u] = (u32)(void *)port_cur_ctx();
+            bd[sl_ + 3u] = (u32)(void *)g_cur->ctx;
         }
     }
     g_cur->wait_obj = obj;

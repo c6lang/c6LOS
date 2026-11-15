@@ -7043,3 +7043,47 @@ recv2/3: 未被写过（全流程只有 2 次 recv）
    与首次进入新任务的组合还没验证过）。
 2. **init 到底阻塞在哪个对象**：把 `os_task_block_prepare` 的记录改成
    按"表下标"而不是 `g_cur->id` 分槽，避开 `g_cur` 归属错误的干扰。
+
+## §170 按 ctx 的阻塞记录：任务 1 的上下文里在执行 ppTask 的代码
+
+`os_task_block_prepare` 的诊断改成环形记录
+`(obj, kind, port_cur_ctx(), g_cur->ctx)`（`port_cur_ctx()` 由
+`port_task_switch`/`port_set_cur_ctx` 维护，是权威的）。真板：
+
+```
+blk0: obj=0x3fcbf928 kind=1 port_ctx=0x3fcbe660 kern_ctx=0x3fcbe660
+blk1: obj=0x3fcbf29c kind=6 port_ctx=0x3fcbe6ac kern_ctx=0x3fcbe6ac
+blk2: obj=0x3fcbf29c kind=6 port_ctx=0x3fcbe660 kern_ctx=0x3fcbe660
+```
+
+* `0x3fcbe660` 与 `0x3fcbe6ac` 相差 `0x4C = sizeof(S3Ctx)`，是两个不同的 ctx；
+* `port_ctx == kern_ctx` 在所有条目里都成立（两个视角一致）；
+* blk0：**任务1** 的 `kind=1`（信号量握手）；
+* blk1：**任务2** 的 `kind=6`（收队列，= `ppTask` 的正常行为）；
+* blk2：**任务1** 的 `kind=6`，而且对象和 blk1 **完全相同**。
+
+而 §169 已经证明：两次 `_queue_recv` 的库侧调用点都是
+`ppTask(0x40381eb4)+0x2d`。
+
+⇒ **任务 1 的上下文里确实在执行 `ppTask` 的代码。**
+
+结合 §155（bringup 桥"进入 1 次、从未返回"），也就是说：任务 1 在
+`s3_win_bringup` 内部被切走之后，恢复回来时**没有再回到桥的返回点，
+而是跑进了 `ppTask`**。
+
+### 下一轮唯一要查的地方
+
+`s3_task_tramp` 首次进入新任务与 `port_task_switch` 恢复旧任务的组合：
+
+1. `os_task_create` 之后，任务 2 在下一个 tick 被抢占切进来时，
+   `port_irq_fill(frame_sp)` 保存的是**任务 1 的**帧（`g_s3_cur[core]`
+   此时还是任务 1）✓；
+2. 但 `port_set_cur_ctx(next)` 之后 `g_s3_cur[core]` 变成任务 2；
+3. 任务 2 阻塞走 `port_task_yield`，它把 sp 存进
+   `g_s3_cur[core]`（= 任务 2）✓ 然后跳到 `g_sched[core]`；
+4. 主循环 `port_task_switch(task1_ctx)` 恢复任务 1 —— 这里要确认
+   `task1_ctx->sp` 确实还是第 1 步保存的那个帧指针，而不是被第 2/3 步
+   写坏。
+
+建议：在 `port_irq_fill` 里把 `(core, ctx, frame_sp)` 记进 RTC，
+与 `port_task_yield`/`port_task_switch` 的记录逐条对照。
