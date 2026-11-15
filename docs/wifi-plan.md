@@ -5845,3 +5845,33 @@ e3: me=2  a0=2  a1=0
 `_wifi_zalloc`(93)、`_wifi_malloc`(90)、`_queue_send`(25) 也全部打点，
 确认初始化任务到底走到 `wifi_init_in_caller_task` 的哪一步；
 必要时用 JTAG 在 `port_idle` 命中后读内核任务表的 `wait_obj` 定位。
+
+## §138 新工具：定时器 ISR 采样"被打断的主流程 PC"
+
+在 `s3_timer_irq` 里 `rsr %0, epc1` 取被打断的 PC，写进 RTC：
+
+* `0x50000780` = 最近一次采样到的 PC
+* `0x50000784` = PC 变化次数（一直在变 = 主流程在跑；很小 = 停在原地）
+* `0x50000788` = ISR 采样计数
+
+真板读数：
+
+```
+0x50000780 = 0x4037af47   = port_idle+0x13（waiti 0 的下一条）
+0x50000788 = 0x00000c00   ISR 采了 3072 次
+```
+
+⇒ **主流程一直停在 `port_idle`**，也就是所有任务都阻塞、只有 idle 在跑。
+这和 §126 的 JTAG 采样（`port_idle`）互相印证。
+
+这条 PC 采样工具从此可以随时回答"卡死时主流程在哪"，比 JTAG 稳定得多
+（JTAG 在这块板上连一次要重试好几次，`print os_task_probe(...)` 这种
+inferior call 更是连续三次连不上）。
+
+### 下一步
+
+主流程在 idle ⇒ 初始化任务阻塞在某个原语上。但 `BDIAG`
+（`0x50000370`/`0x50000374`）只保留"最后一次进入/离开"，而最后进入的是
+WiFi 任务的 `_queue_recv`，把初始化任务的原语覆盖掉了。
+需要把它改成"每个任务各一份"的记录，才能看到初始化任务到底阻塞在
+`_semphr_take` / `_mutex_lock` / `_event_group_wait_bits` 哪一个。

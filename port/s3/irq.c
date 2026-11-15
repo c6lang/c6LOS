@@ -224,6 +224,23 @@ void *s3_timer_irq(u32 frame_sp)
      * 就知道主流程停在哪条指令上。 */
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
     g_isr_cc = cc;
+    {
+        /* 诊断：把被打断的主流程 PC 采样进 RTC 0x50000780（每 256 次刷新一次）。
+         * 卡死时读它就知道主流程停在哪条指令上。 */
+        static u32 pc_n;
+        static u32 pc_last;
+        u32 ipc = 0;
+        volatile u32 *pd = (volatile u32 *)0x50000780u;
+
+        __asm__ __volatile__("rsr %0, epc1" : "=r"(ipc));
+        pc_n = pc_n + 1u;
+        if (ipc != pc_last) {
+            pc_last = ipc;
+            pd[0] = ipc;
+            pd[1] = pd[1] + 1u;      /* PC 变化次数 */
+        }
+        if ((pc_n & 0xFFu) == 0u) { pd[2] = pc_n; }
+    }
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
