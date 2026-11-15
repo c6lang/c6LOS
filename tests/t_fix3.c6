@@ -1,0 +1,17 @@
+/* 正确镜像上：配置 I-cache + 全量失效，然后取指 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+extern const u32 s3_flash_rodata_probe;
+extern u32 s3_win_call_flash42(void);
+extern u32 s3_win_call_cache_invalidate(void);
+void os_main(void)
+{
+    s3_beacon(0u, 0xB00001F0u);
+    os_icache_enable();                       /* 配置 8-way/16KB/32B */
+    s3_win_call_cache_invalidate();           /* 全量失效 */
+    s3_beacon(1u, os_reg_rd(0x600C4060u));    /* ICACHE_CTRL */
+    s3_beacon(2u, s3_flash_rodata_probe);     /* DROM 读 */
+    s3_beacon(3u, s3_win_call_flash42());     /* 取指 */
+    for (;;) { }
+}

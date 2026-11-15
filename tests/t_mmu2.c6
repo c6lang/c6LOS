@@ -1,0 +1,18 @@
+/* 在正确镜像上重测：IROM 段(vaddr 0x42030000 = entry 3) 的 MMU 表项 + cache 状态 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+extern const u32 s3_flash_rodata_probe;
+extern u32 s3_win_call_flash42(void);
+void os_main(void)
+{
+    u32 i = 0u, nv = 0u;
+    s3_beacon(0u, 0xB00001E0u);
+    s3_beacon(1u, os_reg_rd(0x600C4060u));   /* ICACHE_CTRL */
+    for (i = 3u; i <= 10u; i = i + 1u) {
+        if ((os_reg_rd(0x600C5000u + i * 4u) & 0x4000u) == 0u) { nv = nv + 1u; }
+    }
+    s3_beacon(2u, nv);                       /* entry 3..10 里有效的页数（IROM 7 页应为 7） */
+    s3_beacon(3u, os_reg_rd(0x600C5001u * 0u + 0x600C500Cu));  /* MMU[3] */
+    return;   /* 先不取指，看读数 */
+}

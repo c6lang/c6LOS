@@ -4435,3 +4435,40 @@ Segment   Length   Load addr   File offs  Memory types
 1. 重新扫一遍 I-cache 配置（`rom_config_instruction_cache_mode` 的各种参数组合）
 2. 重新看 MMU 表项的实际内容
 3. 用 `EXTMEM_ICACHE_TAG_OBJECT` 机制 dump 那个地址的 I-cache tag
+
+### 99. ★★★★★ IROM 取指彻底打通！
+
+在**正确的镜像**（`--ram-only-header` 已去掉）基础上，
+**同时**做 I-cache 模式配置和全量失效：
+
+```c
+os_icache_enable();                  /* rom_config_instruction_cache_mode(16384,8,32) */
+s3_win_call_cache_invalidate();      /* Cache_Invalidate_ICache_All */
+s3_beacon(1, ICACHE_CTRL);           /* -> 0x0000000F */
+s3_beacon(2, s3_flash_rodata_probe); /* DROM 读 -> 0x12345678 */
+s3_beacon(3, s3_win_call_flash42()); /* flash 取指 -> */
+```
+
+真板：
+
+```
+slot1 = 0x0000000F       ICACHE_CTRL = 0x0F
+slot2 = 0x12345678       DROM 读正常
+slot3 = 0x0000002A       ← **42**！flash 里的函数执行并返回了！
+```
+
+**flash 取指完全正常！**
+
+### 完整的根因链（两个独立问题叠加）
+
+1. **`--ram-only-header`** —— 让 `esptool elf2image` 丢弃 DROM/IROM 段，
+   所有镜像都是残缺的（这是最主要、也最隐蔽的那个）
+2. **I-cache 必须同时做"配置模式"和"全量失效"** ——
+   只做其中一个都不够（之前所有实验因为镜像本身是残缺的，都掩盖了这一点）
+
+⇒ 这两个问题**叠加在一起**，才导致前面几十轮的所有诊断都指向矛盾的方向。
+
+### 下一步
+
+用这个配置（正确的镜像 + os_icache_enable + invalidate）重建 WiFi 版本，
+看 `esp_wifi_init_internal` 是否能跑起来。
