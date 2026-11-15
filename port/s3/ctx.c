@@ -25,6 +25,10 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
 
 S3Ctx g_sched[C6OS_MAX_CORES];
 /* 诊断计数（ctx.S 里自增后覆写到 RTC，避免 RTC 初值随机的干扰） */
+/* 下一个要创建的任务是否 windowed 入口（1=是）。
+ * s3_task_tramp 用 callx0 调我们自己的 call0 任务，
+ * 但库创建的 ppTask 是 windowed 的，必须用 callx8 + WOE 才能正确 entry/retw。*/
+u32 g_next_task_windowed = 0;
 u32 g_sw_cnt = 0;
 u32 g_yl_cnt = 0;
 S3Ctx *g_s3_cur[C6OS_MAX_CORES];
@@ -79,6 +83,8 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         i++;
     }
     f[1] = (u32)entry;                 /* a2 */
+    f[3] = g_next_task_windowed;       /* a4：入口的 ABI 标志 */
+    g_next_task_windowed = 0;
     f[2] = (u32)arg;                   /* a3 */
     f[15] = (u32)s3_task_tramp;        /* EPC */
     f[16] = port_ps_get() & ~0x1Fu;    /* PS */

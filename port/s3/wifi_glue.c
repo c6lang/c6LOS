@@ -193,6 +193,7 @@ extern int  s3_w2c_task_create(const char *name, void *entry, void *arg,
 extern int  s3_w2c_task_delete(u32 id);
 extern void s3_w2c_task_delay(u32 ticks);
 extern int  s3_w2c_task_suspend(u32 id);
+extern u32 g_next_task_windowed;
 extern int  s3_w2c_task_resume(u32 id);
 extern void s3_w2c_task_yield(void);
 extern u64  s3_w2c_tick_get(void);
@@ -579,6 +580,7 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深。
      * 统一抬到平台允许的上限（port/s3/ctx.c 的 S3_STACK_SZ = 8192）。 */
     if (stack < 8192u) { stack = 8192u; }
+    g_next_task_windowed = 1u;   /* 库的任务入口都是 windowed ABI */
     id = s3_w2c_task_create(name, fn, arg, p, stack);
     /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */
     {

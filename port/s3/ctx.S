@@ -212,11 +212,21 @@ s3_task_tramp:
     slli    a5, a5, 2
     add     a5, a3, a5
     s32i    a12, a5, 16
-#ifdef __XTENSA_CALL0_ABI__
+    /* a4 是入口的 ABI 标志（由 port_task_ctx_create 从 g_next_task_windowed 写入）：
+     *   0 -> 我们自己的 call0 任务，用 callx0
+     *   1 -> 闭源库的 windowed 任务（如 ppTask），必须先置 PS.WOE 再 callx8，
+     *        否则被调方的 entry 不会轮转窗口、retw 会用错窗口。 */
+    beqz    a4, 2f
+    rsr     a6, ps
+    movi    a7, 1
+    slli    a7, a7, 18
+    or      a6, a6, a7
+    wsr     a6, ps
+    rsync
+    callx8  a12
+    call0   os_task_exit
+    j       1f
+2:
     callx0  a12
     call0   os_task_exit
-#else
-    callx8  a12
-    call8   os_task_exit
-#endif
 1:  j       1b

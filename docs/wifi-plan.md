@@ -6514,3 +6514,39 @@ ISR 4864 次，os_sched_tick 同步 4864 次
 **去掉 call0→windowed 这一层桥**。如果死锁消失，说明问题就在桥的
 调用约定上（桥是 call0 函数，但它 `call8` 进 windowed 后，windowed 侧的
 `entry`/`retw` 与 `port_task_switch` 的窗口簿记可能不兼容）。
+
+## §156 修正 `s3_task_tramp`：windowed 任务入口要用 `callx8` + 置 WOE
+
+`s3_task_tramp`（`port/s3/ctx.S`）原来统一用 `callx0` 调任务入口。但我们自己
+的任务入口是 call0，而**闭源库的 `ppTask` 是 windowed**。windowed 被调方
+需要 `CALLINC != 0` 才能让 `entry` 正确轮转窗口、`retw` 才能正确返回。
+
+改法：
+* `port/s3/ctx.c` 增加 `u32 g_next_task_windowed`，在 `port_task_ctx_create`
+  里写进帧的 `f[3]`（`RESTORE_FRAME` 会把它恢复成 `a4`），然后清零；
+* `port/s3/wifi_glue.c` 的 `osi_task_create` 在建库任务前置 1；
+* `s3_task_tramp` 按 `a4` 分流：0 → `callx0`；1 → 置 `PS.WOE` 后 `callx8`。
+
+**这是一处正确的 ABI 修正**（windowed 入口不该用 callx0 调），但真板现象不变，
+说明它不是这个死锁的根因。
+
+## 本轮最终状态
+
+```
+串口: M0 phy start / M1 bringup，之后无输出、无 TRAP
+beacons: slot0=0xB0000212(PHY) slot1=0x2A(IROM) slot2=1(建任务成功)
+bridge_in=1（bringup 桥进过、没出来）
+switch_cnt=3 / yield_cnt=3（成对）
+ISR 4864 次，os_sched_tick 同步 4864 次
+两次 _queue_recv 阻塞在同一队列 0x3fcbf234，_queue_send 从未出现
+```
+
+已排除的怀疑点（每条都有真板读数）：上下文槽位/帧保存/port 与内核视图/
+调度选择/switch-yield 配对/任务入口/栈大小/tick/`pp_post` 符号/各候选库
+函数是否含队列接收/`ppTask` 是否被直接调用/建任务后立即挂起。
+
+### 下一轮
+
+把 `wifi_main` 整个搬进 windowed 岛（`win_island.c` 里写 `s3_win_wifi_main`，
+由 `win_bridge.S` 用 `call8` 调），去掉 call0→windowed 这一层嵌套，
+看死锁是否消失。这是目前唯一还没做的对照实验。
