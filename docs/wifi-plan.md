@@ -6476,3 +6476,41 @@ blk2 (任务1 最终): frame_a0 = 0x403794ef  -> os_task_block_wait 内部
 2. **绕过桥**：让测试直接以 windowed 方式调用 `s3_win_bringup`
    （即把 `wifi_main` 整个放进 windowed 岛里跑），去掉 call0→windowed 这一层，
    看死锁是否消失。这是最直接的分辨方法。
+
+## §155 桥埋点：`s3_win_call_bringup` 进入 1 次、从未返回
+
+在 `port/s3/win_bridge.S` 的 `s3_win_call_bringup` 里加进入/离开计数
+（BSS 自增后覆写到 RTC `0x50001100` / `0x50001104`）：
+
+```
+0x50001100 bridge_in  = 1
+0x50001104 bridge_out = 随机值（从未被写过）
+```
+
+⇒ 桥进入一次、**从未返回**，与"初始化卡在 `s3_win_bringup` 内部"完全一致。
+
+（踩坑记录：`win_bridge.S` 里每个函数前面必须有独立的
+`.section .text, "ax", @progbits`，并且 `l32r` 用的字面量必须放在**同一个
+section 内、且在指令之前**；另外 `s3_win_call_wifi_start` 与
+`s3_win_call_bringup` 的前后缀完全一样，批量 `replace` 会同时改到两个函数。）
+
+## 本轮最后状态
+
+真板读数（当前镜像）：
+
+```
+beacons: slot0=0xB0000212(PHY完成) slot1=0x2A(IROM取指OK) slot2=1(os_task_create)
+串口:    M0 phy start / M1 bringup 之后无输出
+bridge_in=1, bridge_out 从未写
+switch_cnt=3, yield_cnt=3
+ISR 4864 次，os_sched_tick 同步 4864 次
+两次 _queue_recv 阻塞在同一个队列 0x3fcbf234，_queue_send 从未出现
+```
+
+### 下一轮首选实验
+
+把 `wifi_main` 整个搬进 windowed 岛（在 `win_island.c` 里写一个
+`s3_win_wifi_main`，由 `win_bridge.S` 用 `call8` 直接调用），
+**去掉 call0→windowed 这一层桥**。如果死锁消失，说明问题就在桥的
+调用约定上（桥是 call0 函数，但它 `call8` 进 windowed 后，windowed 侧的
+`entry`/`retw` 与 `port_task_switch` 的窗口簿记可能不兼容）。

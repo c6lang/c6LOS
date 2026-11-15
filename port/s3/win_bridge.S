@@ -982,6 +982,12 @@ s3_win_call_calls_ptr:
 /* u32 s3_win_call_bringup(void) */
     .section .text, "ax", @progbits
     .align  4
+4:  .word   g_wb_in
+    .align  4
+5:  .word   g_wb_out
+    .align  4
+6:  .word   0x50001100
+    .align  4
     .global s3_win_call_bringup
     .type   s3_win_call_bringup, @function
 s3_win_call_bringup:
@@ -991,6 +997,13 @@ s3_win_call_bringup:
     s32i    a13, a1, 8
     s32i    a14, a1, 12
     s32i    a15, a1, 16
+    /* 诊断：桥进入计数 -> RTC 0x50001100 */
+    l32r    a14, 4b
+    l32i    a15, a14, 0
+    addi    a15, a15, 1
+    s32i    a15, a14, 0
+    l32r    a14, 6b
+    s32i    a15, a14, 0
     rsr     a12, ps
     s32i    a12, a1, 20
     movi    a13, 1
@@ -1003,6 +1016,13 @@ s3_win_call_bringup:
     l32i    a12, a1, 20
     wsr     a12, ps
     rsync
+    /* 诊断：桥离开计数 -> RTC 0x50001104 */
+    l32r    a14, 5b
+    l32i    a15, a14, 0
+    addi    a15, a15, 1
+    s32i    a15, a14, 0
+    l32r    a14, 6b
+    s32i    a15, a14, 4
     l32i    a0, a1, 0
     l32i    a12, a1, 4
     l32i    a13, a1, 8

@@ -4,6 +4,10 @@
  */
 #include "c6os/types.h"
 
+/* 桥进出计数（win_bridge.S 自增，供 RTC 诊断） */
+u32 g_wb_in = 0;
+u32 g_wb_out = 0;
+
 /* 闭源库（windowed）专用的 mem*：库里对 memcpy/memset 的引用被 objcopy
  * 改名成 win_*，这样就不会和主世界（call0）那份混用。 */
 void *win_memcpy(void *dst, const void *src, u32 n)
