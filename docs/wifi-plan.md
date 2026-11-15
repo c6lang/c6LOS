@@ -6167,3 +6167,28 @@ WiFi 队列上了，但它能走到的库里没有任何收这个队列的代码
 2. 或者直接给 `wifi_init_in_caller_task` 的每一步加可观测信号
    （它调用的每个子函数入口都用一个 RTC 计数），把"最后一步"精确定位到
    单个函数。
+
+## §147 kind 歧义彻底排除：事件组是 4/5，不是 6
+
+`kernel/event.c6:83` 里事件组用的等待类型是：
+
+```c
+kind = (mode == OS_EVENT_ALL) ? 5u : 4u;
+r = os_task_block_prepare(e, timeout, kind, mask);
+```
+
+所以 §143 里 `kind=6` 只可能是 `os_queue_get_item`（`Q_WAIT_GET`）。
+
+各原语的 kind 一览（可作以后排查的速查表）：
+
+| 原语 | kind | 出处 |
+|---|---|---|
+| `os_sem_pend` | 1 | `kernel/sem.c6:49` |
+| `os_mutex_pend` | 2 | `kernel/mutex.c6:155` |
+| `os_event_wait`（ANY） | 4 | `kernel/event.c6:83` |
+| `os_event_wait`（ALL） | 5 | 同上 |
+| `os_queue_put_item` | Q_WAIT_PUT | `kernel/queue.c6:105` |
+| `os_queue_get_item` | **6** | `kernel/queue.c6:144` |
+
+⇒ **"初始化任务和 WiFi 任务阻塞在同一个队列对象上"这个内核级结论成立**，
+不受任何 id/栈判读影响。
