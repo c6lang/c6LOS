@@ -7,6 +7,7 @@
     .literal .Lg_sched, g_sched
     .literal .Lg_cur,   g_s3_cur
     .literal .Lprid_base, g_prid_base
+    .literal .Lrtc_dbg, 0x50000A00
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
@@ -181,6 +182,18 @@ s3_task_tramp:
     /* 初始帧把 entry 放在 a2、arg 放在 a3。 */
     mov     a12, a2
     mov     a2, a3
+    /* 诊断：记录任务启动次数 / 入口地址 / 该任务起始 sp（RTC 0x50000A00 起） */
+    l32r    a3, .Lrtc_dbg
+    l32i    a4, a3, 0
+    addi    a4, a4, 1
+    s32i    a4, a3, 0
+    s32i    a12, a3, 4
+    s32i    a1, a3, 8
+    /* 入口地址也按序号存一份，便于确认是不是同一个入口 */
+    extui   a5, a4, 0, 2
+    slli    a5, a5, 2
+    add     a5, a3, a5
+    s32i    a12, a5, 16
 #ifdef __XTENSA_CALL0_ABI__
     callx0  a12
     call0   os_task_exit

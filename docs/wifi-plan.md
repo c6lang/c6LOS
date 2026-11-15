@@ -5941,3 +5941,36 @@ recv #1:  g_s3_cur[0] = 0x3fcbe620   id = 1
 3. 在 `ppTask` 入口（`0x40381ff8` 附近）埋 RTC 计数 —— 但它入口指令被
    库代码复用（`l32r` 预取），需要用 `hbreak` 或改 `_task_create` 传一个
    只做计数的 call0 引导函数（注意：引导函数必须 call0，不能再转 windowed）。
+
+## §141 在 `s3_task_tramp` 埋点：实际只有两个任务启动
+
+`port/s3/ctx.S` 的 `s3_task_tramp` 是所有任务的引导入口（初始帧把 entry 放
+a2、arg 放 a3）。在那里把 **启动次数 / 入口地址 / 起始 sp** 写进 RTC
+（`0x50000A00` 起），并按启动序号存一份入口地址（`+16 + (n&3)*4`）。
+
+真板读数（入口地址经 `nm` 反查）：
+
+```
+0x50000A04 = 0x403821b4  = ppTask          （WiFi 任务）
+0x50000A10 = 0x403785e4  = 另一个入口（非 ppTask）
+0x50000A14 = 0x403821b4  = ppTask
+```
+
+⇒ **只有两个任务真正启动**，入口分别是 `ppTask` 和另一个（测试的
+`wifi_main`），符合预期。（计数本身因为 RTC 初值是随机数、只做自增，
+所以 `0x50000A00` 的绝对值不可读，要看 `+16` 起的入口表。）
+
+所以"两个任务都在 `_queue_recv` 上阻塞"这件事仍然成立，但
+`ppTask` 只有一个任务在跑；剩下要解释的是：
+**为什么 `g_s3_cur[0]` 会在两次 recv 之间切到 `g_ctx[0]`（wifi_main 的
+ctx），而 wifi_main 此刻本应阻塞在 `s3_win_call_bringup` 里。**
+
+可能的方向：
+1. `wifi_main` 并没有真的阻塞 —— 它进入了 `os_task_start_core` 的主循环
+   上下文（`g_sched[0]`），而那个上下文和 `g_ctx[0]` 的区分在某处没做对；
+2. `os_sched_pick` 把 BLOCKED 的任务又选中了一次（状态机 bug）。
+
+### 下一步
+
+在 `os_task_start_core` 的主循环里、`sched_pick` 之后，把
+"选中的任务 id / 它的 state"写进 RTC，看是否出现"选中了一个 BLOCKED 任务"。
