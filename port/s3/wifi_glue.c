@@ -373,6 +373,8 @@ typedef struct { u32 self; WOsQueue q; u32 magic; } WQ;
 
 static u32 g_qn = 0u;
 static u32 g_qbad = 0u;
+static u32 g_ql_n = 0u;
+static u32 g_ql_id[4];
 
 /* 库有时候（实测）会把队列的 **buf 存储** 而不是队列对象本身传给
  * _queue_recv。这里按 magic 找不到就扫一遍 WiFi 堆，找出 buf == qh 的那个队列。
@@ -467,6 +469,23 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         return 0;
     }
     B_IN(2u);
+    {
+        /* 每个任务第一次在队列上阻塞时记下来（BSS 去重，RTC 里存副本） */
+        u32 me = s3_w2c_current_task();
+        u32 j;
+        u32 dup = 0u;
+        for (j = 0u; j < g_ql_n; j++) {
+            if (g_ql_id[j] == me) { dup = 1u; }
+        }
+        if (dup == 0u && g_ql_n < 4u) {
+            volatile u32 *ql = (volatile u32 *)0x50000390u;
+            g_ql_id[g_ql_n] = me;
+            ql[g_ql_n * 2u] = me;
+            ql[g_ql_n * 2u + 1u] = (u32)q;
+            g_ql_n = g_ql_n + 1u;
+            ql[8] = g_ql_n;
+        }
+    }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     B_OUT(2u);
     if (r != 0) {

@@ -5456,3 +5456,40 @@ OSI 回调计数稳定在 30 不再增长 —— 既不是忙等，也不是我�
 2. 反汇编 libpp 里的 `ppTask`（`0x40381f44` 附近），确认它到底从哪个队列收。
 3. 若确认 ROM `pp_post` 不可用，就在我们这边把它替换掉（libpp 里通常也有
    一个 `pp_post` 的非 ROM 版本，或者可以用 `--wrap` 拦掉）。
+
+## §126 死锁定性与证据（JTAG + RTC）
+
+**JTAG 间断采样**（`tools/dbg.sh` + `set target-async on`，`monitor reset run`
+后 sleep 16s 再 `interrupt`）：
+
+```
+PC=4037b01b
+#0  0x4037b01b in port_idle ()
+```
+
+停在 idle 任务 ⇒ **两个任务都阻塞了**（不是死循环）。
+
+**"谁在等哪个队列"**（RTC `0x50000390`，BSS 去重后写入）：
+
+```
+0x50000390 = 1            任务 id 1（wifi_main / 初始化任务）
+0x50000394 = 0x3fcbf2d4   它等的队列
+0x50000398 = 2            任务 id 2（库建出来的 WiFi 任务）
+0x5000039c = 0x3fcbf2d4   它等的队列  <-- 同一个队列
+```
+
+⇒ **初始化任务和 WiFi 任务都阻塞在同一个队列 `s_wifi_queue` 上**，
+而回调环里字段 25（`_queue_send`）**一次都没出现过** —— 没人投递过消息。
+
+`pp_post` 是 ROM 符号（`0x400056e8 A`），ROM 的实现没有走到我们的
+`_queue_send`。另外 `ieee80211_ioctl` 会先调 `current_task_is_wifi_task`
+（比较 `s_wifi_task_hdl` 与 `_task_get_current_task()`）来决定"就地处理还是
+投递"，这条判断如果判错，初始化任务就会**自己在同一个队列上收**，正好
+造成上面这种同队列死锁。
+
+### 下一步
+
+1. 把 `current_task_is_wifi_task` 的两个输入（`s_wifi_task_hdl`、
+   `_task_get_current_task()`）都记进 RTC，真板确认它们的值。
+2. 确认 `pp_post`（ROM）到底用什么机制投递：读 ROM 里 `0x400056e8` 附近
+   的代码，或者直接在 libpp 里找非 ROM 版本的 `pp_post` 用 `--wrap` 拦掉。
