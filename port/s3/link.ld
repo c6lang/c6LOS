@@ -96,6 +96,9 @@ SECTIONS
      * 否则 20KB+ 的代码会把 IRAM 撑爆（实测溢出 22048 字节）。 */
     *libtls.a:*(.literal .literal.* .text .text.*)
     *c6_https_demo.o(.literal .literal.* .text .text.*)
+    /* WPA 加密回调（AES-128/CBC/CMAC/GMAC 的 C 实现，§222）：纯软件、不在中断
+     * 路径上，放 flash 省 IRAM（不放会 IRAM 溢出）。 */
+    *wpa_crypto.o(.literal .literal.* .text .text.*)
     *c6_lwip_port.o(.literal .literal.* .text .text.*)
     *c6_lwip_posix.o(.literal .literal.* .text .text.*)
     *sys_arch.o(.literal .literal.* .text .text.*)

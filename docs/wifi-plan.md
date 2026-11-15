@@ -9969,3 +9969,38 @@ if (nif->input(p, nif) != ERR_OK) { ... }                               // ← �
 ### 三、构建状态
 
 `https` / `wifi` / `wifip` 三种构建都通过，chkimg OK。
+
+---
+
+## §222 WPA 回调补齐 AES 家族：CBC / CMAC(OMAC1) / GMAC（向量验证）
+
+§218 里 AES 那六项还是"记账 + 返回 -1"。这一节把它们补成真实现：
+
+| 回调 | 状态 | 验证向量 |
+| --- | --- | --- |
+| `aes_128_encrypt`（AES-128-CBC 原地加密） | ✅ | NIST SP 800-38A F.2.1 |
+| `aes_128_decrypt`（AES-128-CBC 原地解密） | ✅ | 同上（还原原文） |
+| `omac1_aes_128`（AES-CMAC） | ✅ | RFC 4493 四个用例（空/16/40/64 字节，覆盖填充分支） |
+| `aes_gmac`（GCM 的空明文形式） | ✅ | GCM 规范的"全空"用例 |
+| `ccmp_encrypt` / `ccmp_decrypt` | ⏳ 记账 + 返回失败 | 语义复杂（要按 802.11 头解析 PN/keyid 做 CCM），而 S3 的 MAC 有 CCMP 硬件卸载；真上板若 `0x50000BC0[6]/[7]` 非 0 再补（AES 块、CBC-MAC、CTR 都已就位） |
+
+实现是自包含的普通 C（AES-128 加/解密 + CBC + CMAC + GHASH/GMAC，约 350 行），
+`tests/wpa_crypto_selftest.c` 用宿主 gcc 直接编、直接跑向量：
+
+```
+make tls12check
+  ========== wpa_crypto_selftest ==========
+   ok   PSK 与 IEEE 802.11i 向量一致
+   ok   SHA-256(abc) 与 NIST 向量一致
+   ok   HMAC-SHA256 与 RFC 4231 向量一致
+   ok   CBC 密文与 NIST F.2.1 一致 / CBC 解密还原
+   ok   CMAC(空消息/16/40/64 字节) 与 RFC 4493 一致
+   ok   GMAC 与 GCM 规范一致
+  wpa_crypto C 实现自测通过（失败 0 项）
+```
+
+**坑**：加完 AES 之后 `https` 镜像 `IRAM overflowed by 392 bytes` —— 新代码默认
+掉进 IRAM。`link.ld` 里把 `*wpa_crypto.o(.text…)` 也收进 `.flash.text`（它不在
+中断路径上，放 flash 完全没问题），然后 IRAM 就回去了。
+
+`https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
