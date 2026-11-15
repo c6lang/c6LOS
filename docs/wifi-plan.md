@@ -8237,3 +8237,15 @@ esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.
 ```
 以后遇到"固件明明刷进去了却起不来"，第一件事就是 `read-flash 0x0 32` 看
 bootloader 还在不在。
+
+### §197 补记：为什么"单独归一化 WINDOWSTART"也不行（真板实测）
+- 只加 `RESTORE_FRAME` 里的 `wsr windowstart, 1<<windowbase`（并加了 PS.WOE 判断、
+  放在宏最前面）：**整个固件连 banner 都不打**。
+  原因：这条归一化对所有恢复点都生效，而**并不是每个任务在切走前都 spill 过**
+  （比如第一次启动、以及不走 w2c 壳的让出路径）。对那些祖先窗口还 live 的任务，
+  把 WINDOWSTART 收紧成只剩当前窗口，等于直接丢掉祖先窗口 → 立刻崩。
+- spill + 归一化一起加也失败（早期启动就死）。说明还得把两者**严格配对**：
+  任务切走时若走了 spill，就给它记一个"已 spill"标志；恢复时只有带标志的才
+  做归一化，并把标志清掉。这个标志可以放在 `S3Ctx` 里（`r[0]` 那个闲置槽）。
+- 另：`rotw` 整圈 spill 必须在**确认 PS.WOE=1 且当前帧合法**的地方做；放在
+  `RESTORE_FRAME` 或启动早期都会立刻死。
