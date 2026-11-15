@@ -431,3 +431,12 @@ u32 s3_win_drom_mmu_end(void)
 {
     return ((u32 (*)(void))0x40001968u)();
 }
+
+/* ROM Cache_Invalidate_Addr(addr, size) @0x400016b0 —— 按地址失效（esp-hal 就是这么做的） */
+u32 s3_win_cache_invalidate_addr(u32 addr, u32 size)
+{
+    void (*fn)(u32, u32) = (void (*)(u32, u32))0x400016b0u;
+
+    fn(addr, size);
+    return 0u;
+}

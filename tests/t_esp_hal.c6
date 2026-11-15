@@ -1,0 +1,22 @@
+/* 照 esp-hal 的做法：cache 关闭窗口内写表项 + 按地址失效 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+u32 s3_win_call_cache_invalidate_addr(u32 addr, u32 size);
+u32 s3_win_call_flash42(void);
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000090u);
+
+    os_reg_wr(0x600C4060u, 0x0u);                       /* 关 I-cache */
+    os_reg_wr(0x600C500Cu, 0x00000003u);                /* 写表项（只写页号） */
+    os_reg_wr(0x600C4060u, 0x0000000Bu);                /* 开，用 IDF 的模式位 */
+    s3_win_call_cache_invalidate_addr(0x42030000u, 0x10000u);   /* 按地址失效 */
+
+    v = *(volatile u32 *)0x42030000u;                    /* 期望 0x7b004136 */
+    s3_beacon(2u, v);
+    v = s3_win_call_flash42();
+    s3_beacon(1u, 0xF1000000u | (v & 0xFFu));
+    for (;;) { }
+}

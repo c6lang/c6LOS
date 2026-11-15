@@ -201,3 +201,15 @@ irom3=0x00000000      <- 仍然读不回来
 
 ⇒ 烧录偏移不是差别来源。同时注意：即使在同一偏移，bootloader 给 IDF 镜像配的是
 `0x00010001`、给我们的仍是 `0x80000000` —— 差别确实在**镜像内容**里。
+
+## SPI0 的 `CACHE_FCTRL.CACHE_REQ_EN` 是开着的（排除）
+
+之前只读了 `0x6000203C`（SPI1 的镜像，值为 0），漏了 SPI0 的那份：
+
+```
+0x6000303C (SPI0 CACHE_FCTRL) = 0x00000005   -> bit0 CACHE_REQ_EN = 1（已使能）
+0x6000203C (SPI1 CACHE_FCTRL) = 0x00000000
+```
+
+⇒ cache 请求转发到 SPI0 的总闸是开的，这条也排除。
+（`REG_SPI_MEM_BASE(i) = DR_REG_SPI0_BASE - i*0x1000`，所以 `0x6000303C` 才是 SPI0 的那份。）

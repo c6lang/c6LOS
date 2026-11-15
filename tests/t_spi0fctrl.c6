@@ -1,0 +1,12 @@
+/* 读 SPI0 的 CACHE_FCTRL（0x6000303C）与 SPI1 的（0x6000203C）对比 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB00000A0u);
+    s3_beacon(3u, os_reg_rd(0x6000303Cu));   /* SPI0 的 CACHE_FCTRL */
+    s3_beacon(2u, os_reg_rd(0x6000203Cu));   /* SPI1 的 CACHE_FCTRL */
+    s3_beacon(1u, *(volatile u32 *)0x42030000u);
+    for (;;) { }
+}
