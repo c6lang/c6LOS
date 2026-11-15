@@ -4885,3 +4885,43 @@ slot1 = 0x4037ca2c     表里第 96 项 = _wifi_malloc
 
 用 IDF 的交叉编译器编译一个小程序打印 `offsetof(wifi_init_config_t, magic)`
 和各个字段的偏移，而不是手算。这样能确保 `static_rx_buf_num` 等字段真的写对了地方。
+
+### 112. `esf_buf_setup_static` 的调用点
+
+```
+42034de0:  l16ui  a11, a4, 88      ; 从某个结构里取 u16
+42034de5:  bnez   a11, ok
+42034de7:  movi   a11, 10          ; 默认值 10
+42034de9:  s16i   a11, a3, 176
+42034dec:  movi   a12, 0x1f4
+42034def:  movi   a10, 8
+42034df5:  call8  esf_buf_setup_static   ; (a10=8, a11=数量)
+```
+
+然后 `esf_buf_setup_static` 内部调 `esf_buf_alloc_dynamic()`，
+后者返回 NULL 就报 `ESP_ERR_NO_MEM`。
+
+`esf_buf_alloc_dynamic` 操作的是静态池 `g_eb_list_desc`（`0x3fcb6850`），
+池子里的 buffer 应当由**更早**的步骤用 `_wifi_malloc` 分配好。
+
+⇒ 目前的现象是：**池子是空的**（所以 dynamic 分配失败），
+而填充池子的步骤没有跑到 —— 但我们已确认 OSI 表和字段索引都是对的
+（`_wifi_malloc` 就是我们的 `osi_malloc`），且我们的堆一次都没被调用。
+
+### 最可能的原因
+
+`wifi_init_config_t` 里控制缓冲池大小的字段（`static_rx_buf_num` 等）
+**偏移算错了**，导致库读到 0 或者一个不合理的值，
+从而根本没去分配缓冲。
+
+虽然 `magic`（我们放在 144）校验通过了，但那可能只是个巧合 ——
+如果 `wpa_crypto_funcs` 的实际大小不是 44 字节，`magic` 也会错位。
+
+### 下一步（一定要做）
+
+**用 IDF 的交叉编译器编译一个打印 `offsetof` 的小程序**，
+把 `wifi_init_config_t` 每个字段的真实偏移打出来，
+和我们手算的对照。这是唯一可靠的办法。
+
+IDF 工具的 include 路径可以从任意一个 IDF 组件的 CMake 缓存里拿到，
+或者直接用 `idf.py` 在一个临时工程里编一个 `main.c` 打印。
