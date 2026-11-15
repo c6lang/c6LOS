@@ -487,3 +487,11 @@ u32 s3_win_call1(u32 fn, u32 arg)
 {
     return ((u32 (*)(u32))fn)(arg);
 }
+
+/* 放在 .flash.text 末尾的 call0 函数：用于验证"高偏移处的取指"是否正常。
+ * 注意它不用 windowed ABI（就是普通 C 函数），所以没有 entry/retw。 */
+__attribute__((section(".flashend.test"), noinline, used))
+u32 s3_flash_end_test(u32 x)
+{
+    return x + 9u;
+}

@@ -59,6 +59,7 @@ SECTIONS
     *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *(.flashend.test)
 
     /* IDF 闭源 WiFi 库的代码也放 flash（与 .flash.text 连续，bootloader 才会一起映射） */
     /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：

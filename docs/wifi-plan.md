@@ -3670,3 +3670,41 @@ windowed ABI 的第一个参数应该在 **a2**，而编译器把它放到了 **
 5. bootloader 只支持一个 DROM + 一个 IROM 段，DROM 大了会抢 IROM 的表项
 6. 曾有一次 `esp_wifi_init_internal` **完整执行并返回**（那时 WiFi 库在独立的
    `.flash.wifi` 段、vaddr 0x42100000），但那个 7 段镜像被 bootloader 拒绝
+
+### 82t. ★ 决定性测量：IROM 段被**完整映射**，问题在 I-cache 本身
+
+```c
+for (i = 1; i <= 12; i++) { v = MMU[i]; if ((v & 0x4000) == 0) nvalid++; }
+```
+
+真板：
+
+```
+slot1 = 7      entry 1..12 里有效的页数 = 7
+slot2 = 8      第一个无效的 entry = 8        （即 entry 1~7 全部有效）
+slot3 = 3      MMU[1] = 3（页 3）
+```
+
+⇒ IROM 段（entry 1~7，正好覆盖 422KB 的 7 页）**被 bootloader 完整映射了**。
+
+再看两个高偏移实验：
+- windowed 函数 @ 段内 0xD934 → 取指 trap
+- call0 函数 @ 段内 **0x67EE8** → 不 trap 但挂住、不返回
+- 数据读在 0xD934、0xF1C8 都正常
+
+⇒ **映射完整、数据通路正常，唯独"取指"在高偏移处失效** ⇒ 问题在 **I-cache**。
+
+### 重要参照
+
+- IDF 最小 app 的 IROM 只有 **63KB（1 页）**，从没考验过高偏移
+- **原厂小智固件的 IROM 很大**（段 3 是 0x1D33AC ≈ 1.8MB）而且能正常从 flash 执行
+  ⇒ **高偏移取指在正确的配置下是可行的**
+
+⇒ 我们的 I-cache 配置（16KB/8-way/32B，`ICACHE_CTRL=0x0b`）虽然和 IDF app 读到的一致，
+但那个 app 只用了 1 页 IROM，所以**这个值可能并不适合大镜像**。
+
+### 下一步
+
+在**原厂小智固件**运行时读它的 `ICACHE_CTRL`，看它给 1.8MB 的 IROM 用的是
+什么 cache 模式（16KB 还是 32KB、4-way 还是 8-way、16B 还是 32B 行）——
+这才是"能跑大镜像"的真实配置。

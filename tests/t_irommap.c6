@@ -1,0 +1,20 @@
+/* 检查 IROM 段（vaddr 0x42010000 = entry 1）各页的 MMU 表项是否都有效 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+void os_main(void)
+{
+    u32 i = 0u, v = 0u, nvalid = 0u, firstbad = 0xFFu;
+    s3_beacon(0u, 0xB0000160u);
+    os_icache_enable();
+    for (i = 1u; i <= 12u; i = i + 1u) {
+        v = os_reg_rd(0x600C5000u + i * 4u);
+        if ((v & 0x4000u) == 0u) { nvalid = nvalid + 1u; }
+        else if (firstbad == 0xFFu) { firstbad = i; }
+    }
+    s3_beacon(1u, nvalid);      /* entry 1..12 里有效的页数（期望 7~8） */
+    s3_beacon(2u, firstbad);    /* 第一个无效的 entry */
+    s3_beacon(3u, os_reg_rd(0x600C5000u + 4u));   /* entry 1 的内容 */
+    for (;;) { }
+}
