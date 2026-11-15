@@ -8376,3 +8376,19 @@ windowbase=9  windowstart=0xaaaa（两者一致，说明 spill 确实走了一�
 `call0 xthal_window_spill_nw` → `retw` 返回；由 `port_task_switch` 通过
 `call8` 调它（和 `port/s3/win_bridge.S` 里 call0→windowed 的桥同一套路）。
 这样"当前窗口"就是辅助函数自己的，祖先窗口才是任务的，和官方语义一致。
+
+### §198 再补记：windowed 辅助函数方案的两版实测（都还没成）
+1. 辅助函数里用 `mov a12, a0` 存返回地址：真板 `cause=0x14`、`pc=0`、
+   `a0=0x4037a6ed`。spill 把 a12 连同窗口一起搬走了，`mov a0,a12` 拿到 0。
+2. 改成把返回地址/PS 存进辅助函数**自己的栈帧**（`entry a1,48`，放 a1+32/36）：
+   窗口状态终于一致了（`windowbase=0xb`、`windowstart=0x800`，bit11 对得上），
+   但紧接着 `cause=0`（IllegalInstruction）、`epc1=0x403cd8fa`（**ROM**）、
+   `a1=0x3fcd8f10`（接近启动栈顶）—— 启动链上的窗口被 spill 到了之后会被
+   复用的帧里，把启动路径搞坏了。
+
+**结论（下一轮从这条起步）**：spill 只在**任务已经跑起来、栈已经稳定**之后
+才有意义。启动早期（`_start` → `os_main` → `os_task_start` 之前）那条
+call0/windowed 混合链不能参与 spill。所以要给切换路径加一个"启动阶段不 spill"
+的开关（例如 `g_sched_ready`，`os_task_start` 里置 1），spill 分支只在它为真时
+执行。这一条能同时解释本轮第 1、2 版的失败（两次都死在启动早期，而不是死在
+任务的阻塞/恢复路径上）。
