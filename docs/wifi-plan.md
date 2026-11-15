@@ -4195,3 +4195,28 @@ git checkout 35a9e8c -- port/s3/win_island.c port/s3/win_bridge.S
 **注意**：`0x403cdbe0` 这个地址在 bootloader 的区间（0x403Cxxxx）里，
 而我们的 IRAM 是 0x40378000~0x40388700 —— 所以 abort 是**bootloader** 报的，
 说明它无法加载这个镜像。
+
+### 92. 板子现已恢复到"原厂固件"状态
+
+确认硬件与 bootloader 都正常：
+
+```
+$ esptool ... write-flash 0x20000 .../xiaozhi.bin
+$ capture
+I (102) app_init: Project name:     xiaozhi
+```
+
+⇒ 板子现在跑的是**原厂小智固件**，可以正常工作。
+
+我们自己的镜像（`build/won/c6os.bin`）此刻被 bootloader 拒绝
+（`abort() at PC 0x403cdbe0` = bootloader 里的 `mmu_hal_map_region`）。
+
+### 接手时的第一步
+
+1. 先确认 `build/won/c6os.bin` 的 `esptool image-info` 是否 valid
+2. 检查它的段布局（`t_s3_on` 应该**没有** flash 段，只有 DRAM + IRAM）
+3. 如果 bootloader 仍拒绝，试试把 `.flash.text`/`.flash.rodata` 改回
+   **更早的、验证过能被接受**的布局（`.flash.rodata 0x3C000020 : AT(0x20)` +
+   `.flash.text 0x42030000 : AT(0x30000)`），并把 `.vector`/`.text` 的 AT 顺延
+4. 恢复后**第一件事**是重跑 `tests/t_entrytest.c6`，完成"flash 里的 `entry`
+   到底能不能执行"这个决定性实验 —— 它会决定后续走哪条路
