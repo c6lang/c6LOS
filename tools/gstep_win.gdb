@@ -9,7 +9,7 @@ printf "\n=== 进入 port_task_switch: pc=%p wb=%d ws=0x%x ps=0x%x a1=%p\n", $pc
 set $i = 0
 set $pwb = $windowbase
 set $pws = $windowstart
-while $i < 60
+while $i < 400
   stepi
   if $windowbase != $pwb || $windowstart != $pws
     printf "  step %2d pc=%p wb=%d->%d ws=0x%x->0x%x\n", $i, $pc, $pwb, $windowbase, $pws, $windowstart
@@ -18,4 +18,4 @@ while $i < 60
   end
   set $i = $i + 1
 end
-printf "\n=== 60 步之后: pc=%p wb=%d ws=0x%x\n", $pc, $windowbase, $windowstart
+printf "\n=== 400 步之后: pc=%p wb=%d ws=0x%x\n", $pc, $windowbase, $windowstart

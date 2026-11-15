@@ -8421,3 +8421,38 @@ windowstart 进入第一次切换**。这为下一轮提供了明确的入手点
 2. 在 `os_task_start` 之前（启动栈上、无任务上下文）显式把 WINDOWSTART
    归一化一次；
 3. 然后重新引入官方 spill（`tools/gstep_win.gdb` 逐步验证），而不是烧完看串口。
+
+## §200 单步结论：spill 会改变 WINDOWBASE，所以它必须是"切换前最后一件事"
+
+用 `tools/gstep_win.gdb` 单步（跳过第一次引导切换，停在真正执行 spill 的那次），
+窗口状态序列如下：
+```
+第1次 port_task_switch（引导）: wb=9  ws=0x280        ← 门控生效，没 spill
+第2次 port_task_switch:
+  step  16  pc=0x4203307f  wb  9->11  ws 0x280->0xa80   ← call8 进辅助函数
+  step  41  pc=0x4037e3dc  wb 11      ws 0xa80->0xa     ← HAL spill 开始动窗口
+  step  45  pc=0x4037e3e8  wb 11->6                     ← **WINDOWBASE 被改**
+  step  64  pc=0x4037e432  wb  6->8
+  step  82  pc=0x4037e432  wb  8->10
+  step  85  pc=0x4037e46f  wb 10->11
+  step  90  pc=0x4037e47d  wb 11      ws 0xa->0x800    ← 结束在 base=11 且一致
+末态 pc=0x4037bc77（s3_trap）  wb=11  ws=0x800
+```
+**两个关键事实**：
+1. spill 结束时窗口状态是**自洽**的（`wb=11`、`ws=0x800` = bit11）—— 说明官方
+   例程本身工作正常，我们调用的方式没问题。
+2. 但 **`WINDOWBASE` 从 9 变成了 11**（`xthal_window_spill_nw` 靠一圈轮转实现，
+   官方例程干完就 `s32i sp, TCB` 直接切走，**从不返回**到发起调用的那条链上）。
+   我们却继续在 `port_task_switch` 里用 a1/a4 做后续计算 —— 此时这些寄存器
+   已经属于**另一个窗口**，读到的是垃圾，于是撞进 s3_trap。
+
+### 下一轮的实现方案（已定，照做即可）
+spill 必须是切换前的最后一件事，之后的交接**只能通过内存**（内存访问与窗口无关）：
+1. 存 80 字节陷阱帧（当前窗口内容落栈）；
+2. 照旧做 ctx 记账，算好"目标任务的帧指针"和"目标 ctx"，**写进两个全局**
+   （例如 `g_sw_next_sp` / `g_sw_next_ctx`）；
+3. `a1` 挪回本任务的原始 sp，调用 windowed 辅助函数做 spill；
+4. 之后**不再用任何寄存器里的旧值**：让 `RESTORE_FRAME` 一开头就从那两个全局
+   把 `a1`/`a4` 重新 `l32r` + `l32i` 取回来（它本来就用 a1/a4）；
+5. 继续 `rfe`。
+这样"任务切走时祖先窗口全在栈上、恢复时靠欠载按需 fill"，就完全对齐官方语义了。
