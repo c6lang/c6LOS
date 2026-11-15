@@ -9775,3 +9775,33 @@ x/1xw  0x50000A10     # 阶段信标（§204/§215）
 
 `wifi` / `wifip` / `https` / 基线 `s3` 四种构建都通过，`chkimg OK`。
 这一节的改动只在 `port/s3/wifi_glue.c`，不影响任何已有行为（空实现 → 记账 + 空实现）。
+
+---
+
+## §217 一键上板脚本：`tools/s3run.sh` + `make bringup` / `make httpsflash`
+
+板子动不动就从 USB 上消失（§202/§205），每轮实验都是"等设备回来 → 刷 → 抓串口 →
+翻日志找关键字"。这一步把这些合成一条命令，并且把原始串口日志落到
+`build/logs/s3run-<时间戳>.log`，事后能翻。
+
+```
+# 第一步（板子回来先跑这个）：自动二分 + PHY 进度打印
+make C6_ROOT=/home/winger/c6 bringup
+
+# 第二步：完整镜像（WiFi + lwIP + TLS），记得给账号
+make C6_ROOT=/home/winger/c6 httpsflash \
+     S3_WIFI_SSID='"你家的AP"' S3_WIFI_PASS='"口令"'
+```
+
+脚本会等串口最多 120s（板子可能正在自己复位），刷完抓 60/120s，然后按启动顺序
+逐项打印是否出现关键标记：
+
+| 标记 | 含义 |
+| --- | --- |
+| `[phy] g_phyFuns=…` / `[phy] register_chipv7_phy rc=…` | PHY 走到哪一步（§205/§206） |
+| `[bisect]` | 自动二分进度/故障图（§204） |
+| `[wifi] scan_start` / `[wifi] AP0 …` | 射频体检：扫描是否工作（§215） |
+| `[wifi] 已关联` | 关联成功 |
+| `[lwip] start rc=` / `[lwip] ip=` | lwIP 起来 / DHCP 拿到地址（§210） |
+| `[https] TLS 握手完成` / `第一跳` / `第二跳` | TLS 与 HTTP（§213/§214） |
+| `panic` / `Guru` / `IllegalInstruction` | 崩了（本轮之前的老朋友） |

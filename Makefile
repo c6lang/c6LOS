@@ -1632,3 +1632,14 @@ https:
 		$(WIFI_DIR)/obj/c6_https_demo.o $(TLS_DIR)/libtls.a \
 		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(TLS_DIR)/libtls.a $(WIFI_DIR)/obj/c6_https_demo.o $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
 		s3
+
+# ---- 一键上板（§217）--------------------------------------------------------
+# bringup：先刷"自动二分 + PHY 进度打印"的镜像（板子回来第一步用这个）
+bringup:
+	$(MAKE) C6_ROOT=$(C6_ROOT) S3_PHY_BISECT=1 wifi
+	./tools/s3run.sh $(WIFI_DIR)/c6os.bin 60
+
+# httpsflash：刷完整镜像（WiFi + lwIP + TLS），账号用 S3_WIFI_SSID/S3_WIFI_PASS 传
+httpsflash:
+	$(MAKE) C6_ROOT=$(C6_ROOT) https
+	./tools/s3run.sh $(WIFI_DIR)/c6os.bin 120
