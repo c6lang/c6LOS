@@ -517,11 +517,17 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         rc[(k_ & 7u) * 3u + 1u] = id_;
         rc[(k_ & 7u) * 3u + 2u] = sp_;
         rc[24] = g_rc_n;
-        /* 关键对比：port 认为的当前 ctx（g_s3_cur[0]）vs 内核认为的当前任务 id */
-        rc[(k_ & 7u) * 3u + 3u] = 0u;   /* 占位避免越界踩到下一项 */
-        rc[(k_ & 7u)] = k_;
-        rc[(k_ & 7u) + 8u] = (u32)(void *)g_s3_cur[0];
-        rc[(k_ & 7u) + 16u] = id_;
+        /* 独立区域：从窗口帧里取调用者返回地址。
+         * entry 把调用者的 a0..a3 存在帧的高端（framesize-16 ..+0），
+         * 这里把 framesize=32 的几种可能位置都记下来，事后对照哪份是代码地址。 */
+        {
+            /* 干净配对：(sp, id, g_s3_cur)，互不重叠 */
+            volatile u32 *cp = (volatile u32 *)0x50000900u;
+            cp[(k_ & 3u) * 4u]      = sp_;
+            cp[(k_ & 3u) * 4u + 1u] = id_;
+            cp[(k_ & 3u) * 4u + 2u] = (u32)(void *)g_s3_cur[0];
+            cp[(k_ & 3u) * 4u + 3u] = (u32)(void *)g_s3_cur[1];
+        }
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     {
@@ -551,6 +557,9 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     int id;
     u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
     HIT_OF(_task_create);
+    /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深。
+     * 统一抬到平台允许的上限（port/s3/ctx.c 的 S3_STACK_SZ = 8192）。 */
+    if (stack < 8192u) { stack = 8192u; }
     id = s3_w2c_task_create(name, fn, arg, p, stack);
     /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */
     {
