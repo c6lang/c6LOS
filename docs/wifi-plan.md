@@ -8077,3 +8077,42 @@ osi_queue_recv = 0x42032ed4  ->  pc = osi_queue_recv+0x44
 窗口溢出到该任务自己的栈上并把 WINDOWSTART 收紧（之前 `wsr windowbase/…` 四种
 写法都卡死，需要重新设计：只写 WINDOWSTART、按"最小活跃窗口"收紧，并在切回来
 之前再用 underflow 恢复），要么让库任务不在深层调用链里阻塞。
+
+## §194 尝试按官方做法补齐窗口状态：两版都不成立（真板实测）
+
+### 先确认了"哪些是对的"
+`port/s3/irq.S` 的向量表**已经**是完整实现，不是空壳：
+```
+_win_ovf4:  s32e a0,a5,-16 ... rfwo        _win_unf4:  l32e ... rfwu
+_win_ovf8/12、_win_unf12 同理（标准 Xtensa spill/fill 写法）
+```
+所以"调用链一深就 spill/fill"这条路径是通的 —— §192 的压力测试（深度 12）也印证了。
+
+### 试过的两个 spill 方案（都不成立）
+1. **官方 `window_spill8` 的 call 链**（IDF `coreasm.h`，XCHAL_NUM_AREGS==64 分支：
+   `call8` + `call4` + `call12`×3 = 48 个窗口）。挂在
+   `s3_w2c_sem_pend` / `s3_w2c_queue_get` 进入内核之前。
+   → 真板：`W0/W1` 之后就**整机静默**，连低优先级监控任务都不再打印。
+2. **官方 `SPILL_ALL_WINDOWS` 的 `rotw` 整圈旋转**
+   （`xt_asm_utils.h`：`and a12,a12,a12` / `rotw 3` ×4 / `rotw 4`，转一圈
+   WINDOWBASE 回到原值，因此不需要写 WINDOWBASE）。
+   → 真板：同样是 `W1` 之后整机静默。
+3. 只做 **WINDOWSTART 的按任务保存/恢复**（把 `rsr windowstart` 存进
+   `S3Ctx.r[0]`（偏移 0，原先闲置），`rfe` 前 `wsr` 回去；0 表示"新任务不恢复"）。
+   → 真板：**单独它也会**让系统在第一次阻塞时静默（不加重 spilling 也一样）。
+
+已全部回退，基线恢复（`[recv] t=3 ... ` + `pc=osi_queue_recv+0x44` 的 `retw.n` TRAP
+可稳定复现）。
+
+### 下一步（下一轮从这里开始）
+不要再靠"改一版、烧一次、看串口"猜 —— 仓库里已经有 USB-JTAG 的 gdb 脚本
+（`tools/g*.gdb`），而 USB-JTAG 是这颗板子上唯一剩下的调试通道（没有 UART）。
+要做的：
+1. 加载 `build/wifi/c6os.elf`，在这次 hang 的位置停下来，看 `pc`、`windowbase`、
+   `windowstart`、`ps` 和调用栈，确认到底是卡在
+   `os_task_block_wait` / `port_task_switch`，还是卡在某个向量里。
+2. 特别要确认 `S3Ctx.r[0]` 是否真的闲置 —— `port/s3/ctx.c` 里
+   `port_task_ctx_create` 可能往 `r[]` 里写了别的东西，那样 `wsr windowstart`
+   就是拿垃圾值去写；这条是"单做 WINDOWSTART 恢复也 hang"的最可疑解释。
+3. 确认 `rotw` 在 `entry a1,48` 的壳里是否安全：壳自己的窗口不能在这一圈里
+   被溢出掉（它的 a1 必须有效），否则整个 spill 会写到错误的位置。
