@@ -89,3 +89,27 @@ slot1 = 0x00000000   取指调用没返回
 
 **这条信息本身很有价值**：ROM 的 cache 维护函数在 IDF app 里正常、在我们 app 里异常，
 进一步说明差异在**更底层/更早的阶段**，不是"应用该怎么调函数"的问题。
+
+## 尝试真正构建 NuttX（进展与卡点）
+
+按用户要求，实际尝试在开发机上构建 NuttX 跑这块板子：
+
+**已完成**
+- `git clone --depth 1` 完整克隆 nuttx（578M）+ nuttx-apps
+- 装好构建依赖：`gperf`、`bison`、`flex`、`ninja`、`kconfiglib`（`pip3 --break-system-packages`）
+- 按 NuttX 期望的目录布局放成 `../nuttx` + `../apps` 兄弟目录
+- `./tools/configure.sh esp32s3-devkit:nsh` **成功**（rc=0）
+- `git submodule update --init --recursive` 拉下 Espressif HAL（仓库涨到 1.2G）
+- 交叉编译器认对：`xtensa-esp32s3-elf-gcc`
+
+**卡点**
+1. `-Wstack-usage=`（空参数）→ 手工补 `CONFIG_STACK_USAGE_WARNING=2048` 解决
+2. `#error Unknown XTENSA architecture` → 手工补 `CONFIG_ARCH_FAMILY_LX7=y` 解决
+3. 最后卡在：`没有规则可制作目标 .../bootloader_flash_config_.c`
+   —— 文件名里的 `$(CHIP)` 后缀展开为空，说明**手工编辑 `.config` 不足以让 Kconfig
+   派生变量全部正确**，需要走 NuttX 的完整 `menuconfig` 流程
+
+**结论**：NuttX 能配起来，但正确构建要走它自己的 Kconfig 生成流程（或用它的 CI 脚本），
+不是手工补 `.config` 能糊过去的。**不过这轮真正的收获是它的源码** ——
+`esp32s3_start.c` 里那两行（`bootloader_init()` + `map_rom_segments()`）已经明确告诉我们
+"非 IDF 应用是怎么建立 XIP 的"，这比把它编出来更有价值。
