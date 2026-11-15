@@ -140,6 +140,13 @@ port_task_yield:
     l32i    a15, a14, 28
     addi    a15, a15, 1
     s32i    a15, a14, 28
+    s32i    a0, a14, 32          /* 调用者的返回地址（call0：a0 就是返回地址） */
+    /* 诊断：直接读 g_s3_cur 数组本身与 [0]，与 block_prepare 里 port_cur_ctx()
+     * 读到的值对照，判断是不是同一个数组、以及是不是被清过。 */
+    l32r    a15, .Lg_cur
+    s32i    a15, a14, 36         /* 数组地址 */
+    l32i    a15, a15, 0
+    s32i    a15, a14, 40         /* g_s3_cur[0] */
     rsr     a5, prid
     l32r    a3, .Lprid_base
     l32i    a6, a3, 0

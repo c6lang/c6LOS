@@ -16,7 +16,8 @@ static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
 static u32 g_dbg_n = 0;        /* os_task_current_id 诊断计数 */
 static u32 g_dbg_pick_n = 0;   /* 调度选择诊断计数 */
 static u32 g_dbg_blk_n = 0;    /* 阻塞诊断计数 */
-static u32 g_dbg_to_fires = 0; /* 超时到期唤醒次数 */
+static u32 g_dbg_to_fires = 0;
+static u32 g_snap_done = 0; /* 超时到期唤醒次数 */
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
@@ -308,11 +309,12 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
             /* 环形记录：把 port 视角的 ctx 一起记下来（它由
              * port_task_switch / port_set_cur_ctx 维护，是权威的），
              * 用它区分是哪个任务在阻塞，避开 g_cur->id 归属错误。 */
-            u32 sl_ = (n_ & 3u) * 4u;
+            u32 sl_ = (n_ & 3u) * 5u;
             bd[sl_ + 0u] = (u32)obj;
             bd[sl_ + 1u] = (u32)kind;
             bd[sl_ + 2u] = (u32)(void *)port_cur_ctx();
             bd[sl_ + 3u] = (u32)(void *)g_cur->ctx;
+            bd[sl_ + 4u] = epcv;   /* 该任务被切走时保存的 EPC */
         }
     }
     g_cur->wait_obj = obj;
@@ -540,6 +542,10 @@ void os_sched_tick(void) {
     }
 #endif
     now = os_tick_advance1();
+    if (now >= 500u && g_snap_done == 0u) {
+        g_snap_done = 1u;
+        port_snapshot();     /* 实现放在 port/s3/console.c（flash 里），省 IRAM */
+    }
     if (os_timeout_pending() != 0u) {
         while (os_timeout_pop_expired(now, &id) != 0) {
             OsTask *t = os_task_get(id);

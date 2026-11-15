@@ -201,6 +201,56 @@ void s3_wdt_kick(void)
     *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0u;
 }
 
+extern int ets_printf(const char *fmt, ...);
+
+/* 诊断快照：在空闲循环里周期性地把关键计数/记录一次性打到串口。
+ * 这样得到的是**同一次启动**的完整快照 —— esptool read-mem 每次都会复位，
+ * 逐字段读出来的值其实来自不同次启动，之前多次被这一点误导。 */
+/* 一次性诊断快照：把关键计数与记录整体写进 RTC 0x50001D00。
+ * esptool read-mem 会先复位再读，所以读到的是**上一次启动稳定后**的定格；
+ * 逐字段分多次 read-mem 得到的是不同启动的值，不可比。 */
+__attribute__((section(".flash.text"))) void port_snapshot(void)
+{
+    volatile u32 *sn = (volatile u32 *)0x50001D00u;
+    volatile u32 *b = (volatile u32 *)0x50000C00u;
+    volatile u32 *y = (volatile u32 *)0x50001800u;
+    u32 i = 0;
+
+    sn[0]  = 0x5A5A5A5Au;
+    sn[1]  = (u32)os_tick_get();
+    sn[2]  = *(volatile u32 *)0x50001000u;
+    sn[3]  = *(volatile u32 *)0x50000200u;
+    sn[4]  = y[7];
+    sn[5]  = y[4];
+    sn[6]  = y[5];
+    sn[7]  = *(volatile u32 *)0x50001600u;
+    while (i < 20u) { sn[8u + i] = b[i]; i = i + 1u; }
+    sn[28] = *(volatile u32 *)0x3fcef904u;
+    sn[29] = *(volatile u32 *)0x50001900u;
+    sn[30] = *(volatile u32 *)0x50001904u;
+    sn[31] = *(volatile u32 *)0x50001908u;
+    sn[32] = *(volatile u32 *)0x5000190Cu;
+    sn[33] = *(volatile u32 *)0x50001910u;
+    sn[34] = *(volatile u32 *)0x50001914u;
+}
+
+__attribute__((section(".flash.text"))) void port_diag_dump(void)
+{
+    volatile u32 *y  = (volatile u32 *)0x50001800u;
+    volatile u32 *b  = (volatile u32 *)0x50000C00u;
+    volatile u32 *st = (volatile u32 *)0x50000A00u;
+
+    ets_printf("D1 starts=%u switch=%u yield=%u ylctx=%08x ylsp=%08x ylcaller=%08x\n",
+               (unsigned)st[0], (unsigned)*(volatile u32 *)0x50001000u,
+               (unsigned)y[7], (unsigned)y[4], (unsigned)y[5], (unsigned)y[8]);
+    ets_printf("D2 blk0=%08x/%u/%08x blk1=%08x/%u/%08x\n",
+               (unsigned)b[0], (unsigned)b[1], (unsigned)b[2],
+               (unsigned)b[4], (unsigned)b[5], (unsigned)b[6]);
+    ets_printf("D3 blk2=%08x/%u/%08x blk3=%08x/%u/%08x\n",
+               (unsigned)b[8], (unsigned)b[9], (unsigned)b[10],
+               (unsigned)b[12], (unsigned)b[13], (unsigned)b[14]);
+}
+
 void port_idle(void)
 {
     /* 核 0 有 level-1 定时器中断，可 waiti；核 1 暂无 IPI，忙轮询才能

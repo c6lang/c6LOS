@@ -7288,3 +7288,60 @@ task_starts   = 2
 2. 若确认没有一次来自 `os_task_block_wait`，那就要查
    `os_task_block_wait()` 为什么在这些路径上没被执行（例如
    `os_task_block_prepare` 之后 `r != 0`，或者是编译期把该分支裁掉了）。
+
+## §176 ★★★ 找到测量假象的真正根源，并建立了可靠通道
+
+**根源**：`esptool read-mem` 会**先硬复位、再立刻读**。所以：
+
+* 每次读到的其实是**上一次启动**跑完后留在 RTC 里的值；
+* 但同一次启动的字段被分到多次 `read-mem` 里读时，每次都换了一次启动，
+  字段之间**根本不属于同一次启动** —— 这才是这几十轮里"读数自相矛盾"的真因；
+* 我此前加的"启动时清零 RTC"更是把这份"上一次启动的快照"直接抹掉，
+  于是读到一串 0（一度让我误判 `port_task_yield` 从未生效）。
+
+**可靠通道（已实现）**：`port_snapshot()`（放在 flash 段，省 IRAM）在
+`os_sched_tick` 到达 tick 500 时，把所有关键值**一次性**写进
+RTC `0x50001D00`。之后 `read-mem` 读到的是**上一次启动稳定后的完整定格**。
+
+第一次拿到的一致读数：
+
+```
+magic=0x5A5A5A5A tick=500 switch=3 osi_calls=30 yield_n=348
+yl_ctx=0x3fcbe700 yl_sp=0x3fcbc480 timeout_fires=0
+blk0 obj=0x3fcbf9c8 kind=1 ctx=0x3fcbe700 kern=0x3fcbe700 epc=0x66
+blk1 obj=0x3fcbf33c kind=6 ctx=0x3fcbe74c kern=0x3fcbe74c epc=0x4037b790
+blk2 obj=0x3fcbf33c kind=6 ctx=0x3fcbe700 kern=0x3fcbe700 epc=0x40379483
+xphyQueue=0x3fcbf338   （blk1/blk2 的 obj = 0x3fcbf33c = &xphyQueue->q ✓）
+```
+
+并且用同一通道确认：**两次 `_queue_recv` 都来自 `ppTask`，但来自它的
+两个不同调用点** —— `ppTask+0x2a`（主循环 0x40381fda）和
+`ppTask+0x1a7`（另一条分支 0x40382157）。之前"两次都是 ppTask+0x2d、
+只有一个调用点"的结论同样是跨启动误读。
+
+## 由此得到的两条正确结论
+
+1. **EPC 显示任务 1 在自己的 `os_task_block_wait+0x27` 里**，
+   任务 2 的 EPC 在 `s3_task_tramp`。所以 §170 的
+   "任务 1 在执行 ppTask 的代码"**是错的**（同样是残留值导致的误判）。
+2. `ppTask` 确实有两个收队列的调用点，两次都真的发出去了；
+   而 `os_queue_get_item` 只可能由 `osi_queue_recv_body` 调用
+   （`os_queue_get` 在仓库里没有任何调用者），所以两次 kind=6 的阻塞
+   都来自 `ppTask`。
+
+## 仍然成立的矛盾
+
+`blk2` 这次 kind=6 的阻塞，`port_cur_ctx()` 与 `g_cur->ctx` **都**等于
+**任务 1** 的 ctx（`0x3fcbe700`），但它是由 `ppTask` 的代码触发的。
+
+⇒ **ppTask 运行期间，内核视角的"当前任务"是任务 1。**
+`g_cur` 是 `#define g_cur (g_cur_arr[g_core])`，
+`g_core = port_core_id() & 1`；而 `port_cur_ctx()` 用
+`g_s3_cur[port_core_id() & (C6OS_MAX_CORES-1)]` —— 两个数组索引相同，
+却都指向任务 1。
+
+### 下一轮
+
+在 `os_task_start_core`（主循环切换）和 `os_sched_preempt_ctx`（ISR 抢占
+切换）里各记一次 `(t->id, t->ctx, port_cur_ctx())`，用可靠通道读出来，
+定位到底是哪一次把"当前任务"与"实际恢复的帧"配错了。

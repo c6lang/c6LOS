@@ -522,8 +522,20 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
  * 这里只声明；C 实现改名为 _body。 */
 int osi_queue_recv(void *qh, void *item, u32 ticks);
 
+extern void *port_cur_ctx(void);
+
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
+    {
+        /* 诊断：记录"是谁"在调 _queue_recv —— 用 port 视角的当前上下文，
+         * 这是唯一能区分初始化任务与 WiFi 任务的可靠标识。 */
+        volatile u32 *rr = (volatile u32 *)0x50001900u;
+        u32 k_ = g_recv_seq;
+        g_recv_seq = k_ + 1u;
+        rr[(k_ & 3u) * 3u]      = (u32)port_cur_ctx();
+        rr[(k_ & 3u) * 3u + 1u] = (u32)qh;
+        rr[(k_ & 3u) * 3u + 2u] = ticks;
+    }
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);

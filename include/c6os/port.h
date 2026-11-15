@@ -22,6 +22,8 @@ void port_leave_task(void);
 void port_task_yield(void);
 u32 port_task_stack_ok(void *ctx);
 u32 port_virtual_tick(void);
+void port_diag_dump(void);
+void port_snapshot(void);
 u32 port_in_isr(void);
 void port_isr_enter(void);
 void port_isr_exit(void);

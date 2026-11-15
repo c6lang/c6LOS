@@ -141,16 +141,6 @@ _start:
     j       1b
 
 2:
-    /* 清零 RTC 诊断区（0x50000200..0x50001F00），下面所有埋点都依赖它 */
-    l32r    a2, .Ldiag
-    l32r    a3, .Ldiag_end
-    movi    a4, 0
-5:
-    bgeu    a2, a3, 6f
-    s32i    a4, a2, 0
-    addi    a2, a2, 4
-    j       5b
-6:
     l32r    a2, .Lrtc
     l32r    a3, .Lm1
     s32i    a3, a2, 0            /* RTC 里的 A1（可能被 ROM 覆写，仅作参考） */
