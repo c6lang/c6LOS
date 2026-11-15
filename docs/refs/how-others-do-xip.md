@@ -146,3 +146,30 @@ c6os s3 boot          <- 我们的应用起来了！
 而在我们镜像本身**（链接/段属性/某些段字段）。
 这是一个重要的收窄：之前一直怀疑"原厂 2nd-stage bootloader 没把 XIP 交给我们"，
 现在这条也排除了。
+
+## 逐段比对发现的**结构性差异**：DROM 被撑到 64KB，和 IROM 抢 MMU 表项
+
+```
+我们的镜像 (BASE=0)                      IDF 镜像
+seg0 DROM vaddr 0x3C000020 len 0x0FFD8   seg0 DROM vaddr 0x3C010020 len 0x0913C
+seg1 IROM vaddr 0x42030000 len 0x00018   seg3 IROM vaddr 0x42000020 len 0x0FEC0
+     文件偏移 0xFFF8                            文件偏移 0x10018
+```
+
+我们的 DROM 段被撑到了 **0x0FFD8（约 64KB）** —— 这是为了让 IROM 段的
+"vaddr 低 16 位 == 数据在 flash 上的低 16 位"这条约束成立而做的填充。
+
+后果：bootloader 会认为 **DROM 占了 64 个 MMU 页（entry 0~63）**，
+而我们的 IROM 又要求 **entry 3**（`(0x42030000 & 0x1FFFFFF) >> 16 = 3`）
+—— 正好落在 DROM 的页范围内。
+
+IDF/Zephyr 都会调 `Cache_Set_IDROM_MMU_Size(irom_pages, drom_pages, ...)`
+把 512 项表在 IROM 和 DROM 之间切分（IDF 里 IROM 从 0 开始，DROM 从 irom_pages 开始），
+所以正常镜像的 DROM vaddr 是 `0x3C010020` 这种"从 IROM 页数之后开始"的地址。
+我们的布局很可能让这个切分算错，导致 IROM 的 entry 3 实际指向别处或被覆盖。
+
+### 下一步（明确）
+
+把 DROM 段做小（不做 64KB 填充），并让 IROM/DROM 的 vaddr 落在
+`Cache_Set_IDROM_MMU_Size` 预期的那套切分里 —— 即模仿 IDF 的布局：
+DROM 在 `0x3C0xxxxx`（x 按 IROM 页数定），IROM 在 `0x42000020` 起。
