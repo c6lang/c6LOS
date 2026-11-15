@@ -20,6 +20,8 @@ extern u32 s3_win_call_wifi_start(void);
 extern u32 s3_win_call_phy_cal(void);
 extern u32 s3_win_call_phy_enable(void);
 extern void s3_win_call_log(const char *s);
+extern void s3_win_wifi_main_task(void *arg);
+extern u32 g_next_task_windowed;
 extern void os_icache_enable(void);
 
 static void wifi_main(void *arg)
@@ -78,7 +80,8 @@ void os_main(void)
     s3_win_call_cache_invalidate();
     s3_beacon(1u, s3_win_call_flash42());   /* 期望 42：IROM 取指正常 */
 
-    s3_beacon(2u, (u32)os_task_create("wifi", wifi_main, 0, 3u, 8192u));
+    g_next_task_windowed = 1u;   /* 入口是 windowed 岛函数 */
+    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 8192u));
     /* 隔离实验：暂时不建监控任务，看 InstructionFetchError 是否还在 */
     s3_beacon(3u, 0x11110000u);
     os_task_start();

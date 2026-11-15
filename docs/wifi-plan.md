@@ -6550,3 +6550,48 @@ ISR 4864 次，os_sched_tick 同步 4864 次
 把 `wifi_main` 整个搬进 windowed 岛（`win_island.c` 里写 `s3_win_wifi_main`，
 由 `win_bridge.S` 用 `call8` 调），去掉 call0→windowed 这一层嵌套，
 看死锁是否消失。这是目前唯一还没做的对照实验。
+
+## §157 对照实验：任务 1 整个换成 windowed 入口，死锁依旧
+
+在 `port/s3/win_island.c` 里加了 `s3_win_wifi_main_task()`（任务入口本身也是
+windowed），并把测试任务改成用它作为入口（配合 §156 的 ABI 标志）。
+这样任务 1 的执行流里**完全没有** call0↔windowed 混用。
+
+真板输出：
+
+```
+W0 phy start
+W1 bringup
+（没有 W2，rc 槽 0x50001200 仍是随机值）
+```
+
+两条结论：
+
+1. **`s3_task_tramp` 的 `callx8` 修正确实生效**——windowed 任务入口能被
+   正确启动并跑起来（`W0`/`W1` 都出来了）；
+2. **死锁依旧** ⇒ 根因**不是** call0↔windowed 的 ABI 混用。
+
+## 本轮完整结论（13 轮 WiFi 初始化的收敛过程）
+
+已用真板读数逐项排除：上下文槽位/帧保存/port 与内核视图/调度选择/
+switch-yield 配对/任务入口/栈大小/tick/`pp_post` 符号/各候选库函数是否含
+队列接收/`ppTask` 是否被直接调用/建任务后立即挂起/call0-windowed 混用。
+
+锁定的事实：
+
+* 库侧 `_queue_recv` 的唯一调用者是 `ppTask`（`0x40381c5c`）；
+* 内核记录的最后一次队列阻塞发生在"任务 1"上下文里，且其 sp/EPC 都落在
+  任务 1 自己的栈上；
+* 全流程 `_queue_send`（字段 25）一次都没有；
+* `ieee80211_ioctl_init` 从未被调用，`wifi_init_in_caller_task` 从未返回。
+
+### 下一轮的首选怀疑
+
+`pp_create_task` 里 `_task_create(ppTask, ...)` 之后，WiFi 任务可能**先于**
+`xphyQueue = *(handle+0)` 这句执行完就跑了（我们的 `os_task_create` 让新任务
+立即可运行，而库期望它稍后才被调度）。若 `ppTask` 在 `xphyQueue` 还是 0 时
+就调 `_queue_recv(0)`，我们的 `wq_resolve(0)` 返回 0 → 立即返回失败 →
+`ppTask` 会反复重试并最终阻塞在某个真实队列上，与初始化任务互等。
+
+验证办法：在 `osi_queue_recv` 里记录 `xphyQueue`（ROM `0x3fcef904`）的值
+随时间的第一次/最后一次读数。

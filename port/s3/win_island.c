@@ -515,3 +515,31 @@ u32 s3_win_wifi_start(void)
 {
     return (u32)(int)esp_wifi_start();
 }
+
+/* ---- 对照实验：整个 WiFi 主流程都在 windowed 岛里跑 ---------------------
+ * 任务入口本身也是 windowed（配合 port_task_ctx_create 的 ABI 标志），
+ * 这样任务 1 的执行流里完全没有 call0<->windowed 混用，
+ * 只剩内核原语（经 port/s3/w2c.S 的正规壳）。 */
+u32 s3_win_wifi_main(void)
+{
+    u32 rc = 0;
+
+    s3_win_log("W0 phy start\n");
+    (void)s3_win_phy_cal();
+    (void)s3_win_phy_enable();
+    s3_win_log("W1 bringup\n");
+    rc = s3_wifi_bringup();
+    s3_win_log("W2 bringup returned\n");
+    return rc;
+}
+
+void s3_win_wifi_main_task(void *arg)
+{
+    u32 rc;
+
+    (void)arg;
+    rc = s3_win_wifi_main();
+    /* 结果写进 RTC（窗口ed 里不能直接调 call0 的 s3_beacon） */
+    *(volatile unsigned int *)0x50001200u = rc;
+    for (;;) { }
+}
