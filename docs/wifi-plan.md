@@ -6952,3 +6952,55 @@ RTC `0x50001600`）：
 当前是"干净阻塞"状态但 `W2` 仍不出现。用两条已有工具定位：
 ISR 采样被打断的 PC（§138，RTC `0x50000780`）+ `os_task_probe` 任务表，
 确认初始化任务这次等的是哪个对象、以及 ppTask 是否也已稳定阻塞。
+
+## §168 撤销 `INIT_NOBLOCK`，回到干净阻塞状态
+
+ISR 采样给出了决定性读数：
+
+```
+0x50000780 isr_pc = 0x420325ad  ->  osi_queue_recv 内部
+```
+
+也就是说 `INIT_NOBLOCK()` 让初始化任务的 `_queue_recv` 立刻返回成功，
+反而把它推进了一个**自旋**（PC 一直在 `osi_queue_recv` 里）。
+所以"不阻塞"这条路是错的，已经全部用 `if (0 && ...)` 关掉。
+
+撤销后的真板读数（干净状态）：
+
+```
+串口: W0 phy start / W1 bringup（之后无输出、无 TRAP）
+0x50000780 isr_pc   = 0x4037acab  -> port_idle（全体阻塞，非自旋）
+0x50000200 osi_calls= 0x1e = 30
+0x50001600 timeout_fires = 从未写（无超时误唤醒）
+```
+
+## 本轮的净收获
+
+两个**真实的**内核/适配层 bug，都有真板读数定位：
+
+1. `os_task_current_slot()` 用 `.c6` 的 `&g_tasks[i]` 取址 —— 结果恒为 0，
+   导致 `_task_get_current_task()` 恒返 0、`current_task_is_wifi_task()`
+   恒为真。改成 id 比较后 `g_init_task` 从 0 变 1、`INIT_NOBLOCK` 命中从
+   0 变 1，库的行为明显改变（回调数从 30 涨到百万级）。
+2. `os_task_block_prepare` 在永久等待（timeout=0）时没有清理本任务的残留
+   超时条目，理论上会让永久等待被误唤醒成超时。已在 timeout==0 时先
+   `os_timeout_cancel`。
+
+外加一条重要的**测量纪律**：`esptool read-mem` 每次硬复位，判断"是否自旋"
+必须让固件自己周期快照到 RTC，不能靠连续 read-mem 比较。
+
+## 当前状态
+
+干净阻塞、无自旋、无超时误唤醒，但 `esp_wifi_init_internal` 仍未返回
+（`W2` 不出现）。内核级事实仍然是：
+两个任务都阻塞在同一个队列 `0x3fcbf234`（= `s_wifi_queue`）上，
+而 `_queue_send` / `pp_post` 一次都没被调用。
+
+### 下一轮
+
+用 `os_task_probe`（内核已实现）在干净阻塞状态读任务表，
+确认初始化任务与 WiFi 任务各自等的对象 id，然后二选一：
+* 若是"等对方投递"，就要让库侧的投递路径真正跑起来
+  （回到 `pp_create_task` 之后为什么没有继续）；
+* 若是"等自己"，则是库内部状态机问题，需要对照 IDF 源码的
+  `wifi_init_in_caller_task` 实现逐步核对。

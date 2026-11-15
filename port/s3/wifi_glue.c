@@ -412,7 +412,7 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
     B_IN(3u);
-    if (INIT_NOBLOCK()) { return 0u; }
+    if (0 && INIT_NOBLOCK()) { return 0u; }
     got = s3_w2c_event_wait((void *)&e->e, bits,
                             (wait_all != 0) ? 1u : 0u, w_ticks(ticks));
     B_OUT(3u);
@@ -526,16 +526,10 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
-    if (INIT_NOBLOCK()) {
-        /* 初始化任务在等一条"回复消息"。这里直接返回成功并给一条全零消息，
-         * 看它能否据此继续往下走（库若只看返回码就会前进）。 */
-        u8 *it = (u8 *)item;
-        u32 z = 0u;
-        if (it != 0) {
-            while (z < 16u) { it[z] = 0u; z = z + 1u; }
-        }
-        return 1;
-    }
+    /* 试过让初始化任务不阻塞（INIT_NOBLOCK）：recv 直接返回成功反而让
+     * 调用方自旋（ISR 采样到的 PC 一直是 osi_queue_recv 内部），
+     * 所以初始化任务也必须正常阻塞。保留这个宏仅供诊断开关使用。 */
+    if (0 && INIT_NOBLOCK()) { return 0; }
     if (g_qbad == 0u && (q == 0 || q->magic != WQ_MAGIC)) {
         g_qbad = 1u;
         *(volatile u32 *)0x50000360u = (u32)qh;   /* 第一个不过 magic 的 recv 句柄 */
