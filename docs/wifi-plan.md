@@ -8456,3 +8456,42 @@ spill 必须是切换前的最后一件事，之后的交接**只能通过内存
    把 `a1`/`a4` 重新 `l32r` + `l32i` 取回来（它本来就用 a1/a4）；
 5. 继续 `rfe`。
 这样"任务切走时祖先窗口全在栈上、恢复时靠欠载按需 fill"，就完全对齐官方语义了。
+
+### §200 补记：内存交接版也失败了 —— 但失败点已经"物理上"明确
+
+实现（交接信息落内存、spill 放最后、用 `l32r` 取回目标帧/ctx）后单步读数：
+```
+第2次 port_task_switch:
+  step  58  wb  9->11  ws 0x280->0xa80    call8 进辅助函数
+  step  83  wb 11      ws 0xa80->0xa      HAL spill 开始
+  step  87  wb 11->6                      一圈轮转
+  step 106  wb  6->8
+  step 124  wb  8->10
+  step 127  wb 10->11
+  step 132  wb 11      ws 0xa->0x800      结束时只剩当前窗口(11) live
+末态  pc=s3_trap  wb=11  ws=0x800
+```
+内存交接本身是有效的（后面不再用到旧寄存器），问题在**更底层**：
+
+`xthal_window_spill_nw` 的设计是"溢出**调用者的调用者**的窗口，然后**不返回**"。
+它结束时只有当前窗口 live（`ws=0x800`）。可是辅助函数还要 `retw` 回到
+`port_task_switch` —— 那个返回目标在窗口 9，而窗口 9 既不 live、也**没有被
+spill 出来**（`_nw` 只 spill 调用者的调用者），于是 `retw` 无法恢复，直接崩。
+
+官方之所以没问题，是因为 `vPortYield` **spill 完就把 sp 存进 TCB 直接切走，
+永远不 retw 回到发起调用的那条链**。我们的 `port_task_switch` 是"保存现场 +
+切到目标任务"的普通函数，结构上和它不同。
+
+**下一轮的正确结构**（这是最后一块拼图）：
+把 `port_task_switch` 改成"发起调用的那条链永不被恢复"的形态 —— 即
+spill 之后**不要 `retw` 回 port_task_switch**，而是直接从辅助函数内部完成
+"写出 sp、装载目标任务帧、`rfe`"。也就是把整个切换动作搬到 windowed 侧：
+```
+s3_win_switch_helper:            (windowed)
+    entry a1, 48
+    <保存当前帧到任务 ctx —— 或者直接调用 call0 的保存例程>
+    <PS 舞蹈 + xthal_window_spill_nw>
+    <从内存取目标任务帧 -> a1, 恢复 a0..a15/EPC/PS -> rfe>
+    （永不 retw）
+```
+这样"spill 后不返回"的语义与官方完全一致，也就不需要对抗 WINDOWBASE 了。
