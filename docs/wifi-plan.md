@@ -4678,3 +4678,33 @@ slot3 = 0x00000102      ← esp_wifi_init_internal 的返回值
 4. cfg 用显式 DRAM 地址（`.c6` 的 static 数组取地址问题）
 
 **`esp_wifi_init_internal` 现在完全可用了。**
+
+### 106. 本轮结束时的精确状态
+
+**已经彻底打通的：**
+
+1. **`--ram-only-header`** —— 让 `esptool elf2image` 丢弃 DROM/IROM 段，
+   之前所有镜像都是残缺的（最隐蔽的那个坑）
+2. **`ICACHE_CTRL` 手工改正为 `0x0B`**（16KB/8-way/32B）——
+   `rom_config_instruction_cache_mode(16384,8,32)` 实际会写成 `0x0F`（32KB，非法）
+3. **`Cache_Invalidate_ICache_All`** —— 配置后必须再失效一次
+4. **flash 取指完全正常**：`s3_asm_flash_42()` 返回 42（偏移 0x14）
+5. **`esp_wifi_init_internal` 完整执行并返回**（无 trap）：
+   `entry` → 函数体 → `retw` 全部正常
+
+**还差的：**
+
+`esp_wifi_init_internal` 返回 `0x102` = `ESP_ERR_INVALID_ARG`。
+已发现 `wifi_osi_funcs_t` 需要：
+- `_version`（第一个字）= `ESP_WIFI_OS_ADAPTER_VERSION` = **0x00000008**
+- `_magic`（最后一个字）= `ESP_WIFI_OS_ADAPTER_MAGIC` = **0xDEADBEAF**
+
+已在 `wifi_glue.c` 的 `s3_wifi_osi_init()` 里设置，但仍返回 0x102 ⇒
+说明还有别的校验（可能是 `wifi_init_config_t` 的字段偏移算错了，
+或者 `wifi_osi_funcs_register()` 里还有更细的检查）。
+
+**下一步**：
+1. 用 IDF 的头文件编译一个小的验证程序，打印 `wifi_init_config_t`
+   和 `wifi_osi_funcs_t` 的**真实偏移**（我们现在是按源码推算的）
+2. 或者直接对照 IDF 的 `esp_adapter.c:582` 里 `g_wifi_osi_funcs` 的完整初始化，
+   逐个字段抄过来（那里面每个函数都有真实的实现，我们目前全是 `glue_ret0`）

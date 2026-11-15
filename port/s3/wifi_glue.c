@@ -27,6 +27,13 @@ void s3_wifi_osi_init(void)
         tab[i] = (void *)glue_ret0;
         i = i + 1u;
     }
+    /* 头尾两个字不是函数指针，而是版本号和魔数 —— 闭源库会用它们校验整张表：
+     *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
+     *   ESP_WIFI_OS_ADAPTER_MAGIC   = 0xDEADBEAF
+     * 之前这里全被填成了 glue_ret0，所以 wifi_osi_funcs_register() 返回
+     * ESP_ERR_INVALID_ARG(0x102)。 */
+    tab[0]     = (void *)0x00000008u;
+    tab[n - 1] = (void *)0xDEADBEAFu;
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */

@@ -1,0 +1,43 @@
+/* 按 IDF 的 WIFI_INIT_CONFIG_DEFAULT() 填好整个 wifi_init_config_t
+ * 布局：osi_funcs@0, wpa_crypto_funcs@4(44B), 18 个 int@48..119,
+ *       feature_caps@120(u64), sta_disconnected_pm@128(bool),
+ *       espnow_max_encrypt_num@132, tx_hetb_queue_num@136,
+ *       dump_hesigb_enable@140(bool), magic@144 (sizeof=148) */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+extern u32 s3_win_call_flash42(void);
+extern u32 s3_win_call_cache_invalidate(void);
+extern u32 s3_win_call_wifi_init(void *cfg);
+extern u32 s3_win_call_osi_init(void);
+#define CFG ((u32 *)0x3FCA2000u)
+void os_main(void)
+{
+    u32 i = 0u, rc = 0u;
+    s3_beacon(0u, 0xB0000210u);
+    os_icache_enable();
+    s3_win_call_cache_invalidate();
+    s3_beacon(1u, s3_win_call_flash42());
+
+    for (i = 0u; i < 40u; i = i + 1u) { CFG[i] = 0u; }
+    CFG[0] = s3_win_call_osi_init();          /* osi_funcs */
+    CFG[12] = 10u;                            /* static_rx_buf_num */
+    CFG[13] = 32u;                            /* dynamic_rx_buf_num */
+    CFG[15] = 0u;                             /* static_tx_buf_num */
+    CFG[16] = 32u;                            /* dynamic_tx_buf_num */
+    CFG[18] = 5u;                             /* rx_mgmt_buf_num */
+    CFG[21] = 1u;                             /* ampdu_rx_enable */
+    CFG[22] = 1u;                             /* ampdu_tx_enable */
+    CFG[24] = 1u;                             /* nvs_enable */
+    CFG[26] = 6u;                             /* rx_ba_win */
+    CFG[28] = 752u;                           /* beacon_max_len */
+    CFG[29] = 6u;                             /* mgmt_sbuf_num */
+    CFG[33] = 7u;                             /* espnow_max_encrypt_num */
+    CFG[34] = 1u;                             /* tx_hetb_queue_num */
+    CFG[36] = 0x1F2F3F4Fu;                    /* magic @144 */
+
+    rc = s3_win_call_wifi_init((void *)CFG);
+    s3_beacon(2u, rc);                        /* 期望 0 = OK */
+    s3_beacon(3u, 0x60000000u | (rc & 0xFFFFu));
+    for (;;) { }
+}
