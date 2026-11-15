@@ -1,4 +1,21 @@
 
+
+> # ★★★ 2026：IROM 问题已解决 ★★★
+>
+> **根因**：I-cache 从来没有被正确配置 —— bootloader 留下的默认模式
+> （4-way/16KB/16B，`ICACHE_CTRL=0x01`）无法为 IROM 提供数据。
+> 必须调 ROM 的 `rom_config_instruction_cache_mode(32768, 8, 32)` 配成
+> 8-way/32KB/32B（`ICACHE_CTRL=0x0F`）。IDF 应用一直在做这件事，我们没做。
+>
+> **修复**：`port/s3/flash.c: os_icache_enable()`（已提交）。
+> **验证**：数据读 `0x42030000 = 0x7b004136` ✓，取指执行 flash 里 `movi.n a2,42` 返回 42 ✓。
+>
+> **关键判别方法**：DROM 窗口能读（`0x3C000020` 读回 `0xABCD5432`）而 IROM 不能
+> —— 由此确定坏的只有 I-cache 一侧。
+>
+> 详见 `docs/refs/cache-error-observability.md` 末尾的"根因已找到"一节。
+> **WiFi 栈现在可以放进 flash，原定目标重新可推进。**
+
 # 从这里继续（交接摘要）
 
 ## 一分钟看懂现在的状态
