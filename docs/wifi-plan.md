@@ -6595,3 +6595,39 @@ switch-yield 配对/任务入口/栈大小/tick/`pp_post` 符号/各候选库函
 
 验证办法：在 `osi_queue_recv` 里记录 `xphyQueue`（ROM `0x3fcef904`）的值
 随时间的第一次/最后一次读数。
+
+## §158 `pp_post` 从未被调用（--wrap 验证）
+
+加 `-Wl,--wrap=pp_post` 并计数：
+
+```
+0x50000E1C pp_post 调用次数 = 随机值（从未被写过）
+OSI 回调总数 = 0x1e = 30（与之前一致）
+```
+
+⇒ **整条投递路径根本没走到**（不是 `pp_post` 提前返回）。
+
+## 这 13 轮把问题收敛成了这样一个自洽的图景
+
+1. `esp_wifi_init_internal` 依次调用 `wifi_osi_funcs_register` →
+   `wifi_api_lock` → `pm_funcs_init` → `wdev_funcs_init` →
+   `net80211_funcs_init` → `wifi_api_unlock` → `wifi_init_in_caller_task`；
+2. `wifi_init_in_caller_task` 里：`wifi_menuconfig_init` ✅ →
+   `misc_nvs_init` ✅ → `ic_create_wifi_task`（内部 `pp_create_task` ✅）→
+   **之后就再没往下走**（`ieee80211_ioctl_init` 从未被调用、函数从未返回）；
+3. WiFi 任务（`ppTask`）被建出来并跑起来：`_semphr_give` 完成握手 →
+   在 `s_wifi_queue` 上 `_queue_recv` 阻塞；
+4. 初始化任务也在同一个队列上阻塞（内核级证据：kind=6、obj 相同）；
+5. `pp_post` 从未调用、`_queue_send` 从未调用 —— **没有任何投递**。
+
+也就是说：**两个任务都在等对方投递，而投递代码一次都没执行。**
+`pp_create_task` 内部一定有一条我们现在看不到的"接收"路径
+（它自己的反汇编里没有偏移 116 的直接调用，说明是间接调用，或者
+`pp_create_task` 之后控制流并没有正常返回）。
+
+### 下一轮
+
+把 `pp_create_task` 的**完整**反汇编逐条过一遍（不只是偏移 116 的检索），
+重点是 `_task_create` 之后的控制流：看它是否在一个循环里等某个标志，
+以及它是否通过 `l32i aX, aY, <off>` 间接调了 `_queue_recv`（off 可能是别的值，
+因为 `wifi_static_queue_t` 之类的包装会再取一次字段）。

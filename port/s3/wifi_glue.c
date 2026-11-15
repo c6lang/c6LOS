@@ -525,6 +525,11 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         rc[(k_ & 7u) * 3u + 1u] = id_;
         rc[(k_ & 7u) * 3u + 2u] = sp_;
         rc[24] = g_rc_n;
+        /* 疑点：ppTask 可能在 xphyQueue 尚未写入时就调 _queue_recv。
+         * xphyQueue 是 ROM 里的全局（0x3fcef904），记下每次 recv 时的值。 */
+        rc[25] = *(volatile u32 *)0x3fcef904u;
+        rc[26] = (u32)qh;
+        rc[27] = (u32)q;
         /* 独立区域：从窗口帧里取调用者返回地址。
          * entry 把调用者的 a0..a3 存在帧的高端（framesize-16 ..+0），
          * 这里把 framesize=32 的几种可能位置都记下来，事后对照哪份是代码地址。 */
@@ -1141,6 +1146,13 @@ int __wrap_pp_create_task(void)
 {
     s3_wrap_bump(4u);
     return __real_pp_create_task();
+}
+
+extern int __real_pp_post(unsigned int ppq, unsigned int data);
+int __wrap_pp_post(unsigned int ppq, unsigned int data)
+{
+    s3_wrap_bump(7u);
+    return __real_pp_post(ppq, data);
 }
 
 extern int __real_wifi_init_in_caller_task(void);
