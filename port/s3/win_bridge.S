@@ -627,3 +627,125 @@ s3_win_call_cache_invalidate_addr:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* s3_win_call_ache_suspend_icache */
+    .align  4
+    .global s3_win_call_ache_suspend_icache
+    .type   s3_win_call_ache_suspend_icache, @function
+s3_win_call_ache_suspend_icache:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_cache_suspend_icache
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+
+/* s3_win_call_ache_resume_icache */
+    .align  4
+    .global s3_win_call_ache_resume_icache
+    .type   s3_win_call_ache_resume_icache, @function
+s3_win_call_ache_resume_icache:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_cache_resume_icache
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+/* s3_win_call_cache_suspend_icache */
+    .align  4
+    .global s3_win_call_cache_suspend_icache
+    .type   s3_win_call_cache_suspend_icache, @function
+s3_win_call_cache_suspend_icache:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_cache_suspend_icache
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+/* s3_win_call_cache_resume_icache */
+    .align  4
+    .global s3_win_call_cache_resume_icache
+    .type   s3_win_call_cache_resume_icache, @function
+s3_win_call_cache_resume_icache:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_win_cache_resume_icache
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret

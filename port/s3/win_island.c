@@ -440,3 +440,16 @@ u32 s3_win_cache_invalidate_addr(u32 addr, u32 size)
     fn(addr, size);
     return 0u;
 }
+
+/* ROM Cache_Suspend_ICache @0x4000189c —— 返回挂起前的状态 */
+u32 s3_win_cache_suspend_icache(void)
+{
+    return ((u32 (*)(void))0x4000189cu)();
+}
+
+/* ROM Cache_Resume_ICache @0x400018a8 */
+u32 s3_win_cache_resume_icache(u32 state)
+{
+    ((void (*)(u32))0x400018a8u)(state);
+    return 0u;
+}

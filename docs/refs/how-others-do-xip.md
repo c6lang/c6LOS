@@ -60,3 +60,32 @@ esp-hal 的 flash/MMU 代码（`esp-hal/src/flash/mmu.rs`）里有两句注释�
 3. 失效用 **`Cache_Invalidate_Addr`（按地址）**，并且**写表项 + 失效要在同一个
    cache 关闭窗口内**完成。
 4. 可以考虑改用 `esp-bootloader-direct-boot` 那种模式：镜像烧 0x0、自己初始化、自己映射。
+
+## 我们照着做了，还是不行
+
+按 NuttX / esp-hal 的做法，在 app 里自己建立 XIP：
+
+```c
+st = s3_win_call_cache_suspend_icache();          /* ROM Cache_Suspend_ICache @0x4000189c */
+os_reg_wr(0x600C500C, 0x00000003);                 /* entry3 -> flash 页 3 */
+os_reg_wr(0x600C5000, 0x00000002);                 /* entry0 -> flash 页 2 */
+os_reg_wr(0x600C4064, os_reg_rd(0x600C4064) & ~3); /* 总线不关 */
+s3_win_call_cache_invalidate_addr(0x42030000, 0x10000);  /* ROM Cache_Invalidate_Addr @0x400016b0 */
+s3_win_call_cache_resume_icache(st);               /* ROM Cache_Resume_ICache @0x400018a8 */
+```
+
+真板结果：
+
+```
+slot0 = 0xB00000B0   进 os_main
+slot3 = 0x00000000   suspend 返回的旧状态（可疑：应为 1）
+slot2 = 0x00000000   IROM 读仍是 0
+slot1 = 0x00000000   取指调用没返回
+```
+
+⇒ **在 app 里重建 XIP 这条路也走不通**。`suspend` 返回值就是 0 这一点也可疑，
+说明这些 ROM cache 函数在我们这个环境里行为不正常（之前也观察到
+`Cache_Enable_ICache` 会让应用崩溃）。
+
+**这条信息本身很有价值**：ROM 的 cache 维护函数在 IDF app 里正常、在我们 app 里异常，
+进一步说明差异在**更底层/更早的阶段**，不是"应用该怎么调函数"的问题。

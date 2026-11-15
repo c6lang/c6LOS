@@ -1,0 +1,29 @@
+/* 照 NuttX/esp-hal 的做法自己建立 XIP：
+ * 挂起 I-cache -> 写表项 -> 按地址失效 -> 恢复
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+u32 s3_win_call_cache_suspend_icache(void);
+u32 s3_win_call_cache_resume_icache(u32 state);
+u32 s3_win_call_cache_invalidate_addr(u32 addr, u32 size);
+u32 s3_win_call_flash42(void);
+void os_main(void)
+{
+    u32 st = 0u, v = 0u;
+    s3_beacon(0u, 0xB00000B0u);
+
+    st = s3_win_call_cache_suspend_icache();       /* 挂起 */
+    os_reg_wr(0x600C500Cu, 0x00000003u);           /* entry3 -> flash 页3 */
+    os_reg_wr(0x600C5000u, 0x00000002u);           /* entry0 -> flash 页2 */
+    os_reg_wr(0x600C4064u, os_reg_rd(0x600C4064u) & ~0x3u);   /* 总线不关 */
+    s3_win_call_cache_invalidate_addr(0x42030000u, 0x10000u); /* 按地址失效 */
+    s3_win_call_cache_resume_icache(st);           /* 恢复 */
+
+    s3_beacon(3u, st);
+    v = *(volatile u32 *)0x42030000u;
+    s3_beacon(2u, v);                              /* 期望 0x7b004136 */
+    v = s3_win_call_flash42();
+    s3_beacon(1u, 0xF1000000u | (v & 0xFFu));      /* 期望低字节 42 */
+    for (;;) { }
+}
