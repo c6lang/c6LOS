@@ -6631,3 +6631,34 @@ OSI 回调总数 = 0x1e = 30（与之前一致）
 重点是 `_task_create` 之后的控制流：看它是否在一个循环里等某个标志，
 以及它是否通过 `l32i aX, aY, <off>` 间接调了 `_queue_recv`（off 可能是别的值，
 因为 `wifi_static_queue_t` 之类的包装会再取一次字段）。
+
+## §159 `pp_create_task` 用的是字段 36（`_task_create_pinned_to_core`）
+
+通读 `pp_create_task`（`0x42036500`）的关键片段：
+
+```
+42036532  l32i a4, a4, 152          ; 字段 38 = _task_delete
+42036535  callx8 a4
+42036538  l32r a4, (s_wifi_queue)   ; 读 WiFi 队列全局
+420365a0  l32i a7, a7, 144          ; 字段 36 = _task_create_pinned_to_core
+420365a6  call8 config_get_wifi_task_stack_size
+420365b2  callx8 a10                ; = _task_get_max_priority (字段 42)
+420365c6  callx8 a7                 ; 建任务
+420365f0  l32i a8, a8, 156          ; 字段 39 = _task_ms_to_tick
+```
+
+两点值得注意：
+
+1. 建 WiFi 任务用的是 **`_task_create_pinned_to_core`（字段 36，7 个参数）**，
+   不是 `_task_create`（字段 37）。我们现在两个槽位都映射到同一个
+   `osi_task_create` ✓，但 windowed 调用下**第 7 个参数是在栈上传递的**，
+   需要确认我们的函数没把它当成别的参数用（我们签名是 6 个参数，第 7 个
+   会被忽略 ✓ 但如果编译器/ABI 处理有偏差就要复核）。
+2. 整个函数仍然没有 `l32i aX,aY,116` + `callx8` 的收队列调用。
+
+### 下一轮
+
+核对 `_task_create_pinned_to_core` 的 7 参数在 windowed ABI 下的传递
+（a2..a7 六个 + 栈上第 7 个），确认 `osi_task_create` 拿到的是
+`(fn, name, stack, arg, prio, handle)` 而不是错位的一组。
+可以把实际收到的 6 个参数值全部记进 RTC 与库的调用点对照。
