@@ -8495,3 +8495,29 @@ s3_win_switch_helper:            (windowed)
     （永不 retw）
 ```
 这样"spill 后不返回"的语义与官方完全一致，也就不需要对抗 WINDOWBASE 了。
+
+### §200 三补记：「spill 完直接 rfe、永不返回」版也挂在 ROM 例程内部
+按上一节的正确结构实现（`s3_win_switch`：PS 舞蹈 → `xthal_window_spill_nw`
+→ `jx` 到 `s3_restore_from_globals` 恢复目标任务并 `rfe`，永不 retw）后：
+- **第一次切换（引导，门控不 spill）完全正常**：单步 400 步窗口状态不变、
+  能正常 `rfe` 进第一个任务 ✓
+- 第二次切换（真正 spill）挂在**ROM 的 spill 例程内部**：
+  ```
+  exccause=29 (LoadStoreProhibited)  excvaddr=0xffffffe0(-32)
+  epc1=0x40048c33 (ROM)   a1=0x3fcba980(任务栈)
+  windowbase=0xb  windowstart=0xaaaa   ← spill 进行到一半
+  ```
+  也就是说轮到某个窗口时，它算出的帧指针是坏的（往 -32 存）。
+
+到这里可以确定：**问题不在"怎么调"，而在"我们这条任务栈上的窗口链本身不干净"**
+（第一次切换前就已经观察到 `ws=0x280` = bit7|bit9 这种不连续的 live 集合）。
+所以下一步不该再改切换代码，而应该**从源头保证任务栈上的窗口状态是干净的**：
+
+1. 任务第一次被调度时，`port_task_ctx_create` 建的那个初始帧必须显式把
+   `WINDOWSTART` 归成"只有当前窗口"（`wsr windowstart`，此时 WOE 是否已开
+   要按 §197 的办法判断），让任务从一个干净的窗口状态起步；
+2. 之后每次切换前 spill 才有意义（因为链上每个窗口都是本任务产生的）。
+3. 验证手段：用 `tools/gstep_win.gdb` 在任务第一次运行前看 `ws` 是不是只有一个 bit。
+
+这条是整条线上唯一还没做过的"源头清理"，也是三次切换改造都失败后剩下的
+唯一解释。
