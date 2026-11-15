@@ -16,6 +16,7 @@ static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
 static u32 g_dbg_n = 0;        /* os_task_current_id 诊断计数 */
 static u32 g_dbg_pick_n = 0;   /* 调度选择诊断计数 */
 static u32 g_dbg_blk_n = 0;    /* 阻塞诊断计数 */
+static u32 g_dbg_to_fires = 0; /* 超时到期唤醒次数 */
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
@@ -537,6 +538,10 @@ void os_sched_tick(void) {
     if (os_timeout_pending() != 0u) {
         while (os_timeout_pop_expired(now, &id) != 0) {
             OsTask *t = os_task_get(id);
+            g_dbg_to_fires = g_dbg_to_fires + 1;
+            if (g_dbg_to_fires < 0xFFFFFFFFu) {
+                *(volatile u32 *)0x50001600u = g_dbg_to_fires;
+            }
             if (t != 0 && t->state == (u8)OS_TASK_BLOCKED) {
                 unblock(t, -2);
             }
