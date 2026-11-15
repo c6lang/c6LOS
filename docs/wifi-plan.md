@@ -4708,3 +4708,44 @@ slot3 = 0x00000102      ← esp_wifi_init_internal 的返回值
    和 `wifi_osi_funcs_t` 的**真实偏移**（我们现在是按源码推算的）
 2. 或者直接对照 IDF 的 `esp_adapter.c:582` 里 `g_wifi_osi_funcs` 的完整初始化，
    逐个字段抄过来（那里面每个函数都有真实的实现，我们目前全是 `glue_ret0`）
+
+### 107. ★★★★★ OSI 表校验通过！现在卡在内存分配
+
+反汇编 `wifi_osi_funcs_register` 找到了**完整的校验逻辑**：
+
+```
+4203d426:  l32i  a12, a2, 0        ; a12 = osi_funcs->_version
+4203d428:  beqi  a12, 8, 0x2e      ; 必须 == ESP_WIFI_OS_ADAPTER_VERSION(8)
+4203d43c:  l32i  a12, a2, 0x1dc    ; a12 = osi_funcs->[0x1DC] = **第 119 个字**
+4203d43f:  l32r  a11, 0xdeadbeaf   ; ESP_WIFI_OS_ADAPTER_MAGIC
+4203d445:  bne   a12, a11, error   ; 必须等于魔数
+4203d448:  s32i  a2, a9, 0         ; 通过，存下来
+```
+
+**关键发现**：`_magic` 在**固定偏移 `0x1DC`**（第 119 个字），
+而用 `tab[n-1]` 拿不到它 —— 因为头文件里 `wifi_osi_funcs_t` 有
+`#if CONFIG_IDF_TARGET_ESP32C6/C5/C61` 两个条件字段，对我们不成立，
+算出来的 `sizeof` 比库期望的少两格。
+
+改成显式 `tab[119] = 0xDEADBEAF` 后：
+
+```
+之前：rc = 0x102  (ESP_ERR_INVALID_ARG)
+现在：rc = 0x101  (ESP_ERR_NO_MEM)     ← 校验通过了！
+```
+
+### 下一步：实现真正的 OSI 函数
+
+`ESP_ERR_NO_MEM` 说明库开始调用我们的 `_malloc`/`_calloc` 了，
+而它们目前都是 `glue_ret0`（返回 0）。
+
+需要实现的（按 `wifi_osi_funcs_t` 的定义）：
+- 内存：`_malloc`、`_free`、`_calloc`、`_realloc`、`_zalloc`
+- 同步：`_mutex_create/lock/unlock/destroy`、`_recursive_mutex_*`
+- 任务：`_task_create`、`_task_delete`、`_task_get_current_task`、`_task_ms_to_tick`
+- 队列：`_queue_create/send/recv/delete`
+- 信号量：`_semphr_create/give/take/delete`
+- 事件/定时器：`_event_create/post/clear/delete`、`_timer_*`
+- 其它：`_get_free_heap_size`、`_random`、`_log_write` 等
+
+我们的 RTOS 有任务/互斥量/信号量，这些都能对上。

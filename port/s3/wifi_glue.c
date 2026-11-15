@@ -33,7 +33,10 @@ void s3_wifi_osi_init(void)
      * 之前这里全被填成了 glue_ret0，所以 wifi_osi_funcs_register() 返回
      * ESP_ERR_INVALID_ARG(0x102)。 */
     tab[0]     = (void *)0x00000008u;
-    tab[n - 1] = (void *)0xDEADBEAFu;
+    /* 注意：不能用 tab[n-1]！闭源库是从**固定偏移 0x1DC（第 119 个字）**读 _magic 的，
+     * 而头文件里的 wifi_osi_funcs_t 因为 #if CONFIG_IDF_TARGET_ESP32C6/C5/C61
+     * 那两个条件字段对我们不成立，算出来的 sizeof 比库期望的小两格。 */
+    tab[119]   = (void *)0xDEADBEAFu;
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */
