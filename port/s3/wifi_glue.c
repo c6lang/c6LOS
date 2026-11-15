@@ -1132,6 +1132,10 @@ extern int esp_wifi_set_config(int iface, void *conf);
 extern int esp_wifi_start(void);
 extern int esp_wifi_connect_internal(void);
 extern int esp_wifi_sta_get_ap_info(void *conf);
+extern int esp_wifi_scan_start(const void *cfg, int block);
+extern int esp_wifi_scan_get_ap_num(unsigned short *num);
+extern int esp_wifi_scan_get_ap_records(unsigned short *num, void *records);
+int s3_wifi_scan(void);         /* 定义在下面（先扫一遍做射频体检） */
 #endif
 
 #ifdef S3_WITH_WIFI
@@ -1148,7 +1152,12 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
 
     for (i = 0u; i < 48u; i++) { cfg[i] = 0u; }
     if (ssid == 0 || ssid[0] == 0) {
-        ets_printf("[wifi] 没给 SSID，跳过关联\n");
+        /* 没给账号：仍然把接口拉起来扫一遍，至少验证射频与收发链路 */
+        ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
+        (void)esp_wifi_set_storage(1);
+        (void)esp_wifi_set_mode(1);
+        ets_printf("[wifi] start=%d\n", esp_wifi_start());
+        (void)s3_wifi_scan();
         return 0xFFFFFFFFu;
     }
     while (ssid[n] != 0 && n < 32) { ((u8 *)cfg)[n] = (u8)ssid[n]; n++; }
@@ -1168,9 +1177,48 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     ets_printf("[wifi] set_config=%d\n", r3);
     r4 = esp_wifi_start();
     ets_printf("[wifi] start=%d\n", r4);
+    /* 先扫一遍：不需要密码就能验证射频链路（也方便判断"连不上"是 AP 没扫到
+     * 还是认证失败）。 */
+    (void)s3_wifi_scan();
     r5 = esp_wifi_connect_internal();
     ets_printf("[wifi] connect=%d\n", r5);
     return (u32)r5;
+}
+
+/* 扫描：这一步是**不需要 WiFi 密码**就能做的射频体检 ——
+ * 只要扫到 AP，就证明 PHY + MAC + 收发链路都活着（§215）。
+ * 返回扫到的 AP 数；<0 表示失败。只打印第一个 AP 的 SSID/信道/RSSI
+ * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
+int s3_wifi_scan(void)
+{
+    u8 cfg[16];                 /* wifi_scan_config_t，全零 = 全信道扫所有 SSID */
+    u8 rec[256];                /* 只放一个 wifi_ap_record_t，足够大 */
+    unsigned short num = 0;
+    unsigned short one = 1;
+    int r = 0;
+    int i = 0;
+
+    for (i = 0; i < 16; i++) { cfg[i] = 0; }
+    for (i = 0; i < 256; i++) { rec[i] = 0; }
+    ets_printf("[wifi] scan start（阻塞）\n");
+    r = esp_wifi_scan_start((const void *)cfg, 1);
+    ets_printf("[wifi] scan_start=%d\n", r);
+    if (r != 0) {
+        return -1;
+    }
+    r = esp_wifi_scan_get_ap_num(&num);
+    ets_printf("[wifi] scan_get_ap_num=%d num=%u\n", r, (unsigned)num);
+    if (r != 0 || num == 0) {
+        return (int)num;
+    }
+    r = esp_wifi_scan_get_ap_records(&one, (void *)rec);
+    if (r == 0) {
+        /* 偏移按 IDF 的 wifi_ap_record_t：bssid[6]@0, ssid[33]@6,
+         * primary(u8)@39, second@40, rssi(int8)@41 */
+        ets_printf("[wifi] AP0 ssid=%.32s ch=%u rssi=%d\n",
+                   (const char *)(rec + 6), (unsigned)rec[39], (int)(signed char)rec[41]);
+    }
+    return (int)num;
 }
 
 /* 轮询"连上 AP 了吗"：返回 1 = 已关联。ap_info 至少 64 字节（我们只用前几个字节）。 */

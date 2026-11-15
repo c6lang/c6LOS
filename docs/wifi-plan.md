@@ -9701,3 +9701,25 @@ W1 bringup
 `make https`（含关联 + lwIP + TLS）与 `wifi` / `wifip` / 基线 `s3` 四种构建都通过，
 `chkimg OK`。基线构建里新增的两个函数被 `#ifdef S3_WITH_WIFI` 包住（否则会引用
 不存在的 `esp_wifi_set_storage` 等符号 —— 这次就踩到了，已修）。
+
+### §215 补记：加一步"扫描"——**不需要 WiFi 密码**就能验证射频链路
+
+关联需要用户给 SSID/密码，但"射频通不通"不该等密码。所以 `s3_wifi_associate()`
+在 `esp_wifi_start()` 之后、`esp_wifi_connect` 之前先做一次**阻塞扫描**
+（`esp_wifi_scan_start(cfg, 1)`，cfg 全零 = 全信道扫所有 SSID），并打印：
+
+```
+[wifi] scan start（阻塞）
+[wifi] scan_start=0
+[wifi] scan_get_ap_num=0 num=7
+[wifi] AP0 ssid=<第一个 AP 的名字> ch=6 rssi=-46
+```
+
+- 扫到 `num > 0` 就是**PHY + MAC + 收发链路全部活着的硬证据**；
+- 扫不到（`num=0`）说明还是射频/时钟层的问题，和密码无关；
+- 没给 SSID 时也会走 set_mode + start + scan，所以板子回来第一件事就能验证射频，
+  不必等账号到位。
+
+只打印第一个 AP 的 SSID/信道/RSSI：`wifi_ap_record_t` 的结构体大小依赖 IDF 版本，
+只取第一个记录不需要知道 stride（按 `bssid[6]@0, ssid[33]@6, primary@39, rssi@41`
+读前几个字段，这几个偏移在各版本都稳定）。
