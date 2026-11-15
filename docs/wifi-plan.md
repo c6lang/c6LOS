@@ -6233,3 +6233,44 @@ Xtensa 的 `ENTRY` 只在发生**窗口溢出**时才由溢出向量把 `a0..a3`
 下一轮建议从"给 `wifi_init_in_caller_task` 调用链上的每个库函数各配一个
 RTC 计数"入手 —— 用 `--wrap` 或对目标函数做 trampoline 都可以，
 把 init 的最后一步收敛到单个函数上。
+
+## §149 ★ 两个 ctx 的 sp 各自落在自己的栈区 —— 上下文完全正确
+
+在 `os_task_block_prepare` 里同时记录 (任务 id, 帧 EPC, ctx 保存的 sp, kind)：
+
+```
+blk0: id=1  epc=0x00000066  sp=0x3fcba4e0  kind=1
+blk1: id=2  epc=0x4037b955  sp=0x3fcbc5e0  kind=6
+blk2: id=1  epc=0x403794b3  sp=0x3fcba370  kind=6
+```
+
+对照 `port_task_ctx_create` 的槽位记录（任务 1 栈 `0x3fcb8620..0x3fcba620`、
+任务 2 栈 `0x3fcba620..0x3fcbc620`，各 8192）：
+
+* 任务 1 的 sp `0x3fcba4e0` / `0x3fcba370` → **在任务 1 自己的栈里** ✅
+* 任务 2 的 sp `0x3fcbc5e0` → **在任务 2 自己的栈里** ✅
+
+⇒ **上下文切换与保存完全正确**，不存在"两个任务共栈"或"帧串了"的问题。
+
+因此内核级结论是硬的：
+
+> **初始化任务（wifi_main）在自己的栈上、真的调用了 `_queue_recv`，
+> 并且和 WiFi 任务阻塞在同一个队列对象 `0x3fcbf234` 上。**
+
+同时 §148 记下的"两次 recv 的 a1 相同"这个读数不可靠（与本节 ctx 里的 sp
+矛盾），以本节的 ctx 数据为准。
+
+### 这轮之后，排查范围已经非常窄
+
+唯一还没定位的是：**`wifi_init_in_caller_task` 这条调用链上，
+到底是哪个库函数发了那次 `_queue_recv`。** 已排除的直接候选：
+
+* `ieee80211_ioctl_init()` —— 只调用三个注册函数
+* `ieee80211_ioctl()` —— 压根没被调到（回调环里之后没有 `21`）
+* `ic_create_wifi_task()` —— 只调 `pp_create_task`
+* `pp_create_task()` —— 范围内没有偏移 116 的调用
+* `ppTask` —— 没有任何 `call8/callx8` 直接调用点
+
+下一轮的做法：把 `wifi_init_in_caller_task` 可能走到的每个库函数都用
+`--wrap` 包一层（或者在 `win_bridge.S` 里加同名跳转桩），每个桩把
+RTC 计数 +1，一次上板就能看出最后停在哪个函数。
