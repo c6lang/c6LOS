@@ -5412,3 +5412,47 @@ OSI 回调计数稳定在 30 不再增长 —— 既不是忙等，也不是我�
    （目前回调环里从没出现过 25）。
 3. 若确认 init 从没投消息，就要查 `pp_post` 的入口条件（它可能先检查
    "当前是否已在 WiFi 任务"，而这个检查依赖第 1 点的标志）。
+
+## §125 定位到 `ieee80211_ioctl` 之后卡住（pp_post 的疑点）
+
+`esp_wifi_init_internal` 的完整链路（重建后的地址）：
+
+```
+4203fb9e call8 wifi_osi_funcs_register
+4203fba9 call8 wifi_api_lock            (21)
+4203fbfc call8 pm_funcs_init
+4203fc0e call8 wdev_funcs_init
+4203fc1a call8 net80211_funcs_init
+4203fc2a call8 wifi_api_unlock          (22)
+4203fc32 call8 wifi_init_in_caller_task
+4203fc43 callx8 a3                      (内部回调)
+4203fc5d call8 ieee80211_ioctl          (0x4205ffd8)
+4203fc67 call8 wifi_api_lock            (21)   <-- 回调环里从没出现
+```
+
+真板 30 条回调环：
+
+```
+19 43 21 88 43 88 43 88 43 22 18 43 19 43 18 43 86 43
+42 94 43 43 13 43 42 37 15 16 29 29
+```
+
+`37`（`_task_create`）之后 `15/16`（信号量握手）正常完成，`pp_create_task`
+整条走通；随后 WiFi 任务阻塞在 `29`（`_queue_recv`）。
+**但 `21`（wifi_api_lock，在 `ieee80211_ioctl` 之后）一次都没出现** ——
+说明初始化任务卡在 `callx8 a3` 或 `ieee80211_ioctl` 里面。
+
+关键疑点：**`pp_post` 是 ROM 符号（`0x400056e8 A`）**。ROM 的 `pp_post`
+走 ROM 自己的队列/信号量，而不是我们的 `_queue_send`（回调环里字段 25
+从来没出现过）。如果 ROM 的 `pp_post` 与 libpp 的 `ppTask` 用的不是同一个
+队列对象，就会出现"初始化任务发了消息、WiFi 任务却永远收不到"的静默死锁，
+与真板现象完全吻合。
+
+### 下一步
+
+1. 真板读 `xphyQueue`（ROM `0x3fcef904`）和 `s_wifi_queue`（`0x3fccfc2c`），
+   确认两者是否都等于我们建的 WQ 指针（DRAM 读会被复位冲掉，需要先拷进
+   RTC 再 read-mem）。
+2. 反汇编 libpp 里的 `ppTask`（`0x40381f44` 附近），确认它到底从哪个队列收。
+3. 若确认 ROM `pp_post` 不可用，就在我们这边把它替换掉（libpp 里通常也有
+   一个 `pp_post` 的非 ROM 版本，或者可以用 `--wrap` 拦掉）。
