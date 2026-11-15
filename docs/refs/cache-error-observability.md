@@ -239,3 +239,56 @@ slot3 = 0x00000000   <- IROM 仍然是 0
 
 注意：我们的代码全部跑在 IRAM，**I-Cache 从来没有被真正用过**，
 所以它坏掉不会影响其它功能——这和观察完全一致。
+
+# ★★★ 根因已找到并修复（2026）★★★
+
+## 根因
+
+**I-cache 从来没有被正确配置过。**
+
+- bootloader 留给 app 的默认模式是 **4-way / 16KB / 16B**（`EXTMEM_ICACHE_CTRL = 0x01`）
+- **这种模式无法为 IROM 提供数据** —— 表现就是：
+  - 从 `0x42xxxxxx` 数据读永远返回 `0x00000000`
+  - 跳进去取指得到 `IllegalInstruction`（取回 `0x00000000` = `ill`）
+  - **而且不报任何 cache 错误**（该中断复位默认关闭，所以一切静默）
+- IDF 应用是靠 ROM 的
+  **`rom_config_instruction_cache_mode(32768, 8, 32)`**（`0x40001a1c`）
+  把它配成 **8-way / 32KB / 32B**（`EXTMEM_ICACHE_CTRL = 0x0F`）才让 IROM 可用的。
+
+我们之前只写了 `CTRL` 的 **ENABLE** 位（bit0），**没有配置模式位**，所以 IROM 一直是死的。
+
+## 修复（`port/s3/flash.c: os_icache_enable()`）
+
+```c
+s3_win_call_config_icache_mode(32768u, 8u, 32u);   /* ROM 0x40001a1c，经 windowed 孤岛 */
+S3_EXTMEM_ICACHE_CTRL1 &= ~0x3u;                   /* 打开 core0/1 的 I 总线 */
+S3_EXTMEM_ICACHE_CTRL  |= 1u;                       /* 使能 */
+```
+
+## 真板验证
+
+```
+EXTMEM_ICACHE_CTRL            = 0x0000000f   (ENABLE|WAY_MODE|SIZE_MODE|BLOCKSIZE_MODE)
+数据读 0x42030000              = 0x7b004136   (flash 里的真实字节)
+取指执行 flash 里的 movi.n a2,42 = 42
+```
+
+## 找到它的关键判别
+
+**DROM 窗口能读，IROM 窗口不能**：
+
+```c
+*(volatile u32 *)0x3C000020u   /* DROM，我们的 app_desc 魔数 */
+*(volatile u32 *)0x42030000u   /* IROM，我们的 .flash.text */
+```
+
+真板：DROM 读回 **`0xABCD5432`（成功）**，IROM 读回 **0（失败）**。
+
+⇒ cache/MMU/SPI/数据通路**全都正常**，坏的**只有 IROM / I-Cache 这一侧**。
+由此才锁定了 "I-cache 模式配置" 这个方向 —— 在这之前一直误以为是 MMU 或 flash 通路问题。
+
+## 之前那些"排除项"为什么都没用
+
+因为它们都在查 **D 侧 / flash 通路 / 权限**，而问题在 **I 侧的模式配置**。
+另外，之前从 JTAG 读到的 `ICACHE_CTRL = 0x01` 其实是**真的**，只是我没意识到
+"`0x01` = 4-way/16KB/16B 是坏的模式" —— IDF app 的 `0x0b` 才是对的。
