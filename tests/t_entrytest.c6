@@ -1,0 +1,13 @@
+/* 决定性测试：flash 里的函数带 entry（分配寄存器窗口）能否执行 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+extern u32 s3_win_call_entry_test(void);
+void os_main(void)
+{
+    s3_beacon(0u, 0xB00001B0u);
+    os_icache_enable();
+    s3_beacon(1u, s3_win_call_entry_test());   /* 期望 77 */
+    for (;;) { }
+}

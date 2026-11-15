@@ -77,11 +77,18 @@ u32 s3_win_flash_leaf(u32 a)
     return a + 7u;
 }
 
-u32 s3_asm_flash_42(void);      /* 手写在 flash 段里的 movi+retw（无 entry） */
+u32 s3_asm_flash_42(void);
+u32 s3_asm_flash_entry(void);   /* 带 entry 的 flash 函数 */      /* 手写在 flash 段里的 movi+retw（无 entry） */
 
 u32 s3_win_flash42_chain(void)
 {
     return s3_asm_flash_42();
+}
+
+/* 调用 flash 里那个**带 entry** 的函数（期望 77） */
+u32 s3_win_asm_entry(void)
+{
+    return s3_asm_flash_entry();
 }
 
 u32 s3_win_flash_leaf_chain(u32 a)

@@ -4035,3 +4035,59 @@ Xtensa 的 **windowed longcall**（`call8/call12` 的远距离形式）**只有 
 
 在调用 `esp_wifi_init_internal` 之前，把 `WindowStart`（`rsr a12, windowstart`）
 的值记到信标里，看进入时窗口位图是什么状态、OWB 是多少。
+
+### 88. ★★★ 找到真正的根因：**flash 里的 `entry` 指令无法执行**
+
+用一个对照实验定位到了最后的问题。在**同一个位置**（`.flash.text` 段内偏移 0x14）
+放两个手写汇编函数：
+
+```asm
+s3_asm_flash_42:        ; 能工作
+    movi  a2, 42
+    retw.n
+
+s3_asm_flash_entry:     ; trap
+    entry a1, 16
+    movi  a2, 77
+    retw.n
+```
+
+真板结果：
+
+```
+*** TRAP cause=0 pc=42010014      <- 正是 s3_asm_flash_entry 的地址
+```
+
+⇒ **同样是 flash 里的 windowed 代码，唯一区别就是有没有 `entry` 指令。**
+
+| 函数 | `entry` | 结果 |
+|---|---|---|
+| `s3_asm_flash_42` | 无 | ✅ 返回 42 |
+| `s3_asm_flash_entry` | 有（`entry a1,16`） | ❌ trap `cause=0` |
+
+### 这解释了之前所有的现象
+
+- `esp_wifi_init_internal` 第一条指令就是 `entry a1, 32` ⇒ **必然 trap**
+- 之前所有"能跑"的 flash 测试（`s3_asm_flash_42`）**都没有 entry** ⇒ 所以能跑
+- 换基址、换偏移、换段布局都没用 ⇒ 因为问题在**指令本身**，与位置无关
+
+### 为什么 `entry` 在 flash 里会失败？
+
+`entry` 不是取指问题 —— 它是 **core 指令**。可能的原因：
+1. **`entry` 之后紧接着要取指下一条指令**，而 I-cache 的**预取/填充**在 flash 区域失效
+   （`movi`+`retw` 可能整条落在同一个 cache 行里，不需要第二次填充；
+   而 `entry` 之后跳转/继续取指会触发新的行填充）
+2. 或者 `entry` 引发的**窗口分配**在我们 flash 代码的 PS 状态下不允许
+
+### 下一步（方向明确）
+
+**方案 A（最稳）**：把 `entry` 从 flash 里挪走 —— 用一个**不带 entry 的 trampoline**
+在 IRAM 里"手工"完成 `entry` 的等效工作（把 a0 等寄存器存到栈上，而不是用窗口）。
+IDF 的 `-mabi=call0` 编译的代码就是这么做的。
+
+**方案 B**：让闭源库的 windowed 函数**不被直接调用**，而是先在 IRAM 里的
+windowed 孤岛中完成 `entry`，再跳到库函数体（跳过它自己的 `entry`）。
+即：`jump to (func_addr + 3)`，在孤岛里已经分配好窗口。
+
+方案 B 更直接、改动最小 —— 因为孤岛本身是 `-mabi=windowed` 编译的，
+它的 `entry` 在 **IRAM** 里能正常工作。
