@@ -9432,3 +9432,51 @@ c6 的编译器可以直接在宿主上编+跑（`tcc/c6`，多文件 + 模块�
 这比"上板盲试"高效得多，也把最后这段路的风险从"未知"变成"已知工作量"。
 
 板子上唯一要多做的是把 `Tcp` 换成 lwIP 的 socket 实现（§210 已经链进来了）。
+
+---
+
+## §212 TLS 1.2 基础件：AES-128-GCM / PRF / RSA 验签（宿主上已验证通过）
+
+§211 定下了 TLS 1.2 方案，这一节把**三个最底层、最容易写错**的件写完并在宿主上
+对着公开测试向量验证通过。新增 `net/` 目录（跨宿主/板子复用的协议实现）：
+
+| 文件 | 内容 | 验证方式 | 结果 |
+| --- | --- | --- | --- |
+| `net/aes_gcm.c6` | AES-128-GCM（GHASH + CTR + tag；`std/encoding/aes` 提供块运算和 key schedule） | NIST SP 800-38D 的两个用例（全零用例 + Test Case 3，带 20 字节 AAD/60 字节明文） | 密文、tag 全对；改 tag 必须拒绝 |
+| `net/tls12_prf.c6` | TLS 1.2 PRF（`P_SHA256`）+ `master secret` / `key expansion` / `finished` 三个便捷入口 | 用宿主 python 的 `hmac`/`hashlib` **独立算出**参考值（不是抄自己） | 三个向量全对 |
+| `net/rsa_verify.c6` | RSA PKCS#1 v1.5 + SHA-256 验签：自写 4096 位上限定长模运算（平方-乘 + 逐位长除法）+ SPKI(DER) 解析 | 宿主 `openssl genrsa` 现场生成 RSA-2048 / RSA-4096 密钥与签名 | 两种模长都验过；改消息/改签名/改长度一律拒绝 |
+
+一键跑：`make tls12check`（= `tools/tls12_selftest.sh`，**不需要板子**）。
+
+### 为什么不用 `std/core/bignum.c6`
+
+它是**定长 1024 位**（`BIG_LIMBS=32`），而 qq.com 的叶子证书 RSA-2048、
+中间/根证书 RSA-4096 —— 差一档就废。所以 `net/rsa_verify.c6` 自己带一套
+128 limb（4096 位）的模运算，只做 RSA 需要的那几件事。代价是 `bn_mod` 里要一个
+129 limb 的临时余数（左移会临时多一位）。
+
+### 三个真踩到的坑（都记在代码注释里，避免以后再犯）
+
+1. **c6/tcc 里对 32 位值移 ≥32 位是按 `&31` 取模的**，不是 0。GCM 的长度块
+   `len(A)*8 || len(C)*8` 一开始就是 32 位写的，结果低字节被重复写进高位 →
+   tag 一直不对（密文却是对的，很迷惑）。改成 `u64` 移位后立刻对。
+2. **HMAC 永远吐 32 字节**：PRF 的最后一块往往只要几个字节，直接写 `out+off`
+   会越过调用方栈上的其它局部量（表现为"前面的用例过了，后面的莫名失败"）。
+   改成先写临时 32 字节再 `memcpy` n 个。
+3. **模运算的余数要 n+1 limb**：`bn_mod` 直接拿调用方的 `r[n]` 当 129 limb 用，
+   RSA-2048 侥幸没炸、RSA-4096 直接验签失败。改成内部缓冲、最后拷回 n limb。
+   另外 DER 的 INTEGER 为了让最高位不当负数会在前面补 `0x00`，RSA-4096 的 `n`
+   因此是 **513 字节** —— 不先跳前导零会被误判成"超出 128 limb"。
+
+### 栈占用要注意
+
+`rsa_pkcs1_sha256_verify` 的调用链（`bn_modexp` + `bn_modmul` + `bn_mod` 的本地
+数组）峰值约 **3.5KB**。板子上跑 TLS 时这个任务要给足栈（建议 ≥6KB），
+别用默认小栈。
+
+### 下一步
+
+TLS 1.2 握手状态机（`net/tls12_hs.c6`）：ClientHello → ServerHello → Certificate
+→ ServerKeyExchange（用上面的 RSA 验签）→ ClientKeyExchange → CCS → Finished，
+记录层用 `aes_gcm`，密钥用 `tls12_prf`。仍然先在宿主上对着真 `qq.com:443`
+跑到通，再搬板子。

@@ -1,0 +1,368 @@
+/* rsa_verify：RSA PKCS#1 v1.5 验签（SHA-256），TLS 1.2 握手要用
+ *
+ * 为什么需要（docs/wifi-plan.md §211）：qq.com 的 TLS 1.2 握手用
+ * `ECDHE-RSA-AES128-GCM-SHA256`，服务端会用它证书里的 RSA 公钥对一个
+ * ServerKeyExchange 做签名（我们只声明 `rsa_pkcs1_sha256`，所以是
+ * PKCS#1 v1.5，用不着 PSS/MGF1）。而 c6 标准库里**没有** RSA 模块。
+ *
+ * 为什么不直接用 `std/core/bignum.c6`：那个是**定长 1024 位**（`BIG_LIMBS=32`），
+ * 而 qq.com 的叶子证书是 RSA-2048、中间/根是 RSA-4096。所以这里自己写一套
+ * 定长模运算，上界 4096 位（128 个 32 位 limb），只做 RSA 需要的几件事。
+ *
+ * 性能：平方-乘 + 逐位长除法。RSA-2048、e=65537 大约 17 次模乘，每次 64×64
+ * limb 乘法 + 128 位一档的长除法 —— 宿主上毫秒级，ESP32-S3 上几十毫秒量级，
+ * 一次握手验两次签名完全够用。
+ *
+ * 用法：
+ *
+ *     RsaKey k = { { 0 }, { 0 }, 0, 0 };
+ *     if (rsa_parse_spki(spki_der, spki_len, &k) != 1) { ... }
+ *     if (rsa_pkcs1_sha256_verify(&k, msg, msglen, sig, siglen) != 1) { ... }
+ */
+#include <string.h>
+
+module net.rsa_verify;
+import std.core.types;
+import std.encoding.sha256;
+
+#define RSA_LIMBS 128           /* 128 × 32 = 4096 位 */
+#define RSA_MAXBYTES (RSA_LIMBS * 4)
+
+struct RsaKey {
+    u32 n[RSA_LIMBS];
+    u32 e[RSA_LIMBS];
+    int nlimbs;
+    int elimbs;
+};
+
+/* ---- 定长大数原语（小端 limb，长度由调用方给）---- */
+
+static int bn_limbs(const u32 *a, int cap)
+{
+    int i = cap - 1;
+
+    while (i > 0 && a[i] == 0u) {
+        i = i - 1;
+    }
+    return a[i] == 0u ? 0 : i + 1;
+}
+
+/* a ? b：返回 -1 / 0 / 1 */
+static int bn_cmp(const u32 *a, const u32 *b, int n)
+{
+    int i = n - 1;
+
+    while (i >= 0) {
+        if (a[i] != b[i]) {
+            return a[i] > b[i] ? 1 : -1;
+        }
+        i = i - 1;
+    }
+    return 0;
+}
+
+/* a -= b（假设 a >= b），返回借位 */
+static u32 bn_sub(u32 *a, const u32 *b, int n)
+{
+    u64 borrow = 0;
+    int i = 0;
+
+    for (i = 0; i < n; i++) {
+        u64 d = (u64)a[i] - (u64)b[i] - borrow;
+
+        a[i] = (u32)d;
+        borrow = (d >> 32) & 1ull;
+    }
+    return (u32)borrow;
+}
+
+/* r[2n] = a[n] * b[n]（schoolbook，用 u64 累加） */
+static void bn_mul(u32 *r, const u32 *a, const u32 *b, int n)
+{
+    int i = 0;
+    int j = 0;
+
+    for (i = 0; i < 2 * n; i++) {
+        r[i] = 0u;
+    }
+    for (i = 0; i < n; i++) {
+        u64 carry = 0;
+
+        if (a[i] == 0u) {
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            u64 cur = (u64)r[i + j] + (u64)a[i] * (u64)b[j] + carry;
+
+            r[i + j] = (u32)cur;
+            carry = cur >> 32;
+        }
+        r[i + n] = (u32)((u64)r[i + n] + carry);
+    }
+}
+
+/* r[n] = t[tlen] mod m[n]
+ *
+ * 逐位还原除法。**注意**：内部要一个 n+1 limb 的余数（左移会临时多一位），
+ * 所以用本地缓冲，最后只把 n 个 limb 拷回去 —— 直接拿调用方的 r[n] 当 129 limb
+ * 用会写出边界（本轮实测踩到：RSA-2048 侥幸没炸，RSA-4096 直接验签失败）。 */
+static void bn_mod(u32 *r, const u32 *t, int tlen, const u32 *m, int n)
+{
+    u32 acc[RSA_LIMBS + 1] = { 0 };
+    u32 mm[RSA_LIMBS + 1] = { 0 };
+    int bits = tlen * 32;
+    int bit = 0;
+    int i = 0;
+
+    memcpy(mm, m, (usize)n * 4u);
+    mm[n] = 0u;
+    bit = bits - 1;
+    while (bit >= 0) {
+        u32 carry = (t[bit >> 5] >> (bit & 31)) & 1u;
+        u32 hi = 0u;
+
+        for (i = 0; i <= n; i++) {
+            u32 nv = (u32)(acc[i] << 1) | carry;
+
+            carry = acc[i] >> 31;
+            acc[i] = nv;
+        }
+        hi = carry;
+        if (hi != 0u || bn_cmp(acc, mm, n + 1) >= 0) {
+            (void)bn_sub(acc, mm, n + 1);
+        }
+        bit = bit - 1;
+    }
+    memcpy(r, acc, (usize)n * 4u);
+}
+
+/* r = a*b mod m */
+static void bn_modmul(u32 *r, const u32 *a, const u32 *b, const u32 *m, int n)
+{
+    u32 t[2 * RSA_LIMBS] = { 0 };
+
+    bn_mul(t, a, b, n);
+    bn_mod(r, t, 2 * n, m, n);
+}
+
+static int bn_bit(const u32 *a, int i)
+{
+    return (int)((a[i >> 5] >> (i & 31)) & 1u);
+}
+
+/* out = base^e mod n（base < n） */
+static int bn_modexp(u32 *out, const u32 *base, const u32 *e, int elimbs,
+                     const u32 *n, int nlimbs)
+{
+    u32 acc[RSA_LIMBS] = { 0 };
+    u32 b[RSA_LIMBS] = { 0 };
+    u32 tmp[RSA_LIMBS] = { 0 };
+    int ebits = 0;
+    int i = 0;
+
+    if (nlimbs <= 0 || nlimbs > RSA_LIMBS) {
+        return 0;
+    }
+    ebits = bn_limbs(e, elimbs) * 32;
+    acc[0] = 1u;
+    memcpy(b, base, (usize)nlimbs * 4u);
+    i = ebits - 1;
+    while (i >= 0) {
+        bn_modmul(tmp, acc, acc, n, nlimbs);
+        memcpy(acc, tmp, (usize)nlimbs * 4u);
+        if (bn_bit(e, i) != 0) {
+            bn_modmul(tmp, acc, b, n, nlimbs);
+            memcpy(acc, tmp, (usize)nlimbs * 4u);
+        }
+        i = i - 1;
+    }
+    memcpy(out, acc, (usize)nlimbs * 4u);
+    return 1;
+}
+
+/* ---- DER 解析：SubjectPublicKeyInfo -> (n, e) ---- */
+
+static int der_len(const u8 *p, int avail, int *used)
+{
+    int v = 0;
+    int n = 0;
+
+    if (avail < 1) {
+        return -1;
+    }
+    if (p[0] < 0x80) {
+        *used = 1;
+        return (int)p[0];
+    }
+    n = (int)(p[0] & 0x7fu);
+    if (n < 1 || n > 3 || avail < 1 + n) {
+        return -1;
+    }
+    {
+        int i = 0;
+
+        for (i = 1; i <= n; i++) {
+            v = (v << 8) | (int)p[i];
+        }
+    }
+    *used = 1 + n;
+    return v;
+}
+
+/* 把大端字节串灌进 limb 数组（可能带前导 0） */
+static int bn_from_be(u32 *out, int cap, const u8 *p, int len)
+{
+    int i = 0;
+    int limb = 0;
+    int shift = 0;
+
+    for (i = 0; i < cap; i++) {
+        out[i] = 0u;
+    }
+    /* 先跳掉前导 0x00：DER 的 INTEGER 为了让最高位不当负数，会在前面补一个 0，
+     * 于是 RSA-4096 的 n 是 513 字节 —— 不跳的话会被误判成"超出 128 limb"而解析失败
+     * （本轮实测踩到）。 */
+    while (len > 0 && p[0] == 0x00) {
+        p = p + 1;
+        len = len - 1;
+    }
+    if (len > cap * 4) {
+        return 0;
+    }
+    /* 从最低字节往高位走：p[len-1] 最低 */
+    limb = 0;
+    shift = 0;
+    i = len - 1;
+    while (i >= 0) {
+        out[limb] = out[limb] | ((u32)p[i] << shift);
+        shift = shift + 8;
+        if (shift == 32) {
+            shift = 0;
+            limb = limb + 1;
+            if (limb >= cap) {
+                if (i > 0) {
+                    return 0;       /* 溢出：模数太大 */
+                }
+                break;
+            }
+        }
+        i = i - 1;
+    }
+    return 1;
+}
+
+/* 解析 RSA 公钥的 DER（SPKI）。成功返回 1 并填 key。 */
+int rsa_parse_spki(const void *der, int derlen, RsaKey *key)
+{
+    const u8 *p = (const u8 *)der;
+    int off = 0;
+    int n = 0;
+    int len = 0;
+
+    if (der == 0 || key == 0 || derlen <= 0) {
+        return 0;
+    }
+    memset(key, 0, sizeof *key);
+    /* SEQUENCE (SPKI) */
+    if (p[off] != 0x30) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n;
+    /* AlgorithmIdentifier：SEQUENCE，整段跳过 */
+    if (p[off] != 0x30) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n + len;
+    /* BIT STRING */
+    if (p[off] != 0x03) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n;
+    off = off + 1;              /* unused bits 字节 */
+    /* RSAPublicKey：SEQUENCE { INTEGER n, INTEGER e } */
+    if (p[off] != 0x30) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n;
+    /* INTEGER n */
+    if (p[off] != 0x02) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n;
+    if (!bn_from_be(key->n, RSA_LIMBS, p + off, len)) { return 0; }
+    key->nlimbs = bn_limbs(key->n, RSA_LIMBS);
+    off = off + len;
+    /* INTEGER e */
+    if (p[off] != 0x02) { return 0; }
+    len = der_len(p + off + 1, derlen - off - 1, &n);
+    if (len < 0) { return 0; }
+    off = off + 1 + n;
+    if (!bn_from_be(key->e, RSA_LIMBS, p + off, len)) { return 0; }
+    key->elimbs = bn_limbs(key->e, RSA_LIMBS);
+    return (key->nlimbs > 0 && key->elimbs > 0) ? 1 : 0;
+}
+
+/* ---- PKCS#1 v1.5 + SHA-256 验签 ---- */
+
+/* DigestInfo 里 SHA-256 的固定前缀（RFC 8017 §9.2 note 1） */
+static const u8 sha256_digestinfo[19] = {
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+    0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+};
+
+/* 用公钥验：msg 的 SHA-256 是否等于 sig 解出来的 DigestInfo */
+int rsa_pkcs1_sha256_verify(RsaKey *key, const void *msg, int msglen,
+                            const void *sig, int siglen)
+{
+    u32 s[RSA_LIMBS] = { 0 };
+    u32 m[RSA_LIMBS] = { 0 };
+    u8 em[RSA_MAXBYTES] = { 0 };
+    u8 hash[32] = { 0 };
+    int k = 0;              /* 模数字节数 */
+    int i = 0;
+
+    if (key == 0 || key->nlimbs <= 0 || sig == 0 || siglen <= 0) {
+        return 0;
+    }
+    k = key->nlimbs * 4;
+    /* 去掉模数最高位的全零字节，得到真实的 k */
+    while (k > 1 && ((key->n[(k - 1) >> 2] >> (((k - 1) & 3) * 8)) & 0xffu) == 0u) {
+        k = k - 1;
+    }
+    if (siglen != k) {
+        return 0;           /* RSA 签名长度必须等于模长 */
+    }
+    if (!bn_from_be(s, RSA_LIMBS, (const u8 *)sig, siglen)) {
+        return 0;
+    }
+    if (bn_cmp(s, key->n, key->nlimbs) >= 0) {
+        return 0;           /* s >= n 非法 */
+    }
+    if (!bn_modexp(m, s, key->e, key->elimbs, key->n, key->nlimbs)) {
+        return 0;
+    }
+    /* limb -> 大端字节，长度正好 k */
+    for (i = 0; i < k; i++) {
+        em[k - 1 - i] = (u8)((m[i >> 2] >> ((i & 3) * 8)) & 0xffu);
+    }
+    /* EMSA-PKCS1-v1_5: 00 01 FF..FF 00 || DigestInfo || H */
+    if (em[0] != 0x00 || em[1] != 0x01) {
+        return 0;
+    }
+    i = 2;
+    while (i < k && em[i] == 0xffu) {
+        i = i + 1;
+    }
+    if (i < 10 || i >= k || em[i] != 0x00) {
+        return 0;           /* 填充不足（规范要求至少 8 字节 0xFF）或格式不对 */
+    }
+    i = i + 1;
+    if (k - i != 19 + 32) {
+        return 0;
+    }
+    if (memcmp(em + i, sha256_digestinfo, 19) != 0) {
+        return 0;
+    }
+    sha256(msg, (usize)msglen, hash);
+    return memcmp(em + i + 19, hash, 32) == 0 ? 1 : 0;
+}

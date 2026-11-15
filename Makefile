@@ -1557,3 +1557,7 @@ wifip:
 		S3_MAIN=$(S3_WIFI_MAIN) \
 		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
 		s3
+
+# TLS 1.2 基础件自测（宿主上跑，不需要板子）：docs/wifi-plan.md §212
+tls12check:
+	./tools/tls12_selftest.sh

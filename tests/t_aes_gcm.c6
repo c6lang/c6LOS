@@ -1,0 +1,138 @@
+/* tests/t_aes_gcm.c6 —— AES-128-GCM 自测（NIST SP 800-38D / GCM 规范里的用例）
+ *
+ * 跑法（宿主上就能跑，不需要板子；docs/wifi-plan.md §211/§212）：
+ *
+ *     /home/winger/c6/tcc/c6 -B /home/winger/c6/tcc -I/home/winger/c6 -Inet \
+ *         -o build/aes_gcm_test \
+ *         /home/winger/c6/std/core/types.c6 /home/winger/c6/std/encoding/aes.c6 \
+ *         net/aes_gcm.c6 tests/t_aes_gcm.c6
+ *     ./build/aes_gcm_test
+ *
+ * 用例（都是规范里的公开测试向量）：
+ *   1) K=全 0、P=16 字节全 0、IV=全 0、无 AAD
+ *      C=0388dace60b6a392f328c2b971b2fe78  T=ab6e47d42cec13bdf53a67b21257bddf
+ *   2) 规范 Test Case 3（带 AAD，60 字节明文）
+ */
+#include <stdio.h>
+#include <string.h>
+
+import std.core.types;
+import std.encoding.aes;
+import net.aes_gcm;
+
+static int fails = 0;
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
+static int unhex(const char *s, u8 *out, int cap)
+{
+    int n = 0;
+
+    while (s[0] != 0 && s[1] != 0 && n < cap) {
+        int hi = hexval((int)s[0]);
+        int lo = hexval((int)s[1]);
+
+        if (hi < 0 || lo < 0) { return -1; }
+        out[n] = (u8)((hi << 4) | lo);
+        n = n + 1;
+        s = s + 2;
+    }
+    return n;
+}
+
+static void check(int cond, const char *what)
+{
+    if (!cond) {
+        printf("   FAIL %s\n", what);
+        fails = fails + 1;
+    } else {
+        printf("   ok   %s\n", what);
+    }
+}
+
+static int same(const u8 *a, const u8 *b, int n)
+{
+    int i = 0;
+
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) { return 0; }
+    }
+    return 1;
+}
+
+/* 用例 1：全零 */
+static void case_zero(void)
+{
+    u8 key[16] = { 0 };
+    u8 iv[12] = { 0 };
+    u8 pt[16] = { 0 };
+    u8 ct[16] = { 0 };
+    u8 tag[16] = { 0 };
+    u8 wantc[16] = { 0 };
+    u8 wantt[16] = { 0 };
+    u8 back[16] = { 0 };
+    AesGcm g = { { { 0 } }, { 0 }, 0 };
+
+    (void)unhex("0388dace60b6a392f328c2b971b2fe78", wantc, 16);
+    (void)unhex("ab6e47d42cec13bdf53a67b21257bddf", wantt, 16);
+
+    printf("== 全零用例\n");
+    check(g.init(key, 16) == 1, "init");
+    check(g.seal(iv, 0, 0, pt, 16, ct, tag) == 1, "seal");
+    check(same(ct, wantc, 16), "密文与规范一致");
+    check(same(tag, wantt, 16), "tag 与规范一致");
+    check(g.open(iv, 0, 0, ct, 16, tag, back) == 1, "open");
+    check(same(back, pt, 16), "明文还原");
+    /* 改一个 bit，tag 必须验不过 */
+    tag[0] = (u8)(tag[0] ^ 1u);
+    check(g.open(iv, 0, 0, ct, 16, tag, back) == 0, "tag 被改后必须拒绝");
+}
+
+/* 用例 2：规范 Test Case 3（带 AAD） */
+static void case_aad(void)
+{
+    u8 key[16] = { 0 };
+    u8 iv[12] = { 0 };
+    u8 aad[20] = { 0 };
+    u8 pt[60] = { 0 };
+    u8 ct[60] = { 0 };
+    u8 tag[16] = { 0 };
+    u8 wantc[60] = { 0 };
+    u8 wantt[16] = { 0 };
+    u8 back[60] = { 0 };
+    AesGcm g = { { { 0 } }, { 0 }, 0 };
+    int nc = 0;
+    int nt = 0;
+
+    nc = unhex("42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e"
+               "21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091", wantc, 60);
+    nt = unhex("5bc94fbc3221a5db94fae95ae7121a47", wantt, 16);
+    (void)unhex("feffe9928665731c6d6a8f9467308308", key, 16);
+    (void)unhex("cafebabefacedbaddecaf888", iv, 12);
+    (void)unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2", aad, 20);
+    (void)unhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39", pt, 60);
+
+    printf("== Test Case 3（AAD 20 字节 / 明文 60 字节 / nc=%d nt=%d）\n", nc, nt);
+    check(nc == 60 && nt == 16, "测试向量长度");
+    check(g.init(key, 16) == 1, "init");
+    check(g.seal(iv, aad, 20, pt, 60, ct, tag) == 1, "seal");
+    check(same(ct, wantc, 60), "密文与规范一致");
+    check(same(tag, wantt, 16), "tag 与规范一致");
+    check(g.open(iv, aad, 20, ct, 60, tag, back) == 1, "open");
+    check(same(back, pt, 60), "明文还原");
+}
+
+int main(void)
+{
+    case_zero();
+    case_aad();
+    printf("%s（失败 %d 项）\n", fails == 0 ? "AES-128-GCM 自测通过" : "自测失败", fails);
+    return fails == 0 ? 0 : 1;
+}
