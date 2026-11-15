@@ -116,6 +116,8 @@
  * a12/a13 属于调用者（callee-saved），必须先存栈再借用。 */
     .section .text, "ax", @progbits
     .align  4
+11: .word   0x50001560
+    .align  4
 10: .word   g_recv_seq
     .align  4
 8:  .word   osi_queue_recv_body
@@ -141,8 +143,12 @@ osi_queue_recv:
     mov.n   a10, a2
     mov.n   a11, a3
     mov.n   a12, a4
+    l32r    a9, 11b
+    s32i    a0, a9, 0            /* 诊断：callx8 之前的 a0 */
     l32r    a8, 8b
     callx8  a8
+    l32r    a9, 11b
+    s32i    a0, a9, 4            /* 诊断：callx8 之后的 a0 */
     mov.n   a2, a10
     l32i    a0, a1, 8
     l32i    a12, a1, 0
