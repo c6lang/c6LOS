@@ -873,3 +873,13 @@ s3_win_call_fn1:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* 提供一个 .flash.rodata 里的数据对象：确保镜像里**总有 DROM 段**。
+ * （bootloader 的 mmu_hal_map_region 在没有 DROM 段时会 assert 失败。） */
+    .section .flash.rodata, "a", @progbits
+    .align  4
+    .global s3_flash_rodata_probe
+    .type   s3_flash_rodata_probe, @object
+s3_flash_rodata_probe:
+    .word   0x12345678
+    .size   s3_flash_rodata_probe, 4

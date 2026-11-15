@@ -4250,3 +4250,43 @@ Segment   Length   Load addr   File offs  Memory types
 1. `git log` 找到最早那个能启动的 `t_s3_on` 镜像，`cmp` 一下段布局差异
 2. 或者干脆让它**至少有一个 flash 段**（比如引用一下 `s3_asm_flash_42`），
    避开"零 flash 段"这个边界情况
+
+### 94. ★★★★ 重大突破：`--ram-only-header` 把 DROM/IROM 段全丢了
+
+**Makefile 第 216 行原来是：**
+
+```make
+S3_IMG_FLAGS ?= --ram-only-header
+```
+
+这个选项让 `esptool elf2image` **只输出 RAM 段**，把 **DROM 和 IROM 段全部丢弃**！
+
+⇒ 我们**之前生成的所有镜像其实都是残缺的** —— 里面根本没有 flash 段的描述。
+
+**去掉它之后**，镜像结构立刻和原厂一致：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x0010c  0x3c000020  0x00000018  DROM        <- 终于有了
+      1  0x00bc0  0x3fca0000  0x0000012c  BYTE_ACCESSIBLE, MEM_INTERNAL, DRAM
+      2  0x00040  0x40378000  0x00000cf4  MEM_INTERNAL, IRAM
+      3  0x0868c  0x40378400  0x00000d3c  MEM_INTERNAL, IRAM
+```
+
+**真板结果（历史性）：**
+
+```
+c6os s3 boot                    <- 应用终于正常启动了！
+slot2 = 0x12345678              <- DROM 段里的探针值，读取完全正常
+*** TRAP cause=0 pc=42030014    <- 只剩 flash 取指这一项
+```
+
+⇒ **DROM 通路完全打通**（`0x12345678` 正是我们放进 `.flash.rodata` 的探针值）。
+
+这解释了之前所有的怪现象：
+- 为什么 `abort() at mmu_hal_map_region` —— bootloader 拿不到 DROM 段描述
+- 为什么各种段布局调整都没用 —— 反正段描述根本没进镜像
+- 为什么"数据读正常、取指不正常" —— 其实数据读一直靠的是**别的路径**
+
+**下一步**：用这个正确的镜像重新构建 WiFi 版本，看 flash 取指/IPC 是否
+在"镜像结构正确"的前提下恢复正常。
