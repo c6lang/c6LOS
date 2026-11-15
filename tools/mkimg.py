@@ -58,7 +58,7 @@ for name, paddr in SECS:
     if paddr is None and name == '.flash.rodata':
         paddr = BASE + 0x20
     elif paddr is None and name == '.flash.text':
-        paddr = 0x100000
+        paddr = BASE + 0x1020
     if os.environ.get('MKIMG_NO_FLASH') and paddr is not None:
         continue    # 实验：整个镜像不含 flash 段
     v = section_vaddr(name)
