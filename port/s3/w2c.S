@@ -106,7 +106,8 @@
     W2C s3_w2c_task_yield,     os_task_yield
     W2C s3_w2c_tick_get,       os_tick_get
     W2C s3_w2c_tick_hz,        os_tick_hz
-    W2C s3_w2c_current_task,   os_task_current_id
+    W2C s3_w2c_current_task,   os_task_current_slot
+    W2C s3_w2c_slot_of_id,     os_task_slot_of_id
 
 
 /* 在 osi_queue_recv 入口处记录 **库** 的返回地址（windowed 的 call8 值），

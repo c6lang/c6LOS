@@ -44,6 +44,8 @@ int os_task_create(const char *name, OsTaskEntry entry, void *arg,
 int os_task_create_on(u32 core, const char *name, OsTaskEntry entry, void *arg,
                       u32 prio, u32 stack_size);
 u32 os_task_current_id(void);
+u32 os_task_current_slot(void);
+u32 os_task_slot_of_id(u32 id);
 u32 os_task_probe(u32 id, u32 what);
 u32 os_task_total(void);
 void os_task_start(void);

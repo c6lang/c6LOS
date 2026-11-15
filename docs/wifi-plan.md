@@ -6696,3 +6696,41 @@ B2 cfg@3fcbe7d4 osi=3fcbead4 magic@144=1f2f3f4f
 第 2 点与之前所有"身份不一致"的读数能对上，是目前最值得优先验证的：
 **把任务身份从一个稳定的来源取**（例如 `port_cur_ctx()` 对应的 `g_ctx`
 槽号，或 `g_tasks[]` 的下标），不要再依赖 `g_cur->id`。
+
+## §161 任务身份改用稳定来源（g_tasks 下标）—— 仍然卡住
+
+之前 `_task_create` 写回的句柄是任务 **id**（`g_cur->id`），而
+`_task_get_current_task()` 也取 `g_cur->id`，中间出现过"同一任务两个 id"的
+读数。本轮改成从构造上保证一致的方案：
+
+* `kernel/task.c6` 新增 `os_task_current_slot()`（返回 `g_tasks[]` 下标 +1，
+  0 保留给"无当前任务"）和 `os_task_slot_of_id(id)`；
+* `port/s3/w2c.S` 的 `s3_w2c_current_task` 改为调 `os_task_current_slot`；
+* `osi_task_create` 写回给库的句柄改为 `s3_w2c_slot_of_id(id)`。
+
+这样 `_task_create` 写回的句柄与 `_task_get_current_task()` 用的是**同一口径**，
+不可能再出现"身份对不上"。
+
+真板：**现象完全没有变化**（`W0/W1` 之后没有 `W2`，rc 槽仍是随机值）。
+
+⇒ 任务身份不是这个死锁的根因，这条线索可以关掉。
+
+## 至此已经排除的清单（每条都有真板读数或反汇编证据）
+
+ABI/桥、libc 符号、队列句柄语义、超时语义、`pp_post` 符号、上下文槽位、
+帧保存、port 与内核视图、调度选择、switch/yield 配对、任务入口、
+栈大小、tick/ISR、任务身份口径、`ieee80211_ioctl_init` 是否被调用、
+各候选库函数是否含队列接收、`ppTask` 是否被直接调用、
+建任务后挂起、初始化任务不阻塞、`xphyQueue` 是否已写入。
+
+## 当前唯一未解的矛盾
+
+> 初始化任务在 `pp_create_task` 内部阻塞在 `_queue_recv`（内核级 kind=6、
+> 对象 = `s_wifi_queue`），而库侧那次调用的返回地址落在 `ppTask` 里；
+> 同时 `pp_post` / `_queue_send` 一次都没被调用 —— 没人投递。
+
+### 下一轮建议
+
+把 `ppTask` 也放进"不阻塞"名单做**对称实验**：如果两边都不阻塞、初始化就能
+走完，说明这个死锁纯粹来自"两个阻塞点互为前提"；然后再逐个把阻塞恢复回去，
+二分出到底是哪一个阻塞点是多余的。

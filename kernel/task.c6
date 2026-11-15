@@ -793,3 +793,34 @@ u32 os_task_probe(u32 id, u32 what) {
 u32 os_task_total(void) {
     return (u32)C6OS_MAX_TASKS;
 }
+
+/* 稳定的"当前任务身份"：直接取 g_tasks[] 下标，不依赖 g_cur->id。
+ * 闭源库大量用 `_task_get_current_task()` 做身份判断，
+ * 之前用 g_cur->id 出现过"同一任务返回不同 id"的读数（见 docs/wifi-plan.md
+ * §133/§140），换成表下标可以从构造上保证一致：
+ * `_task_create` 写回的句柄与 `_task_get_current_task()` 用的是同一口径。 */
+u32 os_task_current_slot(void) {
+    u32 i = 0;
+    if (g_cur == 0) {
+        return 0u;
+    }
+    while (i < (u32)C6OS_MAX_TASKS) {
+        if (&g_tasks[i] == g_cur) {
+            return i + 1u;      /* 0 保留给"无当前任务" */
+        }
+        i++;
+    }
+    return 0u;
+}
+
+/* 按 g_tasks 下标取任务 id（_task_create 写句柄用） */
+u32 os_task_slot_of_id(u32 id) {
+    u32 i = 0;
+    while (i < (u32)C6OS_MAX_TASKS) {
+        if (g_tasks[i].magic == OS_TASK_MAGIC && g_tasks[i].id == id) {
+            return i + 1u;
+        }
+        i++;
+    }
+    return 0u;
+}

@@ -194,6 +194,7 @@ extern int  s3_w2c_task_delete(u32 id);
 extern void s3_w2c_task_delay(u32 ticks);
 extern int  s3_w2c_task_suspend(u32 id);
 extern u32 g_next_task_windowed;
+extern u32 s3_w2c_slot_of_id(u32 id);
 extern int  s3_w2c_task_resume(u32 id);
 extern void s3_w2c_task_yield(void);
 extern u64  s3_w2c_tick_get(void);
@@ -609,7 +610,8 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
         td[5] = prio;
     }
     if (id < 0) { return 0; }
-    if (handle != 0) { *(u32 *)handle = (u32)id; }
+    /* 句柄用稳定的表下标，和 _task_get_current_task() 同一口径 */
+    if (handle != 0) { *(u32 *)handle = s3_w2c_slot_of_id((u32)id); }
     /* 试过"建完立即挂起、init 返回后再恢复"：不行 —— 挂起后
      * pp_create_task 里紧接着的 _semphr_take 握手永远等不到 _semphr_give，
      * init 会更早卡住。所以任务必须照常运行。 */
