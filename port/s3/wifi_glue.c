@@ -373,6 +373,7 @@ typedef struct { u32 self; WOsQueue q; u32 magic; } WQ;
 
 static u32 g_qn = 0u;
 static u32 g_qbad = 0u;
+static u32 g_ev_n = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -470,24 +471,18 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
     }
     B_IN(2u);
     {
-        /* 每个任务第一次在队列上阻塞时记下来（BSS 去重，RTC 里存副本） */
-        u32 me = s3_w2c_current_task();
-        u32 j;
-        u32 dup = 0u;
-        for (j = 0u; j < g_ql_n; j++) {
-            if (g_ql_id[j] == me) { dup = 1u; }
-        }
-        if (dup == 0u && g_ql_n < 4u) {
-            volatile u32 *ql = (volatile u32 *)0x50000390u;
-            g_ql_id[g_ql_n] = me;
-            ql[g_ql_n * 2u] = me;
-            ql[g_ql_n * 2u + 1u] = (u32)q;
-            ql[10u + g_ql_n] = (u32)__builtin_return_address(0);  /* 谁调的 recv */
-            g_ql_n = g_ql_n + 1u;
-            ql[8] = g_ql_n;
-        }
+        /* 事件环：只记 (任务 id, 进入/离开)，不依赖 a0。 */
+        volatile u32 *ev = (volatile u32 *)0x50000400u;
+        ev[g_ev_n & 15u] = (s3_w2c_current_task() << 8) | 1u;
+        g_ev_n = g_ev_n + 1u;
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    {
+        volatile u32 *ev = (volatile u32 *)0x50000400u;
+        ev[g_ev_n & 15u] = (s3_w2c_current_task() << 8) | 2u;
+        g_ev_n = g_ev_n + 1u;
+        ev[10] = g_ev_n;
+    }
     B_OUT(2u);
     if (r != 0) {
         QDIAG[1] = (u32)(-r);               /* 1=没有当前任务 3=超时表满 … */
