@@ -50,8 +50,8 @@ SECTIONS
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
-    *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libwapi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libphy.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
