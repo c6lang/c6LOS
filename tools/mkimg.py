@@ -19,7 +19,8 @@ TC   = os.path.expanduser('~/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-e
 # (section, paddr 或 None=RAM 段)
 SECS = [
     ('.flash.rodata', None),   # 运行时按 BASE+0x20 计算    # DROM: 数据落文件偏移 0x20（app_desc 要求）
-    ('.flash.text',   None),   # 运行时按 BASE+0x10000 计算
+    ('.flash.text',   None),
+    ('.flash.wifi',   None),   # 运行时按 BASE+0x10000 计算
     ('.eh_frame',     None),
     ('.vector',       None),
     ('.text',         None),
@@ -58,7 +59,7 @@ for name, paddr in SECS:
     if paddr is None and name == '.flash.rodata':
         paddr = BASE + 0x20
     elif paddr is None and name == '.flash.text':
-        paddr = BASE + 0x1020
+        paddr = BASE + 0x10000
     if os.environ.get('MKIMG_NO_FLASH') and paddr is not None:
         continue    # 实验：整个镜像不含 flash 段
     v = section_vaddr(name)
