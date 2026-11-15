@@ -8964,3 +8964,86 @@ S3 上 `esp_phy_enable()` 的完整链条（`SOC_MODEM_CLOCK_IS_INDEPENDENT` 为
      换成"全 0 的 128 字节"看是不是 init data 的问题（排除法）；
 3. PHY 过了以后才轮到 `esp_wifi_init_internal`（§192~§203 那套 OSI 表已经铺好，
    NVS/MAC 两个隐患也修了），然后是扫描/关联/DHCP，最后才是取 https://qq.com。
+
+---
+
+## §205 找到"PHY 初始化把 USB 干掉"的机器码证据：`i2c_bbpll_set` 里的那个 byte
+
+### 一、证据链（全部来自我们自己 `build/wifi/c6os.elf` 的反汇编，可复现）
+
+1. `phy_bbpll_en_usb()` 在 `phy_api.o` 里只有 4 条指令（写在 `phy_param` 里）：
+
+   ```
+   4204d4c7: l32r  a8, <lit>   (3fcb60a0 <phy_param>)
+   4204d4ca: addmi a8, a8, 0x200
+   4204d4cd: s8i   a2, a8, 166      ; phy_param[0x2A6] = en
+   ```
+   `phy_param` 符号大小 `0x2e4`（`nm -S`），所以 0x2A6 确实是这个结构里的一个
+   普通标志字节，写到 DRAM，不会碰只读的 IROM —— 这一步本身绝对安全。
+
+2. 读这个 byte 的地方只有一个：`i2c_bbpll_set()`（我们镜像里 `0x42056658`）：
+
+   ```
+   420566ad: l32i  a8, a2, 0        ; a8 = I2C 函数表
+   420566b0: l32r  a3, <phy_param>
+   420566b6: s8i   a10, a3, 209     ; 存 I2C 读回值
+   420566c4: s8i   a10, a3, 210
+   420566c7: addmi a3, a3, 0x200
+   420566ca: l8ui  a11, a3, 166     ; ← 就是 phy_param[0x2A6]
+   420566cd: bnez.n a11, 420566e2   ; 非 0 → 跳过下面那一次 I2C 写
+   420566cf: ... l32i a8, a8, 0x198 ; I2C 写回调
+   420566d1: movi a14, 7
+   420566da: movi a12, 5            ; reg 102 / sub 5  ← 关内部 USB PHY 的那一笔
+   420566df: callx8 a8
+   ```
+
+   这正好是 IDF Kconfig `ESP_PHY_ENABLE_USB` 说明文字的机器码版本：
+   *"the ESP PHY library's initialization will automatically disable the USB PHY"*。
+   `phy_bbpll_en_usb(true)` 唯一的作用就是让这一笔 I2C 写被**跳过**。
+
+### 二、于是发现一个真正的代码缺陷：两条 PHY 路径不一致
+
+`port/s3/win_island.c` 里有两套 PHY 初始化代码：
+
+| | 诊断用 `s3_win_phy_step()` | 正常路径 `s3_win_phy_enable()`（**在用的那个**） |
+| --- | --- | --- |
+| `s3_win_phy_power_on()`（PWC/ISO/复位脉冲） | 有 | **没有** |
+| `phy_bbpll_en_usb(1)`（留住 USB PHY） | 有 | **没有** ← 板子从 USB 上消失的直接原因 |
+| 填 `g_phyFuns` | `phy_get_romfunc_addr()` + 检查 | ROM 的 `phy_get_romfuncs()`，**没检查** |
+| `register_chipv7_phy_init_param()` | 有 | **没有** |
+| 事后 `s3_win_usb_reclaim()` | 无 | 有（但已经晚了） |
+
+也就是说 §202 末尾那次"`W0 phy start` 之后整片失联"，**不是 PHY 库的锅，是我们
+自己那条正常路径漏了三步**。现在把 `s3_win_phy_enable()` 改成和诊断路径
+同一套顺序（并且每一步都 `ets_printf` 出来，方便串口直接看到进度）：
+
+```
+s3_win_phy_power_on()                ① 掉电/时钟/复位/隔离
+phy_bbpll_en_usb(1)                  ② 留住 USB PHY（关键！）
+phy_get_romfunc_addr(); 若 g_phyFuns==0 再 phy_get_romfuncs()   ③ 函数表
+ets_printf("[phy] g_phyFuns=0x%08x")                             可观测
+register_chipv7_phy_init_param(...)  ④
+register_chipv7_phy(...)             ⑤  + ets_printf rc
+s3_win_usb_reclaim()                 ⑥ 双保险
+```
+
+### 三、这和 §204 的自动二分是什么关系
+
+现在有两条互补的观测手段：
+- **§204 的自动二分**（`make S3_PHY_BISECT=1 wifi`）：万一 ② 之后还是挂，
+  它会告诉我们到底卡在 1~6 的哪一步；
+- **§205 的串口进度行**：`[phy] g_phyFuns=...` / `[phy] register_chipv7_phy rc=...`
+  直接说明函数表有没有填上、主入口有没有返回。
+
+判据组合：
+| 串口最后一行 | 结论 |
+| --- | --- |
+| 只有 `W0 phy start`，没有 `[phy] g_phyFuns=` | 卡在 ①②（时钟/复位/隔离这一层） |
+| `[phy] g_phyFuns=0x00000000` | ROM/libphy 的函数表入口没起作用 → ③ 的调用约定要查 |
+| `g_phyFuns` 正常但没有 `rc=` | 卡在 ④⑤ 里（PHY 内部忙等） |
+| `rc=0` 之后 | PHY 起来了，问题往下走到 `s3_wifi_bringup` |
+
+### 四、构建状态
+
+`make … wifi`、`make … S3_PHY_BISECT=1 wifi`、基线 `make … s3` 三者都通过，
+`chkimg: OK（2 个 flash 段，文件偏移 == LMA）`。

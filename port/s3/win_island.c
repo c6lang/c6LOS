@@ -328,8 +328,28 @@ int s3_win_phy_step(int step)
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
+/* 正常路径：**必须**和 bisect_run() 的子步骤顺序完全一致。
+ *
+ * 这里曾经和诊断路径不一致（少了 power_on、少了 phy_bbpll_en_usb、函数表用的是
+ * 另一个入口、也没调 register_chipv7_phy_init_param），结果就是 §202 末尾那个
+ * "W0 phy start 之后整片从 USB 上消失" —— 现在把原因找到了（§205）：
+ *
+ * 反汇编 libphy 的 `i2c_bbpll_set()`（我们镜像里 0x42056658）可以看到：
+ *     ...
+ *     a3 = phy_param;  s8i .a10, a3, 209 / 210     ; 存 I2C 读回值
+ *     a3 = phy_param + 0x200
+ *     a11 = phy_param[0x2A6]                        ; ← 就是 phy_bbpll_en_usb() 写的那个 byte
+ *     bnez a11, 跳过
+ *     i2c write(reg 102, sub 5, val 7)              ; ← 这一段是"把内部 USB PHY 关掉"
+ *
+ * 也就是 IDF Kconfig `ESP_PHY_ENABLE_USB` 那句话的机器码版本：
+ * **不显式 phy_bbpll_en_usb(1)，register_chipv7_phy() 就会顺手关掉 USB PHY**，
+ * USB-Serial-JTAG 连 `303a:` 都不再出现。我们原来的 s3_win_phy_enable 恰好没调它。
+ */
 int s3_win_phy_enable(void)
 {
+    int rc;
+
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
      * （见 esp_phy/src/phy_init.c）。这里先写死成这块板自己的 MAC
      * cc:8d:a2:ec:99:c4；以后改成从 efuse 读。 */
@@ -339,20 +359,34 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[7] = 0xecu;
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
-    s3_win_phy_clock_enable();
-    /* **关键**：register_chipv7_phy() 一上来就用全局函数表 g_phyFuns
-     * （反汇编：l32i a5, g_phyFuns; l32i a5, a5, 0x204; callx8 a5）。
-     * 这个表由 ROM 的 phy_get_romfuncs()（0x40005c58）填；IDF 在
-     * esp_phy_enable() 里会先调它。我们之前没调 -> 表是空的 -> 解引用空指针，
-     * 表现就是"卡死在里面"。
-     * ROM 是 windowed，所以必须从孤岛里调。 */
-    phy_get_romfuncs();
-    {
-        int rc = register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 
-        s3_win_usb_reclaim();      /* 把 USB PHY 抢回来，否则串口/esptool 都失联 */
-        return rc;
+    /* ① 解除 WiFi 掉电 + 开 modem/PHY 时钟 + 复位脉冲 + 解隔离
+     *    （= IDF 的 wifi_bt_common_module_enable + phy_module_enable） */
+    s3_win_phy_power_on();
+
+    /* ② 告诉 PHY：USB PHY 要留着（否则 i2c_bbpll_set 会把 USB 关掉，见上面） */
+    phy_bbpll_en_usb(1u);
+
+    /* ③ 填 g_phyFuns：register_chipv7_phy() 一上来就 `l32i a5, g_phyFuns;
+     *    l32i a5, a5, 0x204; callx8 a5`，表是空的就直接跳 0 号地址。
+     *    主入口是 libphy 的 phy_get_romfunc_addr()；ROM 的 phy_get_romfuncs()
+     *    作为双保险再补一次（两者填的不是同一张表，都调不会有害）。 */
+    phy_get_romfunc_addr();
+    if (g_phyFuns == 0u) {
+        phy_get_romfuncs();
     }
+    ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
+
+    /* ④ 参数表（IDF 里也是先 init_param 再主入口） */
+    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+
+    /* ⑤ 主入口 */
+    rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
+
+    /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */
+    s3_win_usb_reclaim();
+    return rc;
 }
 
 u32 s3_win_phy_cal_word(u32 i)
