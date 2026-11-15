@@ -4559,3 +4559,39 @@ slot3 = 0x0000002A     flash42 仍然返回 42
 1. 直接**手工写 `EXTMEM_ICACHE_CTRL` 寄存器**试不同组合（不走 ROM 函数）
 2. 或者查 S3 的 I-cache 是否需要 **`ICACHE_AUTOLOAD`/预取**配置
 3. 或者查 `ICACHE_CTRL1`（`0x600C4064`）里的 **`ICACHE_BUSY`/`ICACHE_ENABLE`** 位
+
+### 103. 手工把 ICACHE_CTRL 改成 16KB（0x0B），低偏移取指仍正常
+
+`rom_config_instruction_cache_mode(16384,8,32)` 实际写的是 `0x0F`（= **32KB**），
+而 S3 的 I-cache **只有 16KB** —— 32KB 是非法值。已改为手工写 `0x0B`：
+
+```c
+s3_win_call_config_icache_mode(16384u, 8u, 32u);
+S3_EXTMEM_ICACHE_CTRL = (S3_EXTMEM_ICACHE_CTRL & ~0xFu) | 0x0Bu;  /* 16KB/8-way/32B */
+```
+
+真板：
+
+```
+slot1 = 0x0000000B     ICACHE_CTRL 正确了
+slot3 = 0x0000002A     flash42 仍返回 42
+```
+
+⇒ cache 模式修对了，但 **WiFi 构建里 `0xD934` 处的取指依然 trap**。
+
+### 现在的事实
+
+| 构建 | 低偏移(0x14) | 高偏移(0xD934) |
+|---|---|---|
+| `t_fix3`（无 WiFi 库） | ✅ 42 | — |
+| WiFi 构建 | 待确认 | ❌ trap |
+
+⇒ **两种构建的 `.flash.text` 内容完全不同**（WiFi 版有 424KB 的库代码），
+所以"低偏移能取指"这个结论在 WiFi 版本上**尚未验证**。
+
+### 下一步最该做的
+
+在 WiFi 构建里**明确**验证：
+1. 段首附近（`s3_asm_flash_42`，0x14）能否取指 —— 需要单独的信标槽，不要和 DROM 探针混用
+2. 如果 0x14 能取指、0xD934 不能 ⇒ 边界的确认
+3. 如果 0x14 也不能 ⇒ WiFi 版连第一页都有问题，方向完全不同

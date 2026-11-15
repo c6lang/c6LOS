@@ -15,6 +15,7 @@ int esp_wifi_deinit(void);
 extern u32 s3_win_call_wifi_init(void *cfg);
 extern u32 s3_win_call_osi_init(void);
 extern u32 s3_win_call_cache_invalidate(void);
+extern u32 s3_win_call_flash42(void);
 
 static void pstr(const char *s) { s3_win_call_log(s); }
 
