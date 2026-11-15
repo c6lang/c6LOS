@@ -471,14 +471,19 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         return 0;
     }
     B_IN(2u);
-    if (g_sp_n < 4u) {
-        /* 交叉验证：同时记栈指针（每个任务的栈范围唯一）和任务 id。 */
+    {
+        /* 交叉验证：同时记栈指针（每个任务的栈范围唯一）和任务 id。
+         * 先占位再写，避免被更高优先级任务打断后把两个任务的字段串到一起。 */
         u32 sp_;
+        u32 k_ = g_sp_n;
         volatile u32 *sd = (volatile u32 *)0x50000440u;
         __asm__ __volatile__("mov %0, a1" : "=r"(sp_));
-        sd[g_sp_n * 2u] = sp_;
-        sd[g_sp_n * 2u + 1u] = s3_w2c_current_task();
-        g_sp_n = g_sp_n + 1u;
+        g_sp_n = k_ + 1u;
+        if (k_ < 4u) {
+            u32 id_ = s3_w2c_current_task();
+            sd[k_ * 2u] = sp_;
+            sd[k_ * 2u + 1u] = id_;
+        }
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     {

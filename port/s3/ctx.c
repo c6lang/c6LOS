@@ -28,6 +28,7 @@ S3Ctx *g_s3_cur[C6OS_MAX_CORES];
 
 static S3Ctx g_ctx[S3_MAX_CTX];
 static u8 g_stacks[S3_MAX_CTX][S3_STACK_SZ] __attribute__((aligned(16)));
+static u32 g_ctx_dbg_n = 0u;
 
 void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
 {
@@ -55,6 +56,15 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         return 0;
     }
 
+    /* 诊断：记录每次分配的槽号/栈基址/请求大小（BSS 计数，RTC 存副本） */
+    if (g_ctx_dbg_n < 4u) {
+        volatile u32 *cd = (volatile u32 *)0x50000460u;
+        u32 k_ = g_ctx_dbg_n;
+        g_ctx_dbg_n = k_ + 1u;
+        cd[k_ * 3u] = i + 1u;
+        cd[k_ * 3u + 1u] = (u32)(void *)g_stacks[i];
+        cd[k_ * 3u + 2u] = want;
+    }
     c->stack = (void *)(g_stacks[i] + (S3_STACK_SZ - want));
     c->size = want;
     top = (((u32)g_stacks[i] + (u32)S3_STACK_SZ) & ~15u) - 80u;

@@ -5698,3 +5698,38 @@ rcUpdateTxDoneAmpdu2      ← 偏移 116 是它自己的结构体字段，噪声
 2. `port_core_id()`：它把 `s3_prid_raw()` 映射到 `g_prid_base[]` 的下标，
    如果映射不稳定，`g_core` 会在 `g_cur_arr[0]`/`g_cur_arr[1]` 之间跳，
    正好能解释"同一任务读到两个不同 id"。
+
+## §134 结论修正：两次 recv 都来自 WiFi 任务，错的是任务 id
+
+`port_task_ctx_create` 的槽位分配记录（RTC `0x50000460`，BSS 计数去重）：
+
+```
+0x50000460 = 1           任务 1 用 1 号槽
+0x50000464 = 0x3fcb8620  它的栈基址
+0x50000468 = 0x00001000  4096 字节
+0x5000046c = 2           任务 2 用 2 号槽
+0x50000470 = 0x3fcb9620  它的栈基址
+0x50000474 = 0x00000e00  3584 字节
+```
+
+**槽位分配完全正确**，两个任务各有独立栈。而两次 `_queue_recv` 记下来的
+栈指针都是 `0x3fcba5c0`：
+
+* 任务 1 栈顶 = `0x3fcb8620 + 0x1000 - 80 = 0x3fcb95d0`
+* 任务 2 栈顶 = `0x3fcb9620 + 0x1000 - 80 = 0x3fcba5d0`
+
+`0x3fcba5c0 = 0x3fcba5d0 - 16` —— 落在**任务 2 的栈**里。
+
+⇒ **两次 recv 都是 WiFi 任务（任务 2）发出的**，和 §132 的枚举一致
+（WiFi 路径上只有 `ppTask` 会收队列）。真正错的是
+`_task_get_current_task()`：其中一次把任务 2 报成了任务 1。
+
+这仍然是个必须修的问题 —— 闭源库到处用 `_task_get_current_task()` 判断
+身份（`current_task_is_wifi_task`、`pp_post` 的就地处理分支），报错任务 id
+会让库做出错误的并发决策。
+
+### 下一步
+
+在 `os_task_current_id()` 里把 `g_cur`、`g_cur_arr[0]`、`g_cur_arr[1]`、
+`port_core_id()` 四个值一次性记进 RTC，抓"同任务报不同 id"的现场，
+判断是 `g_cur_arr` 被改写、还是 `g_core` 下标跳变。
