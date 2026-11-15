@@ -7759,3 +7759,48 @@ osi_calls = 30
 * `osi_calls` 超过 30；
 * 串口出现 `W2 bringup returned`。
 若仍不行，再上真正的多级 spill（见 §184 的分步计划）。
+
+## §187 ★ 为什么"在 trampoline 里改 WINDOWBASE"必然失败
+
+两种顺序都试过了，结果都是**启动卡死**（串口只到 `c6os s3 boot`）：
+
+```
+先 windowstart=1 再 windowbase=0   → 卡死
+先 windowbase=0  再 windowstart=1  → 卡死
+```
+
+原因不是顺序，而是**做这件事的位置根本不对**：
+
+> `s3_task_tramp` 自己就跑在一个寄存器窗口里。一旦 `wsr windowbase` 生效，
+> 这个函数自己的 `a0`..`a15` 会立刻被**重映射到另一组物理寄存器** ——
+> 于是 `a1`（栈指针）、`a12`（入口地址）全都变成了别的值，函数当场失控。
+
+所以**窗口状态不能在"正在运行的代码"里改**，只能在"寄存器已经从帧里
+恢复、但还没有开始执行任务代码"的那一个瞬间改 —— 也就是
+`RESTORE_FRAME` 的最后一步、`rfe` 之前。
+
+### 正确的做法（下一轮按这个来）
+
+在 `RESTORE_FRAME` 宏里，把 `wsr` 放到 `l32i a0..a15` **之后**、
+`rfe` **之前**：
+
+```
+    ...  l32i a0..a15 从帧里恢复 ...
+    addi  a1, a1, 80
+    wsr   a7, windowstart      /* a7 里已装好 1，且这是最后几次读寄存器 */
+    wsr   a6, windowbase       /* a6 里已装好 0 */
+    rsync                       /* rsync 不读寄存器 */
+    rfe                         /* rfe 只从 PS/EPC 特殊寄存器取数 */
+```
+
+要点：
+* 两个 `wsr` 的源寄存器（a6/a7）必须在**改 windowbase 之前**就读好值 ——
+  也就是说 `wsr windowstart, a7` 要先做（此时 a7 还是对的）；
+* `wsr windowbase, a6` 之后**不能再读任何 a0..a15**，所以它必须是
+  倒数第二条指令，后面只能跟 `rsync` 和 `rfe`。
+
+### 验收
+
+`W2 bringup returned` 出现、无 TRAP、`osi_calls` 超过 30。
+
+若这样仍不行，再考虑真正的多级 spill（§184 的计划）。
