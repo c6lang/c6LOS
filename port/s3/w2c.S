@@ -27,37 +27,41 @@
     .align  4
 6:  .word   0x50000F00   /* 诊断区 2：s3_w2c_queue_get 的调用者 */
     .align  4
-12: .word   g_win_spilled  /* "切走前 spill 过"标志（见 ctx.c / ctx.S） */
+12: .word   g_s3_win_spill_en  /* spill 总开关（见 ctx.c / wifi_glue.c） */
 
-    .macro  W2C name, target
-    /* l32r 只能往前引用，所以字面量必须放在指令之前；用数字标签 9 保证
-     * 每次展开都指向紧邻自己的那一个。 */
-    .align  4
-9:  .word   \target
-    .align  4
-    .global \name
-    .type   \name, @function
-\name:
-    /* entry a1,48 里前 32 字节是留给 call8 的窗口 spill 区，**不能**拿来
-     * 存自己的东西：硬件欠载/溢出会往那里面写。局部量从 a1+32 开始。
-     * 之前写成 entry 16 + addi -16，保存槽正好压进 spill 区，真板症状是
-     * 欠载时读到 excvaddr=0xfffffff5（帧指针被踩坏）。 */
-    entry   a1, 48
-    s32i    a0, a1, 32           /* 存下带窗口标签的返回地址 */
-    l32r    a8, 9b
-    callx0  a8
-    l32i    a0, a1, 32
-    retw
-    .endm
-
-
-/* ---- 把祖先窗口整圈 spill 到栈上 -------------------------------------
- * 转 16 个窗口（64 aregs / 4）正好一圈，WINDOWBASE 回到原值 —— 官方
- * xt_asm_utils.h 的 SPILL_ALL_WINDOWS 做法（这颗芯片上不能写 WINDOWBASE）。
- * 转完只有当前窗口 live，所以恢复时把 WINDOWSTART 归成 1<<windowbase 是
- * 唯一正确的选择 —— 但**必须**跟这里配对（见 ctx.c 的 g_win_spilled）。
- * `and a12,a12,a12` 是占位：写回自身，即使被溢出到栈上也仍然正确。 */
-    .macro  WIN_SPILL8
+/* ---- 把祖先窗口整圈 spill 到栈上（IDF SPILL_ALL_WINDOWS 的完整版）------
+ * 与 `xt_asm_utils.h` 里那个裸宏相比，官方 `_xt_context_save` 还多做三件事，
+ * 少做任何一件这套机制就静默失效（这是前几轮"签名没变"的根因）：
+ *
+ *   1) 寄存器窗口溢出是 **level-1 异常**，向量末尾的 `rfwo` 会消耗 EPC1，
+ *      所以要先把 EPC1 存下来、转完再写回；
+ *   2) 溢出向量只在 PS.WOE=1 且 PS.EXCM=0 时才生效 —— WOE=0 时整段 rotw
+ *      是**静默空转**（官方注释原话 "becomes a silent noop"）。所以先把
+ *      INTLEVEL 抬到 7（屏蔽所有可屏蔽中断，溢出异常不受 INTLEVEL 影响）、
+ *      清 EXCM、置 WOE；
+ *   3) 转完只有"当前窗口"该是 live 的，WINDOWSTART 必须显式写成
+ *      1<<windowbase，否则就是 §197 那个签名（windowbase=3 / ws=0x20）。
+ *
+ * 转 16 个窗口（64 aregs / 4）正好一圈，WINDOWBASE 回到原值，所以**不需要**
+ * （也没办法）写 WINDOWBASE。`and a12,a12,a12` 是恒等写：即使被溢出到栈上，
+ * 写回去的还是原值，所以它"不占用任何寄存器"。
+ *
+ * 破坏 a8..a11（windowed ABI 的 caller-saved）；a4..a7 与 a12..a15 一个字节
+ * 都不能动（a4..a7 = 调用者的 a12..a15 是 callee-saved，a12..a15 = 调用者的
+ * a0..a3 是 retw 要用的返回地址和帧指针）。 */
+    .macro  WIN_SPILL
+    rsr     a8, ps
+    extui   a9, a8, 4, 1
+    bnez    a9, .Lspill_end\@   /* EXCM=1（正在异常里）：窗口不能碰，跳过 */
+    rsr     a9, epc1
+    movi    a10, -32
+    and     a10, a10, a8         /* 清 INTLEVEL(0..3) 和 EXCM(bit4) */
+    movi    a11, 1
+    slli    a11, a11, 18
+    addi    a11, a11, 7          /* WOE(bit18) | INTLEVEL=7 */
+    or      a10, a10, a11
+    wsr     a10, ps
+    rsync
     and     a12, a12, a12
     rotw    3
     and     a12, a12, a12
@@ -68,10 +72,50 @@
     rotw    3
     and     a12, a12, a12
     rotw    4
-    l32r    a9, 12b
-    movi    a10, 1
-    s32i    a10, a9, 0          /* g_win_spilled = 1 */
+    wsr     a8, ps               /* 恢复原 PS */
+    rsync
+    wsr     a9, epc1
+    rsr     a10, windowbase
+    movi    a11, 1
+    ssl     a10
+    sll     a11, a11
+    wsr     a11, windowstart
+    isync
+.Lspill_end\@:
     .endm
+
+    .macro  W2C name, target
+    /* l32r 只能往前引用，所以字面量必须放在指令之前；用数字标签 9 保证
+     * 每次展开都指向紧邻自己的那一个。 */
+    .align  4
+9:  .word   \target
+    .align  4
+    .global \name
+    .type   \name, @function
+\name:
+    /* 帧布局（128 字节）：
+     *   [a1 + 0 .. 15]   ABI 保留，不碰
+     *   [a1 + 16 .. 31]  自己的保存槽（带窗口标签的 a0）
+     *   [a1 + 32 .. 127] 空闲
+     * 帧**下方**再留 64 字节死区（addi -64）：spill 出来的窗口槽位落在
+     * [a1-64, a1) 里，之后内核的调用帧从 a1-64 往下长，两者不重叠。
+     * 这是本轮的关键顺序：**先 spill、再把 sp 降下去调内核**。
+     * 反过来（先降 sp 再 spill）槽位就会落在内核帧里，等于踩内核的局部量。 */
+    entry   a1, 128
+    s32i    a0, a1, 16           /* 存下带窗口标签的返回地址 */
+    l32r    a8, 12b
+    l32i    a9, a8, 0
+    beqz    a9, .Lno_spill\@
+    WIN_SPILL
+.Lno_spill\@:
+    addi    a1, a1, -64
+    l32r    a8, 9b
+    callx0  a8
+    addi    a1, a1, 64
+    l32i    a0, a1, 16
+    retw
+    .endm
+
 
 /* 带调用点追踪的版本：在 entry 之后记录 a0（此刻它就是 windowed 调用者的
  * 真实返回地址），存进 RTC 0x50000F00 开始的环（每项 2 字：返回地址、计数）。 */
@@ -82,20 +126,27 @@
     .global \name
     .type   \name, @function
 \name:
-    entry   a1, 48
-    s32i    a0,  a1, 32
-    s32i    a12, a1, 36
-    s32i    a13, a1, 40
+    entry   a1, 128
+    s32i    a0,  a1, 16
+    s32i    a12, a1, 20
+    s32i    a13, a1, 24
     l32r    a12, 6b
     l32i    a13, a12, 4
     s32i    a0, a12, 0
     addi    a13, a13, 1
     s32i    a13, a12, 4
+    l32r    a8, 12b
+    l32i    a9, a8, 0
+    beqz    a9, .Lno_spill\@
+    WIN_SPILL
+.Lno_spill\@:
+    addi    a1, a1, -64
     l32r    a8, 9b
     callx0  a8
-    l32i    a0,  a1, 32
-    l32i    a12, a1, 36
-    l32i    a13, a1, 40
+    addi    a1, a1, 64
+    l32i    a0,  a1, 16
+    l32i    a12, a1, 20
+    l32i    a13, a1, 24
     retw
     .endm
 
@@ -158,9 +209,12 @@
     .global osi_queue_recv
     .type   osi_queue_recv, @function
 osi_queue_recv:
-    entry   a1, 48
-    s32i    a12, a1, 36
-    s32i    a13, a1, 40
+    /* 这条壳是 ppTask 真正阻塞的地方，spill 必须在这里做（理由见文件头
+     * WIN_SPILL 的注释）：此刻 a1 就是本壳的帧基址，帧下 64 字节还是空闲栈，
+     * 祖先窗口的槽位全部落在自由区里。 */
+    entry   a1, 128
+    s32i    a12, a1, 20
+    s32i    a13, a1, 24
     /* 按调用序号把库侧返回地址存进 4 个槽（0x50000F08+4*i） */
     l32r    a8, 10b
     l32i    a9, a8, 0
@@ -171,18 +225,26 @@ osi_queue_recv:
     l32r    a8, 7b
     add     a8, a8, a9
     s32i    a0, a8, 0
-    s32i    a0, a1, 32
+    s32i    a0, a1, 16
+    /* spill 要在把 a10/a11/a12 改成参数之前做：它会用到 a8..a11 */
+    l32r    a8, 12b
+    l32i    a9, a8, 0
+    beqz    a9, .Lrecv_nospill
+    WIN_SPILL
+.Lrecv_nospill:
     mov.n   a10, a2
     mov.n   a11, a3
     mov.n   a12, a4
     l32r    a9, 11b
     s32i    a0, a9, 0            /* 诊断：callx8 之前的 a0 */
+    addi    a1, a1, -64          /* 死区：spill 槽位在 [a1-64, a1) */
     l32r    a8, 8b
     callx8  a8
+    addi    a1, a1, 64
     l32r    a9, 11b
     s32i    a0, a9, 4            /* 诊断：callx8 之后的 a0 */
     mov.n   a2, a10
-    l32i    a0,  a1, 32
-    l32i    a12, a1, 36
-    l32i    a13, a1, 40
+    l32i    a0,  a1, 16
+    l32i    a12, a1, 20
+    l32i    a13, a1, 24
     retw

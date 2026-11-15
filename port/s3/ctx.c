@@ -23,13 +23,12 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
 #define S3_MAX_CTX   3
 #define S3_STACK_SZ  8192
 
-/* 「切走前刚把祖先窗口整圈 spill 过」的标志。
- * w2c.S 的壳在 spill 之后置 1，port_task_switch 把它搬进 ctx->r[0] 并清零；
- * RESTORE_FRAME 只对带这个标志的任务做 WINDOWSTART 归一化。
- * 为什么必须配对：归一化会把 WINDOWSTART 收紧成"只剩当前窗口"，而没 spill
- * 过的任务祖先窗口还 live，收紧就等于把它们丢掉 —— 真板表现是整个固件连
- * banner 都不打。 */
-u32 g_win_spilled = 0u;
+/* 窗口 spill 的总开关（w2c.S 的每个壳在进内核前读它）。
+ *   0 = 完全不动窗口状态（和以前的行为一致，保住已通过的 PHY/串口基线）
+ *   1 = 壳里按 IDF 的做法把祖先窗口整圈 spill + WINDOWSTART 归一化
+ * 由 s3_wifi_osi_init()（wifi_glue.c）在进闭源库之前打开 —— 只有闭源库那几条
+ * 调用链需要窗口语义，我们的 call0 任务根本不需要，别让它们冒这个险。 */
+u32 g_s3_win_spill_en = 0u;
 
 S3Ctx g_sched[C6OS_MAX_CORES];
 /* 诊断计数（ctx.S 里自增后覆写到 RTC，避免 RTC 初值随机的干扰） */

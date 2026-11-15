@@ -15,26 +15,28 @@
     .literal .Ldbg2,    0x50001800
     .literal .Lwscratch, g_win_scratch
     .literal .Lyl_cnt,  g_yl_cnt
-    .literal .Lspilled, g_win_spilled
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
-    /* 只对**切走前 spill 过**的任务做 WINDOWSTART 归一化（a4 = 目标 ctx）。
-     * 为什么必须配对：归一化把 WINDOWSTART 收紧成"只剩当前窗口"，没 spill
-     * 过的任务祖先窗口还 live，收紧等于丢掉它们 —— 真板表现是整个固件连
-     * banner 都不打。标志放在 S3Ctx.r[0]（偏移 0，原本就是闲置占位槽）。 */
-    l32i    a2, a4, 0
-    beqz    a2, 8f
-    movi    a2, 0
-    s32i    a2, a4, 0            /* 用掉即清 */
-    rsr     a2, ps
+    /* WINDOWSTART 归一化成"只有当前窗口 live"。
+     *
+     * 为什么可以对**所有**任务无条件这么做（不再需要 per-task 配对标志）：
+     * 切走前 w2c 的壳一定会把祖先窗口整圈 spill 到任务自己的栈上
+     * （见 port/s3/w2c.S 的 WIN_SPILL），所以"栈上已经有全部祖先窗口、
+     * 寄存器文件里只剩当前窗口"是一个恒真的状态。恢复时让欠载向量按 a1 链
+     * 把祖先窗口 fill 回来就够了 —— 这正是官方 FreeRTOS 移植层的语义。
+     *
+     * 顺序：必须在恢复 a0..a15 **之前**做，因为这里要借用 a2/a3/a4/a5；
+     * 它们稍后会被从帧里重新装载。
+     * PS.WOE=0（启动早期，窗口机制没开）时 windowstart 无意义，别碰。 */
+    l32i    a2, a1, 64
     extui   a3, a2, 18, 1
-    beqz    a3, 8f               /* PS.WOE=0（启动早期）就别碰 */
-    rsr     a2, windowbase
-    movi    a3, 1
-    ssl     a2
-    sll     a3, a3
-    wsr     a3, windowstart
+    beqz    a3, 8f
+    rsr     a4, windowbase
+    movi    a5, 1
+    ssl     a4
+    sll     a5, a5
+    wsr     a5, windowstart
     isync
 8:
     l32i    a2, a1, 60
@@ -60,26 +62,19 @@
     l32i    a14, a1, 52
     l32i    a15, a1, 56
     addi    a1, a1, 80
-#ifdef __XTENSA_CALL0_ABI__
     rfe
-#else
-    /* windowed：只让当前窗口 live，祖先窗口由欠载向量按需 fill 回来 */
-    movi    a2, 1
-    wsr     a2, windowstart
-    isync
-    rfe
-#endif
     .endm
 
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
-#ifndef __XTENSA_CALL0_ABI__
-    /* windowed ABI：先把祖先窗口全部 spill 到当前任务的栈上，
-     * 之后只保存当前窗口的 a0..a15 就够了（恢复时靠欠载向量 fill）。 */
-    movi    a10, 0
-    call8   xthal_window_spill
-#endif
+    /* 这里**不** spill：spill 放在 w2c 的壳里做。
+     * 原因（本轮定死）：窗口溢出槽位落在"被 spill 的那个窗口的调用者的
+     * 栈指针下方"，而 port_task_switch 运行在我们自己的 call0 内核栈上，
+     * 那些字节正是内核活着的局部量 —— 在这里 spill 就是踩内核。壳里 sp 还是
+     * 壳自己的帧基址、下面全是空闲栈，槽位天然落在自由区。
+     * 另外 `call8 xthal_window_spill` 的契约是"溢出调用者的调用者且不返回"，
+     * 用它再往下接自己的代码一定会读到另一个窗口的垃圾（§200 三轮失败的原因）。 */
     /* 双核各用 g_sched[core]/g_s3_cur[core]。
      *
      * 顺序很关键：**必须先把现场（a0..a15/EPC/PS）原样压栈**，再去算本核
@@ -156,16 +151,6 @@ port_task_switch:
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5
-    l32i    a6, a3, 0
-    beqz    a6, 9f
-    /* 标志必须写进**出门任务自己的 ctx**（此刻 g_s3_cur[core] 还是它；
-     * g_sched[] 只是个临时保存槽，写在那里不会跟着任务走）。 */
-    l32r    a7, .Lspilled
-    l32i    a15, a7, 0
-    s32i    a15, a6, 0
-    movi    a15, 0
-    s32i    a15, a7, 0
-9:
     s32i    a4, a3, 0
     l32i    a1, a4, 64
     l32r    a14, .Ldbg2
@@ -199,13 +184,6 @@ port_task_yield:
     add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
-#ifndef __XTENSA_CALL0_ABI__
-    /* windowed ABI：先把祖先窗口全部 spill 到当前任务的栈上，
-     * 之后只保存当前窗口的 a0..a15 就够了（恢复时靠欠载向量 fill）。 */
-    movi    a10, 0
-    call8   xthal_window_spill
-#endif
-
     addi    a1, a1, -80
     s32i    a0, a1, 0
     s32i    a2, a1, 4
@@ -238,8 +216,6 @@ port_task_yield:
     and     a5, a5, a6
     s32i    a5, a1, 64
     s32i    a1, a4, 64
-    movi    a6, 0
-    s32i    a6, a4, 0            /* yield 路径没有 spill，标志清零 */
     /* 诊断：yield 的外出任务 ctx 与保存的 sp */
     l32r    a14, .Ldbg2
     s32i    a4, a14, 16

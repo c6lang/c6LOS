@@ -919,6 +919,11 @@ typedef char s3_osi_magic_offset_check[
     (__builtin_offsetof(wifi_osi_funcs_t, _magic) == 0x1DCu) ? 1 : -1];
 typedef char s3_osi_size_check[(sizeof(wifi_osi_funcs_t) == 480u) ? 1 : -1];
 
+/* windowed 世界的窗口 spill 开关（定义在 port/s3/ctx.c，w2c.S 的壳读它）。
+ * 闭源库的回调马上要跑起来了，从这里开始每条 w2c 壳都必须把祖先窗口 spill
+ * 干净，否则库里一阻塞我们就没法把它恢复回来（§193/§197）。 */
+extern u32 g_s3_win_spill_en;
+
 __attribute__((section(".flash.text")))
 void s3_wifi_osi_init(void)
 {
@@ -927,6 +932,7 @@ void s3_wifi_osi_init(void)
     u32 i = 0;
 
     while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
+    g_s3_win_spill_en = 1u;
 
     /* 头尾不是函数指针，而是版本号和魔数：
      *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
@@ -1299,4 +1305,14 @@ int __wrap_wifi_init_in_caller_task(void)
     r = __real_wifi_init_in_caller_task();
     s3_wrap_bump(6u);          /* 只有它返回了才会 +1 */
     return r;
+}
+
+/* 闭源 net80211 的日志出口。IDF 里它是 esp_wifi 组件自己提供的普通符号，
+ * 我们链接闭源 .a 时没人提供 —— 但库只在几处 md5/自检失败时调它，而且
+ * 实测库自己一个字都不打（§192：_log_write=0），所以直接吞掉。
+ * 要走诊断就看 osi 调用计数表（g_osi_calls）。 */
+int net80211_printf(const char *fmt, ...)
+{
+    (void)fmt;
+    return 0;
 }

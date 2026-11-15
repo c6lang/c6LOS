@@ -8521,3 +8521,107 @@ s3_win_switch_helper:            (windowed)
 
 这条是整条线上唯一还没做过的"源头清理"，也是三次切换改造都失败后剩下的
 唯一解释。
+
+## §201 代码级核对：前几轮的 spill 其实**一次都没执行过**；本轮把三处缺口补齐
+
+这一轮没有再动真板，而是把 `port/` 里与窗口有关的代码和官方的对照读了一遍。
+结论很硬：**§197~§200 三轮"方案不成立"的读数，全部建立在"spill 生效了"这个
+错误前提上** —— 那三版代码在编出来的镜像里根本不存在。
+
+### 三个决定性事实（都能用 objdump/nm 复核）
+
+1. `port/s3/ctx.S` 里 `port_task_switch` / `port_task_yield` 开头那两段
+   `call8 xthal_window_spill`，外面包着 `#ifndef __XTENSA_CALL0_ABI__`，
+   而 Makefile 用 `-mabi=$(S3_ABI)` 编它、`S3_ABI ?= call0`（Makefile:12、
+   218-220）。**所以这两段从来没被编进去过。** 同理 `RESTORE_FRAME` 末尾那个
+   "windowed 才归一化 WINDOWSTART"的 `#else` 分支也是死的。
+2. `port/s3/w2c.S` 里 `WIN_SPILL8`（正好就是官方的 rotw 整圈）**只定义、没人调**；
+   而 `g_win_spilled = 1` 只写在它里面。于是 `ctx.S` 里那段"按标志做
+   WINDOWSTART 归一化"的代码永远读到 0 —— 这解释了 §197 续那句
+   "故障签名没变，说明归一化没执行"：不是归一化写错了，是它压根没被调用。
+3. 真正跑在板上的那三版实验，用的是 `call8 xthal_window_spill`（ROM 的 HAL
+   版本）。它的契约是"溢出**调用者的调用者**的窗口，然后**不返回**"，和
+   `xt_asm_utils.h` 的 `SPILL_ALL_WINDOWS` 是两个东西 —— 前者靠内部轮转改变
+   WINDOWBASE，后者转 16 个窗口正好一圈、**WINDOWBASE 回到原值**。
+   所以 §200 推出的"spill 必然改 WINDOWBASE，所以必须是切换前最后一件事、
+   之后的交接只能走内存、spill 完不能 retw"这一整套约束，是 HAL 版本的性质，
+   不是窗口机制的性质。§197 里我们自己写的那句"转一圈 WINDOWBASE 回到原值，
+   所以不需要写 WINDOWBASE"才是对的，后面三轮把它推翻了。
+
+### 官方 `_xt_context_save` 里还有三件我们缺的事
+
+`xt_asm_utils.h:51` 那个宏只是裸的 5 个 `rotw`。官方在它前后还做了：
+
+1. **存/恢复 EPC1**：窗口溢出是 level-1 异常，向量末尾的 `rfwo` 会消费 EPC1；
+2. **PS 舞蹈**：`PS = (PS & ~(INTLEVEL|EXCM)) | UM|WOE`，且 INTLEVEL 抬到
+   `max(当前, XCHAL_EXCM_LEVEL=3)`。官方注释写得很直白：WOE=0 时整段 rotw 是
+   "**a silent noop**"（静默空转）。我们先前两次"整圈 spill 集成"没做这一步，
+   在 WOE 关掉的上下文里就等于什么都没干；
+3. **归一化 WINDOWSTART**：转完只有当前窗口该是 live 的，必须显式写成
+   `1 << windowbase`，否则就是 §197 那个签名（`windowbase=3 / windowstart=0x20`）。
+
+### spill 该放在哪：不能放 `port_task_switch`，只能放 w2c 的壳里
+
+这是本轮推出来的关键结构结论（比"拷官方代码"更重要）：
+
+* 溢出槽位的地址 = **被 spill 窗口的调用者的栈指针减 16**（`_win_ovf4` 的
+  `s32e a0, a5, -16`，a5 = callee 的 a1；`xtensa_vectors.S:2017` 与我们
+  `port/s3/irq.S:52-125` 逐字节一致，这组向量没问题）。
+  也就是说槽位落在"被 spill 的那个窗口的**被调方**的帧顶部"。
+* `port_task_switch` 跑在我们自己的 **call0 内核栈**上（`kernel/task.c6:621`
+  的主循环、以及 `port_task_yield`）。c6 生成的 call0 帧把 a0 存在 `[sp+0]`，
+  根本没有 Xtensa ABI 那 16 字节保留区 —— 在那里 spill 就是拿窗口内容去踩
+  内核自己的局部量。§197 猜的"`_win_ovf*/_win_unf*` 与 `entry a1,48` 组合时
+  spill 区归属算错"、"spill 区越界"，就是这个。
+* w2c 壳（`port/s3/w2c.S`）正好在另一头：它刚 `entry` 完、**还没有向下调用
+  任何东西**，所以帧下方的 64 字节全是空闲栈，槽位天然落在自由区。祖先窗口
+  则是闭源库那条链（gcc 编的 windowed 帧，保留区是规范做法）。
+
+所以本轮的顺序是固定的：**先 spill，再把 sp 降 64 留死区，然后才进内核**。
+反过来（先降 sp 再 spill）槽位就落进内核帧里了。
+
+### 本轮改了四处
+
+| 文件 | 改动 |
+|---|---|
+| `port/s3/w2c.S` | 新增 `WIN_SPILL` 宏（PS 舞蹈 + 整圈 rotw + EPC1 + 归一化，全部用 a8..a11，不碰 a4..a7/a12..a15 因为这些是 callee-saved 和 retw 的返回地址）；`W2C`/`W2C_TRACE`/`osi_queue_recv` 三个壳统一改成 `entry a1,128` + 局部量从 +16 起 + 64B 死区；删掉死掉的 `WIN_SPILL8` |
+| `port/s3/ctx.S` | 删掉两处 `call8 xthal_window_spill`（反正没编进去）和 `g_win_spilled` → `ctx->r[0]` 的配对记账；`RESTORE_FRAME` 改成**无条件**（只看 PS.WOE）做 `WINDOWSTART = 1<<windowbase`，位置在恢复 a0..a15 之前 |
+| `port/s3/ctx.c` | `g_win_spilled` → `g_s3_win_spill_en`，语义从"每任务一次性标志"变成**总开关**，默认 0 |
+| `port/s3/wifi_glue.c` | `s3_wifi_osi_init()` 里打开开关；补 `net80211_printf`（闭源 .a 要、IDF 侧由开源组件提供、我们没人提供） |
+
+为什么不再需要 per-task 配对标志：只要**每条** w2c 壳进门都 spill 一次，
+"栈上有全部祖先窗口 + 寄存器文件里只有当前窗口"就是恒真状态，恢复时让欠载
+向量按 a1 链 fill 回来即可 —— 这正是官方 FreeRTOS 移植层的语义。默认关掉是
+为了保住已经跑通的 PHY/串口基线：只有闭源库那几条链需要窗口语义。
+
+### 构建侧的真实状态（本轮踩到的环境缺口，别再浪费时间）
+
+* HEAD 上 `make s3` **本来就链不过**（`w2c.o` 的 `os_queue_*` 与
+  `wifi_glue.o` 的 `__real_*`）：默认 `S3_SKIP_C6` 把 `queue/sem` 排掉了。
+  可用命令：
+  ```sh
+  make C6_ROOT=/home/winger/c6 BUILD=build/base S3_SKIP_C6="" \
+    S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+                 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+    S3_EXTRA_LIBS="/tmp/wstub.o" s3        # /tmp/wstub.o 只补 __real_*/g_log_level/esp_wifi_start
+  ```
+  这样能出 elf（本轮用它验证了汇编与链接，`text 56021`）。
+* 真 WiFi 镜像还差的**不是 ABI，是 IDF 开源层**：把
+  `~/.c6os/toolchain` 之外那批原始 `.a` 直接拿来链
+  （`esp_wifi/lib/esp32s3/lib{net80211,pp,core,phy,mesh,wapi,espnow,smartconfig}.a`
+  + `objcopy --redefine-sym memcpy=win_memcpy ...`），现在缺的是
+  `WIFI_EVENT`、`regdomain_table`、`regulatory_data`、`pp_printf`、
+  `esp_wifi_disconnect`、`esp_mesh_send_event_internal` —— 这些在 IDF 的
+  **开源**组件里（`components/esp_wifi/src/*.c`、`esp_wifi_regdomain.c` 等）。
+  下一轮要么把这些编译进来，要么按需补桩。
+
+### 下一轮（真板）判据，按顺序
+
+1. 镜像能链接 + 烧进去后，先用 `tools/gstep_win.gdb` 在**第一次**进
+   `port_task_switch` 时看 `ws`：应该是 `1<<wb`（不再是 §199 那个 `0x280`）。
+2. 再 `hbreak osi_queue_recv`，命中断点后单步看**整圈 rotw 之后**
+   `wb` 是否回到原值、`ws == 1<<wb`、`a1` 是否仍等于进壳时的帧基址。
+3. 然后看 ppTask 阻塞→唤醒→`retw` 这一趟：`retw` 必须因欠载而 fill（说明
+   祖先窗口真的在栈上），而不是直接跳走。
+4. 串口判据：`g_osi_calls` 总数越过 §192 的 30 次、且 `_log_write` 仍然为 0
+   但 `_queue_recv` 不再只在 ppTask 那一条路上出现（说明 init 走得更远）。
