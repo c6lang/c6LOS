@@ -3509,3 +3509,27 @@ Segment   Length   Load addr   File offs  Memory types
 
 ⇒ **只接受一个 DROM 段 + 一个 IROM 段**，所以"两个 IROM 段"必然被拒。
 所有 flash 代码必须放在**同一个 IROM 段**里。
+
+### 82o. 当前最佳布局（但 bootloader 仍不接受）
+
+综合已有知识，排出了理论上最合理的一套：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x00108  0x3c000020  0x00000018  DROM       <- 1 页，占 entry 0
+      1  0x0fed0  0x00000000  0x00000128  PADDING    <- 64KB 空洞，bootloader 应跳过
+      2  0x67ee8  0x42010000  0x00010000  IROM       <- entry 1，与 DROM 不冲突
+      3+ IRAM/DRAM 段
+```
+
+- DROM 只占 **1 个表项**（entry 0）
+- IROM 从 **entry 1** 开始（7 页，entry 1~7），**完全不与 DROM 冲突**
+- 镜像 645KB，不大
+
+**但真板上 bootloader 仍然复位拒绝。**
+
+⇒ 目前的判断：**PADDING 段**可能就是它拒绝的原因（虽然 IDF 自己的镜像里也有）。
+下一步可以试：
+1. 不用 PADDING 段，改成让 DROM 的 `Load addr` **紧跟** 在 IROM 前面（零空洞），
+   这时 IROM 的 vaddr 低 16 位要相应调整
+2. 或者干脆把 DROM 段**放到最后**，让 IROM 成为第一个 flash 段
