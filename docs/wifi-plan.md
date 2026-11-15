@@ -4749,3 +4749,48 @@ slot3 = 0x00000102      ← esp_wifi_init_internal 的返回值
 - 其它：`_get_free_heap_size`、`_random`、`_log_write` 等
 
 我们的 RTOS 有任务/互斥量/信号量，这些都能对上。
+
+### 108. OSI 内存函数接上了，但 NO_MEM 仍在 —— 下一个是队列
+
+已实现的 OSI 函数（`port/s3/wifi_glue.c`）：
+
+```
+tab[0]   = 0x00000008        _version
+tab[119] = 0xDEADBEAF        _magic（固定偏移，不能用 sizeof 推算）
+tab[43]  = osi_malloc        _malloc
+tab[44]  = osi_free          _free
+tab[46]  = osi_free_heap_size
+tab[92]  = osi_malloc        _malloc_internal
+tab[93]  = osi_realloc       _realloc_internal
+tab[94]  = osi_calloc        _calloc_internal
+tab[95]  = osi_zalloc        _zalloc_internal
+tab[96]  = osi_malloc        _wifi_malloc
+tab[97]  = osi_realloc       _wifi_realloc
+tab[98]  = osi_calloc        _wifi_calloc
+tab[99]  = osi_zalloc        _wifi_zalloc
+```
+
+分配器是**自包含**的（不依赖 `kernel/heap.c6` 或 `port/s3/fast.c`，
+那两个在 `S3_LEAN=1` 下都不参与链接），放在 `0x3FCB8000` 起的 64KB 空闲 DRAM
+（app 的 DRAM 段到 `0x3FCB6EC4` 结束）。
+
+**但仍是 `0x101`（ESP_ERR_NO_MEM），而且堆头的 magic 是 0**
+⇒ 说明我们的 `osi_malloc` **一次都没被调用**。
+
+⇒ 库的 NO_MEM 来自别的地方。嫌疑最大的是 **`_wifi_create_queue`**（字段 100，
+第 130 行），它现在还是 `glue_ret0`（返回 0），创建队列失败就报 NO_MEM。
+
+### 下一步
+
+实现这一组（按 `wifi_os_adapter.h` 的字段号 = 行号 - 30）：
+
+| 字段 | 名字 |
+|---|---|
+| 100 | `_wifi_create_queue` |
+| 101 | `_wifi_create_queue_wait_send` |
+| 102 | `_wifi_delete_queue` |
+| 103 | `_wifi_queue_send` |
+| 104 | `_wifi_queue_recv` |
+
+我们的 RTOS 有 `kernel/queue.c6`，但对不上 IDF 的队列语义；
+最直接的是用**环形缓冲 + 我们自己的实现**。

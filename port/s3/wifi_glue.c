@@ -6,6 +6,7 @@
  *   内存 -> 队列 -> 信号量/互斥 -> 定时器 -> 线程 -> 中断 -> 日志/事件
  */
 #include "c6os/types.h"
+
 #include "c6os/wifi_osi.h"
 
 wifi_osi_funcs_t g_wifi_osi_funcs;
@@ -16,6 +17,90 @@ static u32 glue_ret0(void)
 {
     return 0u;
 }
+
+
+/* ---- 真正可用的 OSI 内存函数（其余仍为 glue_ret0 桩）----
+ * 注意：port/s3/fast.c 里的系统堆只在非 LEAN 构建里链接，而 WiFi 场景必须
+ * 用 S3_LEAN=1，所以这里**自建一个独立的堆**，放在空闲 DRAM 里。
+ * 0x3FCB0000 ~ 0x3FCD9000 之间是可用区间（避开栈和坏区）。 */
+#define S3_WIFI_HEAP_BASE 0x3FCB8000u
+#define S3_WIFI_HEAP_SIZE 0x00010000u   /* 64KB，落在 app 的 DRAM 段之后的空闲区 */
+
+/* 自包含的分配器：块头 16 字节 { magic, size, used, next }，首次适配 + 释放合并。
+ * 不依赖 kernel/heap.c6（它在 S3_LEAN=1 下不参与链接）。 */
+#define WH_MAGIC 0x57484646u
+typedef struct WhBlk { u32 magic; u32 size; u32 used; u32 pad; } WhBlk;
+static int g_wh_ready = 0;
+
+static void wh_ensure(void)
+{
+    WhBlk *b;
+    if (g_wh_ready != 0) { return; }
+    b = (WhBlk *)S3_WIFI_HEAP_BASE;
+    b->magic = WH_MAGIC;
+    b->size  = S3_WIFI_HEAP_SIZE - sizeof(WhBlk);
+    b->used  = 0u;
+    b->pad   = 0u;
+    g_wh_ready = 1;
+}
+
+static void *osi_malloc(u32 n)
+{
+    u32 want = (n + 15u) & ~15u;
+    WhBlk *b;
+    wh_ensure();
+    b = (WhBlk *)S3_WIFI_HEAP_BASE;
+    while (b->magic == WH_MAGIC) {
+        if (b->used == 0u && b->size >= want) {
+            /* 够大就切一块出来 */
+            if (b->size >= want + sizeof(WhBlk) + 16u) {
+                WhBlk *nb = (WhBlk *)((u8 *)b + sizeof(WhBlk) + want);
+                nb->magic = WH_MAGIC;
+                nb->size  = b->size - want - sizeof(WhBlk);
+                nb->used  = 0u;
+                nb->pad   = 0u;
+                b->size   = want;
+            }
+            b->used = 1u;
+            return (u8 *)b + sizeof(WhBlk);
+        }
+        b = (WhBlk *)((u8 *)b + sizeof(WhBlk) + b->size);
+    }
+    return 0;
+}
+
+static void osi_free(void *p)
+{
+    WhBlk *hdr;
+    if (p == 0) { return; }
+    hdr = (WhBlk *)((u8 *)p - sizeof(WhBlk));
+    if (hdr->magic == WH_MAGIC) { hdr->used = 0u; }
+}
+
+static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
+
+static void *osi_realloc(void *p, u32 n)
+{
+    void *q;
+    u32 old;
+    u32 i = 0u;
+    u8 *a; u8 *b;
+    if (p == 0) { return osi_malloc(n); }
+    q = osi_malloc(n);
+    if (q == 0) { return 0; }
+    old = ((WhBlk *)((u8 *)p - sizeof(WhBlk)))->size;
+    if (old > n) { old = n; }
+    a = (u8 *)p; b = (u8 *)q;
+    while (i < old) { b[i] = a[i]; i = i + 1u; }
+    osi_free(p);
+    return q;
+}
+static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz); 
+                                            u32 i = 0; u8 *q = (u8 *)p;
+                                            if (p == 0) { return 0; }
+                                            while (i < n * sz) { q[i] = 0u; i = i + 1u; }
+                                            return p; }
+static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
 void s3_wifi_osi_init(void)
 {
@@ -37,6 +122,19 @@ void s3_wifi_osi_init(void)
      * 而头文件里的 wifi_osi_funcs_t 因为 #if CONFIG_IDF_TARGET_ESP32C6/C5/C61
      * 那两个条件字段对我们不成立，算出来的 sizeof 比库期望的小两格。 */
     tab[119]   = (void *)0xDEADBEAFu;
+
+    /* 接上真正的内存函数（字段号 = wifi_os_adapter.h 里的行号 - 30） */
+    tab[43] = (void *)osi_malloc;          /* _malloc */
+    tab[44] = (void *)osi_free;            /* _free */
+    tab[46] = (void *)osi_free_heap_size;  /* _get_free_heap_size */
+    tab[92] = (void *)osi_malloc;          /* _malloc_internal */
+    tab[93] = (void *)osi_realloc;         /* _realloc_internal */
+    tab[94] = (void *)osi_calloc;          /* _calloc_internal */
+    tab[95] = (void *)osi_zalloc;          /* _zalloc_internal */
+    tab[96] = (void *)osi_malloc;          /* _wifi_malloc */
+    tab[97] = (void *)osi_realloc;         /* _wifi_realloc */
+    tab[98] = (void *)osi_calloc;          /* _wifi_calloc */
+    tab[99] = (void *)osi_zalloc;          /* _wifi_zalloc（若有） */
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */

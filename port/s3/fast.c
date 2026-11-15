@@ -311,6 +311,9 @@ u32 os_heap_max_free(OsHeap *h) {
 
 static OsHeap g_sys_heap;
 void os_sys_heap_init(void *mem, u32 size) { os_heap_init(&g_sys_heap, mem, size); }
+void *os_sys_alloc(u32 n) { return os_heap_alloc(&g_sys_heap, n); }
+void os_sys_free(void *p) { os_heap_free(&g_sys_heap, p); }
+void *os_sys_realloc(void *p, u32 n) { return os_heap_realloc(&g_sys_heap, p, n); }
 u32 os_sys_heap_used(void) { return os_heap_used(&g_sys_heap); }
 u32 os_sys_heap_peak(void) { return os_heap_peak(&g_sys_heap); }
 u32 os_sys_heap_max_free(void) { return os_heap_max_free(&g_sys_heap); }

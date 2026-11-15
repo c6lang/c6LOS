@@ -38,6 +38,8 @@ void os_main(void)
 
     rc = s3_win_call_wifi_init((void *)CFG);
     s3_beacon(2u, rc);                        /* 期望 0 = OK */
-    s3_beacon(3u, 0x60000000u | (rc & 0xFFFFu));
+    s3_beacon(3u, *(volatile u32 *)0x3FCB8000u);   /* 堆头 magic，应为 0x57484646 */
+    /* 再看堆里第二块的 used 位（说明分配器真的动过） */
+    s3_beacon(1u, *(volatile u32 *)0x3FCB8010u);
     for (;;) { }
 }
