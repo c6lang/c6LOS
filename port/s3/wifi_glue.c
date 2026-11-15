@@ -42,8 +42,8 @@ void esp_log_level_set(const char *tag, int level)
     (void)level;
 }
 
-u32 g_espnow_user_oui;
-u32 g_mt;
+/* 注意：g_espnow_user_oui / g_mt 由 libespnow.a(manatick.o) 提供，
+ * 这里不能再定义，否则 "multiple definition"。 */
 
 int hexstr2bin(const char *hex, u8 *buf, u32 len)
 {

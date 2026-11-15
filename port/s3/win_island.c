@@ -461,3 +461,13 @@ u32 s3_win_config_icache_mode(u32 size, u32 ways, u32 line)
     ((void (*)(u32, u32, u32))0x40001a1cu)(size, ways, line);
     return 0u;
 }
+
+/* esp_wifi_init_internal 是 windowed ABI（入口是 entry a1,32），必须从这个
+ * -mabi=windowed 的孤岛里调用；从 call0 直接 callx 会在 entry 指令上
+ * IllegalInstruction。 */
+extern int esp_wifi_init_internal(const void *cfg);
+
+u32 s3_win_wifi_init(void *cfg)
+{
+    return (u32)esp_wifi_init_internal(cfg);
+}

@@ -3139,3 +3139,43 @@ abort() was called at PC 0x403cdbe0
 ⇒ **bootloader 要求镜像里必须有 flash 段**，不能绕开。所以"不放 flash 段"这条
 排除法走不通，必须从"为什么我们镜像的 flash 段让它配出 `SPI_MEM_CLOCK=0x80000000`"
 这个角度继续查。
+
+## 82. ★ 里程碑：WiFi 闭源栈已链接进 flash，并已开始从 flash 执行
+
+I-cache 修好之后，把 IDF 闭源库的代码放进 `.flash.text`（链接脚本按归档分别收集
+`.literal/.text/.iram1`，并补上 `.wifi*` 系列段），结果：
+
+```
+镜像: 641K（之前因 IRAM 溢出 421KB 根本链不出来）
+段: DRAM 0x3fca0000 / IRAM 0x40378000 / IROM 在 .flash.text
+链接: Successfully created ESP32-S3 image.
+```
+
+真板串口：
+
+```
+c6os s3 boot
+wifi_init ...                       <- esp_wifi_init_internal 被调用
+*** TRAP sp=3fcd8e90 cause=00000000 pc=4203d934
+```
+
+**PC = 0x4203d934 位于 `.flash.text` 里** —— 证明 CPU 确实在**从 flash 取指并执行
+WiFi 库的代码**（I-cache 完全正常）。
+
+`0x4203d934` 正好是 `esp_wifi_init_internal` 的入口，反汇编是 `entry a1, 32`。
+`entry` 是 windowed ABI 的指令，直接调用会 IllegalInstruction —— 已经改成经
+windowed 孤岛（`s3_win_call_wifi_init`）调用，但仍然在同一条指令上 trap，
+说明还有第二个原因（待查）。
+
+### 顺带修掉的两个链接问题
+
+1. `.wifislpiram*` / `.wifirxiram*` 等 WiFi 专属段没被收集 → 变成孤儿段导致 LMA 重叠
+   （用 `*(SORT_BY_NAME(.wifi*))` 收进 IRAM 解决）
+2. `g_mt` / `g_espnow_user_oui` 在 `wifi_glue.c` 和 `libespnow.a` 里重复定义 → 移除 glue 里的
+
+### 下一步
+
+`entry a1,32` 在 0x4203d934 上 trap 的原因。注意我们的 PHY 也是 windowed 库、
+经同样的孤岛调用是正常的，所以孤岛机制本身没问题。可能是：
+- 该函数被从**非孤岛**路径调到（比如库里内部互调时 ABI 混用）
+- window 溢出/欠载向量在这条路径上没被正确处理
