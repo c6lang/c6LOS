@@ -4977,3 +4977,28 @@ s3_win_call_phy_enable();
 反汇编 `esp_wifi_init_internal` 的**开头部分**（`0x4203d934` 起），
 看它在调用一堆 OSI 函数之前，到底检查了哪些全局状态、
 按什么顺序初始化，然后逐一对齐。
+
+### 114. `esp_wifi_init_internal` 的初始化顺序
+
+反汇编开头：
+
+```
+4203d9b0:  call8  pm_funcs_init           ; 失败就跳到 0x4203da28 返回错误
+4203d9b3:  bnez   a10, 0xda28
+4203d9b9:  l32i   a10, a4, 120            ; cfg 偏移 120 = feature_caps 低字
+4203d9bc:  l32i   a11, a4, 124            ; cfg 偏移 124 = feature_caps 高字
+4203d9c2:  call8  wdev_funcs_init         ; 失败同样返回
+4203d9c5:  bnez   a10, 0xda28
+```
+
+⇒ `wdev_funcs_init(cfg->feature_caps_lo, cfg->feature_caps_hi)` 是**第二个**初始化步骤，
+它的内部会走到 `esf_buf_setup` → `esf_buf_setup_static` → 报 NO_MEM。
+
+⇒ 我们传的 `feature_caps = 0`（全 0）。
+IDF 的 `WIFI_FEATURE_CAPS` 默认值不是 0 —— 可能需要带上支持的 feature 位。
+
+### 下一步
+
+1. 把 `cfg[30]`/`cfg[31]`（偏移 120/124）设成 IDF 的 `WIFI_FEATURE_CAPS` 默认值
+2. 或者先看 `pm_funcs_init` 的返回值（如果它先失败，`wdev_funcs_init` 根本不会跑）
+3. 继续反汇编 `wdev_funcs_init`，确认 `esf_buf_setup` 拿到的参数是什么
