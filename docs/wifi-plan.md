@@ -9047,3 +9047,70 @@ s3_win_usb_reclaim()                 ⑥ 双保险
 
 `make … wifi`、`make … S3_PHY_BISECT=1 wifi`、基线 `make … s3` 三者都通过，
 `chkimg: OK（2 个 flash 段，文件偏移 == LMA）`。
+
+---
+
+## §206 第二个真 bug：`g_phyFuns` 不是 ROM 那个入口填的
+
+§202~§205 一直以为"`g_phyFuns` 由 ROM 的 `phy_get_romfuncs()`（`0x40005c58`）填"。
+反汇编我们自己的镜像看清楚了：**不是**。
+
+```
+4204da14 <phy_get_romfunc_addr>:            ; libphy 的入口
+  4204da17: l32r a8, (40005c58 <phy_get_romfuncs>)   ; ROM 的
+  4204da1a: callx8 a8                                  ; → 返回表指针（a10）
+  4204da1d: l32r a8, (3fccf938 <g_phyFuns>)
+  4204da20: s32i.n a10, a8, 0                          ; ★ 只有这里才写 g_phyFuns
+  4204da22: ...                                         然后往表里补 libphy 自己的实现：
+  4204da25: s32i a8, a10, 0x144   ; ram_temp_to_power
+  4204da2b: s32i a8, a10, 0x208   ; ram_pll_vol_cal
+  4204da31: s32i a8, a10, 0x264   ; ram_wifi_set_tx_gain
+  4204da37: s32i a8, a10, 0x228   ; ram_wifi_get_tx_gain
+  4204da3d: s32i a8, a10, 0x218   ; ram_bt_get_tx_gain
+  4204da43: s32i a8, a10, 0x15c   ; ram_get_i2c_hostid
+  ... （还有 0x268/0x224/0x008/0x00c/0x128/0x22c/0x20c/0x288/0x28c/0x1e4/0x258 …）
+```
+
+也就是说：
+
+* ROM 的 `phy_get_romfuncs()` **只返回**表指针，不会写我们的 `g_phyFuns`；
+* 真正"把表接上 + 打补丁"的是 libphy 的 `phy_get_romfunc_addr()`。
+
+而我们原来的正常路径 `s3_win_phy_enable()` 只调了 ROM 那个 —— 于是
+`g_phyFuns == 0`，而 `register_chipv7_phy()` 的头两条指令就是
+
+```
+4204e2b8: l32i.n a5, a7, 0    ; a5 = g_phyFuns   (= 0!)
+4204e2ba: l32i   a5, a5, 0x204 ; 从 0x204 读 → 未映射，LoadStoreError
+4204e2bd: callx8 a5
+```
+
+这正是 §202 那串"PC 落在奇怪地址 / cause=0x1c/0x1d"签名的一个来源。
+
+### 顺带清掉一个"自己发明的调用"
+
+`register_chipv7_phy_init_param()` 在整个 IDF 源码里只出现在
+`components/esp_rom/esp32c2/ld/esp32c2.rom.ld`（C2 的 ROM 符号表）里，
+S3 的 `esp_phy_load_cal_and_init()` **从不调它**。我们原来按"先 init_param 再主入口"
+的顺序调了它 —— 现在已经从正常路径和诊断路径里都删掉，保持和 IDF 一字不差：
+
+```
+s3_win_phy_power_on()     ① PWC/时钟/复位脉冲/隔离   (IDF: common_clock_enable + phy_module_enable)
+phy_bbpll_en_usb(1)       ② 留住 USB PHY             (IDF: CONFIG_ESP_PHY_ENABLE_USB)
+phy_get_romfunc_addr()    ③ 填 g_phyFuns + 打补丁      (IDF: esp_phy_enable 内部生效)
+register_chipv7_phy()     ④ 主入口                    (IDF: esp_phy_load_cal_and_init)
+s3_win_usb_reclaim()      ⑤ 双保险把 USB 抢回来
+```
+
+（唯一和 IDF 不同的地方：`cal_data.mac` 我们是写死的板子 MAC，IDF 从 efuse 读。）
+
+### 所以到目前为止，"PHY 一初始化就失联"的两个成因都已定位并修掉
+
+1. **USB PHY 被库自己关掉** → 缺 `phy_bbpll_en_usb(1)`（§205，机器码级证据
+   `i2c_bbpll_set` 里那个 byte）；
+2. **`g_phyFuns` 是空表** → 缺 `phy_get_romfunc_addr()`（本节，机器码级证据
+   `s32i a10, g_phyFuns`）。
+
+两个都是我们自己的代码缺陷，不是闭源库或 windowed ABI 的问题。下一步上板如果
+还有问题，`[phy] g_phyFuns=0x…` / `[phy] register_chipv7_phy rc=…` 两行输出
+会直接指向位置；`S3_PHY_BISECT=1` 的自动二分（6 步）作为兜底。

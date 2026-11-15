@@ -207,7 +207,6 @@ static void s3_win_usb_reclaim(void)
  * 返回：0 成功；否则是失败的步骤号。
  * 另外把 g_phyFuns 的内容也暴露出去（step 2 用它确认 ROM 真的填了表）。 */
 extern volatile u32 g_phyFuns;
-int register_chipv7_phy_init_param(const void *init_data, void *cal_data, int mode);
 
 u32 s3_win_phy_funcs_word(void)
 {
@@ -321,7 +320,6 @@ int s3_win_phy_step(int step)
     if (step <= 3) {
         return 0;
     }
-    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
     if (step <= 4) {
         return 0;
     }
@@ -331,7 +329,7 @@ int s3_win_phy_step(int step)
 /* 正常路径：**必须**和 bisect_run() 的子步骤顺序完全一致。
  *
  * 这里曾经和诊断路径不一致（少了 power_on、少了 phy_bbpll_en_usb、函数表用的是
- * 另一个入口、也没调 register_chipv7_phy_init_param），结果就是 §202 末尾那个
+ * 另一个入口、而且那个入口并不会写 g_phyFuns），结果就是 §202 末尾那个
  * "W0 phy start 之后整片从 USB 上消失" —— 现在把原因找到了（§205）：
  *
  * 反汇编 libphy 的 `i2c_bbpll_set()`（我们镜像里 0x42056658）可以看到：
@@ -377,10 +375,9 @@ int s3_win_phy_enable(void)
     }
     ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
 
-    /* ④ 参数表（IDF 里也是先 init_param 再主入口） */
-    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-
-    /* ⑤ 主入口 */
+    /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
+     *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
+     *    IDF 的 S3 流程从不调它，我们也不调 —— 少一个"自己发明的调用"。 */
     rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
     ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
 
@@ -411,7 +408,7 @@ u32 s3_win_phy_cal_word(u32 i)
  * 它会被记成 OK —— 那种情况只能靠主机端串口日志辨认：
  * 最后一条 `[bisect] step N enter` 后面没有 `ok`，就是它。
  */
-#define BISECT_N     7u
+#define BISECT_N     6u
 #define BISECT_CUR   0x50000A20u
 #define BISECT_HUNG  0x50000A24u
 #define BISECT_OK    0x50000A28u
@@ -445,10 +442,6 @@ static u32 bisect_run(u32 k)
         return (g_phyFuns == 0u) ? 1u : 0u;
     }
     if (k == 5u) {
-        (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-        return 0u;
-    }
-    if (k == 6u) {
         return (u32)(int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
     }
     return 0u;
