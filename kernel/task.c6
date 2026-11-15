@@ -15,6 +15,7 @@ static u32 g_rr_arr[C6OS_MAX_CORES] = {0};
 static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
 static u32 g_dbg_n = 0;        /* os_task_current_id 诊断计数 */
 static u32 g_dbg_pick_n = 0;   /* 调度选择诊断计数 */
+static u32 g_dbg_blk_n = 0;    /* 阻塞诊断计数 */
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
@@ -286,6 +287,17 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     }
     if (g_sched_lock[core] != 0u) {
         return -4; /* 调度锁内不允许阻塞 */
+    }
+    {
+        /* 诊断：记录最近 8 次阻塞的 (任务 id, kind, obj) 到 RTC 0x50000C00。
+         * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。 */
+        volatile u32 *bd = (volatile u32 *)0x50000C00u;
+        u32 n_ = g_dbg_blk_n;
+        g_dbg_blk_n = n_ + 1;
+        bd[(n_ & 7) * 4] = g_cur->id;
+        bd[(n_ & 7) * 4 + 1] = (u32)kind;
+        bd[(n_ & 7) * 4 + 2] = (u32)obj;
+        bd[(n_ & 7) * 4 + 3] = timeout;
     }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;

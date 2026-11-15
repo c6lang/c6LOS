@@ -6015,3 +6015,37 @@ pick2: id=1  state=1     （wifi_main 第二次运行）
 并给 `wifi_init_in_caller_task` 的返回路径加一个可观测信号
 （例如在 `esp_wifi_init_internal` 之后立刻写 beacon —— 现有测试里
 `M2 bringup returned` 就是，只是它没打印出来）。
+
+## §143 ★ 内核级确认死锁：任务 1 与任务 2 阻塞在**同一个队列对象**
+
+在 `os_task_block_prepare`（所有阻塞的必经之路）里记录最近 8 次
+(任务 id, wait_kind, wait_obj, timeout) 到 RTC `0x50000C00`。
+
+真板读数（全程只有 3 次阻塞）：
+
+```
+blk0: id=1  kind=1  obj=0x3fcbf8c0  to=0     （初始化早期的信号量/其它等待）
+blk1: id=2  kind=6  obj=0x3fcbf234  to=0     （WiFi 任务 ppTask 的收队列）
+blk2: id=1  kind=6  obj=0x3fcbf234  to=0     （初始化任务，**同一个对象**！）
+```
+
+`kind=6` 是 `os_queue_get_item` 的等待类型，`obj` 就是 `&WQ.q`
+（`WQ` 对象在 `0x3fcbf230`，`WOsQueue` 成员偏移 4）。
+
+⇒ **初始化任务最后一步是在 WiFi 队列上做接收，和 WiFi 任务撞在同一个对象上。**
+这是内核层面、不依赖任何 id/栈判读的确凿证据。
+
+结合 §132 的全量枚举（WiFi 路径上只有 `ppTask` 收这个队列），唯一合理的
+解释是：初始化任务走到了某个"同步等待回复"的路径 —— 最可能是
+`ieee80211_ioctl`（`esp_wifi_init_internal` 在 `wifi_init_in_caller_task`
+之后紧接着调用它）直接在这个队列上等回复。而负责投递的 `pp_post`
+（字段 25 `_queue_send`）在整个流程里**一次都没有被调用**，
+所以两边永远等下去。
+
+### 下一步
+
+反汇编 `ieee80211_ioctl`（当前地址需重新 nm 确认），看它在调用
+`current_task_is_wifi_task` 判定"不在 WiFi 任务里"之后，到底是
+`pp_post` + 信号量等待，还是直接 `_queue_recv`。若是后者，就要在
+初始化路径上补一次投递（或者在 `current_task_is_wifi_task` 为真时
+走就地处理分支，这需要让 WiFi 任务的 id 判断成立）。
