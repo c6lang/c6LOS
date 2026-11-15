@@ -21,7 +21,7 @@
 #ifndef C6_LWIPOPTS_H
 #define C6_LWIPOPTS_H
 
-#define NO_SYS                          1
+#define NO_SYS                          0   /* 0 = 有自己的 tcpip 线程 + BSD socket（见 sys_arch.c）*/
 #define SYS_LIGHTWEIGHT_PROT            0
 
 /* ---- 协议栈 ---- */
@@ -42,8 +42,13 @@
 #define LWIP_DHCP_DOES_ACD_CHECK        0   /* 关掉就必须显式写 0，否则 init.c 直接 #error */
 
 /* ---- API ---- */
-#define LWIP_SOCKET                     0
-#define LWIP_NETCONN                    0
+#define LWIP_SOCKET                     1   /* c6 标准库 std/net/tcp.c6 是 POSIX 薄封装 */
+#define LWIP_NETCONN                    1
+#define MEMP_NUM_NETCONN                4
+#define LWIP_SO_RCVTIMEO                1
+#define LWIP_SO_SNDTIMEO                1
+#define LWIP_SO_RCVBUF                  1
+#define LWIP_TCP_KEEPALIVE              0
 #define LWIP_NETIF_API                  0
 
 /* ---- 内存 ---- */

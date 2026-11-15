@@ -1503,9 +1503,11 @@ LWIP_CF   := -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
              -Wall -Wextra -Wno-unused-parameter
 LWIP_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
              $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
+             $(wildcard $(LWIP_SRC)/api/*.c) \
              $(wildcard $(LWIP_SRC)/netif/ethernet.c) \
-             port/s3/lwip/c6_lwip_port.c
-LWIP_HDRS := port/s3/lwip/lwipopts.h port/s3/lwip/arch/cc.h
+             port/s3/lwip/c6_lwip_port.c \
+             port/s3/lwip/sys_arch.c
+LWIP_HDRS := port/s3/lwip/lwipopts.h port/s3/lwip/arch/cc.h port/s3/lwip/arch/sys_arch.h
 
 define C6_LWIP_RULE
 $(LWIP_DIR)/obj/$(notdir $(basename $(1))).o: $(1) $(LWIP_HDRS)

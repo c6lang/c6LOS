@@ -9188,3 +9188,51 @@ WiFi 关联（`esp_wifi_start` → 扫描 → 4 次握手）在真板上还没�
 2. **每一步都要从满 8s 开始计时**。原来只在 `s3_win_wifi_main` 里喂狗，
    于是第 3 步以后实际只剩"上一步用剩的时间"，可能把"慢"误判成"挂死"。
    现在 `bisect_run()` 之前先 `os_wdt_feed()`。
+
+### §208 lwIP 升级到 NO_SYS=0：自带 tcpip 线程 + BSD socket（编译验证）
+
+§207 先把 lwIP 以 `NO_SYS=1` 编通了；这一步把它升到**最终形态**：`NO_SYS=0`，
+lwIP 自己起一个 tcpip 线程、提供 BSD socket。这样 `/home/winger/c6/std/net/tcp.c6`
+那种 POSIX 薄封装才有落脚点。
+
+新增/改动：
+
+| 文件 | 内容 |
+| --- | --- |
+| `port/s3/lwip/arch/sys_arch.h` | 句柄类型（`sys_sem_t`/`sys_mutex_t`/`sys_mbox_t` 用 unix 端口那种"指针的指针"语义）+ `sys_*_valid/set_invalid` 宏。**函数原型一个都不写** —— 全部由 lwIP 自己的 `lwip/sys.h` 声明（它先 include 本文件、之后才 `typedef lwip_thread_fn`，写原型会 "unknown type name lwip_thread_fn"） |
+| `port/s3/lwip/sys_arch.c` | 静态池实现的 sys 层：sem→`os_sem_*`、mutex→`os_mutex_*`、mbox→内核队列、`sys_thread_new`→`os_task_create`（并置 `g_next_task_windowed=1`，因为 lwIP 线程体是 windowed 编译的）。全部经 `port/s3/w2c.S` 的 `s3_w2c_*` 壳调用 |
+| `port/s3/lwip/lwipopts.h` | `NO_SYS=0`、`LWIP_SOCKET=1`、`LWIP_NETCONN=1`、`MEMP_NUM_NETCONN=4`、打开 `SO_RCVTIMEO/SNDTIMEO/RCVBUF` |
+| `Makefile` | `lwip` 目标加入 `api/*.c` 与 `sys_arch.c` |
+
+lwIP 2.x 的 sys_arch 是**指针传递**风格，和我们最初照 unix 老端口写的签名不一样，
+改对之后才编过：
+```c
+err_t sys_sem_new(sys_sem_t *sem, u8_t count);
+err_t sys_mutex_new(sys_mutex_t *mutex);
+err_t sys_mbox_new(sys_mbox_t *mbox, int size);
+```
+
+结构体尺寸不 include 内核头，直接按 `include/c6os/{sem,mutex,queue}.h` 抄字节数
+（`OsSem` 16 / `OsMutex` 12 / `OsQueue` 40）；容器用静态池
+（16 sem / 8 mutex / 8 mbox × 16 槽），既避免 malloc 时序问题，也让"池满"
+比"堆碎片"好定位。
+
+规模（`make lwip`）：
+
+| 配置 | 对象数 | text | data | bss |
+| --- | --- | --- | --- | --- |
+| `NO_SYS=1`（§207） | 32 | 49407 | 12 | 1688 |
+| `NO_SYS=0` + socket（本节） | 42 | **71554** | 12 | **3384** |
+
+也就是整套 IPv4+TCP+UDP+DHCP+DNS+ARP+BSD socket 只花 **~70KB flash、3.4KB 静态 RAM**
+（PBUF/连接控制块都走内核堆）。IROM 现在只用了 452KB/16MB，完全放得下；
+关键是接进来的时候**必须把 lwIP 的 `.text` 放进 `.flash.text`**（IROM），
+不能让它掉进 IRAM（§202 的 IRAM 预算只剩几 KB）。
+
+到"能取 https://qq.com"还差的软件件（都还没做，因为要等真板把 WiFi 关联跑通）：
+
+1. POSIX 名字的薄封装：`socket/connect/recv/send/poll/close/setsockopt/getaddrinfo`
+   → `lwip_*`（c6 标准库只认这些名字），外加 `errno` 映射；
+2. 把 `liblwip.a` 接进 `c6os.elf` + `link.ld` 里路由 `.text` 到 IROM；
+3. TLS：`std/net/https.c6` 只做记录层，握手要用 `std/net` 里的 `tlskdf`/`x25519`/`x509`
+   或者把 mbedTLS 也照 lwIP 的办法编进来 —— 这是最后一段路，也是最不确定的一段。
