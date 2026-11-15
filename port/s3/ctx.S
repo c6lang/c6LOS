@@ -148,11 +148,6 @@ port_task_switch:
     l32r    a3, .Lg_sched
     add     a3, a3, a5
     s32i    a1, a3, 64
-    l32r    a6, .Lspilled
-    l32i    a7, a6, 0
-    s32i    a7, a3, 0            /* ctx->r[0] = 本任务切走前是否 spill 过 */
-    movi    a7, 0
-    s32i    a7, a6, 0            /* 清标志 */
     /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
     l32r    a14, .Ldbg2
     s32i    a1, a14, 0
@@ -161,6 +156,16 @@ port_task_switch:
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5
+    l32i    a6, a3, 0
+    beqz    a6, 9f
+    /* 标志必须写进**出门任务自己的 ctx**（此刻 g_s3_cur[core] 还是它；
+     * g_sched[] 只是个临时保存槽，写在那里不会跟着任务走）。 */
+    l32r    a7, .Lspilled
+    l32i    a15, a7, 0
+    s32i    a15, a6, 0
+    movi    a15, 0
+    s32i    a15, a7, 0
+9:
     s32i    a4, a3, 0
     l32i    a1, a4, 64
     l32r    a14, .Ldbg2

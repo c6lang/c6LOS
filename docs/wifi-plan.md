@@ -8274,3 +8274,27 @@ JTAG: exccause=28  excvaddr=0xfffffff3  a1=0xffffffff(-1)
 **下一轮第一件事**：查清 `g_sched[core]` 与 `g_ctx[i]` 的关系（`port/s3/ctx.c`），
 确认"每个任务自己的 ctx"到底是哪一个，然后把标志写到正确的那个 ctx 上；
 顺便确认 `port_task_ctx_create` 有没有把 `r[0]` 初始化成 0。
+
+### §197 再续：标志改写到 `g_s3_cur[core]` 指向的任务 ctx（真板签名仍未变）
+
+查清了 `port/s3/ctx.c` 里三者的关系：
+- `g_sched[core]`：**临时保存槽**（ctx.S 按 76 字节步长索引），不跟任务走；
+- `g_s3_cur[core]`：**当前任务的 ctx 指针**（`port_cur_ctx()` 读的就是它）；
+- `g_ctx[i]`：任务 ctx 数组本体。
+所以标志必须写进 `g_s3_cur[core]` 指向的那个 ctx。已改（在 `s32i a4,a3,0`
+之前读旧值），并把 `g_sched` 里那段无效写入删掉。
+
+真板：仍能启动、`[recv] t=3` 正常、无 IllegalInstruction，但故障签名依旧
+（`cause=28`、`a1=0xffffffff`、`windowbase=3`、`windowstart=0x20`）。
+
+### JTAG 直接 dump `g_ctx[]`（gdb: `x/57xw 0x3fcbe970`）
+```
+ctx[0] @0x3fcbe970: r[0..15]=0, sp@64=0x3fcba6b0, stack=0x3fcb8970, size=0x2000
+ctx[1] @0x3fcbe9bc: r[0..15]=0, sp@64=0x3fcbc890, stack=0x3fcbb970, size=0x1000
+ctx[2] @0x3fcbea08: r[0..15]=0, sp@64=0x3fcbe780, stack=0x3fcbc970, size=0x2000
+g_s3_cur[0] = 0x3fcbe970  (= ctx[0]，正是当前任务)
+```
+三个任务的 sp 都落在各自栈区间内，说明**任务级 sp 没坏**。所以 `a1=0xffffffff`
+不是任务 sp，而是**某个祖先窗口的 a1 被欠载从错误的 spill 帧填进来** ——
+和 §197 开头的判断一致。`r[0]` 读到 0，无法区分"用过即清"还是"从没置过"，
+下一轮可以给 `g_win_spilled` 加一个累计计数（RTC），确认 spill 到底有没有发生过。
