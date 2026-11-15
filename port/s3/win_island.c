@@ -543,3 +543,120 @@ void s3_win_wifi_main_task(void *arg)
     *(volatile unsigned int *)0x50001200u = rc;
     for (;;) { }
 }
+
+/* ---- windowed 调用链跨任务切换的压力实验 --------------------------------
+ * 目的：单独验证"windowed 代码在让出 CPU 再回来之后，寄存器窗口还对不对"，
+ * 完全不涉及 WiFi 库。如果这里就崩，说明问题在我们的上下文切换，
+ * 而不是闭源库。
+ *
+ * 递归里故意写 `+ 1u`，防止编译器把尾递归优化成循环（那样就不占窗口了）。
+ */
+extern u32 s3_w2c_task_delay(u32 ticks);
+
+/* 最内层先跑一次深链：s3_win_deep12_entry(8) 用 call12 递归 8 层，
+ * s3_win_deep(16) 递归 16 层 —— 4 个窗口装不下，必然触发
+ * _win_ovf4/8/12 与 _win_unf4/8/12。返回值是固定算术值，
+ * 所以计数器的整除关系能直接证明整条链算对了。 */
+u32 s3_win_stress(u32 depth, u32 rounds)
+{
+    if (depth == 0u) {
+        u32 v = s3_win_deep12_entry(8u);   /* = 8 + (1+2+...+11) = 74 */
+        u32 w = s3_win_deep(16u);          /* = 17 */
+
+        s3_w2c_task_delay(1u);             /* 真正切到别的任务 */
+        return rounds + v + w;             /* 每轮 +91 */
+    }
+    return s3_win_stress(depth - 1u, rounds) + 1u;
+}
+
+void s3_win_stress_task(void *arg)
+{
+    volatile u32 *d = (volatile u32 *)0x50001300u;
+    u32 n = 0u;
+
+    (void)arg;
+    d[0] = 0xC0DE1234u;               /* 已进入 windowed 任务 */
+    /* 先做一次"库调 _queue_recv"路径的最小复现（d[3] 写结果） */
+    {
+        extern int s3_wifi_test_recv(u32 rounds);
+
+        d[3] = (u32)s3_wifi_test_recv(1u);
+        d[4] = 0xC0DE5678u;           /* 走到这里说明那条路径没崩 */
+    }
+    for (;;) {
+        n = s3_win_stress(3u, n);
+        d[1] = n;                     /* 完成的轮数 */
+    }
+}
+
+/* ---- 低优先级监控任务：把所有诊断环格式化打到串口 ----------------------
+ * 因为 esptool 的 read-mem 每次都会先复位芯片、而且一次只能读一个字，
+ * 所以"读一串字段"既慢又对不上。由固件自己打印才是最可靠的快照通道。
+ * 本函数在 windowed 岛上，可以直接调 ROM 的 ets_printf。
+ */
+extern u32 s3_w2c_tick_get(void);
+extern u32 s3_w2c_current_task(void);
+extern u32 s3_w2c_task_probe(u32 id, u32 what);
+
+__attribute__((section(".flash.text")))
+static void pdump(const char *tag, u32 a, u32 b, u32 c, u32 d)
+{
+    ets_printf("%s %08x %08x %08x %08x\n", tag, (unsigned)a, (unsigned)b,
+               (unsigned)c, (unsigned)d);
+}
+
+__attribute__((section(".flash.text")))
+void s3_win_dump_diag(void)
+{
+    volatile u32 *sem = (volatile u32 *)0x50001C00u;
+    volatile u32 *blk = (volatile u32 *)0x50000C00u;
+    volatile u32 *gq  = (volatile u32 *)0x50001300u;
+    u32 i;
+
+    ets_printf("\n[diag] tick=%u task=%u\n",
+               (unsigned)s3_w2c_tick_get(), (unsigned)s3_w2c_current_task());
+    for (i = 0u; i < 8u; i = i + 1u) {
+        if (sem[i * 5u] == 0u) { continue; }
+        ets_printf("  sem n=%u op=%u obj=%08x ticks=%u r=%u\n",
+                   (unsigned)sem[i * 5u], (unsigned)sem[i * 5u + 1u],
+                   (unsigned)sem[i * 5u + 2u], (unsigned)sem[i * 5u + 3u],
+                   (unsigned)sem[i * 5u + 4u]);
+    }
+    for (i = 0u; i < 4u; i = i + 1u) {
+        if (blk[i * 5u + 1u] == 0u) { continue; }
+        ets_printf("  blk%u obj=%08x kind=%u ctx=%08x epc=%08x\n", (unsigned)i,
+                   (unsigned)blk[i * 5u], (unsigned)blk[i * 5u + 1u],
+                   (unsigned)blk[i * 5u + 2u], (unsigned)blk[i * 5u + 4u]);
+    }
+    pdump("  qrun", gq[0], gq[1], gq[2], gq[3]);
+    /* 内核视角的任务状态：state / wait_kind / wait_obj。
+     * 状态值：0=就绪 1=运行 2=阻塞 3=挂起 4=结束（以 kernel/task.c6 为准） */
+    /* 库里到底调过哪些 OSI 回调、各多少次 —— 这一张表能直接看出 init 走到哪 */
+    {
+        extern volatile u32 g_osi_calls[128];
+        u32 j;
+
+        for (j = 0u; j < 128u; j = j + 1u) {
+            if (g_osi_calls[j] != 0u) {
+                ets_printf("  osi%u=%u\n", (unsigned)j, (unsigned)g_osi_calls[j]);
+            }
+        }
+    }
+    for (i = 0u; i < 5u; i = i + 1u) {
+        u32 st = s3_w2c_task_probe(i, 0u);
+        if (st == 0xFFFFFFFFu) { continue; }
+        ets_printf("  task%u st=%u wk=%u wobj=%08x\n", (unsigned)i, (unsigned)st,
+                   (unsigned)s3_w2c_task_probe(i, 1u),
+                   (unsigned)s3_w2c_task_probe(i, 2u));
+    }
+}
+
+__attribute__((section(".flash.text")))
+void s3_win_monitor_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        s3_w2c_task_delay(120u);
+        s3_win_dump_diag();
+    }
+}

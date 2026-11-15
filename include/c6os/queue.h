@@ -23,5 +23,7 @@ int os_queue_put_item(OsQueue *q, const void *item, u32 timeout);
 void *os_queue_get(OsQueue *q, u32 timeout);
 int os_queue_get_item(OsQueue *q, void *out, u32 timeout);
 u32 os_queue_count(OsQueue *q);
+int os_queue_try_get_item(OsQueue *q, void *out);
+int os_queue_try_put_item(OsQueue *q, const void *item);
 
 #endif

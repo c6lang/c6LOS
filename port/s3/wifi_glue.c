@@ -181,6 +181,8 @@ extern int  s3_w2c_mutex_post(void *m);
 extern int  s3_w2c_queue_init(void *q, void *storage, u32 cap, u32 item_size);
 extern int  s3_w2c_queue_put(void *q, const void *item, u32 timeout);
 extern int  s3_w2c_queue_get(void *q, void *out, u32 timeout);
+extern int  s3_w2c_queue_try_get(void *q, void *out);
+extern int  s3_w2c_queue_try_put(void *q, const void *item);
 extern u32  s3_w2c_queue_count(void *q);
 extern int  s3_w2c_queue_destroy(void *q);
 extern int  s3_w2c_event_init(void *e);
@@ -270,25 +272,43 @@ static void osi_semphr_delete(void *sem)
     WSem *s = (WSem *)sem;
     if (s != 0 && s->magic == WSEM_MAGIC) { (void)s3_w2c_sem_destroy((void *)&s->s); s->magic = 0u; osi_free(s); }
 }
+/* 信号量操作环形追踪（RTC 0x50001C00，每项 5 字：
+ * 序号 / 操作(1=take 2=give) / 对象 / ticks / 结果）。
+ * 用来定位"谁在等、谁没给"。 */
+static u32 g_sem_n = 0u;
+static void sem_trace(u32 op, u32 obj, u32 ticks, u32 r)
+{
+    volatile u32 *t = (volatile u32 *)0x50001C00u;
+    u32 k = g_sem_n & 7u;
+
+    g_sem_n = g_sem_n + 1u;
+    t[k * 5u]      = g_sem_n;
+    t[k * 5u + 1u] = op;
+    t[k * 5u + 2u] = obj;
+    t[k * 5u + 3u] = ticks;
+    t[k * 5u + 4u] = r;
+}
 static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
+    int ok;
     HIT_OF(_semphr_take);
-    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    {
-        int ok;
-        B_IN(1u);
-        ok = (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
-        B_OUT(1u);
-        return ok;
-    }
+    if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
+    B_IN(1u);
+    ok = (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
+    B_OUT(1u);
+    sem_trace(1u, (u32)sem, ticks, (u32)ok);
+    return ok;
 }
 static int osi_semphr_give(void *sem)
 {
     WSem *s = (WSem *)sem;
+    int r;
     HIT_OF(_semphr_give);
-    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    return (s3_w2c_sem_post((void *)&s->s) == 0) ? 1 : 0;
+    if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(2u, (u32)sem, 0u, 0xEEu); return 0; }
+    r = (s3_w2c_sem_post((void *)&s->s) == 0) ? 1 : 0;
+    sem_trace(2u, (u32)sem, 0u, (u32)r);
+    return r;
 }
 
 /* 当前任务用来阻塞的信号量。现在有真任务了，必须每个任务一个，
@@ -481,6 +501,7 @@ static u32 osi_wifi_create_queue(u32 len, u32 size)
     *(volatile u32 *)0x50000350u = g_qn;                /* 累计创建次数（BSS 计数，可信） */
     return (u32)q;
 }
+__attribute__((section(".flash.text")))
 static void osi_wifi_delete_queue(u32 qh)
 {
     WQ *q = (WQ *)qh;
@@ -507,7 +528,11 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
         SDIAG[3] = 0xBAD00000u;
         return 0;
     }
-    r = s3_w2c_queue_put((void *)&q->q, item, w_ticks(ticks));
+    if (ticks == 0u) {
+        r = s3_w2c_queue_try_put((void *)&q->q, item);
+    } else {
+        r = s3_w2c_queue_put((void *)&q->q, item, w_ticks(ticks));
+    }
     if (r != 0) {
         SDIAG[3] = 0xBAD10000u | (u32)(-r);
         SDIAG[2] = ticks;
@@ -533,7 +558,11 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         volatile u32 *rr = (volatile u32 *)0x50001540u;
         u32 k_ = g_recv_seq;
         g_recv_seq = k_ + 1u;
-        rr[(k_ & 3u) * 3u]      = (u32)port_cur_ctx();
+        /* 注意：这里必须用 windowed 的垫片，不能直接调 ctx.c 的 port_cur_ctx()。
+         * ctx.c 是 -mabi=call0 编译的，被 windowed 代码用 call8 调时，
+         * 它的 `ret` 会跳到**带 CALLINC 标记**的返回地址上 ->
+         * InstrFetchProhibited（真板症状：pc==vaddr==a0==0x82xxxxxx）。 */
+        rr[(k_ & 3u) * 3u]      = s3_w2c_current_task();
         rr[(k_ & 3u) * 3u + 1u] = (u32)qh;
         rr[(k_ & 3u) * 3u + 2u] = ticks;
     }
@@ -601,7 +630,14 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
             }
         }
     }
-    r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    /* FreeRTOS 语义：ticks==0 = 非阻塞；tick==portMAX_DELAY = 永久等待。
+     * 我们内核里 timeout==0 表示永久等待，所以 0 必须走 try 版本，
+     * 否则库里的"非阻塞收"会变成永久挂起（实测就是任务再也不动）。 */
+    if (ticks == 0u) {
+        r = s3_w2c_queue_try_get((void *)&q->q, item);
+    } else {
+        r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    }
     {
         /* 诊断：每次收到的返回值 + 当前队列 count，判断第一次是"真收到"
          * 还是我们错误地返回了成功。 */
@@ -628,6 +664,28 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     }
     return (r == 0) ? 1 : 0;
 }
+/* ---- 隔离测试：只走"库调用 _queue_recv"这一条路径 ----------------------
+ * 用和库完全一样的方式建队列（osi_wifi_create_queue），再经 osi_queue_recv
+ * 垫片（w2c.S，windowed）→ callx8 osi_queue_recv_body → 内核队列 收一次。
+ * 这样可以在完全不启动 WiFi 的情况下判断这条路径本身是否有问题。
+ */
+int osi_queue_recv(void *qh, void *item, u32 ticks);
+__attribute__((section(".flash.text"), noinline))
+int s3_wifi_test_recv(u32 rounds)
+{
+    u32 qh = osi_wifi_create_queue(4u, 4u);
+    u32 item = 0u;
+    u32 i;
+    int ok = 0;
+
+    if (qh == 0u) { return -1; }
+    for (i = 0u; i < rounds; i = i + 1u) {
+        if (osi_queue_recv((void *)qh, (void *)&item, 0u) != 0) { ok = ok + 1; }
+    }
+    return ok;
+}
+
+__attribute__((section(".flash.text")))
 static u32 osi_queue_msg_waiting(void *qh)
 {
     WQ *q = (WQ *)qh;

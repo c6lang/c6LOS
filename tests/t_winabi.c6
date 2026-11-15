@@ -1,0 +1,44 @@
+/* 受控实验：windowed 调用链跨任务切换，能不能保住寄存器窗口。
+ *
+ * 两个任务互相让出：
+ *   wstr —— windowed 任务，3 层递归后 delay(1)（会产生真实的 call8 链 + 切换）
+ *   cstr —— call0 任务，只 delay(1)
+ * 结果写到 RTC 0x50001300： d[0]=magic  d[1]=windowed 完成轮数  d[2]=call0 轮数
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/task.h"
+
+extern void s3_win_stress_task(void *arg);
+extern u32 g_next_task_windowed;
+extern void os_icache_enable(void);
+
+static void cstr_main(void *arg)
+{
+    volatile u32 *d = (volatile u32 *)0x50001300u;
+    u32 k = 0u;
+
+    (void)arg;
+    for (;;) {
+        os_task_delay(1u);
+        k = k + 1u;
+        d[2] = k;
+    }
+}
+
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0003000u);
+    /* .flash.text 里的内核代码要先使能 I-cache 才能取指 */
+    os_icache_enable();
+    s3_win_call_cache_invalidate();
+
+    s3_beacon(1u, (u32)os_task_create("cstr", cstr_main, 0, 1u, 4096u));
+
+    g_next_task_windowed = 1u;
+    s3_beacon(2u, (u32)os_task_create("wstr", s3_win_stress_task, 0, 2u, 8192u));
+
+    os_task_start();
+    for (;;) { }
+}

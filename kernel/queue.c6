@@ -176,3 +176,50 @@ u32 os_queue_count(OsQueue *q) {
     }
     return q->count;
 }
+
+/* 非阻塞读写：FreeRTOS/IDF 里 timeout==0 表示"立刻返回，不等待"，
+ * 而我们的 timeout==0 是"永久等待"（portMAX_DELAY 映射过来的）。
+ * 两者语义相反，所以单独提供这两个不做任何等待的版本。 */
+int os_queue_try_get_item(OsQueue *q, void *out) {
+    u32 st = 0u;
+    int r = -1;
+
+    if (q == 0 || out == 0) {
+        return -1;
+    }
+    st = os_obj_lock();
+    if (q->magic == QUEUE_MAGIC && q->cap != 0u && q->count != 0u) {
+        slot_read(q, q->head, out);
+        q->head = q->head + 1u;
+        if (q->head == q->cap) {
+            q->head = 0u;
+        }
+        q->count = q->count - 1u;
+        (void)os_task_wake_first(q, Q_WAIT_PUT, 0);
+        r = 0;
+    }
+    os_obj_unlock(st);
+    return r;
+}
+
+int os_queue_try_put_item(OsQueue *q, const void *item) {
+    u32 st = 0u;
+    int r = -1;
+
+    if (q == 0 || item == 0) {
+        return -1;
+    }
+    st = os_obj_lock();
+    if (q->magic == QUEUE_MAGIC && q->cap != 0u && q->count != q->cap) {
+        slot_write(q, q->tail, item);
+        q->tail = q->tail + 1u;
+        if (q->tail == q->cap) {
+            q->tail = 0u;
+        }
+        q->count = q->count + 1u;
+        (void)os_task_wake_first(q, Q_WAIT_GET, 0);
+        r = 0;
+    }
+    os_obj_unlock(st);
+    return r;
+}

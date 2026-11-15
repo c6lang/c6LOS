@@ -87,6 +87,8 @@
     W2C s3_w2c_queue_put,      os_queue_put_item
     W2C_TRACE s3_w2c_queue_get, os_queue_get_item
     W2C s3_w2c_queue_count,    os_queue_count
+    W2C s3_w2c_queue_try_get,  os_queue_try_get_item
+    W2C s3_w2c_queue_try_put,  os_queue_try_put_item
     W2C s3_w2c_queue_destroy,  os_queue_destroy
 
 /* ---- 事件组 ---- */
@@ -105,6 +107,7 @@
     W2C s3_w2c_task_delay,     os_task_delay
     W2C s3_w2c_task_yield,     os_task_yield
     W2C s3_w2c_tick_get,       os_tick_get
+    W2C s3_w2c_task_probe,     os_task_probe
     W2C s3_w2c_tick_hz,        os_tick_hz
     W2C s3_w2c_current_task,   os_task_current_slot
     W2C s3_w2c_slot_of_id,     os_task_slot_of_id
