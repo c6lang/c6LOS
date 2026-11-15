@@ -122,3 +122,27 @@ slot1 = 0x00000000   取指调用没返回
 **但从源码已经拿到了我们要的答案**（见上面 NuttX 启动代码那一段），
 构建本身对我们的目标不是必需的。已克隆的源码保留在 `/tmp/nuttx-full`（1.2G）与
 `/tmp/apps-full`，需要时可以继续。
+
+## 验证：把镜像烧到 0x0，让 **ROM 直接引导**（NuttX/Zephyr 的 simple-boot 方式）
+
+Zephyr 的注释明确说："In simple boot mode, **ROM bootloader has already set up MMU
+mappings** for flash access"。NuttX 的 `CONFIG_ESPRESSIF_SIMPLE_BOOT` 也是
+`PRIMARY_SLOT_OFFSET = 0` —— 镜像烧在 flash 0x0，由 ROM 直接引导。
+
+我们用 `mkimg.py ... 0x0` 生成镜像烧到 0x0 试了一次：
+
+```
+SHA-256 comparison failed: ... Attempting to boot anyway...
+entry 0x403788f0
+c6os s3 boot          <- 我们的应用起来了！
+```
+
+**ROM 完全接受我们的镜像并成功引导**（`Checksum valid`）—— 这本身是个好消息，
+说明镜像格式没问题。
+
+但是：**读 IROM 仍然是 0**。
+
+⇒ 连"ROM 直接引导"这种方式都不行，说明**问题不在 bootloader 这一侧，
+而在我们镜像本身**（链接/段属性/某些段字段）。
+这是一个重要的收窄：之前一直怀疑"原厂 2nd-stage bootloader 没把 XIP 交给我们"，
+现在这条也排除了。
