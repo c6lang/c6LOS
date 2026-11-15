@@ -439,6 +439,7 @@ static u32 g_rc_n = 0u;
 static u32 g_fr_n = 0u;
 static u32 g_gr_n = 0u;
 volatile u32 g_recv_seq = 0u;
+u32 g_wifi_noblock = 0u;   /* 实验开关：默认关闭 */
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -539,6 +540,11 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
+    /* 假设验证：让 WiFi 任务不在深窗口调用链上阻塞。
+     * 若崩溃（InstrFetchProhibited @ osi_queue_recv+N）因此消失，
+     * 就印证"切走 windowed 任务时祖先窗口丢失"这个根因。 */
+    if (g_wifi_noblock != 0u) { return 0; }
+
     /* 试过让初始化任务不阻塞（INIT_NOBLOCK）：recv 直接返回成功反而让
      * 调用方自旋（ISR 采样到的 PC 一直是 osi_queue_recv 内部），
      * 所以初始化任务也必须正常阻塞。保留这个宏仅供诊断开关使用。 */
