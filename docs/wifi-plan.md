@@ -4850,3 +4850,38 @@ tab[99]  = osi_zalloc        _wifi_zalloc
 
 （`esf_buf_alloc_dynamic` 在 `0x40381fe0`（IRAM），函数体较长，
 需要完整反汇编来分析。）
+
+### 111. 运行时验证：OSI 表注册成功、字段索引也对
+
+读运行时的 `g_osi_funcs_p`（`0x3FCEF940`）指向的表：
+
+```
+slot3 = 0x3fcbe664     g_osi_funcs_p 已被 wifi_osi_funcs_register 设为我们的表
+slot1 = 0x4037ca2c     表里第 96 项 = _wifi_malloc
+```
+
+`nm` 确认 `0x4037ca2c` 就是 **`osi_malloc`**（我们自己的函数），
+反汇编也看到它读 `0x3fcb8000`（我们给它的堆基址）。
+
+⇒ **OSI 表注册成功、字段索引正确、函数确实是我们的。**
+
+### 但 NO_MEM 仍在，且我们的堆没被用过
+
+说明 `esp_wifi_init_internal` 在 **`_wifi_malloc` 被调用之前**就失败了。
+
+已定位到具体位置：**`esf_buf_setup_static`** → `esf_buf_alloc_dynamic()` 返回 NULL
+→ 报 `ESP_ERR_NO_MEM`。
+
+`esf_buf_alloc_dynamic` 内部走的是 `g_osi_funcs_p` 的**第 21 个字段**
+（偏移 84 = `_mutex_unlock`），不是分配器 ——
+说明它操作的是一个**静态缓冲池**（`g_eb_list_desc` @ `0x3fcb6850`），
+池子里的 buffer 是**更早**由 `_wifi_malloc` 分配填进去的。
+
+⇒ 所以问题变成：**那个更早的池填充步骤为什么没执行/没成功**。
+最可能是 `wifi_init_config_t` 里的字段偏移算错了（我们按源码手算的，
+`wpa_crypto_funcs` 占多少字节特别容易错）。
+
+### 下一步：拿到真实的字段偏移
+
+用 IDF 的交叉编译器编译一个小程序打印 `offsetof(wifi_init_config_t, magic)`
+和各个字段的偏移，而不是手算。这样能确保 `static_rx_buf_num` 等字段真的写对了地方。

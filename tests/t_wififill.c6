@@ -38,8 +38,11 @@ void os_main(void)
 
     rc = s3_win_call_wifi_init((void *)CFG);
     s3_beacon(2u, rc);                        /* 期望 0 = OK */
-    s3_beacon(3u, *(volatile u32 *)0x3FCB8000u);   /* 堆头 magic，应为 0x57484646 */
-    /* 再看堆里第二块的 used 位（说明分配器真的动过） */
-    s3_beacon(1u, *(volatile u32 *)0x3FCB8010u);
+    s3_beacon(3u, *(volatile u32 *)0x3FCEF940u);   /* g_osi_funcs_p（库注册后应非0） */
+    { u32 osp = *(volatile u32 *)0x3FCEF940u;
+      if (osp != 0u) {
+          s3_beacon(1u, ((volatile u32 *)osp)[96]);   /* _wifi_malloc */
+          s3_beacon(0u, 0xB0000211u);
+      } }
     for (;;) { }
 }
