@@ -251,15 +251,6 @@ s3_asm_flash_42:
     movi    a2, 42
     retw.n
 
-/* 决定性测试：flash 里的函数**带 entry**（会分配寄存器窗口） */
-    .align  4
-    .global s3_asm_flash_entry
-    .type   s3_asm_flash_entry, @function
-s3_asm_flash_entry:
-    entry   a1, 16
-    movi    a2, 77
-    retw.n
-
     .section .text, "ax", @progbits
 /* u32 s3_win_call_flash42(void) —— 从 call0 调上面那个 flash 里的手写函数 */
     .align  4
@@ -882,35 +873,3 @@ s3_win_call_fn1:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
-
-/* u32 s3_win_call_entry_test(void) —— 从 call0 调上面那个 flash 里的手写函数 */
-    .align  4
-    .global s3_win_call_entry_test
-    .type   s3_win_call_entry_test, @function
-s3_win_call_entry_test:
-    addi    a1, a1, -32
-    s32i    a0, a1, 0
-    s32i    a12, a1, 4
-    s32i    a13, a1, 8
-    s32i    a14, a1, 12
-    s32i    a15, a1, 16
-    rsr     a12, ps
-    s32i    a12, a1, 20
-    movi    a13, 1
-    slli    a13, a13, 18
-    or      a12, a12, a13
-    wsr     a12, ps
-    rsync
-    call8   s3_win_asm_entry
-    mov     a2, a10
-    l32i    a12, a1, 20
-    wsr     a12, ps
-    rsync
-    l32i    a0, a1, 0
-    l32i    a12, a1, 4
-    l32i    a13, a1, 8
-    l32i    a14, a1, 12
-    l32i    a15, a1, 16
-    addi    a1, a1, 32
-    ret
-

@@ -49,11 +49,9 @@ SECTIONS
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
-    /* esp_wifi_init_internal 所在的 .o 放段首：已验证段内偏移很小的位置能正常取指 */
-    *libnet80211.a:ieee80211_api.o(.literal .literal.* .text .text.*)
     *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
-    *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libwapi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libphy.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
