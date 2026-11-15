@@ -303,8 +303,11 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         }
         bd[(n_ & 7) * 4] = g_cur->id;
         bd[(n_ & 7) * 4 + 1] = epcv;          /* 切走时保存的 EPC */
-        bd[(n_ & 7) * 4 + 2] = (u32)(void *)port_cur_ctx();  /* port 视角的当前 ctx */
-        bd[(n_ & 7) * 4 + 3] = (u32)(void *)g_cur->ctx;      /* 内核视角的当前 ctx */
+        bd[(n_ & 7) * 4 + 2] = (u32)(void *)g_cur->ctx;      /* 内核视角的当前 ctx */
+        bd[(n_ & 7) * 4 + 3] = 0u;
+        if (spv != 0u) {
+            bd[(n_ & 7) * 4 + 3] = *(volatile u32 *)(spv + 0u);  /* 帧里的 a0 */
+        }
     }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
