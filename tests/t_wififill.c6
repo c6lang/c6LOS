@@ -78,7 +78,7 @@ void os_main(void)
     s3_win_call_cache_invalidate();
     s3_beacon(1u, s3_win_call_flash42());   /* 期望 42：IROM 取指正常 */
 
-    s3_beacon(2u, (u32)os_task_create("wifi", wifi_main, 0, 3u, 4096u));
+    s3_beacon(2u, (u32)os_task_create("wifi", wifi_main, 0, 3u, 8192u));
     /* 隔离实验：暂时不建监控任务，看 InstructionFetchError 是否还在 */
     s3_beacon(3u, 0x11110000u);
     os_task_start();

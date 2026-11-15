@@ -20,8 +20,8 @@ typedef struct {
 /* ctx.S 用 76 字节步长索引 g_sched[]，布局变了必须同步。 */
 typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
 
-#define S3_MAX_CTX   6
-#define S3_STACK_SZ  4096
+#define S3_MAX_CTX   3
+#define S3_STACK_SZ  8192
 
 S3Ctx g_sched[C6OS_MAX_CORES];
 S3Ctx *g_s3_cur[C6OS_MAX_CORES];
