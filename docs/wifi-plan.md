@@ -8765,3 +8765,104 @@ RTC 慢存跨 CPU 复位不清，所以下一轮只要**复位后读一次 `0x50
 - 如果连复位都没救回来 → 说明是 PHY 改时钟把 USB-Serial-JTAG 的时钟源掐了
   （那种情况必须走 IDF 的 `esp_phy_common_clock_enable` 顺序，或者换一路普通
   UART 日志）。
+
+---
+
+## §203 闭源库到底用了 OSI 表的哪些槽位（静态统计）+ 两个真实隐患修正
+
+§192 里我们是靠"运行期在 glue 里记计数器"猜哪些回调被调用了。板子不在手上时，
+更直接的办法是**反汇编闭源 .a**：WiFi 库调用 OSI 回调的固定形态是
+"取 `g_osi_funcs_p` → `l32i aN, base, 4*slot` → `callx8 aN`"，把每个
+`callx8` 往回追到最近一条写该寄存器的 `l32i`，就能得到**确凿**的槽位使用清单。
+
+工具已经固化：`tools/osislots.py`（槽位名字直接读 `include/c6os/wifi_osi.h`
+的字段声明顺序，所以永远和 ABI 同步；默认库目录是 IDF 的
+`components/esp_wifi/lib/esp32s3`）。
+
+```
+python3 tools/osislots.py            # 全部库
+python3 tools/osislots.py --limit 5  # 每个 .a 只扫前 5 个 .o，快点看
+```
+
+### 结论一：这些槽位根本没被闭源库读过（= 空实现完全无害）
+
+`_phy_enable`、`_phy_disable`、`_phy_update_country_info`、`_wifi_clock_enable/disable`、
+`_wifi_reset_mac`、`_timer_arm*`、`_dport_access_*`、`_wifi_apb80m_*`、`_coex_init/_coex_deinit`。
+
+其中 **`_phy_enable` 没被读过**这条很重要：说明"PHY 必须由我们自己按 IDF 的
+`esp_phy` 顺序显式初始化"是**对的**，不用指望库反过来叫我们，也不存在
+"我们没实现 `_phy_enable` 导致 PHY 没开"这种问题 —— 现在 `W0 phy start` 之后
+的挂死只能是我们自己那段 `s3_win_phy_*` 顺序/寄存器写错。
+
+### 结论二：`_nvs_*` 是**真会被调用**的（原先全是返回 0 的空实现 → 真 bug）
+
+统计到 `_nvs_open`(x8)、`_nvs_get_blob`(x11)、`_nvs_set_blob`(x21)、`_nvs_get_i8/u8/u16`、
+`_nvs_commit`(x8)、`_nvs_erase_key`，调用点集中在
+`libnet80211:wifi_nvs_load / wifi_nvs_compare_cfg_diff / wifi_nvs_commit`、
+`libcore:misc_nvs_load`、`libmesh:esp_mesh_nvs_init/operate`。
+
+危险点在于**返回 0 在 IDF 的 `esp_err_t` 里就是 `ESP_OK`**：
+
+1. `_nvs_open()` 返回 0 → 库认为打开成功，拿到一个我们随手写 0 的 handle；
+2. 接着 `_nvs_get_blob(handle, key, buf, &len)` 也返回 0 → 库认为"读到了上次保存的
+   数据"，于是把 `buf` 里的**未初始化内容**当校准数据/配置用下去。
+
+`tests/t_s3_wifi3.c6` 里那份 8KB 任务栈、以及 `g_wifi_cfg_blob` 附近的静态区，
+内容都是随机的 —— 一旦被当成"已保存配置"解读，轻则行为诡异，重则按里面的
+长度/索引越界。修正（`port/s3/wifi_glue.c`）：
+
+| 槽位 | 现在的返回 |
+| --- | --- |
+| `_nvs_open` | `0x1101` = `ESP_ERR_NVS_NOT_INITIALIZED` |
+| `_nvs_get_i8/u8/u16/blob` | `0x1102` = `ESP_ERR_NVS_NOT_FOUND`（`*len` 清 0） |
+| `_nvs_set_*` / `_nvs_commit` | `0x1101` |
+| `_nvs_erase_key` | `0x1102` |
+| `_nvs_close` | void，什么也不做 |
+
+这样库走的是"没存过配置 → 用默认值"的正常分支（也就是 IDF 第一次上电的行为）。
+
+### 结论三：`_read_mac` 也必须返回真 MAC
+
+同一个"返回 0 就是成功"的坑：`_read_mac` 原来把 MAC 全填 0 并返回 0（成功）。
+真机上这会让 `esp_wifi` 认为网卡 MAC 是 `00:00:00:00:00:00` —— DHCP 客户端身份
+不合法、部分 AP 直接拒绝关联，而我们后面**正是要靠 DHCP 才能访问 qq.com**。
+改成返回这块板 efuse 里的 base MAC `cc:8d:a2:ec:99:c4`，并按 IDF `esp_read_mac()`
+语义按 `type` 递增最后一字节（0=STA、1=AP、2=BT）。
+
+> 待办：改成运行期从 efuse 读（`efuse_hal_get_mac()` 那套 ROM 接口），
+> 现在先写死一块板的 MAC。
+
+### 结论四：低编号槽位（sem/queue/task/malloc/intr）——统计里"没直接读到"，但确实在用
+
+工具输出里 `_semphr_*`/`_queue_*`/`_task_*`/`_malloc`/`_set_isr`/`_ints_on` 等
+都落在"没被直接调过"的列表里，但 §192 的运行期计数器 **证实** 槽位 13/18/29/37/43
+都被真实调用过。原因：这些调用走 libcore 的 `OsSem_*`/`OsQueue_*` 一层薄封装
+（先把自己缓存的函数指针或表指针转一手，`l32i` 和 `callx8` 之间隔得远，
+静态追不上）。所以：
+
+- 这个工具的结论**只能用于"确实被直接读过"的槽位**（那一侧是硬证据）；
+- "没被直接读过"只意味着静态追不到，不能当成"没被调用" —— 需要运行期计数器兜底。
+
+`_set_isr`/`_ints_on` 这一组仍然**没有定论**（静态追不到、运行期也没在计数器里
+单独核对过）。如果下一轮上板出现"库卡在等中断"这类症状，第一个要查的就是：
+WiFi MAC 中断（`ETS_WIFI_MAC_INTR_SOURCE`）到底有没有被装进我们自己的中断表。
+
+### 构建状态
+
+- `make C6_ROOT=/home/winger/c6 wifi` → `Successfully created ESP32-S3 image`、
+  `chkimg: OK（2 个 flash 段，文件偏移 == LMA）`
+- 基线 `make C6_ROOT=/home/winger/c6 BUILD=build/base S3_SKIP_C6="" S3_EXTRA_C6="…" s3`
+  依旧通过（`chkimg: OK`）。
+
+### 下一步（板子恢复供电后按这个顺序做）
+
+1. 上电 → `lsusb | grep 303a` 确认 USB-Serial-JTAG 回来；
+2. 刷 `build/wifi/c6os.bin`，观察串口：8s 内没输出就等**板子自己复位**
+   （`os_wdt_start(8)` 的自愈狗），复位后用 `tools/rd.py` 读 `0x50000A10`
+   看挂在哪个阶段信标；
+3. 若信标停在 `0x1003`（`s3_win_phy_enable` 里 `register_chipv7_phy`）而 RWDT
+   又能把片子救回来 → 说明 PHY 内部在忙等某个时钟/中断，下一步对比 IDF
+   `esp_phy_common_clock_enable()` 里我们**漏掉的**寄存器
+   （`MODEM_CLK`/`MODEM_RST`/`MODEM_ISO` 那一组，见 §202 末尾的清单）；
+4. PHY 过了之后才轮到"扫描 → 关联 → DHCP → 取 https://qq.com"，
+   MAC 现在已经是真 MAC，DHCP 这条路才成立。

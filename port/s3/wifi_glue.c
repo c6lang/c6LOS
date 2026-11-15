@@ -889,14 +889,79 @@ static u32 osi_slowclk_cal_get(void) { return 0u; }
 /* ---- 其它琐碎项 ---- */
 static int osi_env_is_chip(void) {
     HIT_OF(_env_is_chip); return 1; }
+
+/* 真实 MAC：DHCP / WPA / 扫描都要用，返回全零 MAC 会让上层行为莫名其妙
+ * （有些 AP 直接拒绝，DHCP 客户端身份也不合法）。IDF 的 esp_read_mac() 语义：
+ * type 0 = STA/BASE、1 = AP、2 = BT，按最后 1 字节 +type 派生。
+ * 这块板 efuse 里的 base MAC 是 cc:8d:a2:ec:99:c4（§192 从 IDF 启动日志抄下来的）。
+ * TODO: 改成从 efuse 读，而不是写死。 */
+static const u8 s3_base_mac[6] = { 0xccu, 0x8du, 0xa2u, 0xecu, 0x99u, 0xc4u };
+
 static u32 osi_read_mac(u8 *mac, u32 type)
 {
+    u32 i;
+
     HIT_OF(_read_mac);
-    u32 i = 0;
-    (void)type;
-    if (mac != 0) { while (i < 6u) { mac[i] = 0u; i = i + 1u; } }
+    if (mac == 0) { return 1u; }
+    i = 0u;
+    while (i < 6u) { mac[i] = s3_base_mac[i]; i = i + 1u; }
+    mac[5] = (u8)(mac[5] + (u8)type);
     return 0u;
 }
+
+/* ---- NVS 槽位：**必须返回错误码，不能返回 0** -------------------------
+ *
+ * 这一条是静态统计（tools/osislots.py）挖出来的隐患：libnet80211 的
+ * `wifi_nvs_load`、libcore 的 `misc_nvs_load`、libmesh 的 `esp_mesh_nvs_*`
+ * 都会走 `_nvs_open` / `_nvs_get_blob` 这条链。写成"一律返回 0"的话：
+ *   1) IDF 的 esp_err_t 里 0 就是 ESP_OK —— 库以为配置打开成功了；
+ *   2) 接着它拿一个**没初始化过**的 handle 去 `_nvs_get_blob`，还是返回 0（成功），
+ *      于是把调用方 buffer 里的**未初始化内容**当成"上次保存的校准数据/配置"用下去。
+ * 正确做法是返回 nvs 的真实错误码，让库走"没存过 → 用默认值"的正常分支。 */
+#define OSI_NVS_ERR_NOT_INITIALIZED 0x1101
+#define OSI_NVS_ERR_NOT_FOUND       0x1102
+
+static int osi_nvs_open(const char *name, u32 mode, u32 *out)
+{
+    HIT_OF(_nvs_open);
+    (void)name; (void)mode;
+    if (out != 0) { *out = 0u; }
+    return OSI_NVS_ERR_NOT_INITIALIZED;
+}
+static void osi_nvs_close(u32 h) { HIT_OF(_nvs_close); (void)h; }
+static int osi_nvs_get(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_FOUND; }
+static int osi_nvs_put(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_INITIALIZED; }
+
+#define OSI_NVS_STUB_GET(name, slot) \
+    static int name(u32 h, const char *k, void *out) \
+    { HIT_OF(slot); (void)h; (void)k; (void)out; return OSI_NVS_ERR_NOT_FOUND; }
+#define OSI_NVS_STUB_SET(name, slot) \
+    static int name(u32 h, const char *k, void *val) \
+    { HIT_OF(slot); (void)h; (void)k; (void)val; return OSI_NVS_ERR_NOT_INITIALIZED; }
+
+OSI_NVS_STUB_GET(osi_nvs_get_i8,   _nvs_get_i8)
+OSI_NVS_STUB_GET(osi_nvs_get_u8,   _nvs_get_u8)
+OSI_NVS_STUB_GET(osi_nvs_get_u16,  _nvs_get_u16)
+OSI_NVS_STUB_SET(osi_nvs_set_i8,   _nvs_set_i8)
+OSI_NVS_STUB_SET(osi_nvs_set_u8,   _nvs_set_u8)
+OSI_NVS_STUB_SET(osi_nvs_set_u16,  _nvs_set_u16)
+
+static int osi_nvs_get_blob(u32 h, const char *k, void *out, u32 *len)
+{
+    HIT_OF(_nvs_get_blob);
+    (void)h; (void)k; (void)out;
+    if (len != 0) { *len = 0u; }
+    return OSI_NVS_ERR_NOT_FOUND;
+}
+static int osi_nvs_set_blob(u32 h, const char *k, const void *val, u32 len)
+{
+    HIT_OF(_nvs_set_blob);
+    (void)h; (void)k; (void)val; (void)len;
+    return OSI_NVS_ERR_NOT_INITIALIZED;
+}
+static int osi_nvs_commit(u32 h) { HIT_OF(_nvs_commit); (void)h; return OSI_NVS_ERR_NOT_INITIALIZED; }
+static int osi_nvs_erase_key(u32 h, const char *k) { HIT_OF(_nvs_erase_key); (void)h; (void)k; return OSI_NVS_ERR_NOT_FOUND; }
+
 
 /* 库对同一份实现会用不同槽位调用（内部堆 / wifi 专用堆），分开包装
  * 才能从 RTC 追踪里看出到底是哪个槽位在失败。 */
@@ -1010,6 +1075,20 @@ void s3_wifi_osi_init(void)
     OSI_SET(_spin_lock_create, osi_mutex_create);
     OSI_SET(_spin_lock_delete, osi_mutex_delete);
     OSI_SET(_is_from_isr,   glue_ret0);
+
+    /* ---- NVS：必须返回错误码，别让库把未初始化内存当有效数据（见上面的说明）---- */
+    OSI_SET(_nvs_open,        osi_nvs_open);
+    OSI_SET(_nvs_close,       osi_nvs_close);
+    OSI_SET(_nvs_commit,      osi_nvs_commit);
+    OSI_SET(_nvs_erase_key,   osi_nvs_erase_key);
+    OSI_SET(_nvs_set_i8,      osi_nvs_set_i8);
+    OSI_SET(_nvs_get_i8,      osi_nvs_get_i8);
+    OSI_SET(_nvs_set_u8,      osi_nvs_set_u8);
+    OSI_SET(_nvs_get_u8,      osi_nvs_get_u8);
+    OSI_SET(_nvs_set_u16,     osi_nvs_set_u16);
+    OSI_SET(_nvs_get_u16,     osi_nvs_get_u16);
+    OSI_SET(_nvs_set_blob,    osi_nvs_set_blob);
+    OSI_SET(_nvs_get_blob,    osi_nvs_get_blob);
 }
 
 /* WiFi 初始化配置块：放在 BSS 里，由 .c6 侧经桥取地址后填写。
