@@ -3179,3 +3179,23 @@ windowed 孤岛（`s3_win_call_wifi_init`）调用，但仍然在同一条指令
 经同样的孤岛调用是正常的，所以孤岛机制本身没问题。可能是：
 - 该函数被从**非孤岛**路径调到（比如库里内部互调时 ABI 混用）
 - window 溢出/欠载向量在这条路径上没被正确处理
+
+### 82b. 继续排查 `entry a1,32` 的 trap
+
+**内容是对的**：读 `0x4203d934` 得到 `0x4d004136`，低三字节正是 `36 41 00`（`entry a1,32`）
+⇒ **数据读在那个地址完全正常**。
+
+**I-cache 尺寸也修正了**：IDF app 的 `ICACHE_CTRL = 0x0b` 解出来是 **8-way / 16KB / 32B**
+（bit2 SIZE_MODE=0），我们之前误用了 32768（32KB）。已改成
+`rom_config_instruction_cache_mode(16384, 8, 32)`。
+
+**但 trap 依旧**：`pc=4203d934`、`cause=0`（IllegalInstruction）。
+
+对照：同一个 I-cache 配置下，`0x42030014` 的取指是**成功**的（之前 `movi.n a2,42` 返回 42），
+而 `0x4203d934` 失败，两者同在 page 3。
+
+⇒ 所以问题不是"I-cache 完全不能取指"，而是**这个特定地址/这个函数入口**不行。
+`entry` 是 windowed ABI 的入口指令，理论上我们的孤岛调用方式对 libphy 是有效的
+（PHY 5 步都跑通了）。下一步要看：
+- 是不是 libphy 的 windowed 函数入口根本没有 `entry`（用 `retw` 的可能是别的形式）
+- 或者 `esp_wifi_init_internal` 被**库内部**（而非我们的孤岛）调用到了

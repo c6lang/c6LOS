@@ -1,0 +1,15 @@
+/* 检查 0x4203d934（esp_wifi_init_internal 入口）的内容与取指 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000100u);
+    os_icache_enable();
+
+    s3_beacon(1u, *(volatile u32 *)0x42030000u);   /* 段首，之前验证过是 0x7b004136 类别 */
+    s3_beacon(2u, *(volatile u32 *)0x4203d934u);   /* 期望 0x00413620? 反汇编是 004136 */
+    s3_beacon(3u, *(volatile u32 *)0x4203d930u);
+    for (;;) { }
+}

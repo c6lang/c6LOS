@@ -84,7 +84,7 @@ void os_icache_enable(void)
      * 8-way/32KB/32B（ICACHE_CTRL = 0x0f）来解决的。我们之前只写了 CTRL 的
      * ENABLE 位，没配模式，所以 IROM 一直是死的。
      */
-    s3_win_call_config_icache_mode(32768u, 8u, 32u);
+    s3_win_call_config_icache_mode(16384u, 8u, 32u);  /* S3 的 I-cache 是 16KB（IDF 的 0x0b = 8way/16KB/32B） */
 
     /* 打开 core0/core1 的 I 总线（SHUT_*_BUS 复位默认是 1 = 关着） */
     S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~0x3u;
