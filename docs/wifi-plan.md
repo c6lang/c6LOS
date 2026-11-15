@@ -4361,3 +4361,43 @@ Segment   Length   Load addr   File offs  Memory types
 IROM 取指仍然失败（`0x42030014`、`0x4203d934` 都是 `cause=0`），
 而 DROM 读完全正常。下一步照 §95 的建议：在**原厂固件的 app 里**读
 `ICACHE_CTRL` 和其它 cache 相关寄存器，和我们的逐一对比。
+
+### 97. IROM 段 flash 偏移与 vaddr 的低 16 位不一致（重要线索）
+
+用 `image-info` 检查正确的镜像：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x0010c  0x3c000020  0x00000018  DROM
+      1  0x0fec4  0x3fca0000  0x0000012c  DRAM
+      2  0x67ef0  0x42030000  0x0000fff8  IROM
+```
+
+IROM 段在**镜像文件内偏移 0xFFF8** ⇒ 实际落盘到 flash **0x2FFF8**
+（镜像基址 0x20000 + 0xFFF8）。
+
+而它的 **vaddr 低 16 位是 0x0000**。
+
+⇒ **两者低 16 位不一致**（0xFFF8 vs 0x0000）。
+
+MMU 的 64KB 页映射要求 **vaddr 的低 16 位 == flash 地址的低 16 位**，
+否则映射到的是"错开 8 字节"的另一页 —— 这正是"数据读看起来对、但取指拿到垃圾"的典型症状。
+
+**注意**：DROM 段是 `vaddr 0x3c000020` / 文件偏移 `0x18`，低 16 位也不一致，
+但 **DROM 读是正常的**（`0x12345678` 探针值读到了）。所以这条规则对 DROM 不成立，
+可能只对 IROM 的取指路径成立。
+
+### 修的方向
+
+让 IROM 段在镜像里的**文件偏移**变成 **0x10000 的整数倍**：
+- 试过改 `.flash.text` 的 `AT()`，但 `esptool elf2image` **按段大小顺序打包**，
+  不理会 `AT` 的空洞 —— 改 `AT(0x10008)` / `AT(0x10010)` 文件偏移都是 0xFFF8
+- 所以要**调整前面段的大小**（比如给 DRAM 段加 padding），
+  或者把 IROM 的 **vaddr 改成 `0x4203FFF8`** 让它和实际 flash 地址对齐
+
+### 当前状态
+
+- ✅ 镜像结构已正确（DROM/IROM 段都在、bootloader 接受）
+- ✅ 应用正常启动、`alive` 心跳正常、**DROM 读完全正常**
+- ❌ IROM 取指仍失败
+- 板子跑的是 `tests/t_s3_on.c6`（稳定心跳，无 flash 调用）
