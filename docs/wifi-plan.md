@@ -4532,3 +4532,30 @@ slot3 = 0x0000002A       ← **42**！flash 里的函数执行并返回了！
 
 把这些组合逐个上板测试 `s3_asm_flash_42`（偏移 0x14）和一个高偏移函数（0xD934），
 找出哪一档能让**两者都工作**。
+
+### 102. 试 4-way 无效（方式参数被忽略）
+
+把 `rom_config_instruction_cache_mode` 的 ways 从 8 改成 4：
+
+```
+slot1 = 0x0000000F     ICACHE_CTRL 没变（还是 0x0F）
+slot3 = 0x0000002A     flash42 仍然返回 42
+```
+
+⇒ ROM 这个函数**忽略了 ways/size 参数**，最终总是写 `0x0F`。
+所以没法通过它来试不同的 cache 组织方式。
+
+### 本轮的最终状态
+
+**已经打通的：**
+- ✅ 镜像结构正确（`--ram-only-header` 的坑已填）
+- ✅ 应用正常启动、DROM 读正常
+- ✅ **flash 取指在段内前 16KB 内正常工作**（`0x42030014` 返回 42）
+
+**仍存在的：**
+- ❌ 段内偏移超过约 16KB 后取指失败（`0xD934` trap）
+
+**下一步方向**（因为 ROM 函数不能调参，得从别处入手）：
+1. 直接**手工写 `EXTMEM_ICACHE_CTRL` 寄存器**试不同组合（不走 ROM 函数）
+2. 或者查 S3 的 I-cache 是否需要 **`ICACHE_AUTOLOAD`/预取**配置
+3. 或者查 `ICACHE_CTRL1`（`0x600C4064`）里的 **`ICACHE_BUSY`/`ICACHE_ENABLE`** 位
