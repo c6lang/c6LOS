@@ -8149,3 +8149,46 @@ exccause = 0             <- IllegalInstruction
   需要的是"只让 retw 不收窄"的办法，下一轮要验证：手写 `.byte` 编码出宽
   `retw`（先 `as --no-transform` 汇编一小段确认字节），或者查 GAS 是否支持
   逐指令关闭 transform。
+
+## §196 两个真实的 ABI bug 修好了 —— `retw.n` 与 spill 区越界
+
+### bug 1：`retw` 被汇编器收窄成 `retw.n`
+`windowstart=0x8` 说明调用者窗口已经不在寄存器里，这条返回**必须**走窗口欠载；
+而这颗 CPU 上窄格式 `retw.n` 在需要欠载时就是非法指令（`cause=0`）。
+修法：给 `port/s3/w2c.S` 加 `-Wa,--no-transform`，强制出宽格式 `retw`
+（编码 `90 00 00`）。**只加在这一个文件上**：
+- `win_island.c` 加不了 —— 关掉 transform 后 `call8` 目标越界
+  （`dangerous relocation: call8: call target out of range`），因为长调用是靠
+  transform 放宽的；
+- `wifi_glue.c` 更不行 —— 它太大，分支偏移会越界（汇编报 `operand out of range`）。
+关键洞察：**恢复执行后的第一次返回**用宽 `retw` 就够了 —— 欠载会把下一层窗口
+填回来，之后各层的 `retw.n` 就都合法了。而阻塞路径上最内层的 windowed 帧恰好
+就是 `w2c.S` 里的这些壳，所以只修这一个文件正好够。
+
+### bug 2：壳把自己的局部量放进了 ABI 保留的 spill 区
+原来写的是 `entry a1,16` + `addi a1,a1,-16`，把返回地址存在 `a1+0`；
+而 `entry` 分配的前 32 字节是留给 `call8` 的**窗口 spill 区**，硬件欠载/溢出会
+往里面写。真板症状：宽 `retw` 一触发欠载就 `exccause=28`、
+`excvaddr=0xfffffff5`（帧指针被踩成奇数地址）。
+修法：统一改成 `entry a1,48`，局部量从 `a1+32` 开始（32/36/40），并且不做
+`addi a1,a1,-16`。顺手补上了 `W2C_TRACE` 里对 a12/a13 的保存（原来直接借用
+callee-saved 寄存器）。
+
+### 现在的真板状态（在上一版基础上）
+```
+c6os s3 boot / [wifimain] id=1 / W0 phy start / W1 bringup / B0 B1 B2
+[recv] t=3 qh=... tk=ffffffff          <- ppTask 正常阻塞在 pp 队列上
+（没有 TRAP 了）
+```
+JTAG 抓到的下一个问题：
+```
+exccause = 28          excvaddr = 0xfffffff3（奇数，对齐异常）
+epc1 = 0x4037e7dc      a0 = 0xffffffff8037e0a9
+a1 = 0xffffffffffffffff   <- 栈指针被毁成 -1
+windowbase = 3   windowstart = 0x20   <- 当前窗口(3)竟然不在 live 集合里
+落到了 _vec_default（未处理的异常）
+```
+也就是说还有一处"栈/spill 区被踩"的 bug。下一轮用 JTAG 在
+`0x4037e7dc` 前后下断点、单步看是哪个壳写坏的；重点怀疑：
+- `_win_ovf*/_win_unf*` 向量和我们的 `entry a1,48` 组合时，spill 区归属算错；
+- `port_task_switch` 保存/恢复时 `a1` 的推进量（80 字节帧）与壳的 48 字节帧叠加。

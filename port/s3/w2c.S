@@ -36,13 +36,15 @@
     .global \name
     .type   \name, @function
 \name:
-    entry   a1, 32
-    addi    a1, a1, -16          /* 自己的临时槽，避开 entry 保存 a0-a3 的区域 */
-    s32i    a0, a1, 0            /* 存下带窗口标签的返回地址 */
+    /* entry a1,48 里前 32 字节是留给 call8 的窗口 spill 区，**不能**拿来
+     * 存自己的东西：硬件欠载/溢出会往那里面写。局部量从 a1+32 开始。
+     * 之前写成 entry 16 + addi -16，保存槽正好压进 spill 区，真板症状是
+     * 欠载时读到 excvaddr=0xfffffff5（帧指针被踩坏）。 */
+    entry   a1, 48
+    s32i    a0, a1, 32           /* 存下带窗口标签的返回地址 */
     l32r    a8, 9b
     callx0  a8
-    l32i    a0, a1, 0
-    addi    a1, a1, 16
+    l32i    a0, a1, 32
     retw
     .endm
 
@@ -55,9 +57,10 @@
     .global \name
     .type   \name, @function
 \name:
-    entry   a1, 32
-    addi    a1, a1, -16
-    s32i    a0, a1, 0
+    entry   a1, 48
+    s32i    a0,  a1, 32
+    s32i    a12, a1, 36
+    s32i    a13, a1, 40
     l32r    a12, 6b
     l32i    a13, a12, 4
     s32i    a0, a12, 0
@@ -65,8 +68,9 @@
     s32i    a13, a12, 4
     l32r    a8, 9b
     callx0  a8
-    l32i    a0, a1, 0
-    addi    a1, a1, 16
+    l32i    a0,  a1, 32
+    l32i    a12, a1, 36
+    l32i    a13, a1, 40
     retw
     .endm
 
@@ -129,10 +133,9 @@
     .global osi_queue_recv
     .type   osi_queue_recv, @function
 osi_queue_recv:
-    entry   a1, 16
-    addi    a1, a1, -16
-    s32i    a12, a1, 0
-    s32i    a13, a1, 4
+    entry   a1, 48
+    s32i    a12, a1, 36
+    s32i    a13, a1, 40
     /* 按调用序号把库侧返回地址存进 4 个槽（0x50000F08+4*i） */
     l32r    a8, 10b
     l32i    a9, a8, 0
@@ -143,7 +146,7 @@ osi_queue_recv:
     l32r    a8, 7b
     add     a8, a8, a9
     s32i    a0, a8, 0
-    s32i    a0, a1, 8
+    s32i    a0, a1, 32
     mov.n   a10, a2
     mov.n   a11, a3
     mov.n   a12, a4
@@ -154,8 +157,7 @@ osi_queue_recv:
     l32r    a9, 11b
     s32i    a0, a9, 4            /* 诊断：callx8 之后的 a0 */
     mov.n   a2, a10
-    l32i    a0, a1, 8
-    l32i    a12, a1, 0
-    l32i    a13, a1, 4
-    addi    a1, a1, 16
+    l32i    a0,  a1, 32
+    l32i    a12, a1, 36
+    l32i    a13, a1, 40
     retw
