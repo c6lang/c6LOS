@@ -1,0 +1,24 @@
+/* 假设：高偏移取指失败是 cache tag 残留导致。配置好之后再做一次全量失效，
+ * 然后读/取指高偏移处的函数。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+u32 s3_win_call_cache_invalidate(void);
+u32 s3_flash_end_test(u32 x);
+void os_main(void)
+{
+    u32 v = 0u;
+    s3_beacon(0u, 0xB0000170u);
+
+    os_icache_enable();                       /* 配置 + 打开 */
+    s3_win_call_cache_invalidate();           /* 全量失效 */
+    s3_beacon(3u, 0x1CAC0001u);
+
+    v = *(volatile u32 *)0x42077ee8u;         /* 高偏移处的数据读 */
+    s3_beacon(2u, v);
+
+    v = s3_flash_end_test(33u);               /* 高偏移处的取指执行，期望 42 */
+    s3_beacon(1u, v);
+    for (;;) { }
+}
