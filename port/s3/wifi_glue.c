@@ -843,6 +843,7 @@ static void osi_log_write(u32 level, const char *tag, const char *fmt, const cha
     (void)arg;
 }
 
+__attribute__((section(".flash.text")))
 static void osi_log_writev(u32 level, const char *tag, const char *fmt,
                            void *ap, char *buf, u32 len)
 {
@@ -918,6 +919,7 @@ typedef char s3_osi_magic_offset_check[
     (__builtin_offsetof(wifi_osi_funcs_t, _magic) == 0x1DCu) ? 1 : -1];
 typedef char s3_osi_size_check[(sizeof(wifi_osi_funcs_t) == 480u) ? 1 : -1];
 
+__attribute__((section(".flash.text")))
 void s3_wifi_osi_init(void)
 {
     void **tab = (void **)(void *)&g_wifi_osi_funcs;

@@ -8298,3 +8298,59 @@ g_s3_cur[0] = 0x3fcbe970  (= ctx[0]，正是当前任务)
 不是任务 sp，而是**某个祖先窗口的 a1 被欠载从错误的 spill 帧填进来** ——
 和 §197 开头的判断一致。`r[0]` 读到 0，无法区分"用过即清"还是"从没置过"，
 下一轮可以给 `g_win_spilled` 加一个累计计数（RTC），确认 spill 到底有没有发生过。
+
+## §198 回到官方文档：窗口切换的**标准答案**在 FreeRTOS 的 Xtensa 移植层
+
+`components/freertos/FreeRTOS-Kernel/portable/xtensa/portasm.S` 的 `vPortYield`
+（windowed 分支）就是"抢占式内核 + windowed ABI"的权威做法：
+
+```asm
+    entry   sp, XT_SOL_FRMSZ
+    rsr     a2, PS
+    s32i    a0, sp, XT_SOL_PC            ; 只存 a0（和 PS）
+    s32i    a2, sp, XT_SOL_PS
+    movi    a6, ~(PS_WOE_MASK|PS_INTLEVEL_MASK)
+    and     a2, a2, a6                   ; 清 WOE
+    addi    a2, a2, XCHAL_EXCM_LEVEL     ; INTLEVEL = 3
+    wsr     a2, PS
+    rsync
+    call0   xthal_window_spill_nw        ; 把所有活着的窗口 spill 到栈上
+    l32i    a2, sp, XT_SOL_PS            ; 恢复 PS
+    wsr     a2, PS
+    ...
+    s32i    sp, a2, TOPOFSTACK_OFFS      ; TCB 里**只存 sp**
+```
+
+要点（三条，都很关键）：
+1. **spill 是在 `PS.WOE = 0` 下做的**，用 HAL 的 `xthal_window_spill_nw`。
+   WOE=0 时 `call4/8/12` 只轮转窗口、不触发溢出异常，所以这个例程可以自己
+   把每个窗口显式存到栈上。这正是我之前用 `rotw`（WOE=1）失败的原因 ——
+   那样每次轮转都会触发溢出异常，要求每个窗口的帧都合法。
+2. **只保存 sp**（以及帧里的 a0/PS）。因为 spill 之后任务的寄存器状态全在
+   自己栈上，恢复时靠**欠载向量按需 fill**。
+3. **从不写 WINDOWSTART / WINDOWBASE**。（写 WINDOWBASE 在这颗芯片上会卡死，
+   写 WINDOWSTART 则必须与 spill 严格配对 —— 我自己发明的两种写法都失败过，
+   见 §197。）
+
+`xthal_window_spill_nw` 有现成的：`components/xtensa/esp32s3/libxt_hal.a`
+（`nm` 可见 `T xthal_window_spill_nw`，`xthal_window_spill` 0x114 字节）。
+链接它大约多吃 316 字节 IRAM，为此把 `wifi_glue.c` 的 `osi_log_writev` 和
+`s3_wifi_osi_init` 挪进 `.flash.text` 腾了地方。
+
+### 本轮集成到哪一步
+按上面顺序插进 `port_task_switch`（先存 80 字节陷阱帧，再做 PS 舞蹈 + spill）
+后：spill 确实跑起来了 —— JTAG 读到 `windowbase=9`、`windowstart=0xaaaa`
+（bit9 是置的，**两者终于一致了**），但随后在 ROM 里 `cause=29`、
+`epc1=0x40048c33`。已回退，基线（`[recv] t=3`、无 TRAP）保持不变。
+
+### 下一轮的具体修法（已经想清楚，只差实现）
+**spill 必须在任务的"原始 sp"上做，不能在 `addi a1,a1,-80` 之后的帧上做。**
+因为祖先窗口的帧是相对任务原始 sp 的，sp 挪了 80 字节之后 spill 会写到错误的
+位置。正确顺序：
+1. `addi a1,a1,-80` 存好 a0..a15/EPC/PS（当前窗口的内容先落到我们自己的帧里）；
+2. `addi a1,a1,80` **把 sp 挪回任务原始值**；
+3. 再做 PS 舞蹈 + `call0 xthal_window_spill_nw`（此时它看到的是任务的真实栈，
+   祖先窗口的帧位置都对）；
+4. 注意 spill 会破坏 a2..a11 的当前窗口内容 —— 但我们第 1 步已经存过了，
+   后面只用帧里的值，所以没问题；
+5. 恢复路径保持"只从帧恢复 + 欠载按需 fill"，不要写 WINDOWSTART。
