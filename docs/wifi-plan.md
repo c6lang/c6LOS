@@ -7087,3 +7087,43 @@ blk2: obj=0x3fcbf29c kind=6 port_ctx=0x3fcbe660 kern_ctx=0x3fcbe660
 
 建议：在 `port_irq_fill` 里把 `(core, ctx, frame_sp)` 记进 RTC，
 与 `port_task_yield`/`port_task_switch` 的记录逐条对照。
+
+## §171 `port_irq_fill` 无缺陷：两次抢占都正确存进任务 1 自己的 ctx
+
+在 `port/s3/ctx.c` 的 `port_irq_fill` 里记录 `(序号, ctx, frame_sp)` 到 RTC
+`0x50001700`：
+
+```
+irqfill0: seq=1 ctx=0x3fcbe660 sp=0x3fcba530
+irqfill1: seq=2 ctx=0x3fcbe660 sp=0x3fcba550
+```
+
+* `0x3fcbe660` 是**任务 1** 的 ctx；
+* 两个 `frame_sp`（`0x3fcba530`/`0x3fcba550`）都落在任务 1 自己的栈区
+  （`0x3fcb8620..0x3fcba620`）✓
+* 全程只有 **2 次**中断抢占。
+
+所以 ISR 保存路径是对的：抢占任务 1 时存的就是任务 1 的 ctx + 任务 1 的帧。
+**不是这里把上下文串掉的。**
+
+## 到目前为止，这块「上下文/调度」已经查得很透了
+
+| 环节 | 状态 |
+|---|---|
+| `port_task_ctx_create` 建帧 | ✓ 正确（f[1]=entry、f[15]=tramp、f[16]=PS、sp=top） |
+| `s3_task_tramp` 启动 | ✓ 正确（task_starts=2，入口分别是 wifi_main 与 ppTask） |
+| `port_irq_fill` 抢占保存 | ✓ 正确（2 次，都存任务1 的 ctx+帧） |
+| `port_task_switch` / `port_task_yield` 的 sp 存取 | **尚未埋点验证** |
+| `os_sched_preempt_ctx` / `port_set_cur_ctx` | ✓ 两者一致（port_ctx == kern_ctx） |
+| ISR 帧布局 | ✓ 与 RESTORE_FRAME 一致（EPC@60、PS@64） |
+
+唯一还没验证的就是 `port_task_switch` / `port_task_yield` 这两条 asm 里
+**sp 的存取是否真的对应各自的任务**。
+
+### 下一轮
+
+在这两个 asm 函数里各埋一个 RTC 记录 `(tag, ctx, frame_sp)`：
+* `port_task_yield`：记录 `a4`（= `g_s3_cur[core]`）与 `a1`（要保存的帧）；
+* `port_task_switch`：记录 `a4`（= 目标 ctx）与它恢复出来的 `a1`。
+
+只要有一次「任务 1 的 ctx 被写进了任务 2 的帧」或反之，就找到了根因。

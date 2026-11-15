@@ -128,6 +128,17 @@ void port_irq_fill(u32 frame_sp)
     if (c != 0) {
         c->sp = frame_sp;
     }
+    {
+        /* 诊断：ISR 抢占时保存的是哪个 ctx、哪个帧（RTC 0x50001700 起，
+         * 每项 3 字：序号、ctx、frame_sp） */
+        static u32 n_;
+        volatile u32 *d = (volatile u32 *)0x50001700u;
+        u32 k_ = n_ & 7u;
+        n_ = n_ + 1u;
+        d[k_ * 3u]      = n_;
+        d[k_ * 3u + 1u] = (u32)(void *)c;
+        d[k_ * 3u + 2u] = frame_sp;
+    }
 }
 
 u32 port_task_stack_ok(void *ctx)
