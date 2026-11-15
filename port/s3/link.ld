@@ -45,22 +45,11 @@ SECTIONS
   /* flash 段固定放到 flash 偏移 0x100000、虚拟地址 0x42100000：
    * 这样可以用 esptool 单独把这段字节写到 flash 0x100000，
    * 再把 IROM 页映射过去验证"从 flash 取指"。 */
-  .flash.text 0x42030000 : AT (0x30000)
+  .flash.text 0x42100000 : AT (0x100000)
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
-    /* IDF 闭源 WiFi 库的代码也放 flash（与 .flash.text 连续，bootloader 才会一起映射） */
-    /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：
-     * LEAN 构建下 libphy 闭包约 38KB、我们自己的代码约 26KB，合计约 64KB，
-     * 正好在 IRAM 预算（66.8KB，坏区 0x403D9500 以下）之内。 */
-    _flash_text_end = .;
-  }
-
-  /* IDF 闭源 WiFi 库独立成段（flash 0x80000 / vaddr 0x42080000，identity、页对齐） */
-  .flash.wifi 0x42080000 : AT (0x80000)
-  {
-    _flash_wifi_start = .;
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
@@ -70,7 +59,12 @@ SECTIONS
     *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    _flash_wifi_end = .;
+
+    /* IDF 闭源 WiFi 库的代码也放 flash（与 .flash.text 连续，bootloader 才会一起映射） */
+    /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：
+     * LEAN 构建下 libphy 闭包约 38KB、我们自己的代码约 26KB，合计约 64KB，
+     * 正好在 IRAM 预算（66.8KB，坏区 0x403D9500 以下）之内。 */
+    _flash_text_end = .;
   }
 
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的

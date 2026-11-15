@@ -3476,3 +3476,36 @@ rst:0x3 (RTC_SW_SYS_RST)      <- bootloader 复位，应用没起来
 另一种可能：那个偏移本身没问题，而是**该位置恰好落在一个 l32r 字面量池的边界上**
 （Xtensa l32r 只有 ±256KB）。用 `readelf -r`/`objdump` 检查 `esp_wifi_init_internal`
 附近的 `l32r` 目标地址是否越界，是下一步最快的验证。
+
+### 82n. 又一个 IDF 格式细节：空洞应该用 **PADDING 段**
+
+之前 `mkimg.py` 处理"flash 段之间要对齐"时，是把空洞**塞进上一段的数据**里 ——
+结果 DROM 段被撑到 **0xDFFD8（14 页）**，占掉 14 个 MMU 表项，和 IROM 段抢表项。
+
+而 IDF 自己的镜像里，这种空洞是用 **PADDING 段**表示的：
+
+```
+$ esptool image-info build/wifi/c6os.bin
+Segment   Length   Load addr   File offs  Memory types
+      0  0x00108  0x3c000020  0x00000018  DROM          <- 只有 1 页！
+      1  0xdfed0  0x00000000  0x00000128  PADDING       <- bootloader 会跳过，不占表项
+      2  0x67ee8  0x42100000  0x000e0000  IROM
+```
+
+⇒ DROM 1 页 + IROM 7 页 = **8 页**，彻底避开了表项冲突。
+`mkimg.py` 已改成发 PADDING 段（`load_addr = 0`）。
+
+**但真板上 bootloader 仍然复位拒绝**（`rst:0x3`），
+可能是 PADDING 段在这个位置不被接受，或者镜像变成 1.5MB 超出了它的处理能力。
+
+### 已确认的 IDF bootloader 限制
+
+读 `bootloader_support/src/bootloader_utility.c` 的 `set_cache_and_start_app()` 签名：
+
+```c
+(uint32_t drom_load_addr, uint32_t drom_size,
+ uint32_t irom_load_addr, uint32_t irom_size, ...)
+```
+
+⇒ **只接受一个 DROM 段 + 一个 IROM 段**，所以"两个 IROM 段"必然被拒。
+所有 flash 代码必须放在**同一个 IROM 段**里。

@@ -59,7 +59,7 @@ for name, paddr in SECS:
     if paddr is None and name == '.flash.rodata':
         paddr = BASE + 0x20
     elif paddr is None and name == '.flash.text':
-        paddr = BASE + 0x10000
+        paddr = 0x100000
     if os.environ.get('MKIMG_NO_FLASH') and paddr is not None:
         continue    # 实验：整个镜像不含 flash 段
     v = section_vaddr(name)
@@ -95,7 +95,11 @@ for name, vaddr, paddr, data in segs:
         if gap:
             if not records:
                 raise SystemExit('%s: 第一段前不能有空白' % name)
-            records[-1][1].extend(b'\x00' * gap)
+            # 用 IDF 风格的 **PADDING 段**（load_addr = 0）填补空洞：
+            # bootloader 会跳过它，不会把它映射进 MMU，从而不占用表项。
+            # （早期版本是把空洞塞进上一段的数据里，导致 DROM 被撑到 64KB、
+            #  占掉十几个 MMU 表项，和 IROM 段抢表项。）
+            records.append([0, bytearray(gap)])
     d = bytearray(data)
     while len(d) % 4:                 # IDF 风格：补齐计入段长度（原厂各段长度都是 4 的倍数）
         d.append(0)
