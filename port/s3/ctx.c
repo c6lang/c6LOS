@@ -89,7 +89,11 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     g_next_task_windowed = 0;
     f[2] = (u32)arg;                   /* a3 */
     f[15] = (u32)s3_task_tramp;        /* EPC */
-    f[16] = port_ps_get() & ~0x1Fu;    /* PS */
+    /* PS：清掉中断级别位，并**置 WOE（bit18）**。闭源库是 windowed ABI，
+     * 它的 call/retw 依赖窗口溢出/下溢向量来处理寄存器窗口轮转；
+     * WOE=0 时这些向量不生效，第一次窗口轮转就会取到错位的返回地址
+     * （真板表现：a0 带着 CALLINC 标记被当指令地址取、cause=0x14）。 */
+    f[16] = (port_ps_get() & ~0x1Fu) | 0x40000u;
     c->sp = top;
     *(volatile u32 *)c->stack = 0xC6C0DEADu;
     return c;
@@ -130,6 +134,12 @@ void port_irq_fill(u32 frame_sp)
 
     if (c != 0) {
         c->sp = frame_sp;
+    }
+    /* 陷阱帧里的 PS 也要带上 WOE：中断进来时硬件保存的是被打断代码的 PS，
+     * 而被打断的多半是我们自己的 call0 代码（WOE=0）。如果不补这一位，
+     * 中断返回后 WiFi 任务里的 windowed 调用就会因为 WOE=0 而失败。 */
+    if (frame_sp != 0u) {
+        *(volatile u32 *)(frame_sp + 64u) |= 0x40000u;
     }
     {
         /* 诊断：ISR 抢占时保存的是哪个 ctx、哪个帧（RTC 0x50001700 起，
