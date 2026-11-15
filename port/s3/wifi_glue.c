@@ -715,9 +715,11 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     int id;
     u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
     HIT_OF(_task_create);
-    /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深。
-     * 统一抬到平台允许的上限（port/s3/ctx.c 的 S3_STACK_SZ = 8192）。 */
-    if (stack < 8192u) { stack = 8192u; }
+    /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深，
+     * 所以要抬。但栈池只有 24KB（port/s3/ctx.c 的 S3_STACK_POOL，§219），
+     * 抬到 8192 的话"bringup 任务 8KB + ppTask 8KB + lwIP tcpip 4KB"就快满了，
+     * 所以这里取 6144：够深调用的余量，又给别的任务留位置。 */
+    if (stack < 6144u) { stack = 6144u; }
     g_next_task_windowed = 1u;   /* 库的任务入口都是 windowed ABI */
     id = s3_w2c_task_create(name, fn, arg, p, stack);
     /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */

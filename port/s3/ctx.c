@@ -20,8 +20,17 @@ typedef struct {
 /* ctx.S 用 76 字节步长索引 g_sched[]，布局变了必须同步。 */
 typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
 
-#define S3_MAX_CTX   3
-#define S3_STACK_SZ  8192
+/* 任务数上限：闭源 WiFi 库自己也会建任务（libpp 的 ppTask、net80211 的
+ * wifi_task 等），加上我们的 bringup 任务、监视任务、lwIP 的 tcpip 线程，
+ * 3 个槽早就不够用了（§219）。 */
+#define S3_MAX_CTX       8
+/* 栈池：所有任务的栈从这一块里按需切（按请求大小 + 16 字节对齐），
+ * 不再"每个任务固定 8KB"。总大小受 DRAM 限制（§210/§214），32KB 是权衡值：
+ * 实测预算是：bringup/wifi 任务 8KB + lwIP tcpip 4KB + libpp ppTask 4KB
+ * + 监视任务 2KB ≈ 18KB，24KB 与"原来 3×8KB"的 bss 占用完全一样（不涨 DRAM），
+ * 但把"最多 3 个任务"变成了"最多 8 个任务、按需切栈"。
+ * 注意：任务不会被删除，所以这里不做回收（和之前一样）。 */
+#define S3_STACK_POOL    24576u
 
 /* 窗口 spill 的总开关（w2c.S 的每个壳在进内核前读它）。
  *   0 = 完全不动窗口状态（和以前的行为一致，保住已通过的 PHY/串口基线）
@@ -43,7 +52,8 @@ u32 g_yl_cnt = 0;
 S3Ctx *g_s3_cur[C6OS_MAX_CORES];
 
 static S3Ctx g_ctx[S3_MAX_CTX];
-static u8 g_stacks[S3_MAX_CTX][S3_STACK_SZ] __attribute__((aligned(16)));
+static u8 g_stack_pool[S3_STACK_POOL] __attribute__((aligned(16)));
+static u32 g_pool_off = 0u;
 static u32 g_ctx_dbg_n = 0u;
 
 void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
@@ -54,12 +64,25 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     u32 want = stack_size;
     u32 *f = 0;
 
-    if (want < 512u) {
-        want = 512u;
+    if (want < 1024u) {
+        want = 1024u;         /* 512 太少了：闭源库/ lwIP 的线程都要几千字节 */
     }
     want = (want + 15u) & ~15u;
-    if (want > (u32)S3_STACK_SZ) {
-        return 0; /* 不静默缩栈 */
+    if (g_pool_off + want > S3_STACK_POOL) {
+        /* 栈池不够：**必须吭声**。以前这里静默返回 0，表现是"某个任务凭空
+         * 没起来"，很难查（§219）。 */
+        {
+            extern int ets_printf(const char *fmt, ...);
+            volatile u32 *m = (volatile u32 *)0x50000BE0u;
+
+            m[0] = want;
+            m[1] = g_pool_off;
+            m[2] = S3_STACK_POOL;
+            m[3] = m[3] + 1u;
+            ets_printf("[ctx] 栈池不够：需要 %u，已用 %u/%u\n",
+                       (unsigned)want, (unsigned)g_pool_off, (unsigned)S3_STACK_POOL);
+        }
+        return 0;
     }
     while (i < (u32)S3_MAX_CTX) {
         if (g_ctx[i].stack == 0) {
@@ -78,12 +101,13 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         u32 k_ = g_ctx_dbg_n;
         g_ctx_dbg_n = k_ + 1u;
         cd[k_ * 3u] = i + 1u;
-        cd[k_ * 3u + 1u] = (u32)(void *)g_stacks[i];
+        cd[k_ * 3u + 1u] = (u32)(void *)(g_stack_pool + g_pool_off);
         cd[k_ * 3u + 2u] = want;
     }
-    c->stack = (void *)(g_stacks[i] + (S3_STACK_SZ - want));
+    c->stack = (void *)(g_stack_pool + g_pool_off);
     c->size = want;
-    top = (((u32)g_stacks[i] + (u32)S3_STACK_SZ) & ~15u) - 80u;
+    g_pool_off = g_pool_off + want;
+    top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 80u;
     f = (u32 *)top;
 
     i = 0;

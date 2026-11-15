@@ -283,6 +283,12 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
 {
     u32_t saved = g_next_task_windowed;
 
+    /* lwIP 某些配置下 stacksize 是 0，传下去会被内核当成最小值（1KB），
+     * 对 tcpip 线程远远不够 —— 这里兜个底。 */
+    if (stacksize < 4096) {
+        stacksize = 4096;
+    }
+
     g_next_task_windowed = 1u;
     (void)s3_w2c_task_create(name, (void *)thread, arg,
                              (u32_t)prio, (u32_t)stacksize);

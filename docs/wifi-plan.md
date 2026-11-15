@@ -9858,3 +9858,60 @@ make tls12check
 
 如果 RTC `0x50000BC0[3..7]` 非 0，说明库回调了 AES/CCMP 那几项（也就是说硬件
 卸载这条路没走通），那时就要在 `wpa_crypto.c` 里补真正的 AES-128（CBC/CMAC/CCM）。
+
+---
+
+## §219 任务上限只有 3 个、每个栈固定 8KB —— 又一个会挡住关联的结构性限制
+
+### 一、问题
+
+`port/s3/ctx.c` 里写死了：
+
+```c
+#define S3_MAX_CTX   3          /* 最多 3 个任务上下文 */
+#define S3_STACK_SZ  8192       /* 每个任务固定 8KB 栈 */
+static u8 g_stacks[S3_MAX_CTX][S3_STACK_SZ];   /* 共 24KB */
+```
+
+数一下我们**实际需要**的任务：
+
+| # | 任务 | 谁创建 | 栈 |
+| --- | --- | --- | --- |
+| 1 | bringup / wifi 主任务 | `tests/t_s3_wifi3.c6` | 8KB |
+| 2 | 监视任务 | 同上 | 4KB |
+| 3 | libpp 的 `ppTask`（TX/RX 的包处理，**必需**） | 闭源库经 OSI `_task_create` | 3.5KB（我们抬到 6KB） |
+| 4 | lwIP 的 `tcpip` 线程（DHCP/TCP 都靠它） | `sys_thread_new` → `os_task_create` | 4KB |
+
+也就是 `wifi` 镜像刚好卡在 3 个（能跑），而 `https` 镜像的 lwIP tcpip 线程
+**建不起来** —— 没有 tcpip 线程就没有 DHCP、没有 TCP，取页面无从谈起。
+而且 `port_task_ctx_create` 失败时是**静默返回 0**，只表现为"某个任务凭空没起来"。
+
+### 二、改法：栈池 + 放宽任务数
+
+```c
+#define S3_MAX_CTX     8          /* 任务数上限 3 -> 8 */
+#define S3_STACK_POOL  24576u     /* 所有任务的栈从这一块里按需切 */
+static u8 g_stack_pool[S3_STACK_POOL];
+static u32 g_pool_off;            /* 单调分配，任务不会被删所以不回收 */
+```
+
+- 总内存**和原来一样是 24KB**（DRAM 一点没多花，§210 的余量还是几 KB）；
+- 但"最多 3 个任务 × 8KB"变成了"最多 8 个任务、按请求大小切"；
+- 每个任务最小 1KB（原来 512B，对闭源库/ lwIP 的线程太小）；
+- 池不够时**不再静默**：打印 `[ctx] 栈池不够：需要 X，已用 Y/Z`，并把
+  （需要, 已用, 总大小, 次数）写进 RTC 慢存 `0x50000BE0`。
+
+预算：bringup/wifi 8KB + ppTask 6KB + tcpip 4KB + 监视 2KB ≈ 20KB ≤ 24KB ✓。
+
+配套两处：
+1. `port/s3/wifi_glue.c` 的 OSI `_task_create` 不再把库请求的栈一律抬到 8192，
+   改成抬到 **6144**（否则"bringup 8KB + ppTask 8KB + tcpip 4KB"正好把池吃满）；
+2. `port/s3/lwip/lwipopts.h` 显式给 `TCPIP_THREAD_STACKSIZE = 4096`
+   （lwIP 在 `NO_SYS=0` 下这个默认值是 **0**，传下去会被内核当成最小值），
+   `sys_arch.c` 的 `sys_thread_new` 再兜一个下限 4096。
+
+### 三、构建状态
+
+`https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
+`https` 镜像的余量：`_bss_end = 0x3FCD7C56`、`_stack_limit = 0x3FCD8456`、
+`_stack_top = 0x3FCD9000`（主栈余量约 3KB；TLS 那些活都在任务栈上跑，不在主栈）。

@@ -42,6 +42,16 @@
 #define LWIP_DHCP_DOES_ACD_CHECK        0   /* 关掉就必须显式写 0，否则 init.c 直接 #error */
 
 /* ---- API ---- */
+/* lwIP 的 tcpip 线程：默认 TCPIP_THREAD_STACKSIZE=0（在 NO_SYS=0 下非常危险），
+ * 我们内核会把 0 当成最小值；这里显式给 4KB，优先级放在我们任务的中间档。 */
+#define TCPIP_THREAD_STACKSIZE          (4 * 1024)
+#define TCPIP_THREAD_PRIO               2
+#define TCPIP_MBOX_SIZE                 16
+#define DEFAULT_RAW_RECVMBOX_SIZE       8
+#define DEFAULT_UDP_RECVMBOX_SIZE       8
+#define DEFAULT_TCP_RECVMBOX_SIZE       8
+#define DEFAULT_ACCEPTMBOX_SIZE         8
+
 #define LWIP_SOCKET                     1   /* c6 标准库 std/net/tcp.c6 是 POSIX 薄封装 */
 #define LWIP_NETCONN                    1
 #define MEMP_NUM_NETCONN                4
