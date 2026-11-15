@@ -3639,3 +3639,34 @@ slot3 = 0x10004136        <- 该地址的数据读是对的（是条有效指令
 
 把通用桥的参数传递弄对（现在 fn/arg 的寄存器传递有 bug），
 然后就能判断"跳到 flash 里的任意 windowed 函数"是否普遍失败。
+
+### 82s. 通用桥的编译结果有问题（供以后参考）
+
+```asm
+4037c940 <s3_win_call1>:       ; u32 s3_win_call1(u32 fn, u32 arg) { return ((u32(*)(u32))fn)(arg); }
+4037c940:  entry  a1, 32
+4037c943:  mov.n  a10, a3      ; ← 把 arg 放到了 a10
+4037c945:  callx8 a2           ; ← 用 a2 当函数指针
+4037c948:  mov    a2, a10
+4037c94a:  retw.n
+```
+
+windowed ABI 的第一个参数应该在 **a2**，而编译器把它放到了 **a10**（返回寄存器）。
+所以"用 C 写通用函数指针调用"这条路在这个 ABI 下不可靠，
+需要改写成手写汇编（先把 fn 存起来，再把 arg 放进 a2，然后 callx8）。
+
+### 本轮结论
+
+- 我们**自己写的** `s3_win_wifi_init`（直接 C 调用 `esp_wifi_init_internal`）是正确的
+- 通用桥 `s3_win_call1` 的参数传递有问题（编译器把参数放到 a10）
+- `esp_wifi_init_internal` 依然卡在**段内偏移 0xD934** 的取指上
+
+### 目前掌握的全部事实（供后续接手）
+
+1. I-cache 已按 IDF 的方式配置（16KB/8-way/32B，`ICACHE_CTRL=0x0b`）
+2. IROM 段**数据读在任何偏移都正常**（0xD934、0xF1C8 都验证过内容正确）
+3. IROM 段**取指在段首正常**（0x42030014 的 movi.n a2,42 执行成功）
+4. IROM 段**取指在偏移 0xD934 失败**（cause=0），且与基址无关
+5. bootloader 只支持一个 DROM + 一个 IROM 段，DROM 大了会抢 IROM 的表项
+6. 曾有一次 `esp_wifi_init_internal` **完整执行并返回**（那时 WiFi 库在独立的
+   `.flash.wifi` 段、vaddr 0x42100000），但那个 7 段镜像被 bootloader 拒绝
