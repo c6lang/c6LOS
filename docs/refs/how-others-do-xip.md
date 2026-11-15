@@ -113,3 +113,12 @@ slot1 = 0x00000000   取指调用没返回
 不是手工补 `.config` 能糊过去的。**不过这轮真正的收获是它的源码** ——
 `esp32s3_start.c` 里那两行（`bootloader_init()` + `map_rom_segments()`）已经明确告诉我们
 "非 IDF 应用是怎么建立 XIP 的"，这比把它编出来更有价值。
+
+### 最终结论（构建 NuttX）
+
+继续修配置时又出现 `CONFIG_NFILE_DESCRIPTORS_PER_BLOCK` 未定义等一串 **Kconfig 派生符号**
+缺失 —— 说明手工补 `.config` 这条路收敛不了，NuttX 必须走它自己的 Kconfig 生成流程。
+
+**但从源码已经拿到了我们要的答案**（见上面 NuttX 启动代码那一段），
+构建本身对我们的目标不是必需的。已克隆的源码保留在 `/tmp/nuttx-full`（1.2G）与
+`/tmp/apps-full`，需要时可以继续。
