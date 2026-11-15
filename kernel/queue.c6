@@ -79,6 +79,10 @@ int os_queue_destroy(OsQueue *q) {
     return 0;
 }
 
+static u32 g_put_ok = 0;
+static u32 g_put_try = 0;
+static u32 g_get_ok = 0;
+
 int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
     if (q == 0 || q->magic != QUEUE_MAGIC || item == 0) {
         return -1;
@@ -92,12 +96,16 @@ int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
             return -1;
         }
         if (q->count != q->cap) {
+            g_put_try = g_put_try + 1u;
+            *(volatile u32 *)0x5000120Cu = g_put_try;
             slot_write(q, q->tail, item);
             q->tail = q->tail + 1u;
             if (q->tail == q->cap) {
                 q->tail = 0u;
             }
             q->count = q->count + 1u;
+            g_put_ok = g_put_ok + 1u;
+            *(volatile u32 *)0x50001208u = g_put_ok;
             (void)os_task_wake_first(q, Q_WAIT_GET, 0);
             os_obj_unlock(st);
             return 0;
