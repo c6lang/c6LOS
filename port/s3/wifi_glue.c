@@ -217,6 +217,15 @@ extern void *g_s3_cur[2];   /* port/s3/ctx.S 里的当前 ctx（按核下标） 
  * 直接把 IDF 的 portMAX_DELAY(0xFFFFFFFF) 当 tick 数传进去，会变成
  * "now + 0xFFFFFFFF"，立刻到期 → 每次等待都秒回超时，调用者就忙等。
  * 所有阻塞原语统一在这里翻译。 */
+/* 初始化任务的 id：它是唯一有权"不阻塞"的任务。
+ * 实测（§120）单线程配置下 esp_wifi_init_internal 能返回 ESP_OK，
+ * 而真 RTOS 配置下它会在 pp_create_task 内部与 WiFi 任务互等。
+ * 这里先让初始化任务的所有阻塞调用变成"立即返回成功"，
+ * 验证这是否足以让 init 走完（WiFi 任务照常阻塞等下一条消息）。 */
+static u32 g_init_task = 0u;
+
+#define INIT_NOBLOCK() (g_init_task != 0u && s3_w2c_current_task() == g_init_task)
+
 static u32 w_ticks(u32 t)
 {
     return (t == C6_FOREVER) ? 0u : t;
@@ -387,6 +396,7 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
     B_IN(3u);
+    if (INIT_NOBLOCK()) { return 0u; }
     got = s3_w2c_event_wait((void *)&e->e, bits,
                             (wait_all != 0) ? 1u : 0u, w_ticks(ticks));
     B_OUT(3u);
@@ -499,6 +509,7 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
+    if (INIT_NOBLOCK()) { return 0; }   /* 初始化任务不阻塞在收队列上 */
     if (g_qbad == 0u && (q == 0 || q->magic != WQ_MAGIC)) {
         g_qbad = 1u;
         *(volatile u32 *)0x50000360u = (u32)qh;   /* 第一个不过 magic 的 recv 句柄 */
@@ -944,6 +955,7 @@ u32 s3_wifi_bringup(void)
                (u32)(void *)g_wifi_osi_funcs._mutex_create,
                (u32)(void *)g_wifi_osi_funcs._magic,
                (u32)(void *)g_wifi_osi_funcs._version);
+    g_init_task = s3_w2c_current_task();
     ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
                (u32)(void *)g_wifi_cfg_blob,
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),

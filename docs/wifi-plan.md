@@ -6662,3 +6662,37 @@ OSI 回调总数 = 0x1e = 30（与之前一致）
 （a2..a7 六个 + 栈上第 7 个），确认 `osi_task_create` 拿到的是
 `(fn, name, stack, arg, prio, handle)` 而不是错位的一组。
 可以把实际收到的 6 个参数值全部记进 RTC 与库的调用点对照。
+
+## §160 新实验：让初始化任务的所有阻塞调用立即返回 —— 仍然卡住
+
+加了一个 `INIT_NOBLOCK()`：在 `s3_wifi_bringup` 里记下初始化任务的 id
+（`g_init_task`），之后 `_semphr_take` / `_mutex_lock` / `_queue_recv` /
+`_event_group_wait_bits` 只要发现调用者是它，就**立即返回成功/超时**，
+不进入内核阻塞。
+
+真板串口（完整）：
+
+```
+c6os s3 boot
+W0 phy start
+W1 bringup
+B0 osi0=00000000 osi@00000000 calls@3fcbe8d4
+B1 slot13=4037d0cc slot18=4037cfc8 magic=deadbeaf ver=00000008
+B2 cfg@3fcbe7d4 osi=3fcbead4 magic@144=1f2f3f4f
+（之后没有 W2）
+```
+
+`B2` 打出来了 ⇒ `g_init_task` 已记录、库已被调用；但初始化**仍然**卡在
+`pp_create_task` 内部。
+
+这有两种解释：
+
+1. 初始化任务阻塞在一个我们**没有覆写**的原语上（例如某条我们仍映射到
+   `glue_ret0` 的等待路径，或者库内部的忙等）；
+2. `_task_get_current_task()` 在同一个任务里返回的 id **会变**，
+   于是 `INIT_NOBLOCK()` 匹配失败 —— 这也正好解释 §133/§140 里那些
+   "同一个任务报出两个 id" 的读数。
+
+第 2 点与之前所有"身份不一致"的读数能对上，是目前最值得优先验证的：
+**把任务身份从一个稳定的来源取**（例如 `port_cur_ctx()` 对应的 `g_ctx`
+槽号，或 `g_tasks[]` 的下标），不要再依赖 `g_cur->id`。
