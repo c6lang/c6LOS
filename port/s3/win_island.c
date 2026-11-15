@@ -481,3 +481,9 @@ u32 s3_win_osi_init(void)
     s3_wifi_osi_init();
     return s3_wifi_osi_funcs_ptr();
 }
+
+/* 通用 windowed 调用：以窗口化 ABI 调用任意函数地址，传一个参数 */
+u32 s3_win_call1(u32 fn, u32 arg)
+{
+    return ((u32 (*)(u32))fn)(arg);
+}

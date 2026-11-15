@@ -1,0 +1,18 @@
+/* 调 esp_wifi_get_mac(0x4201f1c8，段内偏移 0xF1C8，比 0xD934 更靠后)，
+ * 看是否同样失败 —— 区分"函数特殊性"与"区域问题" */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+extern u32 s3_win_call_fn1(u32 fn, u32 arg);
+void os_main(void)
+{
+    u32 rc = 0u;
+    static u8 mac[8];
+    s3_beacon(0u, 0xB0000140u);
+    os_icache_enable();
+    s3_beacon(3u, *(volatile u32 *)0x4201f1c8u);   /* 先确认那个地址内容可读 */
+    rc = s3_win_call_fn1(0x4201f1c8u, (u32)mac);   /* 调用它 */
+    s3_beacon(1u, rc);
+    for (;;) { }
+}
