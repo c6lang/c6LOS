@@ -5256,3 +5256,69 @@ M2 bringup returned
 3. 之后依次：连 WPA2 AP（这时 `wpa_crypto_funcs` 的 9 个函数指针必须填真
    实现，官方在 `wpa_supplicant/src/crypto/crypto_ops.c`，依赖 mbedtls）
    → DHCP/TCP → TLS/HTTP。
+
+---
+
+## §121 OSI 层换成真 RTOS 对象（任务/信号量/互斥/队列/事件组）
+
+原来的 OSI 适配层是"单线程假对象"（任务只返回假句柄、信号量不阻塞）。
+`esp_wifi_start()` 需要 WiFi 任务真的跑起来，所以整层重写成内核对象：
+
+| OSI 槽位 | 实现 | 内核原语 |
+|---|---|---|
+| `_task_create` / `_task_delete` | 真任务 | `os_task_create` / `os_task_delete` |
+| `_semphr_create/take/give` | 计数信号量 | `os_sem_init/pend/post` |
+| `_mutex_*` / `_recursive_mutex_*` | **递归互斥** | `os_mutex_init/pend/post` |
+| `_wifi_create_queue` / `_queue_*` | 环形队列 | `os_queue_init_ex/put_item/get_item` |
+| `_event_group_*` | 事件组 | `os_event_*` |
+| `_esp_timer_get_time` | tick | `os_tick_get` / `os_tick_hz` |
+
+两个关键坑：
+
+1. **windowed → call0 不能直接调**。`wifi_glue.c` 是 `-mabi=windowed`，内核是
+   call0；直接调会把 CALL 的窗口标签漏给内核（`ret` 跳到 0x82xxxxxx），内核也
+   会踩调用者的寄存器。新增 `port/s3/w2c.S`，每个内核函数配一个薄壳：
+   `entry a1,32` → `l32r` + `callx0`（目标在 flash，超出 `call0` 的 ±512KB）
+   → 先把自己带标签的 `a0` 从栈里取回 → `retw`。
+
+2. **libc 也要两套**。库需要 windowed 的 `memset/memcpy/...`，我们自己的
+   call0 代码需要 call0 版；同一符号没法兼得。做法：这四个（以及
+   strlen/strcmp/strncmp/strcpy/strncpy/strnlen）留在
+   `port/s3/wifi_glue.c`（windowed）给库用，我们自己的单元用 Makefile 里的
+   `-Dmemset=c6_memset …` 重定向到 `rt/c6rt.c` 的 call0 实现。
+
+   反例（踩过）：把 call0 版留给库 → 库的 `retw` 抛 IllegalInstruction；
+   把 windowed 版留给我们自己 → **我们**的 `retw` 抛 IllegalInstruction。
+
+3. `_mutex_*` 必须用内核的 `OsMutex`（owner + 递归计数），不能用 max=1 的计数
+   信号量冒充：IDF 的 `wifi_api_lock` 是递归加锁，会自己把自己锁死
+   （真板表现：`M1 bringup` 之后彻底卡住，无 TRAP 无返回）。
+
+**真板证据**（`tests/t_wififill.c6` 改成任务里跑）：
+
+```
+M0 phy start
+M1 bringup
+beacon slot0 = 0xb0000212   (PHY 完成)
+beacon slot1 = 0x0000002a   (IROM 取指 = 42)
+beacon slot2 = 0x00000001   (os_task_create 成功，任务 id=1)
+```
+
+## §122 当前卡点：WiFi 任务在 `_queue_recv` 上忙等
+
+寄存器窗口/ABI 问题全部消失，现在纯粹是队列语义问题。RTC 计数
+`0x50000200` 已经涨到 **0x170e978（2417 万次）** 且末尾全是同一个回调
+**29（`_queue_recv`）** —— WiFi 任务没有真正阻塞，而是在死循环。
+
+诊断记录区（RTC `0x50000300`，复位后可直接 read-mem）：
+
+```
+0x50000300 = 0x3fcbf2f8   最近一次 _queue_recv 收到的句柄（magic 校验没过）
+0x50000310 = 0x3fcbf2b8   最近一次 _wifi_create_queue 真正建出来的句柄
+0x50000314 = 0x0d7de2c8   _wifi_create_queue 成功次数（2.26 亿次）
+```
+
+两个句柄差 `0x40`，且创建次数爆炸 —— 是"建队列 → 收不到 → 重建"的循环，
+不是句柄简单错位。**下一步**：查是谁在循环调用 `_wifi_create_queue`
+（大概率是 `ppTask` 建自己的队列失败后重试），以及 `_queue_recv` 收到的
+那个地址到底是哪个对象。

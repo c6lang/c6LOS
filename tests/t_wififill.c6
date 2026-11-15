@@ -1,40 +1,59 @@
 /* WiFi 启动测试。
  *
- * 配置填写和 esp_wifi_init_internal 的调用都在 C 侧（port/s3/wifi_glue.c 的
- * s3_wifi_bringup），这里只负责：开 I-cache → PHY 初始化 → 触发 → 报告。
- * 之前这段逻辑写在 .c6 里，但 .c6 生成的代码在跨函数调用时会丢失局部变量
- * （配置块指针变成了字符串地址），导致库里读到垃圾 cfg。
+ * 现在 OSI 层用的是**真 RTOS 对象**（任务/信号量/队列/事件组），闭源库在初始化
+ * 里会建自己的 WiFi 任务并往队列里投消息，所以必须先把调度器跑起来、再在任务里
+ * 做 PHY + esp_wifi_init + esp_wifi_start。
+ *
+ * 证据通道：
+ *   beacons slot0/slot1 = 各阶段返回码（ssc 读 0x600080c0/0xc4）
+ *   RTC 0x50000200      = OSI 回调累计次数
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/reg.h"
+#include "c6os/task.h"
+
 extern u32 s3_win_call_flash42(void);
 extern u32 s3_win_call_cache_invalidate(void);
 extern u32 s3_win_call_bringup(void);
-extern u32 s3_win_call_calls_ptr(void);
-extern u32 s3_win_call_cfg_ptr(void);
+extern u32 s3_win_call_wifi_start(void);
 extern u32 s3_win_call_phy_cal(void);
 extern u32 s3_win_call_phy_enable(void);
 extern void s3_win_call_log(const char *s);
+extern void os_icache_enable(void);
 
-void os_main(void)
+static void wifi_main(void *arg)
 {
     u32 rc = 0u;
-    s3_beacon(0u, 0xB0000210u);
-    os_icache_enable();
-    s3_win_call_cache_invalidate();
-    s3_beacon(1u, s3_win_call_flash42());       /* 期望 42 */
+    (void)arg;
 
     s3_win_call_log("M0 phy start\n");
     s3_win_call_phy_cal();
     s3_win_call_phy_enable();
-    s3_beacon(0u, 0xB0000212u);                 /* PHY 初始化完成 */
+    s3_beacon(0u, 0xB0000212u);          /* PHY 初始化完成 */
 
     s3_win_call_log("M1 bringup\n");
     rc = s3_win_call_bringup();
+    s3_beacon(0u, rc);                   /* esp_wifi_init_internal 的返回码 */
     s3_win_call_log("M2 bringup returned\n");
 
-    s3_beacon(0u, rc);                          /* 期望 0 = OK */
-    s3_beacon(1u, s3_win_call_calls_ptr());
+    s3_win_call_log("M3 start\n");
+    rc = s3_win_call_wifi_start();
+    s3_beacon(1u, rc);                   /* esp_wifi_start 的返回码 */
+    s3_win_call_log("M4 start returned\n");
+
+    s3_beacon(3u, 0xB0000001u);          /* 走到这里说明整段没崩 */
+    for (;;) { os_task_delay(100u); }
+}
+
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000210u);
+    os_icache_enable();
+    s3_win_call_cache_invalidate();
+    s3_beacon(1u, s3_win_call_flash42());   /* 期望 42：IROM 取指正常 */
+
+    s3_beacon(2u, (u32)os_task_create("wifi", wifi_main, 0, 3u, 4096u));
+    os_task_start();
     for (;;) { }
 }

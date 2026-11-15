@@ -13,6 +13,7 @@ wifi_osi_funcs_t g_wifi_osi_funcs;
 void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
+volatile u32 g_osi_calls[128];
 extern int ets_printf(const char *fmt, ...);
 
 /* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
@@ -130,197 +131,300 @@ static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz);
 static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
 
-/* ---- OSI 队列：自包含的环形缓冲（WiFi 初始化阶段就要用）---- */
-typedef struct { u32 len; u32 size; u32 head; u32 tail; u32 count; u8 *buf; } WQ;
+/* ---- 真 RTOS 对象 ------------------------------------------------------
+ * 全部经 port/s3/w2c.S 里的 windowed→call0 薄壳调用内核：
+ *   entry a1,32 / call0 os_xxx / retw
+ * 这样既不会把 CALL 的窗口标签漏给内核，也不会破坏调用者的窗口簿记。
+ *
+ * 内核对象布局在这里按值内嵌（OsSem/OsQueue/OsEvent 都是纯 POD，字段与
+ * include/c6os/{sem,queue,event}.h 完全一致）。                               */
+typedef struct { u32 count; u32 max; u32 magic; u32 waiters; } WOsSem;
+typedef struct { u8 *buf; u32 item_size; u32 cap; u32 head; u32 tail;
+                 u32 count; u32 magic; u32 waiters_get; u32 waiters_put; } WOsQueue;
+typedef struct { u32 bits; u32 magic; } WOsEvent;
+typedef struct { u32 owner; u32 count; u32 magic; } WOsMutex;
 
-static u32 osi_wifi_create_queue(u32 len, u32 size)
-{
-    WQ *q = (WQ *)osi_malloc((u32)sizeof(WQ) + len * size);
-    OSI_HIT(94);
-    if (q == 0) { ets_printf("QFAIL %u %u\n", len, size); return 0u; }
-    ets_printf("Qok %u %u -> %08x\n", len, size, (u32)(void *)q);
-    q->len = len; q->size = size; q->head = 0u; q->tail = 0u; q->count = 0u;
-    q->buf = (u8 *)(q + 1);
-    return (u32)q;
-}
+extern int  s3_w2c_sem_init(void *s, u32 initial, u32 max);
+extern int  s3_w2c_sem_destroy(void *s);
+extern int  s3_w2c_sem_pend(void *s, u32 timeout);
+extern int  s3_w2c_sem_post(void *s);
+extern int  s3_w2c_mutex_init(void *m);
+extern int  s3_w2c_mutex_destroy(void *m);
+extern int  s3_w2c_mutex_pend(void *m, u32 timeout);
+extern int  s3_w2c_mutex_post(void *m);
+extern int  s3_w2c_queue_init(void *q, void *storage, u32 cap, u32 item_size);
+extern int  s3_w2c_queue_put(void *q, const void *item, u32 timeout);
+extern int  s3_w2c_queue_get(void *q, void *out, u32 timeout);
+extern u32  s3_w2c_queue_count(void *q);
+extern int  s3_w2c_queue_destroy(void *q);
+extern int  s3_w2c_event_init(void *e);
+extern int  s3_w2c_event_set(void *e, u32 bits);
+extern int  s3_w2c_event_clear(void *e, u32 bits);
+extern u32  s3_w2c_event_wait(void *e, u32 mask, u32 mode, u32 timeout);
+extern int  s3_w2c_event_destroy(void *e);
+extern int  s3_w2c_task_create(const char *name, void *entry, void *arg,
+                               u32 prio, u32 stack);
+extern int  s3_w2c_task_delete(u32 id);
+extern void s3_w2c_task_delay(u32 ticks);
+extern void s3_w2c_task_yield(void);
+extern u64  s3_w2c_tick_get(void);
+extern u32  s3_w2c_tick_hz(void);
+extern u32  s3_w2c_current_task(void);
 
-static u32 osi_wifi_queue_send(u32 qh, const void *item, u32 ticks)
-{
-    WQ *q = (WQ *)qh;
-    const u8 *src = (const u8 *)item;
-    u8 *dst;
-    u32 i = 0u;
-    if (q == 0 || item == 0 || q->count >= q->len) { return 0u; }
-    dst = q->buf + q->tail * q->size;
-    while (i < q->size) { dst[i] = src[i]; i = i + 1u; }
-    q->tail = (q->tail + 1u) % q->len;
-    q->count = q->count + 1u;
-    return 1u;
-}
-
-static u32 osi_wifi_queue_recv(u32 qh, void *item, u32 ticks)
-{
-    WQ *q = (WQ *)qh;
-    u8 *dst = (u8 *)item;
-    const u8 *src;
-    u32 i = 0u;
-    if (q == 0 || item == 0 || q->count == 0u) { return 0u; }
-    src = q->buf + q->head * q->size;
-    while (i < q->size) { dst[i] = src[i]; i = i + 1u; }
-    q->head = (q->head + 1u) % q->len;
-    q->count = q->count - 1u;
-    return 1u;
-}
-
-static void osi_wifi_delete_queue(u32 qh) { if (qh != 0u) { osi_free((void *)qh); } }
-
-/* ===================== OSI 层：其余基础函数 =====================
- * 说明：wifi_glue.c 整体用 windowed ABI 编译（闭源库回调我们时是 call8/retw），
- * 这里只调用 call0 的外部符号（port_puts / os_tick_get）——windowed → call0
- * 是安全方向（call0 被调方不发 entry，不会泄漏寄存器窗口）。 */
-#include "c6os/port.h"
-#include "c6os/tick.h"
-
-/* 调用计数：上板用信标读，能看出库走到哪一步了 */
-volatile u32 g_osi_calls[128];
-
+#define C6_FOREVER 0xFFFFFFFFu
 
 /* ---- 信号量 ---- */
-typedef struct { u32 magic; u32 cnt; u32 max; } WSem;
+typedef struct { WOsSem s; u32 magic; } WSem;
 #define WSEM_MAGIC 0x53454D31u
+
+static WSem *wsem_new(u32 max, u32 init)
+{
+    WSem *s = (WSem *)osi_malloc((u32)sizeof(WSem));
+    if (s == 0) { return 0; }
+    if (s3_w2c_sem_init((void *)&s->s, init, max) != 0) { osi_free(s); return 0; }
+    s->magic = WSEM_MAGIC;
+    return s;
+}
 
 static void *osi_semphr_create(u32 max, u32 init)
 {
-    WSem *s = (WSem *)osi_malloc((u32)sizeof(WSem));
-    OSI_HIT(13);
-    if (s == 0) { return 0; }
-    s->magic = WSEM_MAGIC; s->cnt = init; s->max = max;
-    return (void *)s;
+    HIT_OF(_semphr_create);
+    return (void *)wsem_new(max, init);
 }
-static void osi_semphr_delete(void *sem) { if (sem != 0) { osi_free(sem); } }
+static void osi_semphr_delete(void *sem)
+{
+    WSem *s = (WSem *)sem;
+    if (s != 0 && s->magic == WSEM_MAGIC) { (void)s3_w2c_sem_destroy((void *)&s->s); s->magic = 0u; osi_free(s); }
+}
 static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
-    OSI_HIT(15);
+    HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    if (s->cnt == 0u) { return 0; }     /* 没有真正阻塞（单线程初始化阶段够用） */
-    s->cnt = s->cnt - 1u;
-    return 1;
+    return (s3_w2c_sem_pend((void *)&s->s, ticks) == 0) ? 1 : 0;
 }
 static int osi_semphr_give(void *sem)
 {
     WSem *s = (WSem *)sem;
+    HIT_OF(_semphr_give);
     if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    s->cnt = s->cnt + 1u;
-    return 1;
+    return (s3_w2c_sem_post((void *)&s->s) == 0) ? 1 : 0;
 }
 
-/* ---- 互斥量（复用信号量）---- */
+/* 当前任务用来阻塞的信号量。现在有真任务了，必须每个任务一个，
+ * 否则两个任务会在同一个信号量上打架。用当前任务 token 做键。 */
+#define WTHREAD_SLOTS 8
+static WSem *g_thread_sems[WTHREAD_SLOTS];
+static u32   g_thread_keys[WTHREAD_SLOTS];
+
+static void *osi_thread_semphr_get(void)
+{
+    u32 key = s3_w2c_current_task();
+    u32 i;
+    HIT_OF(_wifi_thread_semphr_get);
+    for (i = 0u; i < WTHREAD_SLOTS; i++) {
+        if (g_thread_sems[i] != 0 && g_thread_keys[i] == key) { return (void *)g_thread_sems[i]; }
+    }
+    for (i = 0u; i < WTHREAD_SLOTS; i++) {
+        if (g_thread_sems[i] == 0) {
+            g_thread_sems[i] = wsem_new(1u, 0u);
+            g_thread_keys[i] = key;
+            return (void *)g_thread_sems[i];
+        }
+    }
+    return 0;
+}
+
+/* ---- 互斥量 ------------------------------------------------------------
+ * 必须用内核的 OsMutex（带 owner + 递归计数），不能用计数信号量冒充：
+ * IDF 的 wifi_api_lock 是**递归**加锁的，用 max=1 的信号量会自己把自己锁死
+ * （真板表现：init 走完 M1 之后彻底卡住，没有 TRAP 也没有返回）。            */
+typedef struct { WOsMutex m; u32 magic; } WMtx;
+#define WMTX_MAGIC 0x4D545831u
+
+static void *wmux_new(void)
+{
+    WMtx *m = (WMtx *)osi_malloc((u32)sizeof(WMtx));
+    if (m == 0) { return 0; }
+    if (s3_w2c_mutex_init((void *)&m->m) != 0) { osi_free(m); return 0; }
+    m->magic = WMTX_MAGIC;
+    return (void *)m;
+}
+
 static void *osi_mutex_create(void)
 {
-    OSI_HIT(18);
-    return osi_semphr_create(1u, 1u);      /* 互斥量创建即可用 */
-}
-static void osi_mutex_delete(void *m) { osi_semphr_delete(m); }
-static int osi_mutex_lock(void *m)
-{
-    WSem *s = (WSem *)m;
-    OSI_HIT(21);
-    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    if (s->cnt != 0u) { s->cnt = s->cnt - 1u; }
-    return 1;
-}
-static int osi_mutex_unlock(void *m)
-{
-    WSem *s = (WSem *)m;
-    OSI_HIT(22);
-    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    if (s->cnt < s->max) { s->cnt = s->cnt + 1u; }
-    return 1;
+    HIT_OF(_mutex_create);
+    return wmux_new();
 }
 static void *osi_recursive_mutex_create(void)
 {
-    OSI_HIT(19);
-    return osi_semphr_create(0xFFFFFFFFu, 1u);   /* 递归锁：给个大上限即可 */
+    HIT_OF(_recursive_mutex_create);
+    return wmux_new();
+}
+static void osi_mutex_delete(void *p)
+{
+    WMtx *m = (WMtx *)p;
+    if (m != 0 && m->magic == WMTX_MAGIC) {
+        (void)s3_w2c_mutex_destroy((void *)&m->m);
+        m->magic = 0u;
+        osi_free(m);
+    }
+}
+static int osi_mutex_lock(void *p)
+{
+    WMtx *m = (WMtx *)p;
+    HIT_OF(_mutex_lock);
+    if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    return (s3_w2c_mutex_pend((void *)&m->m, C6_FOREVER) == 0) ? 1 : 0;
+}
+static int osi_mutex_unlock(void *p)
+{
+    WMtx *m = (WMtx *)p;
+    HIT_OF(_mutex_unlock);
+    if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 1 : 0;
 }
 
-/* 当前线程的信号量（库里拿它做阻塞等待；单线程阶段给一个固定的即可） */
-static WSem g_thread_sem = { WSEM_MAGIC, 0u, 1u };
-static void *osi_thread_semphr_get(void) { OSI_HIT(17); return (void *)&g_thread_sem; }
-
 /* ---- 事件组 ---- */
-typedef struct { u32 magic; volatile u32 bits; } WEvt;
+typedef struct { WOsEvent e; u32 magic; } WEvt;
 #define WEVT_MAGIC 0x45565431u
 
 static void *osi_event_group_create(void)
 {
+    WEvt *g = (WEvt *)osi_malloc((u32)sizeof(WEvt));
     HIT_OF(_event_group_create);
-    WEvt *e = (WEvt *)osi_malloc((u32)sizeof(WEvt));
-    OSI_HIT(31);
-    if (e == 0) { return 0; }
-    e->magic = WEVT_MAGIC; e->bits = 0u;
-    return (void *)e;
+    if (g == 0) { return 0; }
+    if (s3_w2c_event_init((void *)&g->e) != 0) { osi_free(g); return 0; }
+    g->magic = WEVT_MAGIC;
+    return (void *)g;
 }
-static void osi_event_group_delete(void *g) { if (g != 0) { osi_free(g); } }
+static void osi_event_group_delete(void *g)
+{
+    WEvt *e = (WEvt *)g;
+    if (e != 0 && e->magic == WEVT_MAGIC) { (void)s3_w2c_event_destroy((void *)&e->e); e->magic = 0u; osi_free(e); }
+}
 static u32 osi_event_group_set_bits(void *g, u32 bits)
 {
     WEvt *e = (WEvt *)g;
+    HIT_OF(_event_group_set_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
-    e->bits = e->bits | bits;
-    return e->bits;
+    (void)s3_w2c_event_set((void *)&e->e, bits);
+    return e->e.bits;
 }
 static u32 osi_event_group_clear_bits(void *g, u32 bits)
 {
     WEvt *e = (WEvt *)g;
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
-    e->bits = e->bits & ~bits;
-    return e->bits;
+    (void)s3_w2c_event_clear((void *)&e->e, bits);
+    return e->e.bits;
 }
 static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
-                                     u32 ticks, u32 *out)
+                                     u32 ticks)
 {
-    HIT_OF(_event_group_wait_bits);
     WEvt *e = (WEvt *)g;
     u32 got;
+    HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
-    got = e->bits & bits;
-    if (wait_all != 0) {
-        if (got != bits) { return 0u; }
-    } else {
-        if (got == 0u) { return 0u; }
-    }
-    if (clear != 0) { e->bits = e->bits & ~bits; }
-    if (out != 0) { *out = e->bits; }
-    return 1u;
+    got = s3_w2c_event_wait((void *)&e->e, bits,
+                            (wait_all != 0) ? 1u : 0u, ticks);
+    if (clear != 0 && got != 0u) { (void)s3_w2c_event_clear((void *)&e->e, got); }
+    return got;
 }
 
-/* ---- 通用队列（_queue_* 系列，和 _wifi_* 用同一实现）---- */
-static u32 osi_queue_create(u32 len, u32 size) { OSI_HIT(23); return osi_wifi_create_queue(len, size); }
-static void osi_queue_delete(u32 q) { osi_wifi_delete_queue(q); }
-static int osi_queue_send(u32 q, void *item, u32 ticks) { OSI_HIT(25); return (int)osi_wifi_queue_send(q, item, ticks); }
-static int osi_queue_recv(u32 q, void *item, u32 ticks) { OSI_HIT(29); return (int)osi_wifi_queue_recv(q, item, ticks); }
-static int osi_queue_msg_waiting(u32 q)
+/* ---- 队列 ---- */
+typedef struct { WOsQueue q; u32 magic; } WQ;
+#define WQ_MAGIC 0x51554531u
+
+static u32 osi_wifi_create_queue(u32 len, u32 size)
 {
-    WQ *p = (WQ *)q;
-    if (p == 0) { return 0; }
-    return (int)p->count;
+    WQ *q;
+    u8 *buf;
+    HIT_OF(_wifi_create_queue);
+    if (len == 0u || size == 0u) { return 0u; }
+    q = (WQ *)osi_malloc((u32)sizeof(WQ));
+    if (q == 0) { return 0u; }
+    buf = (u8 *)osi_malloc(len * size);
+    if (buf == 0) { osi_free(q); return 0u; }
+    if (s3_w2c_queue_init((void *)&q->q, (void *)buf, len, size) != 0) {
+        osi_free(buf); osi_free(q); return 0u;
+    }
+    q->magic = WQ_MAGIC;
+    *(volatile u32 *)0x50000310u = (u32)q;              /* 记录建出来的句柄 */
+    *(volatile u32 *)0x50000314u = *(volatile u32 *)0x50000314u + 1u;
+    return (u32)q;
+}
+static void osi_wifi_delete_queue(u32 qh)
+{
+    WQ *q = (WQ *)qh;
+    HIT_OF(_wifi_delete_queue);
+    if (q == 0 || q->magic != WQ_MAGIC) { return; }
+    (void)s3_w2c_queue_destroy((void *)&q->q);
+    osi_free(q->q.buf);
+    q->magic = 0u;
+    osi_free(q);
+}
+static u32 osi_queue_create(u32 len, u32 size) { HIT_OF(_queue_create); return osi_wifi_create_queue(len, size); }
+static void osi_queue_delete(void *qh) { osi_wifi_delete_queue((u32)qh); }
+static int osi_queue_send(void *qh, void *item, u32 ticks)
+{
+    WQ *q = (WQ *)qh;
+    HIT_OF(_queue_send);
+    if (q == 0 || q->magic != WQ_MAGIC) { return 0; }
+    return (s3_w2c_queue_put((void *)&q->q, item, ticks) == 0) ? 1 : 0;
+}
+/* 诊断记录区：0x50000300 放最近一次失败的线索，复位后 read-mem 可读 */
+#define QDIAG ((volatile u32 *)0x50000300u)
+
+static int osi_queue_recv(void *qh, void *item, u32 ticks)
+{
+    WQ *q = (WQ *)qh;
+    int r;
+    HIT_OF(_queue_recv);
+    if (q == 0 || q->magic != WQ_MAGIC) {
+        QDIAG[0] = (u32)qh;                 /* 句柄不像我们的队列 */
+        QDIAG[1] = (u32)((WQ *)qh)->magic;  /* 那里到底放的是什么 */
+        QDIAG[2] = (u32)((WQ *)qh)->q.cap;
+        QDIAG[3] = (u32)((WQ *)qh)->q.item_size;
+        return 0;
+    }
+    r = s3_w2c_queue_get((void *)&q->q, item, ticks);
+    if (r != 0) {
+        QDIAG[1] = (u32)(-r);               /* 1=没有当前任务 3=超时表满 … */
+        QDIAG[2] = ticks;
+        QDIAG[3] = q->q.count;
+    }
+    return (r == 0) ? 1 : 0;
+}
+static u32 osi_queue_msg_waiting(void *qh)
+{
+    WQ *q = (WQ *)qh;
+    if (q == 0 || q->magic != WQ_MAGIC) { return 0u; }
+    return s3_w2c_queue_count((void *)&q->q);
 }
 
-/* ---- 任务（初始化阶段单线程，先给非零句柄）---- */
-static u32 g_fake_task = 0x7A5B0001u;
+/* ---- 任务 ---- */
 static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
                            u32 prio, void *handle)
 {
+    int id;
+    u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
     HIT_OF(_task_create);
-    OSI_HIT(37);
-    if (handle != 0) { *(u32 *)handle = (u32)&g_fake_task; }
-    return 1;                              /* 1 = pdPASS */
+    id = s3_w2c_task_create(name, fn, arg, p, stack);
+    if (id < 0) { return 0; }
+    if (handle != 0) { *(u32 *)handle = (u32)id; }
+    return 1;
 }
-static void osi_task_delete(void *h) { (void)h; }
-static u32 osi_task_get_current_task(void) { return (u32)&g_fake_task; }
-static u32 osi_task_ms_to_tick(u32 ms) { return ms; }
-static u32 osi_task_get_max_priority(void) { OSI_HIT(42); return 25u; }
-static void osi_task_yield_from_isr(void) { }
+static void osi_task_delete(void *h) { (void)s3_w2c_task_delete((u32)h); }
+static u32 osi_task_get_current_task(void) { return s3_w2c_current_task(); }
+static u32 osi_task_ms_to_tick(u32 ms)
+{
+    u32 hz = s3_w2c_tick_hz();
+    if (hz == 0u) { return ms; }
+    return (ms * hz) / 1000u;
+}
+static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); return 31u; }
+static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
+static void osi_task_delay(u32 ticks) { s3_w2c_task_delay(ticks); }
 
 /* ---- 日志：把库自己打的信息送到我们的串口 ---- */
 /* 注意：这里**不能**调 port_puts —— 它是 call0 编译的，从 windowed 代码
@@ -444,9 +548,11 @@ static u32 osi_log_timestamp(void) { OSI_HIT(85); return 0u; }
 /* ---- 时间 / 随机数 ---- */
 static u64 osi_esp_timer_get_time(void)
 {
+    u32 hz;
+    u64 t;
     HIT_OF(_esp_timer_get_time);
-    u32 hz = os_tick_hz();
-    u64 t = os_tick_get();
+    hz = s3_w2c_tick_hz();          /* 时间也必须走 w2c 壳：内核是 call0 */
+    t  = s3_w2c_tick_get();
     if (hz == 0u) { return t * 1000u; }
     return (t * 1000000u) / (u64)hz;
 }

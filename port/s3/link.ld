@@ -50,6 +50,14 @@ SECTIONS
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
+    /* 内核的同步原语（WiFi OSI 层要用）放 flash 文本段，给 IRAM 腾地方。
+     * IROM 取指这条路已经验证过（libpp/libnet80211 等闭源库全跑在 flash 里）。 */
+    *sem.o(.literal .literal.* .text .text.*)
+    *queue.o(.literal .literal.* .text .text.*)
+    *event.o(.literal .literal.* .text .text.*)
+    *mutex.o(.literal .literal.* .text .text.*)
+    *heap.o(.literal .literal.* .text .text.*)
+    *timeout.o(.literal .literal.* .text .text.*)
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)

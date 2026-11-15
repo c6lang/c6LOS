@@ -17,7 +17,16 @@ S3_CDEFS ?=
 # idf_shim.c 的 ABI：默认 windowed（要和闭源库一致）；做对照实验时可设 call0
 S3_SHIM_ABI ?= windowed
 
-XTFLAGS := -mabi=$(S3_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common \
+# 我们自己的代码是 call0，闭源库是 windowed：两边不能共用同一个 memset。
+# 库的 memset/memcpy/... 由 port/s3/wifi_glue.c（-mabi=windowed）提供；
+# 我们自己的单元统一把这些名字重定向到 c6_*（rt/c6rt.c 里的 call0 实现）。
+# 否则 call0 代码调到 windowed 版会因为 entry 不轮转而在 retw 上抛非法指令。
+S3_LIBC_RENAME := -Dmemset=c6_memset -Dmemcpy=c6_memcpy -Dmemmove=c6_memmove \
+                  -Dmemcmp=c6_memcmp -Dstrlen=c6_strlen -Dstrcmp=c6_strcmp \
+                  -Dstrncmp=c6_strncmp -Dstrcpy=c6_strcpy \
+                  -Dstrncpy=c6_strncpy -Dstrnlen=c6_strnlen
+
+XTFLAGS := -mabi=$(S3_ABI) $(S3_CDEFS) $(S3_LIBC_RENAME) -Os -ffreestanding -fno-builtin -fno-common \
            -mlongcalls -mtext-section-literals -Wall -Wextra
 PORT    ?= /dev/ttyACM0
 
@@ -38,6 +47,7 @@ S3_NAMES := $(notdir $(S3_C6))
 S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
 # 内核/控制台等必需对象（LEAN 也保留）
 S3_OBJ_CORE := $(BUILD)/obj/start.o \
+                   $(BUILD)/obj/w2c.o \
            $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \
@@ -158,6 +168,10 @@ $(LIBPHY_WIN): $(LIBPHY_SRC)
 $(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=call0 -c $< -o $@
+
+$(BUILD)/obj/w2c.o: port/s3/w2c.S
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -c $< -o $@
 
 $(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj

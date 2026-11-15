@@ -504,3 +504,10 @@ u32 s3_flash_end_test(u32 x)
 {
     return x + 9u;
 }
+
+/* esp_wifi_start()：闭源库里的公开 API，同样是 windowed ABI。 */
+extern int esp_wifi_start(void);
+u32 s3_win_wifi_start(void)
+{
+    return (u32)(int)esp_wifi_start();
+}
