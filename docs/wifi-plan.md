@@ -4220,3 +4220,33 @@ I (102) app_init: Project name:     xiaozhi
    `.flash.text 0x42030000 : AT(0x30000)`），并把 `.vector`/`.text` 的 AT 顺延
 4. 恢复后**第一件事**是重跑 `tests/t_entrytest.c6`，完成"flash 里的 `entry`
    到底能不能执行"这个决定性实验 —— 它会决定后续走哪条路
+
+### 93. abort 的确切位置（已查实）
+
+```
+$ addr2line -f -e xiaozhi/build/bootloader/bootloader.elf 0x403cdbe0
+mmu_hal_map_region
+esp-idf/components/hal/mmu_hal.c:95
+```
+
+⇒ 是 **bootloader** 里 `mmu_hal_map_region` 的 assert 失败。
+
+我们镜像的段布局（`t_s3_on`）：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x00bc0  0x3fca0000  0x00000018  BYTE_ACCESSIBLE, MEM_INTERNAL, DRAM
+      1  0x08a54  0x40378000  0x00000be0  MEM_INTERNAL, IRAM
+```
+
+**没有 flash 段**（`t_s3_on` 不用 flash 代码），bootloader 调 `mmu_hal_map_region` 时
+参数为空/无效，触发了 assert。
+
+**重要**：这个布局以前是能启动的（同样的 `t_s3_on` 跑了上百轮心跳）。
+所以要么是 bootloader 换了（我刷过 xiaozhi 的 bootloader）、
+要么是某个 eFuse/flash 状态被改变了。
+
+**下一步**：
+1. `git log` 找到最早那个能启动的 `t_s3_on` 镜像，`cmp` 一下段布局差异
+2. 或者干脆让它**至少有一个 flash 段**（比如引用一下 `s3_asm_flash_42`），
+   避开"零 flash 段"这个边界情况
