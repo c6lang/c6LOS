@@ -7925,3 +7925,47 @@ CALLINC=bit16..17=3（call12）、WOE=bit18=1。
 `osi_queue_recv_body` 自己"入手 —— 它是 `-mabi=windowed` 编译的，
 但被 call0 的 `w2c` 垫片用 `callx8` 调用，值得逐条核对它在栈上
 期望的帧布局（`entry` 分配多少、a0 存在哪）。
+
+## §191 EPC 槽的 CALLINC 问题：真 bug，但不是当前崩溃的元凶
+
+`port_task_yield` / `port_task_switch` 把 `a0` 直接存进 **EPC 槽**（帧偏移 60）。
+windowed 调用返回时 `a0` 是**带 CALLINC 标记**的地址（如 `0x820328e4`），
+直接当 EPC 用就会去取指带标记的地址。已改成按已知公式还原：
+
+```
+    slli    a15, a0, 2
+    srli    a15, a15, 2          /* a15 = a0 & 0x3FFFFFFF */
+    movi    a14, 1
+    slli    a14, a14, 30         /* 0x40000000 */
+    or      a15, a15, a14        /* a15 = (a0 & 0x3FFFFFFF) | 0x40000000 */
+    s32i    a15, a1, 60
+```
+
+对 call0 地址（`0x4037xxxx`/`0x4203xxxx`）这是**恒等变换**（安全），
+对 windowed 的带标记地址这是必要还原。
+
+（中途试过只做 `slli/srli` 清高 2 位：那会把 call0 地址的 bit30 也清掉，
+`0x4037a6bd` 变成 `0x0037a6bd`，TRAP 签名立刻变成 `pc=0037a6bd` ——
+反过来也验证了 `0x40000000` 这一位必须补回来。）
+
+**但这个改动没有改变当前崩溃的签名** ⇒ 说明崩溃走的不是 yield/switch
+的 EPC 路径（与 §185"不阻塞也崩"一致）。这是一个独立的、真实存在的
+隐患，已修好留着。
+
+## 第 120 轮最终结论（给下一轮接手）
+
+仍然成立的核心事实：
+
+1. 崩溃在 `osi_queue_recv` 里 `callx8 a8`（`a8 = osi_queue_recv_body`）处，
+   `cause=0x14 InstrFetchProhibited`，`pc == vaddr == a0 == 0x820328e4`，
+   而 `0x820328e4` 去掉 `0x40000000` 正好是 **`callx8` 的下一条指令**地址
+   `0x420328e4` —— 也就是说 CPU 跳到了一个**带 CALLINC 标记的返回地址**上。
+2. 这个现象与"是否阻塞、是否发生任务切换"都无关（§185 已实测）。
+3. `PS.WOE` 已确认置上（§190），不是它。
+4. `WINDOWSTART`/`WINDOWBASE` 在此配置下不能随便写（§188/§189）。
+
+⇒ 下一轮最该做的一件事：**在 `callx8 a8` 前后把 `PS` 完整读出来存到 RTC**
+（尤其 `CALLINC` 这两位）。如果 `callx8` 之后 `PS.CALLINC` 仍是 2，说明
+问题在 `osi_queue_recv_body` 内部某处把 PS 写坏了；如果已经变成 0，
+那就是我们自己的某个函数（`w2c` 垫片、`s3_w2c_current_task` 等）改了 PS。
+这一步能把范围从"整条链"缩到"某一个函数"。

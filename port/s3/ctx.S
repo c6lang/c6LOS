@@ -86,7 +86,17 @@ port_task_switch:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
-    s32i    a0, a1, 60
+    /* EPC 槽存的是恢复后的执行地址。a0 在 windowed 调用中是**带 CALLINC
+     * 标记**的返回地址（高 2 位，如 0x82xxxxxx）；直接存进 EPC 再 rfe，
+     * CPU 会去取指这个带标记的地址 -> InstrFetchProhibited（真板症状：
+     * pc==vaddr==a0==0x820328e4，cause=0x14）。所以先清掉高 2 位。
+     * 真实调用链的 CALLINC 由 PS 槽（偏移 64）保留，retw 仍能正确回退。 */
+    slli    a15, a0, 2
+    srli    a15, a15, 2          /* a15 = a0 & 0x3FFFFFFF（去掉 CALLINC） */
+    movi    a14, 1
+    slli    a14, a14, 30         /* 0x40000000：代码段基址高位 */
+    or      a15, a15, a14
+    s32i    a15, a1, 60
     rsr     a5, ps
     movi    a6, -32
     and     a5, a5, a6
@@ -183,7 +193,17 @@ port_task_yield:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
-    s32i    a0, a1, 60
+    /* EPC 槽存的是恢复后的执行地址。a0 在 windowed 调用中是**带 CALLINC
+     * 标记**的返回地址（高 2 位，如 0x82xxxxxx）；直接存进 EPC 再 rfe，
+     * CPU 会去取指这个带标记的地址 -> InstrFetchProhibited（真板症状：
+     * pc==vaddr==a0==0x820328e4，cause=0x14）。所以先清掉高 2 位。
+     * 真实调用链的 CALLINC 由 PS 槽（偏移 64）保留，retw 仍能正确回退。 */
+    slli    a15, a0, 2
+    srli    a15, a15, 2          /* a15 = a0 & 0x3FFFFFFF（去掉 CALLINC） */
+    movi    a14, 1
+    slli    a14, a14, 30         /* 0x40000000：代码段基址高位 */
+    or      a15, a15, a14
+    s32i    a15, a1, 60
     rsr     a5, ps
     movi    a6, -32
     and     a5, a5, a6
