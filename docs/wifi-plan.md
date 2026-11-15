@@ -5634,3 +5634,32 @@ ev[1] = 0x201   任务 2（WiFi 任务）后进入
 若有，说明它的语义依赖某个我们还没满足的前置条件（例如队列里应当已经
 有"任务启动"消息），需要在 `_task_create` 返回前替库投递一条，或者把
 `_queue_recv` 在"初始化任务"身份下改成不阻塞。
+
+## §132 全量枚举：WiFi 路径上只有 `ppTask` 会从 osi 队列收
+
+按"`l32i aX, aY, 116` 紧跟 `callx8`"的模式扫全 ELF，命中的函数只有：
+
+```
+mesh_flush_txQ
+mesh_rx_task_deinit
+mesh_send_block_deinit
+mesh_tx_task_deinit
+rcUpdateTxDoneAmpdu2      ← 偏移 116 是它自己的结构体字段，噪声
+```
+
+（`ppTask` 的接收点 `0x40381f66` 在它的标号之前，所以没被这条 awk 归到
+`ppTask` 名下，但反汇编已确认它就是用 `l32i a5, a5, 116` + `callx8` 收的。）
+
+并且 `pp_create_task`（`0x42036584`~`0x420366d9`）里**没有任何**偏移 116
+的调用 —— 它只做 `_task_get_max_priority` / `_wifi_create_queue` /
+`_semphr_create` / `_task_create` / `_semphr_take` 握手。
+
+⇒ WiFi 初始化路径上真正的接收者只有 `ppTask`。
+所以之前"任务 1（初始化任务）也进了 recv"这条读数需要换判据复核 ——
+可能是 `_task_get_current_task` 的取数时机/口径问题，而不是真有两个接收者。
+
+### 下一步
+
+在 `osi_queue_recv` 里同时记录 `os_task_current_id()` **和**从 `ppTask`
+反汇编能对上的调用点，两者交叉验证；或者直接在 `ppTask` 的接收点埋
+`RTC` 计数（拿到 a1 栈帧里的返回地址），彻底确认第二次接收的来源。
