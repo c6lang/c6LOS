@@ -10163,3 +10163,54 @@ port_irq_restore: wsr ps, a2      （恢复）
 （RTC `0x50000B40[2]/[3]` 记录调用次数，能看出库到底用不用）。
 
 `https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
+
+---
+
+## §227 宿主上验证 lwIP 的线程层（sys_arch）：`make lwipcheck`
+
+板子上真正"没被验证过"的软件层只剩两块：闭源 WiFi/PHY（要硬件）和 **lwIP 的
+线程层**。后者其实不需要硬件 —— 把 `s3_w2c_*` 这套内核原语用 pthread 实现出来，
+`port/s3/lwip/sys_arch.c`（板子上跑的那份，一行不改）就能在宿主上跑通。
+
+### 新增
+
+| 文件 | 内容 |
+| --- | --- |
+| `port/s3/lwip/host/arch_stub.c` | 用 pthread 实现 `s3_w2c_sem_*` / `s3_w2c_mutex_*` / `s3_w2c_queue_*` / `s3_w2c_task_*` / `s3_w2c_tick_*`（timeout 单位是内核 tick，这里按 10ms 折算），外加 `sys_now`、`c6lwip_diag/assert/rand` |
+| `tests/sys_arch_host_test.c` | 18 项检查：邮箱按序投递/`tryfetch`/超时（空邮箱 fetch(200ms) 必须返回 `SYS_ARCH_TIMEOUT` 且耗时约 200ms）、信号量超时与跨线程 signal、`sys_thread_new` 真起线程、互斥量、`sys_now`/`sys_msleep` |
+| `make lwipcheck` | 用宿主 `cc` 编 lwIP 全量源码 + `sys_arch.c` + stub + 用例，直接跑 |
+
+实测：
+
+```
+$ make lwipcheck
+== 邮箱：投递 3 条、按序取出、tryfetch
+   ok   sys_mbox_new / 第一条是 1 / tryfetch 拿到 2 / 第三条是 3
+== 邮箱超时：空邮箱 fetch(200ms)
+   ok   返回 SYS_ARCH_TIMEOUT / 耗时约 200ms（允许调度误差）
+== 信号量：wait 超时 / 跨线程 signal
+   ok   空信号量 wait 超时 / 耗时约 200ms
+== 跨线程：sys_thread_new 起的线程投递邮箱并 signal
+   ok   sys_thread_new / 从工作线程收到消息 / 被工作线程唤醒 / 工作线程确实跑了
+== 互斥量  ok   lock/unlock 两次没死锁
+== sys_now  ok   不回退 / sys_msleep(30) 后前进约 30ms
+sys_arch 自测通过（失败 0 项）
+```
+
+### 踩到的一个配置坑（记下来）
+
+宿主编译 lwIP 时不能用 `#define LWIP_PROVIDE_ERRNO 0` —— lwIP 的 `lwip/errno.h`
+用的是 `#ifdef`（只看有没有定义），定义成 0 一样会走"自己提供 errno"分支，
+于是和 glibc 的 TLS `errno` 打架（链接期 `TLS definition ... mismatches`）。
+正确做法是宿主上**不定义**它，并且定义 `LWIP_ERRNO_INCLUDE <errno.h>` 让 lwIP
+把系统的 errno 头拉进来；`struct timeval` 用 `LWIP_TIMEVAL_PRIVATE 0` 避免重复定义。
+
+### 现在的验证矩阵
+
+| 层 | 验证方式 | 状态 |
+| --- | --- | --- |
+| AES-GCM / PRF / RSA / WPA crypto | 宿主向量（NIST/RFC/IEEE/openssl） | ✅ |
+| TLS 1.2 + HTTP（含跟随 302） | 宿主真连 qq.com / www.qq.com | ✅ |
+| lwIP 线程层（sys_arch + tcpip 邮箱/信号量/超时） | `make lwipcheck` | ✅ |
+| 内核原语（sem/mutex/queue/task/tick） | 内核自带测试 + 基线构建 | ✅ |
+| **WiFi PHY / 关联 / DHCP（闭源库）** | **必须真板** | ⛔ |

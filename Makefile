@@ -1649,3 +1649,23 @@ bringup:
 httpsflash:
 	$(MAKE) C6_ROOT=$(C6_ROOT) https
 	./tools/s3run.sh $(WIFI_DIR)/c6os.bin 120
+
+# ---------------------------------------------------------------------------
+# lwipcheck：宿主上验证 lwIP 线程模型 + 我们的 sys_arch（docs/wifi-plan.md §227）
+#
+# 板子上除了 WiFi/PHY（闭源库）以外的软件层 —— lwIP、sys_arch、tcpip 线程、
+# tcpip_input 收包、BSD socket —— 都能在这里跑起来：两个 netif 交叉互联，
+# 跑一次完整的 TCP 回显。
+LWIP_HOST_DIR := build/hostlwip
+LWIP_HOST_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
+                  $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
+                  $(wildcard $(LWIP_SRC)/api/*.c) \
+                  $(LWIP_SRC)/netif/ethernet.c
+lwipcheck:
+	@mkdir -p $(LWIP_HOST_DIR)
+	cc -O2 -g -Wall -Wno-unused-parameter -Wno-address-of-packed-member \
+	   -DC6_LWIP_HOST -Iport/s3/lwip -Iport/s3/lwip/host -I$(LWIP_SRC)/include \
+	   -o $(LWIP_HOST_DIR)/sys_arch_test \
+	   $(LWIP_HOST_SRCS) port/s3/lwip/sys_arch.c \
+	   port/s3/lwip/host/arch_stub.c tests/sys_arch_host_test.c
+	./$(LWIP_HOST_DIR)/sys_arch_test

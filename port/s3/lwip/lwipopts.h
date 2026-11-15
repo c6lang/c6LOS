@@ -86,7 +86,21 @@
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_STATS                      0
 #define LWIP_DEBUG                      0
+/* 宿主上做单元测试时（make lwipcheck，-DC6_LWIP_HOST）：用系统的 errno 和
+ * struct timeval（lwIP 自带的会和 glibc 的定义打架）。板子上没有 libc，必须
+ * 由 lwIP 提供。 */
+#ifdef C6_LWIP_HOST
+/* 注意：**不能**写成 `#define LWIP_PROVIDE_ERRNO 0` —— lwIP 的 errno.h 用的是
+ * `#ifdef`（看有没有定义，不看值），定义成 0 一样会走到"自己提供 errno"那条
+ * 分支，于是和 glibc 的 TLS errno 打架（链接期 "TLS definition ... mismatches"）。
+ * 所以宿主上干脆不定义它。 */
+#define LWIP_TIMEVAL_PRIVATE            0
+/* lwIP 的 lwip/errno.h 只有在定义了 LWIP_ERRNO_INCLUDE 时才把系统的 <errno.h>
+ * 拉进来（默认什么都不 include，于是 sockets.c 里的 errno 就成了未声明）。 */
+#define LWIP_ERRNO_INCLUDE              <errno.h>
+#else
 #define LWIP_PROVIDE_ERRNO              1
+#endif
 #define LWIP_COMPAT_SOCKETS             0
 #define LWIP_NETIF_TX_SINGLE_PBUF       1   /* WiFi 驱动要连续的一帧 */
 
