@@ -1,0 +1,104 @@
+/* t_s3_wifi3.c6 —— WiFi 全量镜像（libnet80211 + libpp + libphy）的启动用例。
+ *
+ * 与 t_wififill.c6 的区别（§202）：
+ *   - 不再依赖 s3_win_call_flash42() 的旧版"无 entry 只有 retw.n"探针
+ *     （那个版本本身违反 windowed ABI，返回时必炸；现在探针已改成 entry/retw）。
+ *   - flash 映射/I-cache 状态直接打到串口：IROM MMU 表项、_flash_text_lma、
+ *     以及一次真实的 "从 flash 里取指并返回 42" 的探针。
+ *   - PHY + esp_wifi_init + esp_wifi_start 全在**一个 windowed 任务**里做
+ *     （s3_win_wifi_main_task），call0 内核只负责建任务。
+ *
+ * 观察通道：串口（ets_printf / 我们自己的 console）+ RTC 慢存 0x50000200 起
+ * 的 OSI 回调环 + 低优先级监控任务 port_diag_task。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/task.h"
+#include "c6os/flash.h"
+
+extern void s3_win_wifi_main_task(void *arg);
+extern u32 s3_win_call_flash42(void);
+extern u32 g_next_task_windowed;
+extern void os_icache_enable(void);
+extern void port_diag_task(void *arg);
+extern u32 os_flash_mmu_entry(u32 vaddr);
+extern int os_flash_map(u32 flash_off, u32 vaddr, u32 bytes, u32 kind);
+extern void os_dcache_enable(void);
+
+extern const u8 _flash_text_start[];
+extern const u8 _flash_text_end[];
+extern const u8 _flash_text_lma[];
+extern const u8 _flash_rodata_start[];
+extern const u8 _flash_rodata_lma[];
+
+static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+static void phex(u32 v)
+{
+    int i = 28;
+
+    pstr("0x");
+    while (i >= 0) {
+        u32 nib = (v >> (u32)i) & 0xFu;
+        port_putc((int)(nib < 10u ? ('0' + nib) : ('a' + nib - 10u)));
+        i -= 4;
+    }
+}
+
+/* 把 flash 映射状态打出来，必要时自己补一次映射 */
+static void flash_diag(void)
+{
+    u32 va = (u32)_flash_text_start;
+    u32 end = (u32)_flash_text_end;
+    u32 lma = (u32)_flash_text_lma;
+    u32 rva = (u32)_flash_rodata_start;
+    u32 rlma = (u32)_flash_rodata_lma;
+
+    pstr("flash: text va=");  phex(va);  pstr(" lma="); phex(lma);
+    pstr(" end="); phex(end);
+    pstr(" size="); phex(end - va); pstr("\n");
+    pstr("flash: rodata va="); phex(rva); pstr(" lma="); phex(rlma); pstr("\n");
+    pstr("flash: mmu(text)="); phex(os_flash_mmu_entry(va));
+    pstr(" mmu(rodata)="); phex(os_flash_mmu_entry(rva)); pstr("\n");
+    pstr("flash: icache_ctrl="); phex(*(volatile u32 *)0x600C4060u);
+    pstr(" ctrl1="); phex(*(volatile u32 *)0x600C4064u); pstr("\n");
+
+    if ((os_flash_mmu_entry(va) & 0x4000u) != 0u) {
+        int rc = os_flash_map(lma, va, end - va + 0xFFFFu, 0u);
+        pstr("flash: map text rc="); phex((u32)rc); pstr("\n");
+    }
+    if ((os_flash_mmu_entry(rva) & 0x4000u) != 0u) {
+        int rc = os_flash_map(rlma, rva, 0x10000u, 1u);
+        pstr("flash: map rodata rc="); phex((u32)rc); pstr("\n");
+    }
+    pstr("flash: after mmu(text)="); phex(os_flash_mmu_entry(va));
+    pstr(" mmu(rodata)="); phex(os_flash_mmu_entry(rva)); pstr("\n");
+    os_icache_enable();
+    os_dcache_enable();
+    pstr("flash: probe(42)="); phex(s3_win_call_flash42()); pstr("\n");
+}
+
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000300u);
+    /* 自愈狗：闭源 PHY/WiFi 初始化很容易忙等死转（真板实测会连 USB 一起没了，
+     * 只能人工断电）。8s 不喂就整片复位重跑 —— 板子自己回来，串口重新枚举，
+     * RTC 阶段信标（0x50000A10）还在，于是"上一轮死在哪"能直接读出来。 */
+    os_wdt_start(8u);
+    os_icache_enable();
+    s3_beacon(1u, 0xB0000301u);
+    flash_diag();
+    s3_beacon(1u, 0xB0000302u);
+
+    /* WiFi 主流程：windowed 任务（入口经 ctx.S 的 ABI 标志建立窗口） */
+    g_next_task_windowed = 1u;
+    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 8192u));
+    g_next_task_windowed = 0u;
+
+    /* 低优先级监控任务：纯 call0，周期性把诊断环打到串口 */
+    s3_beacon(3u, (u32)os_task_create("mon", port_diag_task, 0, 0u, 4096u));
+
+    os_task_start();
+    for (;;) { }
+}

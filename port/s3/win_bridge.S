@@ -242,14 +242,21 @@ s3_win_call_flash_leaf:
     addi    a1, a1, 32
     ret
 
-/* ---- 放在 flash 段里的手写函数（没有 entry，只有 movi+retw） ---- */
+/* ---- 放在 flash 段里的手写 windowed 叶子函数 ----
+ * 必须成对写 `entry` / 宽 `retw`（§202 真板实测）：
+ *   - 只有 retw 没有 entry：`call8` 把 CALLINC=2 写进 a0，retw 会按 CALLINC
+ *     把窗口"退"回去，但根本没进过窗口 → 触发窗口欠载/非法指令
+ *     （签名：cause=28、pc=retw.n、a0 带 0x80xxxxxx 标签）。
+ *   - 窄 retw.n 在需要欠载填充时是非法指令（§196 结论），所以这个文件用
+ *     -Wa,--no-transform 编译，保证 retw 不被收窄。 */
     .section .flash.text, "ax", @progbits
     .align  4
     .global s3_asm_flash_42
     .type   s3_asm_flash_42, @function
 s3_asm_flash_42:
+    entry   a1, 16
     movi    a2, 42
-    retw.n
+    retw
 
     .section .text, "ax", @progbits
 /* u32 s3_win_call_flash42(void) —— 从 call0 调上面那个 flash 里的手写函数 */

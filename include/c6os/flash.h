@@ -40,4 +40,16 @@ u32 os_flash_mmu_entry(u32 vaddr);
 /* 当前 I-cache 控制寄存器值（调试用，bit0 = 已使能） */
 u32 os_icache_state(void);
 
+/* ---- RTC 看门狗（RWDT）：真板调试用的"挂死自愈"装置 ----------------
+ *
+ * 闭源 PHY/WiFi 初始化一旦忙等死转，CPU 不会自己复位，整块板子会从 USB 上
+ * 消失，只能人工断电。用它来兜底：挂住 N 秒后整片复位重跑（RTC 慢存里的
+ * 信标不会被清，所以还能知道上一轮死在哪一步）。
+ *
+ * secs = 0 表示关闭。feed 会重新计时。这些都是寄存器级的裸操作，
+ * 不影响其它构建（只有显式调用才生效）。 */
+void os_wdt_start(u32 secs);
+void os_wdt_feed(void);
+void os_wdt_stop(void);
+
 #endif /* C6OS_FLASH_H */

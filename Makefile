@@ -67,13 +67,18 @@ S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o \
            $(BUILD)/obj/wifi_glue.o
 
+# 真正链闭源 WiFi 库（libnet80211/libpp）时才需要监管域数据表
+ifneq ($(findstring -DS3_WITH_WIFI,$(S3_CDEFS)),)
+S3_OBJ_WIFI += $(BUILD)/obj/wifi_regulatory.o
+endif
+
 ifeq ($(S3_LEAN),1)
 S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_WIFI)
 else
 S3_OBJ := $(S3_OBJ_CORE) $(S3_OBJ_FULL) $(S3_OBJ_WIFI)
 endif
 
-.PHONY: rt-host run-rt-host rv32bare-rt run-rv32bare-rt perf-host run-perf-host rv32bare-perf run-rv32bare-perf all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick
+.PHONY: rt-host run-rt-host rv32bare-rt run-rv32bare-rt perf-host run-perf-host rv32bare-perf run-rv32bare-perf all s3 s3-src-check check-all check-sim rv32bare-tick run-rv32bare-tick rv32bare-smp run-rv32bare-smp rv32bare-smp-sem run-rv32bare-smp-sem s3-min check-host clean toolchain-info backup-flash flash image-info x86 run-x86 x86-sched run-x86-sched x86-tick run-x86-tick x86-preempt run-x86-preempt rv32 run-rv32 run-rv32-emu run-rv32-emu-sched rv32-sched run-rv32-sched rv32-tick run-rv32-tick wifi wififlash
 .PRECIOUS: $(S3_C)
 .SECONDARY:
 
@@ -165,6 +170,13 @@ $(LIBPHY_WIN): $(LIBPHY_SRC)
 	  --redefine-sym memmove=win_memmove --redefine-sym memcmp=win_memcmp \
 	  $< $@
 
+# 监管域数据表（regdomain_table / regulatory_data）：闭源 net80211 需要，
+# IDF 由开源组件 esp_wifi/regulatory/esp_wifi_regulatory.c 提供。只有 WiFi 构建要。
+$(BUILD)/obj/wifi_regulatory.o: port/s3/wifi_regulatory.c
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
+		-mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
 $(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=call0 -c $< -o $@
@@ -205,7 +217,7 @@ $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -mtext-section-literals -c $< -o $@
+	$(XTGCC) -mabi=call0 -Wa,--no-transform -mtext-section-literals -c $< -o $@
 
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj
@@ -245,6 +257,7 @@ $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
 	esptool --chip esp32s3 elf2image $(S3_IMG_FLAGS) --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
+	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@
 
 image-info: $(BUILD)/c6os.bin
 	esptool --chip esp32s3 image-info $<
@@ -1415,3 +1428,46 @@ wphy:
 		S3_MAIN=tests/t_s3_phy.c6 S3_EXTRA_LIBS=build/phy/libphy_win.a s3
 wphyflash: wphy
 	./tools/flashmon.sh build/phy/c6os.bin 15
+
+# ---- WiFi 构建（闭源 libnet80211 + libpp + libphy）-----------------------
+# 用法：make C6_ROOT=/home/winger/c6 wifi
+#       make ... wififlash       构建 + 刷机 + 串口监视
+#
+# 这一版才是"真的 WiFi 镜像"：把 IDF 的三个闭源 .a 全链进来，缺的开源侧
+# 符号由我们自己的 port/s3/wifi_glue.c（OSI 适配 + libc/printf 出口）和
+# port/s3/wifi_regulatory.c（监管域数据表）提供。
+# 链接顺序用 --start-group 包起来：libnet80211 ↔ libpp 之间有强相互引用。
+IDF_ROOT   ?= /media/winger/inst_26/esp/esp-idf
+WIFI_LIBDIR := $(IDF_ROOT)/components/esp_wifi/lib/esp32s3
+# 顺序无所谓：全部包在 --start-group 里（libnet80211 ↔ libpp ↔ libmesh 相互引用）
+WIFI_LIBS   := $(WIFI_LIBDIR)/libnet80211.a $(WIFI_LIBDIR)/libpp.a \
+               $(WIFI_LIBDIR)/libcore.a $(WIFI_LIBDIR)/libmesh.a \
+               $(WIFI_LIBDIR)/libespnow.a
+WIFI_DIR    := build/wifi
+S3_WIFI_MAIN ?= tests/t_s3_wifi3.c6
+# --wrap 让 wifi_glue.c 里的 __wrap_* 计数生效（init 走到哪一步一眼可见）
+WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
+             -Wl,--wrap=ic_create_wifi_task -Wl,--wrap=ieee80211_ioctl_init \
+             -Wl,--wrap=pp_create_task -Wl,--wrap=pp_post \
+             -Wl,--wrap=wifi_init_in_caller_task
+# S3_FLASH_AUTO_MAP：镜像里有 IROM 段（闭源库代码在 flash 里）时必须打开 ——
+# 没有二级 bootloader 时没人配置 I-cache 的模式，取指会拿到 IllegalInstruction
+# （典型签名：PC = 函数首地址 + 2、cause=0）。见 docs/wifi-plan.md §15~24、§202。
+WIFI_CDEFS = -DS3_WITH_WIFI -DS3_WITH_LIBPHY -DS3_KEEP_SWD -DS3_FLASH_AUTO_MAP
+
+# 注意：目标文件的规则里**没有**把 S3_CDEFS 记成依赖，改了 -D 之后 make 不会
+# 重编已有对象（踩过一次：S3_FLASH_AUTO_MAP 没生效，镜像行为完全没变）。
+# 所以这里无条件全量重建。
+wifi:
+	@rm -rf $(WIFI_DIR)
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) S3_LEAN=1 \
+		S3_SKIP_C6="" \
+		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+		S3_CDEFS="$(WIFI_CDEFS)" S3_STACK_TOP=0x3FCD9000 \
+		S3_MAIN=$(S3_WIFI_MAIN) \
+		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
+		s3
+wififlash: wifi
+	./tools/flashmon.sh build/wifi/c6os.bin 15

@@ -42,10 +42,20 @@ SECTIONS
     _flash_rodata_end = .;
   }
 
-  /* flash 段固定放到 flash 偏移 0x100000、虚拟地址 0x42100000：
-   * 这样可以用 esptool 单独把这段字节写到 flash 0x100000，
-   * 再把 IROM 页映射过去验证"从 flash 取指"。 */
-  .flash.text 0x42030000 : AT (0x30000)
+  /* flash 代码段：虚拟地址 0x42010000 / LMA 0x10000（IDF 的标准 IROM 布局）。
+   *
+   * ★ 这里有一条硬约束（§202 真板实测）：**LMA 必须等于这段数据在镜像文件里
+   * 的实际 flash 偏移**。原因：
+   *   - ROM 直接引导（我们没有二级 bootloader）建 MMU 映射时，用的是段头里的
+   *     load addr（也就是 LMA）>>16 当物理页号；
+   *   - 而 esptool 排布镜像文件时对 flash 段做 0x10000 对齐，第 3 段
+   *     （DROM 0x10c + DRAM 0xfec4 之后）正好落在文件偏移 0x10000。
+   * 以前这里写 0x30000，于是 ROM 把 0x42030000 映射到 flash 0x30000，
+   * 而真正的代码在 flash 0x10000 —— 取指拿到的是别处的字节，表现成
+   * "从 flash 执行必炸 / IllegalInstruction / 跳到地址 1"。
+   * 另外 VMA/LMA 必须 mod 0x10000 同余（MMU 页 64KB）。
+   * 用 tools/chkimg.py 在构建后校验这条不变量。 */
+  .flash.text 0x42010000 : AT (0x10000)
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
@@ -62,6 +72,13 @@ SECTIONS
     *w2c.o(.literal .literal.* .text .text.*)
     *tick.o(.literal .literal.* .text .text.*)
     *timer.o(.literal .literal.* .text .text.*)
+    /* kprintf 只被日志/panic 打印用，不参与中断路径；WiFi 全量镜像里 IRAM
+     * 只剩几十字节余量（§202），把它挪到 flash 换出 1KB。 */
+    *kprintf.o(.literal .literal.* .text .text.*)
+    /* 调度器内核代码放 flash：WiFi 全量镜像 IRAM 只剩一两百字节余量，task.o
+     * 有 11KB。port_task_switch/yield 在 ctx.S（仍留 IRAM），中断入口在 irq.S，
+     * 所以切换路径本身不经过 flash。 */
+    *task.o(.literal .literal.* .text .text.*)
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
