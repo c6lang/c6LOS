@@ -725,6 +725,15 @@ u32 s3_win_wifi_main(void)
         }
         WSTAGE(0x1011u);
         ets_printf("[lwip] polled %u\n", (unsigned)n);
+#ifdef S3_WITH_HTTPS
+        {
+            extern int c6_https_demo(void);
+            int hrc = c6_https_demo();
+
+            ets_printf("[https] demo rc=%d\n", hrc);
+            WSTAGE(0x1020u);
+        }
+#endif
     }
 #endif
     return rc;

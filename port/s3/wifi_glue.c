@@ -1598,6 +1598,28 @@ const char _ctype_[257] = {
     0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
+/* errno：lwIP 的 sockets.c 会引用它（lwip/errno.h 里是 extern int errno）。
+ * freestanding 镜像里没有 libc 提供这个变量，只能自己给一个（windowed 侧）。 */
+int errno;
+
+/* printf：windowed 侧的实现（§214；snprintf 本文件里早就有）。
+ * TLS 客户端（net/*.c6 编成 windowed 对象）和我们自己的板级用例都要打日志，
+ * 而 freestanding 镜像里没有 libc 的 printf；这里用现有的 wp_vfmt() 顶。 */
+int printf(const char *fmt, ...)
+{
+    char buf[256] = { 0 };
+    va_list ap;
+    int n = 0;
+
+    va_start(ap, fmt);
+    n = wp_vfmt(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        s3_win_log(buf);
+    }
+    return n;
+}
+
 int puts(const char *s)
 {
     if (s != 0) { s3_win_log(s); s3_win_log("\n"); }

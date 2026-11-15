@@ -1565,3 +1565,66 @@ tls12check:
 # 宿主上真连 qq.com 跑 TLS 1.2 握手 + HTTP GET（不需要板子）：§213
 tls12live:
 	./tools/tls12_live.sh
+
+# ---------------------------------------------------------------------------
+# TLS 1.2 客户端（.c6 写的）编成 windowed 静态库 —— 见 docs/wifi-plan.md §214
+#
+# 为什么要 windowed：它要和 lwIP（windowed，§210）以及闭源 WiFi 库直接互相调用，
+# 而内核是 call0。同一侧（windowed）内部调用没有 ABI 混用问题。
+#
+# 三个步骤：
+#   1) 剥掉 c6 标准库模块里的 `test "…" { … }` 自测块（否则会拖进 c6 切片运行时，
+#      详见 tools/c6_strip_tests.py 的说明）；
+#   2) c6c 编成 .c99；
+#   3) xtensa-gcc 按 -mabi=windowed 编成对象，归档成 build/wifi/tls/libtls.a。
+TLS_DIR   := $(WIFI_DIR)/tls
+TLS_SRC   := $(C6_ROOT)/std/core/types.c6 $(C6_ROOT)/std/core/bits.c6 \
+             $(C6_ROOT)/std/core/rand.c6 $(C6_ROOT)/std/encoding/aes.c6 \
+             $(C6_ROOT)/std/encoding/sha256.c6 $(C6_ROOT)/std/net/x25519.c6 \
+             net/aes_gcm.c6 net/tls12_prf.c6 net/rsa_verify.c6 \
+             net/cert_parse.c6 net/tls12_hs.c6
+TLS_NAMES := $(notdir $(basename $(TLS_SRC)))
+TLS_OBJS  := $(addprefix $(TLS_DIR)/obj/,$(addsuffix .o,$(TLS_NAMES)))
+
+define C6_TLS_RULES
+$(TLS_DIR)/src/$(notdir $(1)): $(1) tools/c6_strip_tests.py
+	@mkdir -p $(TLS_DIR)/src
+	python3 tools/c6_strip_tests.py $$< $$@
+$(TLS_DIR)/c99/$(notdir $(basename $(1))).c: $(TLS_DIR)/src/$(notdir $(1)) $(S3_HDRS)
+	@mkdir -p $(TLS_DIR)/c99
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) -Iport/s3/lwip/posix \
+		-c -o $(TLS_DIR)/c99/ $$<
+$(TLS_DIR)/obj/$(notdir $(basename $(1))).o: $(TLS_DIR)/c99/$(notdir $(basename $(1))).c
+	@mkdir -p $(TLS_DIR)/obj
+	$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
+		-mlongcalls -mtext-section-literals -Iinclude -c $$< -o $$@
+endef
+$(foreach src,$(TLS_SRC),$(eval $(call C6_TLS_RULES,$(src))))
+
+$(TLS_DIR)/libtls.a: $(TLS_OBJS)
+	@mkdir -p $(dir $@)
+	$(XTP)ar rcs $@ $^
+	@echo "libtls.a: $(words $(TLS_OBJS)) 个对象"
+
+# 板级 HTTPS 演示（windowed C）：bringup 之后用 lwIP socket 跑 TLS 1.2 + HTTP GET
+$(WIFI_DIR)/obj/c6_https_demo.o: port/s3/c6_https_demo.c
+	@mkdir -p $(WIFI_DIR)/obj
+	$(XTGCC) -mabi=windowed -DS3_WITH_WIFI $(S3_CDEFS) -Os -ffreestanding \
+		-fno-builtin -fno-common -mlongcalls -mtext-section-literals \
+		-Iinclude -Iport/s3/lwip -I$(LWIP_SRC)/include -c $< -o $@
+
+# https：在 wifip 的基础上加 TLS 1.2 客户端 + 板级 HTTPS 演示
+HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS
+https:
+	@rm -rf $(WIFI_DIR)
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
+	$(MAKE) C6_ROOT=$(C6_ROOT) lwip
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) S3_LEAN=1 \
+		S3_SKIP_C6="" \
+		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+		S3_CDEFS="$(HTTPS_CDEFS)" S3_STACK_TOP=0x3FCD9000 \
+		S3_MAIN=$(S3_WIFI_MAIN) \
+		$(WIFI_DIR)/obj/c6_https_demo.o $(TLS_DIR)/libtls.a \
+		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(TLS_DIR)/libtls.a $(WIFI_DIR)/obj/c6_https_demo.o $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
+		s3

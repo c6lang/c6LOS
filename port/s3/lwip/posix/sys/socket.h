@@ -56,9 +56,30 @@ struct sockaddr_in {
     char            sin_zero[8];
 };
 
+struct in6_addr {
+    u8_t u_addr[16];
+};
+
+struct sockaddr_in6 {
+    u8_t             sin6_len;
+    sa_family_t      sin6_family;
+    in_port_t        sin6_port;
+    u32_t            sin6_flowinfo;
+    struct in6_addr  sin6_addr;
+    u32_t            sin6_scope_id;
+};
+
+extern const struct in6_addr in6addr_any;
+#define IN6ADDR_ANY_INIT { { 0 } }
+
 /* ---- 协议族 / socket 类型 / 层 ---- */
 #define AF_UNSPEC       0
 #define AF_INET         2
+/* IPv6 只做**编译期**兼容：c6 的 std/net/tcp.c6 会同时试 v4/v6，
+ * 我们的 lwIP 配置是 IPv6 关（§207），运行时 v6 的 socket() 直接失败，
+ * 调用方会回落到 v4。数值与 lwIP 保持一致。 */
+#define AF_INET6        10
+#define PF_INET6        AF_INET6
 #define PF_INET         AF_INET
 #define PF_UNSPEC       AF_UNSPEC
 
@@ -118,7 +139,9 @@ int     recvfrom(int s, void *mem, socklen_t len, int flags,
                  struct sockaddr *from, socklen_t *fromlen);
 int     shutdown(int s, int how);
 int     ioctl(int s, long cmd, void *arg);
-int     fcntl(int s, int cmd, int val);
+/* fcntl() **不在这里声明**：c6 自带的 <fcntl.h> 已经声明了它（我们 include
+ * <sys/socket.h> 的单元往往也 include <fcntl.h>，两边签名不同会打架）。
+ * 实现在 port/s3/lwip/c6_lwip_posix.c 里，符号名一致就对得上。 */
 
 /* POSIX 里 close() 属于 <unistd.h>，但 c6 那份 unistd.h 里没有它
  * （socket 是一整套后加的接口）。S3 目标上没有 libc 的 close，所以在这儿补声明，

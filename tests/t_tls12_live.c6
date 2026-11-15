@@ -32,6 +32,12 @@ import net.tls12_hs;
 #define TLS_PORT 443
 #endif
 
+/* TLS 客户端要的缓冲（宿主上静态给；板子上的 c6_https_demo.c 从堆里要） */
+static u8 tls_rec[8192] = { 0 };
+static u8 tls_enc[2048] = { 0 };
+static u8 tls_out[1024] = { 0 };
+static u8 tls_hs[8192] = { 0 };
+
 /* 一次完整的 HTTPS GET：连上、握手、发请求、把响应读到 out 里。
  * 返回读到的字节数，失败返回 -1。 */
 static int fetch(const char *host, const char *path, char *out, int cap, int verbose)
@@ -55,6 +61,8 @@ static int fetch(const char *host, const char *path, char *out, int cap, int ver
     }
     /* 每条连接换一个 seed，避免两条连接撞同一个 client_random */
     seed = seed ^ (u64)(unsigned int)path[0];
+    (void)tls12_set_buffers(tls_rec, (int)sizeof tls_rec, tls_enc, (int)sizeof tls_enc,
+                            tls_out, (int)sizeof tls_out, tls_hs, (int)sizeof tls_hs);
     if (!tls12_start(&t, c.fd, host, seed)) {
         printf("   ClientHello 发送失败\n");
         return -1;

@@ -20,10 +20,9 @@
 #define IN_CLASSC_NET    0xffffff00UL
 #define IN_CLASSC_NSHIFT 8
 
-/* 端口/地址在结构体里**始终是网络字节序**（和 lwIP 一致） */
-struct in6_addr {
-    u8_t u_addr[16];
-};
+/* 端口/地址在结构体里**始终是网络字节序**（和 lwIP 一致）。
+ * 注意 struct in6_addr / sockaddr_in6 定义在 <sys/socket.h> 里（和 lwIP 一样），
+ * 这里不再重复定义。 */
 
 int          inet_aton(const char *cp, struct in_addr *inp);
 in_addr_t    inet_addr(const char *cp);

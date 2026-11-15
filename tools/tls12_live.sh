@@ -18,6 +18,7 @@ mkdir -p "$OUT"
     "$C6/std/encoding/aes.c6" "$C6/std/encoding/sha256.c6" \
     "$C6/std/net/x25519.c6" "$C6/std/net/tcp.c6" \
     "$C6/std/encoding/asn1.c6" "$C6/std/text/str.c6" "$C6/std/data/x509.c6" \
-    net/aes_gcm.c6 net/tls12_prf.c6 net/rsa_verify.c6 net/tls12_hs.c6 \
+    net/aes_gcm.c6 net/tls12_prf.c6 net/rsa_verify.c6 net/cert_parse.c6 \
+    net/tls12_hs.c6 \
     tests/t_tls12_live.c6
 "./$OUT/tls12_live"

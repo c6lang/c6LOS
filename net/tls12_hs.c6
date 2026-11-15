@@ -31,7 +31,7 @@ import std.core.types;
 import std.core.rand;
 import std.encoding.sha256;
 import std.net.x25519;
-import std.data.x509;
+import net.cert_parse;
 import net.aes_gcm;
 import net.tls12_prf;
 import net.rsa_verify;
@@ -46,12 +46,41 @@ int tls12_trace_keys = 0;
  * 所以记录缓冲必须开够。缓冲放在**模块静态区**而不是栈上：ESP32-S3 的 DRAM 紧、
  * 栈更紧（§210），一次只服务一条 TLS 连接，静态缓冲够用。
  * 代价：这个模块不可重入（同时开两条 TLS 连接需要改成传缓冲进来）。 */
-#define TLS_REC_MAX  8192
-#define TLS_HS_MAX   12288      /* 整条握手消息（可跨多个记录）的上限 */
+/* 尺寸按实测收紧（板子 DRAM 很紧，§210）：qq.com 最长的握手消息是
+ * Certificate（5199+4 字节），最长的应用数据记录见过 2948 字节。 */
+#define TLS_REC_MAX  6144
+#define TLS_HS_MAX   6144       /* 整条握手消息（可跨多个记录）的上限 */
 
-static u8 tls12_recbuf[TLS_REC_MAX + 256] = { 0 };
-static u8 tls12_encbuf[TLS_REC_MAX + 512] = { 0 };
-static u8 tls12_hsout[TLS_HS_MAX] = { 0 };      /* 发出去的握手消息（ClientHello / CKE） */
+/* 缓冲由**调用方**提供（不是模块静态、也不是这里 malloc）：
+ *   - 板子 DRAM 只剩 ~10KB（§210），这些缓冲要让调用方从 64KB 的 OSI 堆里要；
+ *   - 宿主上的用例直接用静态数组就行；
+ *   - 另外 c6 模块里的 `extern void *malloc(...)` 会被修饰成
+ *     `net__tls12_hs__malloc`，链不到 C 侧的 malloc，所以干脆不在这儿调。 */
+static u8 *g_rec = 0;           /* 收记录缓冲 */
+static int g_rec_cap = 0;
+static u8 *g_enc = 0;           /* 发记录的加密缓冲 */
+static int g_enc_cap = 0;
+static u8 *g_out = 0;           /* 单条发出去的握手消息 */
+static int g_out_cap = 0;
+static u8 *g_hsbuf = 0;         /* 收方向握手消息累积 */
+static int g_hsbuf_cap = 0;
+
+/* 一次装好四块缓冲（同一条连接期间不能换）。返回 1 成功。 */
+int tls12_set_buffers(void *rec, int rec_cap, void *enc, int enc_cap,
+                      void *out, int out_cap, void *hsbuf, int hsbuf_cap)
+{
+    if (rec == 0 || enc == 0 || out == 0 || hsbuf == 0) { return 0; }
+    if (rec_cap < 1024 || enc_cap < 256 || out_cap < 256 || hsbuf_cap < 1024) { return 0; }
+    g_rec = (u8 *)rec;
+    g_rec_cap = rec_cap;
+    g_enc = (u8 *)enc;
+    g_enc_cap = enc_cap;
+    g_out = (u8 *)out;
+    g_out_cap = out_cap;
+    g_hsbuf = (u8 *)hsbuf;
+    g_hsbuf_cap = hsbuf_cap;
+    return 1;
+}
 
 /* 握手消息类型 */
 #define HS_CLIENT_HELLO        1
@@ -90,8 +119,8 @@ struct Tls12 {
     int  enc_in;                /* 对端发来的是否已经加密（收到 CCS 才置 1） */
     /* transcript */
     Sha256 th;
-    /* 收方向握手缓冲 */
-    u8   hsbuf[TLS_HS_MAX];
+    /* 收方向握手缓冲（由调用方经 tls12_set_buffers 提供） */
+    u8  *hsbuf;
     int  hslen;
     /* 服务端证书里的公钥 */
     RsaKey skey;
@@ -174,11 +203,14 @@ static int rd_all(int fd, void *p, int n)
 static int rec_send(Tls12 *s, int type, const u8 *pl, int n)
 {
     u8 hdr[5] = { 0 };
-    u8 *body = tls12_encbuf;
+    u8 *body = g_enc;
     u8 tag[16] = { 0 };
     u8 nonce[12] = { 0 };
     u8 aad[13] = { 0 };
 
+    if (n < 0 || n + 64 > g_enc_cap) {
+        return -1;              /* 一条记录装不下调用方给的发送缓冲 */
+    }
     hdr[0] = (u8)type;
     hdr[1] = 3;
     hdr[2] = 3;
@@ -215,7 +247,7 @@ static int rec_send(Tls12 *s, int type, const u8 *pl, int n)
 static int rec_recv(Tls12 *s, u8 *out, int cap, int *type)
 {
     u8 hdr[5] = { 0 };
-    u8 *body = tls12_recbuf;
+    u8 *body = g_rec;
     u8 nonce[12] = { 0 };
     u8 aad[13] = { 0 };
     int n = 0;
@@ -226,7 +258,7 @@ static int rec_recv(Tls12 *s, u8 *out, int cap, int *type)
     }
     tn = (int)hdr[0];
     n = get16(hdr + 3);
-    if (n < 0 || n > TLS_REC_MAX) {
+    if (n < 0 || n > g_rec_cap) {
         return -1;
     }
     if (rd_all(s->fd, body, n) < 0) {
@@ -274,13 +306,13 @@ static void th_add(Tls12 *s, const u8 *msg, int n)
 
 static int send_client_hello(Tls12 *s, const char *host)
 {
-    u8 *hs = tls12_hsout;
+    u8 *hs = g_out;
     int o = 0;              /* 写位置 */
     int ext_at = 0;
     int hostlen = (int)strlen(host);
     int i = 0;
 
-    memset(hs, 0, TLS_HS_MAX);
+    memset(hs, 0, (usize)g_out_cap);
     /* handshake 头先占位：类型(1) + 长度(3) */
     hs[0] = HS_CLIENT_HELLO;
     o = 4;
@@ -337,6 +369,9 @@ static int send_client_hello(Tls12 *s, const char *host)
     put16(hs + o, 1); o = o + 2;
     hs[o] = 0; o = o + 1;
 
+    if (o > g_out_cap) {
+        return -1;
+    }
     put16(hs + ext_at, o - ext_at - 2);
     put24(hs + 1, o - 4);
     th_add(s, hs, o);
@@ -393,44 +428,32 @@ static int on_server_hello(Tls12 *s, const u8 *p, int n)
     return 0;
 }
 
-/* 从 Certificate 消息里取叶子证书的 SPKI，并解析 RSA 公钥 */
+/* 从 Certificate 消息里取叶子证书，再取出 SPKI 填 RSA 公钥。
+ * 只用 net/cert_parse（不走 std/data/x509，后者会拖进 c6 切片运行时，§214）。 */
 static int on_certificate(Tls12 *s, const u8 *p, int n)
 {
     int listlen = 0;
     int clen = 0;
-    X509Cert cert = { 0 };
+    const u8 *spki = 0;
+    int spki_len = 0;
 
     if (n < 6) { return -1; }
     listlen = get24(p);
     if (listlen + 3 > n) { return -1; }
     clen = get24(p + 3);
     if (clen <= 0 || 3 + 3 + clen > n) { return -1; }
-    cert = x509_parse(p + 6, clen);
     if (tls12_trace) {
-        printf("   [tls] Certificate: list=%d leaf=%d valid=%d spki=%d bits=%d\n",
-               listlen, clen, cert.valid, cert.spki_len, cert.key_bits);
+        printf("   [tls] Certificate: list=%d leaf=%d\n", listlen, clen);
     }
-    if (!cert.valid || cert.spki == 0 || cert.spki_len <= 0) {
+    if (!cert_leaf_spki(p + 6, clen, &spki, &spki_len)) {
         return -1;
     }
     if (tls12_trace) {
-        printf("   [tls] SPKI 头: %02x %02x %02x %02x（长度 %d）\n",
-               (int)cert.spki[0], (int)cert.spki[1], (int)cert.spki[2],
-               (int)cert.spki[3], cert.spki_len);
+        printf("   [tls] SPKI: %02x %02x %02x %02x（长度 %d）\n",
+               (int)spki[0], (int)spki[1], (int)spki[2], (int)spki[3], spki_len);
     }
-    {
-        /* std/data/x509 给的 spki 视图是 BIT STRING 的**内容**，可能还带着
-         * 那个"未用位数"字节 0x00；rsa_parse_spki 要的是从 SEQUENCE(0x30) 开始。 */
-        const u8 *sp = cert.spki;
-        int sl = cert.spki_len;
-
-        if (sl > 0 && sp[0] == 0x00) {
-            sp = sp + 1;
-            sl = sl - 1;
-        }
-        if (!rsa_parse_spki(sp, sl, &s->skey)) {
-            return -1;
-        }
+    if (!rsa_parse_spki(spki, spki_len, &s->skey)) {
+        return -1;
     }
     s->have_skey = 1;
     s->stage = 11;
@@ -543,8 +566,12 @@ int tls12_start(Tls12 *s, int fd, const char *host, u64 seed)
     int i = 0;
 
     if (s == 0 || fd < 0 || host == 0) { return 0; }
+    if (g_rec == 0 || g_hsbuf == 0 || g_out == 0 || g_enc == 0) {
+        return 0;               /* 没装缓冲：调用方忘了 tls12_set_buffers() */
+    }
     memset(s, 0, sizeof *s);
     s->fd = fd;
+    s->hsbuf = g_hsbuf;
     s->th.init();
     for (i = 0; i < 32; i++) { s->cr[i] = (u8)(r.next_u32() & 0xffu); }
     for (i = 0; i < 32; i++) { sk[i] = (u8)(r.next_u32() & 0xffu); }
@@ -563,7 +590,7 @@ int tls12_start(Tls12 *s, int fd, const char *host, u64 seed)
 /* 收服务端飞行 + 发客户端飞行 */
 int tls12_handshake(Tls12 *s)
 {
-    u8 *rec = tls12_recbuf;
+    u8 *rec = g_rec;
     Sha256 snap = { 0 };
     u8 thash[32] = { 0 };
     u8 vd[12] = { 0 };
@@ -589,7 +616,7 @@ int tls12_handshake(Tls12 *s)
         if (type != RT_HANDSHAKE) {
             continue;
         }
-        if (s->hslen + n > TLS_HS_MAX) {
+        if (s->hslen + n > g_hsbuf_cap) {
             return 0;
         }
         memcpy(s->hsbuf + s->hslen, rec, (usize)n);
@@ -633,7 +660,7 @@ int tls12_handshake(Tls12 *s)
         return 0;
     }
     {
-        u8 *cke = tls12_hsout;
+        u8 *cke = g_out;
         int o = 4;
 
         memset(cke, 0, 64);
@@ -717,7 +744,7 @@ int tls12_write_app(Tls12 *s, const void *p, int n)
 /* 读一条应用数据记录；返回长度（0 表示读到了非应用数据，-1 表示错误） */
 int tls12_read_app(Tls12 *s, void *p, int cap)
 {
-    u8 *rec = tls12_recbuf;
+    u8 *rec = g_rec;
     int type = 0;
     int n = 0;
 
@@ -753,3 +780,7 @@ int tls12_ready(Tls12 *s)
 }
 
 int tls12_stage(Tls12 *s) { return s != 0 ? s->stage : 0; }
+
+/* 状态结构体的大小：给 C 侧的调用者（板级用例）用来分配静态缓冲 —— C 里拿不到
+ * c6 的 struct 定义，只好这样把尺寸导出去（调用方要先 check 一下够不够）。 */
+int tls12_state_size(void) { return (int)sizeof(Tls12); }

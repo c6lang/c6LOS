@@ -9544,3 +9544,74 @@ $ ./tools/tls12_live.sh          # 或 make tls12live
 | lwIP（ARP/IP/TCP/DHCP/DNS + BSD socket） | ✅ 编进镜像并实测内存（§210） |
 | 板子的 socket 层 = lwIP POSIX 薄封装 | ✅ 已提供（§209），只是还没在真板上跑过 |
 | **WiFi PHY/关联** | ⛔ 仍是唯一未通的一环：PHY 两个真 bug 已修（§205/§206），等板子回来验证 |
+
+---
+
+## §214 TLS 1.2 客户端上板：`make https` 链接通过（WiFi + lwIP + TLS 在一个镜像里）
+
+上一节把协议层在宿主上跑通了；这一节把**同一份 `.c6` 代码**编成 windowed 静态库
+链进 ESP32-S3 镜像，得到一个"bringup 成功后自动去取 https://qq.com"的完整镜像。
+
+```
+make C6_ROOT=/home/winger/c6 https
+```
+
+### 一、新增/改动
+
+| 位置 | 内容 |
+| --- | --- |
+| `Makefile` 的 `https` 目标 | 在 `wifip` 基础上加三样：`-DS3_WITH_HTTPS`、`build/wifi/tls/libtls.a`、`build/wifi/obj/c6_https_demo.o` |
+| `Makefile` 的 TLS 规则 | 三步：`tools/c6_strip_tests.py` 剥自测块 → c6c 出 `.c99` → gcc 按 `-mabi=windowed` 编成对象 → `ar` 成 `libtls.a`（11 个对象） |
+| `tools/c6_strip_tests.py` | 去掉 c6 标准库模块里的 `test "…" { … }` 块（见下面"坑 1"） |
+| `net/cert_parse.c6` | 自己写的最小 DER 证书解析：只取叶子证书的 SPKI（替代 `std/data/x509`，见"坑 2"） |
+| `net/tls12_hs.c6` | 改成**调用方提供缓冲**：`tls12_set_buffers(rec, enc, out, hsbuf)`；`tls12_state_size()` 导出结构体大小；`tls12_trace` 默认关 |
+| `port/s3/c6_https_demo.c` | 板级演示（windowed C）：`getaddrinfo("qq.com")` → `connect(443)` → TLS 1.2 握手 → `GET /` → 打印状态行与页面开头。缓冲全部从 OSI 堆里要 |
+| `port/s3/wifi_glue.c` | 补 windowed 的 `printf()` 和 `int errno;` |
+| `port/s3/win_island.c` | `S3_WITH_HTTPS` 时在 lwIP 起来之后调 `c6_https_demo()`，阶段信标 `0x1020` |
+| `port/s3/link.ld` | `libtls.a` 和 `c6_https_demo.o` 的 `.text` 也收进 `.flash.text`（否则 IRAM 溢出 22048 字节） |
+
+### 二、内存实测（`make https`）
+
+| 段 | 大小 | 说明 |
+| --- | --- | --- |
+| `.flash.text`（IROM） | **535 KB** | WiFi/PHY 闭源库 + lwIP + TLS + 内核原语，flash 富余得很 |
+| `.vector + .text`（IRAM） | 60.4 KB / 67.3 KB | 仍有余量 |
+| `.data` | 109.8 KB | |
+| `.bss` | 117.3 KB | `_bss_end = 0x3FCD76D6`，`_stack_limit = 0x3FCD7ED6 ≤ _stack_top = 0x3FCD9000`（链接期 ASSERT 过；栈区约 4.4 KB，很紧但够用） |
+
+TLS 的缓冲（收记录 6.4KB + 发送 2KB + 握手消息 1KB + 握手累积 6.4KB + 状态结构
+约 0.7KB ≈ 16.5KB）**不再占 .bss**，改成运行期从 OSI 堆（`g_wifi_heap_mem` 64KB）
+申请 —— 这是这一节能链进镜像的关键：静态放不下（DRAM 只剩约 10KB）。
+
+### 三、上板前踩到的四个坑
+
+1. **c6 标准库的 `test "…" { … }` 块会被编进 `.c99`**，于是引入 c6 语言运行时的
+   `__tcc_err_set_copy()` / `__tcc_slice_index()` 之类符号 —— 我们这套
+   `-ffreestanding` 镜像里没有那套运行时，链接直接失败。所以加了
+   `tools/c6_strip_tests.py` 在编译前剥掉（`test` 是顶层块，按大括号配对删）。
+2. **`std/data/x509.c6` 依赖 `std/text/str.c6`**，而 str 里有切片操作 → 又拖回
+   坑 1 的运行时依赖。TLS 1.2 其实只需要"叶子证书里那段 SPKI"，所以改成
+   `net/cert_parse.c6` 自己走 DER（按 tag 跳过 6 个字段就到了），依赖清零。
+3. **c6 模块里的 `extern void *malloc(...)` 会被修饰成 `net__tls12_hs__malloc`**
+   （模块作用域），链不到 C 侧的 `malloc`。所以缓冲改成由调用方传进来
+   （`tls12_set_buffers`），模块自己不碰分配器。
+4. **`snprintf`/`printf`/`errno`/`strstr` 都得自己给**：freestanding 镜像里没有
+   libc；`snprintf` 本来就有（wifi_glue.c），又补了 `printf`（用 `wp_vfmt`）和
+   `int errno`；`strstr` 干脆在演示里用本地小函数替代。
+
+### 四、现在的状态
+
+| 环节 | 状态 |
+| --- | --- |
+| TLS 1.2 握手 + HTTP GET + 跟随 302 | ✅ 宿主上对着真 qq.com 验证到通（§213） |
+| 同一份 TLS 代码编成 windowed 库链进镜像 | ✅ `make https` 通过，chkimg OK |
+| lwIP（ARP/IP/TCP/DHCP/DNS + BSD socket） | ✅ 链进镜像（§210） |
+| 其他镜像不受影响 | ✅ `wifi` / `wifip` / 基线 `s3` 三种构建都仍然通过 |
+| **WiFi PHY/关联** | ⛔ 仍是唯一没在真板上通过的一环（§205/§206 已修，等板子） |
+
+板子回来后一步到位的验证顺序：
+1. `make S3_PHY_BISECT=1 wifi` 刷进去，确认 PHY 过（看 `[phy] g_phyFuns=` / `rc=` / bisect mask）；
+2. PHY 过了就刷 `make https` 的镜像：串口应出现 `[https] === 开始取 https://qq.com/ ===`
+   → `[https] TLS 握手完成（阶段=21）` → 状态行 + 页面开头；
+3. 如果卡在 DHCP/DNS，会看到 `[https] DNS 解析 qq.com 失败`；
+   卡在 TLS 会看到 `[https] TLS 握手失败，阶段=N`（阶段含义见 §213）。

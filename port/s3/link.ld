@@ -92,6 +92,10 @@ SECTIONS
      * 让它掉进 .text 会直接把 IRAM 撑爆。三个粘合目标文件也一起进来，
      * 免得它们单独落进 IRAM。 */
     *liblwip.a:*(.literal .literal.* .text .text.*)
+    /* TLS 1.2 客户端（.c6 编成的 windowed 静态库，§214）：同样必须进 flash，
+     * 否则 20KB+ 的代码会把 IRAM 撑爆（实测溢出 22048 字节）。 */
+    *libtls.a:*(.literal .literal.* .text .text.*)
+    *c6_https_demo.o(.literal .literal.* .text .text.*)
     *c6_lwip_port.o(.literal .literal.* .text .text.*)
     *c6_lwip_posix.o(.literal .literal.* .text .text.*)
     *sys_arch.o(.literal .literal.* .text .text.*)
