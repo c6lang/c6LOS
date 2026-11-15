@@ -7345,3 +7345,45 @@ xphyQueue=0x3fcbf338   （blk1/blk2 的 obj = 0x3fcbf33c = &xphyQueue->q ✓）
 在 `os_task_start_core`（主循环切换）和 `os_sched_preempt_ctx`（ISR 抢占
 切换）里各记一次 `(t->id, t->ctx, port_cur_ctx())`，用可靠通道读出来，
 定位到底是哪一次把"当前任务"与"实际恢复的帧"配错了。
+
+## §177 可靠的诊断区与实测到的切换序列
+
+RTC slow memory 的**可写/可读范围并不等于标称的 8KB**：
+`0x50001800` 可读，`0x50001900` / `0x50001A00` / `0x50001DA0` 都读到 0。
+把诊断放在已验证可用的低地址后稳定工作。当前可用区（都实测过）：
+
+```
+0x50000200  OSI 回调环          0x50000C00  阻塞环（5 字/槽 × 4）
+0x50001000  port_task_switch    0x50001400  g_init_task
+0x50001500  切换追踪（4 字 × 8）  0x50001600  超时到期次数
+0x50001700  irq_fill 记录        0x50001800  yield 记录
+0x50001D00  一次性快照（只到 +0x8C 有效）
+```
+
+**切换追踪**（`port_switch_trace(tag, id, ctx)`，tag=1 主循环 / 2 ISR 抢占）
+的实测读数：
+
+```
+#1 tag=1 id=1 ctx=0x3fcbe700     ← 主循环切到任务 1
+#2 tag=2 id=1 ctx=0x3fcbe700     ← ISR 想切，选中的仍是任务 1（ctx 与 cur 相同，
+                                    所以 irq.c 里 next==cur 会直接 return 0，等于没切）
+```
+
+而 `port_task_switch` 计数 = 3。
+
+## 本轮把矛盾缩到了这一点
+
+* 两次 `_queue_recv` 都来自 `ppTask`（两个不同调用点 `+0x2a` / `+0x1a7`）；
+* 对应的两次 kind=6 阻塞，`port_cur_ctx()` 分别是**任务 2** 和**任务 1**；
+* 也就是说：**`ppTask` 的第二次收队列，是在"当前任务 = 任务 1"的状态下执行的。**
+
+由于 `os_queue_get_item` 只可能由 `osi_queue_recv_body` 调用，而它只被
+`ppTask` 的两个点调用，所以结论只能是：**任务 1 的上下文里恢复了
+ppTask 的代码位置** —— 即某一时刻 `port_irq_fill` 把 ppTask 的帧
+存进了任务 1 的 ctx，或者恢复任务 1 时用错了帧。
+
+### 下一轮（最小、最直接的验证）
+
+在 `port_irq_fill` 里除了 `(ctx, frame_sp)`，再记录**当时 `g_cur->id`**；
+在 `port_task_yield` 里记录**当时的 `g_cur->id`**。把这两组和切换追踪对齐，
+就能确定是哪一次保存把"任务 1 的 ctx"和"ppTask 的帧"配到了一起。

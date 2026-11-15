@@ -580,6 +580,7 @@ void *os_sched_preempt_ctx(void) {
     if (t != g_cur) {
         g_cur = t;
     }
+    port_switch_trace(2u, t->id, (u32)(void *)t->ctx);       /* ISR 抢占切换 */
     t->state = (u8)OS_TASK_RUNNING;
     return t->ctx;
 }
@@ -611,6 +612,7 @@ void os_task_start_core(u32 core) {
             continue;
         }
         g_cur_arr[me] = t;
+        port_switch_trace(1u, t->id, (u32)(void *)t->ctx);   /* 主循环切换 */
         t->state = (u8)OS_TASK_RUNNING;
         g_switch_count = g_switch_count + 1u;
         {

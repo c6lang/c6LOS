@@ -209,6 +209,18 @@ extern int ets_printf(const char *fmt, ...);
 /* 一次性诊断快照：把关键计数与记录整体写进 RTC 0x50001D00。
  * esptool read-mem 会先复位再读，所以读到的是**上一次启动稳定后**的定格；
  * 逐字段分多次 read-mem 得到的是不同启动的值，不可比。 */
+__attribute__((section(".flash.text"))) void port_switch_trace(u32 tag, u32 id, u32 ctx)
+{
+    volatile u32 *t = (volatile u32 *)0x50001500u;
+    static u32 n_;
+    u32 k_ = n_ & 7u;
+    n_ = n_ + 1u;
+    t[k_ * 4u]      = tag;
+    t[k_ * 4u + 1u] = id;
+    t[k_ * 4u + 2u] = ctx;
+    t[k_ * 4u + 3u] = n_;
+}
+
 __attribute__((section(".flash.text"))) void port_snapshot(void)
 {
     volatile u32 *sn = (volatile u32 *)0x50001D00u;
@@ -226,12 +238,17 @@ __attribute__((section(".flash.text"))) void port_snapshot(void)
     sn[7]  = *(volatile u32 *)0x50001600u;
     while (i < 20u) { sn[8u + i] = b[i]; i = i + 1u; }
     sn[28] = *(volatile u32 *)0x3fcef904u;
-    sn[29] = *(volatile u32 *)0x50001900u;
-    sn[30] = *(volatile u32 *)0x50001904u;
-    sn[31] = *(volatile u32 *)0x50001908u;
-    sn[32] = *(volatile u32 *)0x5000190Cu;
-    sn[33] = *(volatile u32 *)0x50001910u;
-    sn[34] = *(volatile u32 *)0x50001914u;
+    sn[29] = *(volatile u32 *)0x50000D00u;
+    sn[30] = *(volatile u32 *)0x50000D04u;
+    sn[31] = *(volatile u32 *)0x50000D08u;
+    sn[32] = *(volatile u32 *)0x50000D0Cu;
+    sn[33] = *(volatile u32 *)0x50000D10u;
+    sn[34] = *(volatile u32 *)0x50000D14u;
+    i = 0;
+    while (i < 32u) {
+        sn[40u + i] = *(volatile u32 *)(0x50001500u + i * 4u);
+        i = i + 1u;
+    }
 }
 
 __attribute__((section(".flash.text"))) void port_diag_dump(void)
