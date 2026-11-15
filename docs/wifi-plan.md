@@ -6274,3 +6274,44 @@ blk2: id=1  epc=0x403794b3  sp=0x3fcba370  kind=6
 下一轮的做法：把 `wifi_init_in_caller_task` 可能走到的每个库函数都用
 `--wrap` 包一层（或者在 `win_bridge.S` 里加同名跳转桩），每个桩把
 RTC 计数 +1，一次上板就能看出最后停在哪个函数。
+
+## §150 ★ `--wrap` 计数：`ieee80211_ioctl_init` 从未被调用
+
+给 `wifi_init_in_caller_task` 走到的库函数各加一层 `--wrap`（包装函数在
+`port/s3/wifi_glue.c`，windowed，BSS 计数后同步到 RTC `0x50000E00`）：
+
+```
+0x50000E00 menuconfig        = 1          ✅ 调过
+0x50000E04 misc_nvs_init     = 1          ✅ 调过
+0x50000E08 ic_create_wifi_task = 1        ✅ 调过
+0x50000E0C ieee80211_ioctl_init = 随机值   ❌ **从未被调用**
+0x50000E10 pp_create_task    = 1          ✅ 调过
+0x50000E14 wifi_init_in_caller_task = 随机值（--wrap 对同目标文件内的调用无效）
+0x50000E18 wifi_init_in_caller_task 返回   = 随机值  ❌ 没返回
+```
+
+**结论：初始化流程走到 `ic_create_wifi_task()` → `pp_create_task()` 之后
+就再也没往下走，`ieee80211_ioctl_init()` 一次都没进。**
+
+再结合 §149 的内核级证据（初始化任务在自己的栈上阻塞在 `_queue_recv`，
+对象就是 `s_wifi_queue`），可以断定：
+
+> 那次接收发生在 **`pp_create_task()` 内部**。
+
+但 §144 已经把 `pp_create_task`（`0x42036584~0x420366d9`）和它的两个子函数
+（`config_get_wifi_task_stack_size`、`esf_buf_setdown`）都反汇编查过，
+**没有 `l32i aX,aY,116` + `callx8` 的收队列调用**。
+
+所以只剩一种可能：那次接收是通过**函数指针**发起的
+（例如把 `_queue_recv` 或某个 wrapper 存进结构体再间接调用），
+或者发生在 `_task_create` 让我们切到新任务、而新任务执行完后再切回来时
+被误记到了初始化任务名下。
+
+### 下一轮
+
+1. 在 `osi_queue_recv` 里用**可靠的**方式取调用者 PC —— 由于 `entry` 不写栈，
+   只能靠强制窗口溢出（先调用一个深递归函数），或者改成在
+   `s3_w2c_queue_get` 这个汇编壳里直接记录 `a0`（壳是 `entry`+`callx0`，
+   在 `entry` 之后、`callx0` 之前 `a0` 一定是 windowed 调用者的返回地址）。
+2. 把 `pp_create_task` 的间接调用面（`l32i aX, aY, <off>` 后跟 `callx8`）
+   全部列出来，逐个对照 OSI 偏移。

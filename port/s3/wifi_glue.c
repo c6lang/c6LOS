@@ -1078,3 +1078,62 @@ __attribute__((weak)) int esp_wifi_init_internal(const void *cfg)
     return -1;
 }
 #endif
+
+/* ---- 诊断：用 --wrap 给 wifi_init_in_caller_task 走到的库函数各包一层 ----
+ * 每个包装函数把自己的调用计数写进 RTC（BSS 计数，RTC 只做副本，
+ * 因为 RTC 初值是随机的）。一次上板就能看出初始化到底走到哪个函数。 */
+static u32 g_wrap_n[8];
+
+static void s3_wrap_bump(u32 i)
+{
+    volatile u32 *d = (volatile u32 *)0x50000E00u;
+    if (i < 8u) {
+        g_wrap_n[i] = g_wrap_n[i] + 1u;
+        d[i] = g_wrap_n[i];
+    }
+}
+
+extern int __real_wifi_menuconfig_init(void *cfg);
+int __wrap_wifi_menuconfig_init(void *cfg)
+{
+    s3_wrap_bump(0u);
+    return __real_wifi_menuconfig_init(cfg);
+}
+
+extern int __real_misc_nvs_init(void);
+int __wrap_misc_nvs_init(void)
+{
+    s3_wrap_bump(1u);
+    return __real_misc_nvs_init();
+}
+
+extern int __real_ic_create_wifi_task(void);
+int __wrap_ic_create_wifi_task(void)
+{
+    s3_wrap_bump(2u);
+    return __real_ic_create_wifi_task();
+}
+
+extern int __real_ieee80211_ioctl_init(void);
+int __wrap_ieee80211_ioctl_init(void)
+{
+    s3_wrap_bump(3u);
+    return __real_ieee80211_ioctl_init();
+}
+
+extern int __real_pp_create_task(void);
+int __wrap_pp_create_task(void)
+{
+    s3_wrap_bump(4u);
+    return __real_pp_create_task();
+}
+
+extern int __real_wifi_init_in_caller_task(void);
+int __wrap_wifi_init_in_caller_task(void)
+{
+    int r;
+    s3_wrap_bump(5u);
+    r = __real_wifi_init_in_caller_task();
+    s3_wrap_bump(6u);          /* 只有它返回了才会 +1 */
+    return r;
+}

@@ -60,6 +60,8 @@ SECTIONS
     *timeout.o(.literal .literal.* .text .text.*)
     /* w2c 壳只被 WiFi 胶水层调用，不参与中断路径，放 flash 省 IRAM */
     *w2c.o(.literal .literal.* .text .text.*)
+    *tick.o(.literal .literal.* .text .text.*)
+    *timer.o(.literal .literal.* .text .text.*)
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
