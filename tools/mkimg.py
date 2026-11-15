@@ -95,11 +95,12 @@ for name, vaddr, paddr, data in segs:
         if gap:
             if not records:
                 raise SystemExit('%s: 第一段前不能有空白' % name)
-            # 用 IDF 风格的 **PADDING 段**（load_addr = 0）填补空洞：
-            # bootloader 会跳过它，不会把它映射进 MMU，从而不占用表项。
-            # （早期版本是把空洞塞进上一段的数据里，导致 DROM 被撑到 64KB、
-            #  占掉十几个 MMU 表项，和 IROM 段抢表项。）
-            records.append([0, bytearray(gap)])
+            # 把空洞吸收进上一段的数据。
+            # 注意：这里之所以安全，是因为 IROM 的 AT 是 0x10000（64KB 边界），
+            # 吸收后 DROM 正好是 **1 页**（0x10000），只占 entry 0；
+            # 而 IROM 从 entry 1 开始，两者不冲突。
+            # （早期 IROM 放在 0x100000 时，DROM 会被撑成 14 页，就会抢表项。）
+            records[-1][1].extend(b'\x00' * gap)
     d = bytearray(data)
     while len(d) % 4:                 # IDF 风格：补齐计入段长度（原厂各段长度都是 4 的倍数）
         d.append(0)

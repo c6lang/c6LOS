@@ -3533,3 +3533,40 @@ Segment   Length   Load addr   File offs  Memory types
 1. 不用 PADDING 段，改成让 DROM 的 `Load addr` **紧跟** 在 IROM 前面（零空洞），
    这时 IROM 的 vaddr 低 16 位要相应调整
 2. 或者干脆把 DROM 段**放到最后**，让 IROM 成为第一个 flash 段
+
+### 82p. ★ bootloader 终于接受了带 WiFi 的镜像（6 段结构）
+
+关键调整：**让 DROM 正好 1 页**，IROM 从 **entry 1**（vaddr 0x42010000 / flash 0x10000）开始：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x0ffd8  0x3c000020  0x00000018  DROM      <- 正好 1 页，占 entry 0
+      1  0x67ee8  0x42010000  0x0000fff8  IROM      <- entry 1 起 7 页，不与 DROM 冲突
+      2+ IRAM/DRAM 段
+```
+
+真板：
+
+```
+c6os s3 boot          <- bootloader 接受了！
+wifi_init ...         <- 进入 esp_wifi_init_internal
+*** TRAP cause=0 pc=4201d934
+```
+
+⇒ **镜像结构问题解决了**（回到 6 段、无 PADDING、DROM 只占 1 个表项）。
+
+但 trap 依然在**段内偏移 0xD934**（这次是 0x4201d934）。三种基址下都是这个偏移，
+再次确认它与页号、表项冲突都无关。
+
+### 关于 0xD934 的新猜想
+
+既然：
+- 段首（0x42010014 附近）能取指
+- 0xD934 处不能取指
+- 而该地址**数据读正常**
+
+那么很可能是**这个函数本身**的某种特性。反汇编显示它的第一条就是 `entry a1, 32`
+—— 而我们已经确认 `entry` 在别处能正常工作（孤岛函数、PHY 调用）。
+
+所以下一步应该看**这个函数被调用的路径**：是不是从某个 call0 上下文直接 `callx8`
+过去，导致窗口状态不对。或者看 `ps=00060910` 里 `WOE` 位在 trap 时是否真的是 1。
