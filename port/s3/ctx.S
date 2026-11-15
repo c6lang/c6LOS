@@ -135,6 +135,11 @@ port_task_switch:
     .global port_task_yield
     .type   port_task_yield, @function
 port_task_yield:
+    /* 诊断：入口计数（Ldbg2+28），区分"没被调用"与"调用后空指针早退" */
+    l32r    a14, .Ldbg2
+    l32i    a15, a14, 28
+    addi    a15, a15, 1
+    s32i    a15, a14, 28
     rsr     a5, prid
     l32r    a3, .Lprid_base
     l32i    a6, a3, 0

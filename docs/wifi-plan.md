@@ -7252,3 +7252,39 @@ int os_task_block_wait(void) {
    一旦读到非零就坐实"空指针早退"；
 2. 同时在 `os_task_block_prepare` 之外的所有 `port_set_cur_ctx(0)` /
    `g_s3_cur[core] = 0` 处埋点，找出是谁把它清成了 0。
+
+## §175 真板坐实：`port_task_yield` 三次调用全部空指针早退
+
+在 `port_task_yield` 的**入口**加计数（`Ldbg2+28`），并保留保存路径上的
+`+16/+20` 两个埋点，清空基线后读数：
+
+```
+yield_entries = 3      ← 函数确实被调用 3 次
+yl_ctx        = 0      ← 保存路径上的埋点从未执行
+yl_sp         = 0
+switch_cnt    = 3
+task_starts   = 2
+```
+
+⇒ **三次调用全部在 `beqz a4, 1f`（即 `g_s3_cur[core] == 0`）处提前返回**，
+一次都没有把任务的现场保存下来。
+
+`port_task_yield` 的调用点（`kernel/task.c6`）有 6 处：
+270 / 345 / 470 / 664 / 685 / 695。其中第 345 行在 `os_task_start_core`
+附近（建任务后让出），其余在阻塞等待/删除/挂起路径上。
+
+结合"`os_task_block_prepare` 里记到的 `port_cur_ctx()` 非空"这一事实，
+最可能的组合是：
+
+* 这 3 次 yield 来自 **`os_main`（主循环线程）**——那时 `g_s3_cur[core]`
+  本来就是空的，早退是对的、无害；
+* 而任务里真正调 `os_task_block_wait()` 的那些路径**根本没走到**
+  （否则会多出 3 次以上、且 ctx 非空的 yield）。
+
+### 下一轮
+
+1. 给 6 个 `port_task_yield()` 调用点各自编号（传一个 tag 参数或用 6 个
+   独立埋点），确认这 3 次到底来自哪一处；
+2. 若确认没有一次来自 `os_task_block_wait`，那就要查
+   `os_task_block_wait()` 为什么在这些路径上没被执行（例如
+   `os_task_block_prepare` 之后 `r != 0`，或者是编译期把该分支裁掉了）。
