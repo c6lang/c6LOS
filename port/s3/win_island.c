@@ -414,6 +414,10 @@ u32 s3_win_phy_cal_word(u32 i)
 #define BISECT_OK    0x50000A28u
 #define BISECT_DONE  0x50000A2Cu
 #define BISECT_MAGIC 0x600DD0E0u
+/* 上电后 RTC 慢存是**随机值**（只有掉电才清）。没有这个校验字，BISECT_CUR
+ * 可能一上来就是 0x7fffffff，于是第一轮直接打印"done"把整个二分跳过去。 */
+#define BISECT_INIT  0x50000A30u
+#define BISECT_INIT_MAGIC 0x600DD0E1u
 
 static u32 bisect_get(u32 addr) { return *(volatile u32 *)addr; }
 static void bisect_set(u32 addr, u32 v) { *(volatile u32 *)addr = v; }
@@ -451,12 +455,21 @@ static u32 bisect_run(u32 k)
  * 调用者应该停下来（不喂狗），让 RWDT 复位后继续下一轮。 */
 u32 s3_win_phy_bisect(void)
 {
-    u32 k = bisect_get(BISECT_CUR);
+    u32 k;
     u32 s = 1u;
 
+    if (bisect_get(BISECT_INIT) != BISECT_INIT_MAGIC) {
+        /* 刚上电（或上一次是人手动断电）：账本清零 */
+        bisect_set(BISECT_CUR, 0u);
+        bisect_set(BISECT_HUNG, 0u);
+        bisect_set(BISECT_OK, 0u);
+        bisect_set(BISECT_DONE, 0u);
+        bisect_set(BISECT_INIT, BISECT_INIT_MAGIC);
+    }
     if (bisect_get(BISECT_DONE) == BISECT_MAGIC) {
         return 1u;
     }
+    k = bisect_get(BISECT_CUR);
     if (k >= BISECT_N) {
         ets_printf("[bisect] done hung=0x%08x ok=0x%08x\n",
                    (unsigned)bisect_get(BISECT_HUNG), (unsigned)bisect_get(BISECT_OK));
@@ -470,6 +483,7 @@ u32 s3_win_phy_bisect(void)
             s = s + 1u;
             continue;
         }
+        os_wdt_feed();                         /* 每步都从满 8s 开始计时 */
         bisect_or(BISECT_HUNG, 1u << s);       /* 先进"挂死候选"，跑完再清 */
         ets_printf("[bisect]   step %u enter\n", (unsigned)s);
         {
