@@ -9236,3 +9236,62 @@ err_t sys_mbox_new(sys_mbox_t *mbox, int size);
 2. 把 `liblwip.a` 接进 `c6os.elf` + `link.ld` 里路由 `.text` 到 IROM；
 3. TLS：`std/net/https.c6` 只做记录层，握手要用 `std/net` 里的 `tlskdf`/`x25519`/`x509`
    或者把 mbedTLS 也照 lwIP 的办法编进来 —— 这是最后一段路，也是最不确定的一段。
+
+### §209 socket 头：c6 的 libc 根本没有 `sys/socket.h`（我们自己补上）
+
+查 `/home/winger/c6/c6c/include/`（c6 自带 libc 头）发现一件之前没意识到的事：
+
+| 头 | 有吗 |
+| --- | --- |
+| `string.h` / `stdlib.h` / `stdio.h` / `unistd.h` / `errno.h` / `fcntl.h` | 有 |
+| `sys/` 下 | **只有 `stat.h`** |
+| `sys/socket.h`、`netinet/in.h`、`netinet/tcp.h`、`netdb.h`、`poll.h`、`arpa/inet.h` | **全都没有** |
+
+而 `/home/winger/c6/std/net/tcp.c6` 一上来就 include 这一整套（它连 `<unistd.h>`
+都用上了，`close()` 也没人声明）。也就是说：**要把 c6 标准库的 net 模块拿到
+S3 上用，先得把这 6 个头写出来** —— 这跟 lwIP 编不编得过是两件独立的事。
+
+做法（都在新目录 `port/s3/lwip/posix/` 里）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `posix/sys/socket.h` | `struct sockaddr/sockaddr_storage/sockaddr_in`、`AF_*/SOCK_*/SOL_SOCKET/SO_*/MSG_*/SHUT_*` 常量、函数原型，**逐字节照抄 lwIP 的 `lwip/sockets.h`**（含 BSD 风格的 `sa_len` 首字段），这样包装层是纯转发、不用搬字段 |
+| `posix/netinet/in.h` | `INADDR_ANY`、`inet_addr/aton/ntoa/pton/ntop`、`htonl/htons/ntohl/ntohs` |
+| `posix/netinet/tcp.h` | `TCP_NODELAY` 等（数值同 lwIP） |
+| `posix/netdb.h` | `struct addrinfo`/`hostent` + `getaddrinfo/freeaddrinfo/gethostbyname` |
+| `posix/poll.h` | `struct pollfd` + `poll()`（`tcp_connect(timeout)` 靠它实现超时） |
+| `posix/arpa/inet.h` | 转发到 `netinet/in.h` |
+
+**为什么不放进仓库根的 `include/`**：宿主（x86）构建也用 `-Iinclude`，
+放进去会遮蔽 glibc 的同名头，把宿主构建搞坏。所以它们单独放，只在 S3 + lwIP
+的构建里用 `S3_C6FLAGS=-Iport/s3/lwip/posix` 加进来（`S3_C6FLAGS` 已经存在于
+`.c6` 编译规则里）。
+
+配套：`port/s3/lwip/c6_lwip_posix.c` 提供**真符号**
+（`socket/connect/poll/send/recv/getaddrinfo/...` → `lwip_*`），因为我们的
+`lwipopts.h` 里 `LWIP_COMPAT_SOCKETS=0`（宏式兼容层只在 include 了 lwIP 头的
+TU 里生效，而 c6 侧不 include lwIP 的头）。`close/read/write` 也一并提供
+（freestanding 目标上没有 libc 的同名符号；可用 `C6_LWIP_NO_POSIX_IO` 关掉）。
+
+离线验证：新增 `make netcheck` —— 用 c6c 编 `tests/t_s3_net.c6`（一个把
+`getaddrinfo → socket → setsockopt → connect → poll → send → recv → getsockname
+→ shutdown → close` 和 `hton*/inet_*` 全用一遍的编译期冒烟用例），再用 gcc 把
+c6c 的产物按 windowed 编一遍，两侧都过才算 OK。
+
+踩到两个 c6 语言层面的事（顺手记下）：
+1. **注释里不能出现 `*/`**：我在 `arpa/inet.h` 的注释里写了 `hton*/ntoh*`，
+   注释在那里就被提前闭合了，后面 `ntoh*` 被当成变量声明，
+   报 `error: variable 'ntoh' must be initialized`。
+2. c6 要求**局部变量必须带初始化**（`struct addrinfo hints = { 0 };`），
+   裸的 `int fd;` 都过不了。
+
+### 主线还差什么（更新版）
+
+| 环节 | 状态 |
+| --- | --- |
+| WiFi 关联（PHY → start → scan → 4 次握手） | **卡在这**：PHY 两个真 bug 已修（§205/§206），等上板验证 |
+| L2 收发 | 已确认闭源库给 `esp_wifi_internal_tx/reg_rxcb` |
+| ARP/IP/TCP/UDP/DHCP/DNS + BSD socket | lwIP 编过（42 对象，text 71.5KB），`sys_arch` 已写 |
+| POSIX 名字/头 | 本节完成（`make netcheck` 过） |
+| 接进 `c6os.elf` | 没做（等 PHY 通；还要把 lwIP `.text` 路由进 `.flash.text`） |
+| TLS 1.3 握手 + 证书链校验 | 没做（c6 std 只有记录层/KDF/x25519/x509，缺握手驱动与签名校验） |

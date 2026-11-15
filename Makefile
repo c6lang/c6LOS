@@ -1506,6 +1506,7 @@ LWIP_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
              $(wildcard $(LWIP_SRC)/api/*.c) \
              $(wildcard $(LWIP_SRC)/netif/ethernet.c) \
              port/s3/lwip/c6_lwip_port.c \
+             port/s3/lwip/c6_lwip_posix.c \
              port/s3/lwip/sys_arch.c
 LWIP_HDRS := port/s3/lwip/lwipopts.h port/s3/lwip/arch/cc.h port/s3/lwip/arch/sys_arch.h
 
@@ -1525,3 +1526,13 @@ $(LWIP_DIR)/liblwip.a: $(LWIP_OBJS)
 	@mkdir -p $(dir $@)
 	$(XTP)ar rcs $@ $^
 	@$(XTP)size $(LWIP_DIR)/obj/*.o | tail -1
+
+# 编译期冒烟测试：c6 侧用我们的 POSIX socket 头能不能编（不进镜像，纯检查）
+# 见 docs/wifi-plan.md §209。
+netcheck:
+	@mkdir -p $(BUILD)/netcheck
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) -Iport/s3/lwip/posix \
+		-c -o $(BUILD)/netcheck/ tests/t_s3_net.c6
+	@$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common -mlongcalls \
+		-Iport/s3/lwip -I$(LWIP_SRC)/include -c $(BUILD)/netcheck/t_s3_net.c -o $(BUILD)/netcheck/t_s3_net.o
+	@echo "netcheck: OK（c6 头 + lwIP POSIX 层两侧都能编）"
