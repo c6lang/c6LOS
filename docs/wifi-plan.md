@@ -6359,3 +6359,46 @@ nm 反查：0x40381c89 在 ppTask（0x40381c5c）内部
 它的 `addi a1, a1, -32` 用的是**当前 a1**，在任务里就是任务栈 ✓，
 但 `port_task_switch` 保存的"主循环上下文" `g_sched[core]` 可能被
 误当成任务上下文。
+
+## §152 port 与内核的上下文视图完全一致；任务入口也都正确
+
+在 `os_task_block_prepare` 里同时记录 `port_cur_ctx()`（port 视角，
+`g_s3_cur[core]`）和 `g_cur->ctx`（内核视角）：
+
+```
+blk0: id=1  port_ctx=0x3fcbe620  kern_ctx=0x3fcbe620
+blk1: id=2  port_ctx=0x3fcbe66c  kern_ctx=0x3fcbe66c
+blk2: id=1  port_ctx=0x3fcbe620  kern_ctx=0x3fcbe620
+```
+
+三次阻塞里两者**完全相等** ⇒ port 与内核的上下文簿记没有分歧
+（`port_set_cur_ctx` 在 ISR 抢占路径上确实同步了 `g_s3_cur[core]`）。
+
+任务入口表（RTC `0x50000A10` 起）反查 `nm`：
+
+```
+entry[0] = 0x403785e4 = wifi_main   （测试任务）
+entry[1] = 0x40381c7c = ppTask      （WiFi 任务）
+```
+
+两个任务的入口都正确，**只有这两个任务**。
+
+### 于是本轮的矛盾被压缩到最小
+
+* 上下文保存/恢复正确（sp、EPC 各自在自己栈上）；port 与内核视图一致；
+  调度器没选中过 BLOCKED 任务；入口都正确；
+* 库侧 `_queue_recv` 的最后一次调用者确实是 `ppTask`；
+* 但内核记录那次阻塞属于任务 1（`wifi_main`）。
+
+⇒ 只剩一种可能：**任务 1 的执行流在某一刻进入了 `ppTask` 的代码**。
+最可疑的环节是 `s3_win_call_bringup` 这个 call0→windowed 桥在任务上下文中
+的栈使用：它自己 `addi a1, a1, -32` 用的是当前 a1（任务栈）✓，但
+`port_task_switch` 保存的是 **主调度循环** 的上下文（`g_sched[core]`）。
+如果任务 1 在桥里被抢占、而主循环那段上下文又被当成任务 1 的上下文恢复，
+就会出现"任务 1 的 id + 主循环/别的任务的栈"。
+
+### 下一轮
+
+给 `port_task_switch` / `port_task_yield` 各加一个 RTC 计数（分别记
+"从主循环切到任务"和"从任务切回主循环"的次数），并确认它们成对出现；
+若出现"两次 yield 之间没有 switch"，就说明主循环上下文被当成了任务上下文。
