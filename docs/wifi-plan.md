@@ -3226,3 +3226,30 @@ windowed 孤岛（`s3_win_call_wifi_init`）调用，但仍然在同一条指令
 
 ⇒ **8-way / 16KB / 32B（`ICACHE_CTRL = 0x0b`，和 IDF 一致）是正确的配置**，已改回。
 `0x4203d934` 的 `entry` trap 与相联度无关，另有原因。
+
+### 82e. ★ 重大突破：`esp_wifi_init_internal` 已经跑起来了，新错误是 ABI 不匹配
+
+把 WiFi 库放进**独立的 `.flash.wifi` 段**（VMA/AT 都按 64KB 页对齐，避免扰动
+`.vector`/`.text` 布局）之后，构建和链接都正常了。真板结果：
+
+```
+c6os s3 boot
+wifi_init ...                                  <- 进入 esp_wifi_init_internal
+*** TRAP cause=00000014 pc=8037d21d            <- InstrFetchProhibited
+```
+
+对比之前 `cause=0 pc=4203d934`（卡在函数入口的 `entry`）：
+
+- **`entry` 已经执行过去了** —— 说明 "windowed 代码从 flash 取指执行" 完全没问题
+- 新 trap 是 **`InstrFetchProhibited`**，PC = **`0x8037d21d`**
+- **`0x8037d21d` 的最高位是 1**，而 `0x4037d21d` 正是我们的 IRAM 地址
+- Xtensa 里 **最高位为 1 是 `call0` 返回地址的标记**
+
+⇒ **ABI 不匹配**：WiFi 闭源库是 **windowed** ABI，它回调我们提供的
+`wifi_osi_funcs_t` 里那 100 多个桩函数；这些桩函数在 `wifi_glue.c` 里是用 **call0**
+编译的，被 windowed 代码 `callx8` 调用后 `ret` 返回，地址就错了。
+
+### 修复方向
+
+把那批 OSI 桩函数放到**用 `-mabi=windowed` 编译的文件**里（像 `win_island.c` 那样），
+或者让 `wifi_glue.c` 整体用 windowed 编译。这是纯工程改动，方向明确。

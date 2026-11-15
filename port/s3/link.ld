@@ -56,6 +56,24 @@ SECTIONS
     _flash_text_end = .;
   }
 
+  /* IDF 闭源 WiFi 库独立成段：VMA/AT 都按 64KB 页对齐（identity），
+   * 这样不会扰动 .vector/.text 的地址布局（之前把归档规则塞进 .flash.text
+   * 会导致 .vector 里的 j 跳转 out of range）。 */
+  .flash.wifi 0x42050000 : AT (0x50000)
+  {
+    _flash_wifi_start = .;
+    *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libwapi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libphy.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libphy_win.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    _flash_wifi_end = .;
+  }
+
   /* 字面量池必须在使用它的 l32r 之前；内核镜像 <256KB 时全局前置是安全的
      （M1 之后代码变大时改用 -mno-text-section-literals + --auto-litpools）。 */
   /* 全部可加载段的 LMA 都排在 flash 里（标准 ESP app 镜像布局，

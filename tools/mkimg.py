@@ -19,7 +19,8 @@ TC   = os.path.expanduser('~/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-e
 # (section, paddr 或 None=RAM 段)
 SECS = [
     ('.flash.rodata', None),   # 运行时按 BASE+0x20 计算    # DROM: 数据落文件偏移 0x20（app_desc 要求）
-    ('.flash.text',   None),   # 运行时按 BASE+0x10000 计算    # IROM: flash 0x30000
+    ('.flash.text',   None),   # 运行时按 BASE+0x10000 计算
+    ('.flash.wifi',   None),   # WiFi 闭源库，落在 BASE+0x30000（页对齐）    # IROM: flash 0x30000
     ('.eh_frame',     None),
     ('.vector',       None),
     ('.text',         None),
