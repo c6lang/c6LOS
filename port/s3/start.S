@@ -17,6 +17,10 @@
      *   0xB0..0xB3 = port_init 各阶段（见 console.c），
      *   0xBAD0 出现在 0x50000100 起 = 跑进了未处理向量（见 irq.S）。 */
     .literal .Lrtc,     0x50000000
+    /* 诊断区起止：每次启动清零，保证 read-mem 读到的都是本次启动写的值
+     * （RTC 跨复位不丢，之前多次被上一轮的残留值误导）。 */
+    .literal .Ldiag,     0x50000200
+    .literal .Ldiag_end, 0x50001F00
     .literal .Lm0,      0x000000A0
     .literal .Lm1,      0x000000A1
     .literal .Lmarks,   g_boot_marks
@@ -137,6 +141,16 @@ _start:
     j       1b
 
 2:
+    /* 清零 RTC 诊断区（0x50000200..0x50001F00），下面所有埋点都依赖它 */
+    l32r    a2, .Ldiag
+    l32r    a3, .Ldiag_end
+    movi    a4, 0
+5:
+    bgeu    a2, a3, 6f
+    s32i    a4, a2, 0
+    addi    a2, a2, 4
+    j       5b
+6:
     l32r    a2, .Lrtc
     l32r    a3, .Lm1
     s32i    a3, a2, 0            /* RTC 里的 A1（可能被 ROM 覆写，仅作参考） */
