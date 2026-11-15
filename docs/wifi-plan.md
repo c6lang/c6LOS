@@ -4120,3 +4120,50 @@ windowed 孤岛中完成 `entry`，再跳到库函数体（跳过它自己的 `e
 
 （记录在这里是为了避免后面的人被 §88 误导。正确做法是：把桥的 `call8` 目标
 改成 `s3_win_asm_entry`，再跑一次。）
+
+### 90. 板子当前状态（重要，接手时先看这里）
+
+**板子现在跑不起来**，串口输出：
+
+```
+load:0x403c8700,len:0xcc8
+load:0x403cb700,len:0x2ea0
+entry 0x403c88f4
+abort() was called at PC 0x403cdbe0
+```
+
+`0x403cdbe0` 是 IDF 的 `mmu_hal_map_region`（之前踩过同样的坑）。
+这次是在读原厂固件（刷了 xiaozhi 的分区表和 bootloader）、
+然后又刷回我们的镜像之后出现的。
+
+**恢复步骤**：
+1. 端口号会变（`/dev/ttyACM0` ↔ `/dev/ttyACM1`），刷之前先 `ls /dev/ttyACM*`
+2. 端口被占住时（应用在跑、或 trap 后卡住），用 JTAG 复位：
+   ```
+   printf 'set pagination off\nset confirm off\ntarget extended-remote :3333\nmonitor reset run\nkill\nquit\n' > /tmp/greset.gdb
+   ./tools/dbg.sh build/won/c6os.elf /tmp/greset.gdb
+   ```
+3. 三个镜像都要刷：`0x0` bootloader、`0x8000 /tmp/p2.bin`、`0x20000 <app>`
+4. **擦掉 otadata**：`esptool erase-region 0xd000 0x2000`
+   （xiaozhi 的分区表带 OTA，otadata 会让 bootloader 从别的槽启动）
+5. 刷完 `read-flash` 读回比对，确认真的写进去了
+
+**已验证可用的镜像**：`build/won/c6os.bin`（t_s3_on）的 `image-info` 显示
+`Checksum: 0x3c (valid)`，它本身是好的。
+
+### 本 session 最重要的技术结论
+
+对照实验（同一个段内偏移 0x14、同样经 windowed 孤岛调用）：
+
+| 函数 | 指令 | 结果 |
+|---|---|---|
+| `s3_asm_flash_42` | `movi.n a2,42` + `retw.n`（**无 entry**） | ✅ 返回 42 |
+| `s3_asm_flash_entry` | **`entry a1,16`** + `movi.n a2,77` + `retw.n` | ❓ 待重测（桥有 bug，见 §89）|
+
+**这个对照实验还没有真正跑出来** —— 因为测试桥的 `call8` 目标写错了（§89），
+后来修正了桥，但板子进入了上面的坏状态，没能完成验证。
+
+**下一步第一件事**：按上面步骤恢复板子，然后重新跑 `tests/t_entrytest.c6`，
+确认 "flash 里的 `entry` 是否能执行"。这一步的结果会决定后续方向：
+- 如果能执行 ⇒ 问题在别处（可能是闭源库自身的某种前提）
+- 如果不能执行 ⇒ 方案是"孤岛里先 `entry`，再跳到库函数体 `func+3`"
