@@ -125,6 +125,19 @@ IROM 页时会正常 `panic'ed (Cache error)`。
 仍然有效的一条：两边的 `EXTMEM_ICACHE_FREEZE(0x600C4154)` 都是 0，
 可以排除"假命中（FREEZE_MODE = assert hit on miss）"这个假设。
 
+## 5c. 反向对照：把"我们固件的条件"装到能工作的 IDF app 上
+
+为了排除"我们固件运行时做了什么让它失效"，我们把怀疑的条件逐条**装进能正常工作的
+IDF app**，每次装完再读它自己的 IROM：
+
+| 装上的条件 | IDF app 读 IROM 结果 |
+|---|---|
+| `SPI_MEM_CLOCK = 0x80000000`（我们固件的值） | `irom=0x00f01d12` **照常** ⇒ 排除 |
+| `rsil 15`（INTLEVEL=15，和我们 `_start` 一样） | `irom=0x0020c012` **照常** ⇒ 排除 |
+
+⇒ 我们 `_start` 里的动作、以及我们和 IDF app 不同的那个 SPI 时钟值，
+**都不会让 IROM 读失效**。
+
 ## 6. 想请教的问题
 
 1. ESP32-S3 上，**除了 MMU 表项、Cache 使能/模式位、SPI_MEM 时钟与控制、PMS 权限**
