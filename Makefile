@@ -38,6 +38,7 @@ S3_NAMES := $(notdir $(S3_C6))
 S3_C    := $(addprefix $(BUILD)/c99/,$(S3_NAMES:.c6=.c))
 # 内核/控制台等必需对象（LEAN 也保留）
 S3_OBJ_CORE := $(BUILD)/obj/start.o \
+                   $(BUILD)/obj/abi_thunk.o \
            $(addprefix $(BUILD)/obj/,$(S3_NAMES:.c6=.o)) \
            $(BUILD)/obj/console.o $(BUILD)/obj/c6rt.o $(BUILD)/obj/kprintf.o \
            $(BUILD)/obj/ctx.o $(BUILD)/obj/ctx_asm.o \

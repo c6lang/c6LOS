@@ -5002,3 +5002,87 @@ IDF 的 `WIFI_FEATURE_CAPS` 默认值不是 0 —— 可能需要带上支持的
 1. 把 `cfg[30]`/`cfg[31]`（偏移 120/124）设成 IDF 的 `WIFI_FEATURE_CAPS` 默认值
 2. 或者先看 `pm_funcs_init` 的返回值（如果它先失败，`wdev_funcs_init` 根本不会跑）
 3. 继续反汇编 `wdev_funcs_init`，确认 `esf_buf_setup` 拿到的参数是什么
+
+---
+
+## §115 ★ 破案：call0 与 windowed 的 memset/memcpy 把返回地址踩了
+
+**现象**：`esp_wifi_init_internal()` 一进去就挂，`cause=0x14`（EXCCAUSE 20 =
+InstrPageTableErr，PMS 认为这条指令地址没有映射），而且
+`pc == vaddr == a0 == 0x8203d39c` —— 正好是正确返回地址 `0x4203d39c`
+**多了一个 bit31**。
+
+**定位过程**（都是真板/反汇编证据）：
+
+1. 陷阱现场打印 `g_osi_calls[]`，发现库在崩之前**确实在回调我们的 OSI 表**，
+   顺序是 `19 13 21 18 13 19 13 18 13 21`（递归互斥/信号量/加锁/互斥…）。
+2. 在 `s3_wifi_bringup()` 里加 B0/B1/B2 三个检查点，确认进库前
+   `g_wifi_cfg_blob`、`g_wifi_osi_funcs`（`_magic=0xdeadbeaf`、
+   `_version=8`、`magic@144=0x1f2f3f4f`）**全都正确**，BSS 也是干净的。
+3. 反汇编 `wifi_menuconfig_init`（`0x4205a928`）发现它的入口是：
+
+   ```
+   4205a928: entry a1, 48
+   4205a92b: l32r a8, (g_wifi_menuconfig)
+   4205a92e: movi a12, 104
+   4205a931: mov.n a10, a8
+   4205a933: movi a11, 0
+   4205a936: l32r a8, (memset)
+   4205a939: callx8 a8            <-- windowed 代码用 callx8 调 memset
+   4205a93c: mov.n a8, a10
+   4205a93e: bnez.n a2            <-- 之后还指望 a2（=cfg）没变！
+   ```
+
+**根因**：`rt/c6rt.c` 里的 `memset/memcpy/memmove/memcmp` 是 **call0** 编译的。
+windowed 调用者用 `callx8` 调它，它不执行 `entry`（不轮转寄存器窗口），
+于是直接作用在调用者的物理寄存器上：
+
+* 返回时用 `ret`（`jx a0`），而 windowed 的返回地址带 bit31 标记，
+  必须由 `retw` 消掉 ⇒ 跳到 `0x8203d39c` ⇒ InstrPageTableErr；
+* 顺手把调用者的 `a2`（cfg）等活跃寄存器踩掉。
+
+**修法**：`port/s3/abi_thunk.S` 改成真正的双 ABI 实现：
+
+* 入口看 `a0` 的 **bit31**（windowed 的返回地址带这一位，call0 的都是
+  `0x40xxxxxx`/`0x42xxxxxx`，bit31=0）判断调用者用哪套 ABI；
+* call0 路径：存/取 `a12..a15` 后用 `ret` 返回；
+* windowed 路径：`entry a1, 16` + 函数体 + `retw`（a12..a15 由 entry/retw
+  天然保护）；
+* `rt/c6rt.c` 里这四个函数用 `#if !defined(__XTENSA__)` 让位；
+* `abi_thunk.o` 加进 `S3_OBJ_CORE`。
+
+> 表里的字符串函数（`strlen/strcmp/strncmp/strcpy/strncpy/strnlen`）在
+> `wifi_glue.c` 里本来就是 `-mabi=windowed` 编的，所以库调它们没问题。
+
+**结果（真板）**：`esp_wifi_init_internal()` **不再挂，正常返回 `0x102`**：
+
+```
+B0 osi0=00000000 osi@00000000 calls@3fcbe884
+B1 slot13=4037c9cc slot18=4037ca4c magic=deadbeaf ver=00000008
+B2 cfg@3fcbe784 osi=3fcbea84 magic@144=1f2f3f4f
+o19 o13 o21 o18 o13 o19 o13 o18 o13 o21 M2 bringup returned
+```
+
+顺带确认的两件事：
+
+* `wifi_init_config_t.wpa_crypto_funcs` 的真实布局是
+  `size(u32)@4`、`version(u32)@8`、**9 个函数指针**@12..47，共 44 字节；
+  `wifi_menuconfig_init` 会硬检查 `cfg[4]==44 && cfg[8]==1`，必须填。
+* `l32i a10, osi_funcs, 72` 里的 72 是**字节偏移**，等于字段号 18
+  （`_mutex_create`），不是字段序号 72。
+
+### 下一步
+
+`0x102`（INVALID_ARG）是在 `wifi_menuconfig_init` 返回之后、`pp_create_task`
+之前产生的（`_task_get_max_priority`=字段 42 和 `_wifi_create_queue`=字段 94
+一次都没被调到）。`wifi_init_in_caller_task` 那一段的顺序是：
+
+```
+call8 wifi_menuconfig_init   ; 0x4205a928，已通过
+call8 misc_nvs_init          ; 0x420652f4
+call8 ic_create_wifi_task    ; 0x42032ec0 -> call8 pp_create_task (0x4203433c)
+call8 ieee80211_ioctl_init   ; 0x4205dd50
+```
+
+所以下一个要查的是 `misc_nvs_init` / `misc_nvs_load` 的返回值和
+`ic_create_wifi_task` 是否真的被调到。

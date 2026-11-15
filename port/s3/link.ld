@@ -132,6 +132,10 @@ SECTIONS
   _stack_limit = _bss_end + 0x800;   /* 2KB 护栏；大 bss 的构建（音频/图像）也能容下 */
   ASSERT(_stack_limit <= _stack_top, "S3 BSS/stack collision")
 
+  /* C 代码默认带 -fasynchronous-unwind-tables，会生成 .eh_frame；
+     我们没有展开栈回溯器，直接丢弃，否则它会挤进 .data 的 LMA 区间。 */
+  /DISCARD/ : { *(.eh_frame) *(.eh_frame_hdr) *(.note.GNU-stack) *(.comment) }
+
   _text_start = ADDR(.text);
   _text_end = ADDR(.text) + SIZEOF(.text);
   _data_start = ADDR(.data);

@@ -123,6 +123,11 @@ static void trap_hex(u32 v)
     }
 }
 
+/* WiFi 闭源库通过我们的 osi_funcs 表回调；表里每个函数的调用次数记在
+ * g_osi_calls[]。崩溃时在串口把它打出来，就知道库走到哪一步了。
+ * 用 weak 引用，非 WiFi 构建时地址为 0，自动跳过。 */
+extern volatile unsigned int g_osi_calls[128] __attribute__((weak));
+
 void s3_trap(u32 frame_sp)
 {
     u32 *f = (u32 *)frame_sp;
@@ -145,6 +150,26 @@ void s3_trap(u32 frame_sp)
     trap_hex(pc);
     port_puts(" ps=");
     trap_hex(ps);
+    {
+        u32 va = 0;
+        __asm__ __volatile__("rsr %0, excvaddr" : "=r"(va));
+        port_puts(" vaddr=");
+        trap_hex(va);
+        port_puts(" ws=");
+        trap_hex((ps >> 16) & 0xFu);
+        port_puts(" a0=");
+        trap_hex(((u32 *)frame_sp)[0]);
+    }
+    if (&g_osi_calls[0] != 0) {
+        u32 i = 0;
+        port_puts("\n  osi:");
+        while (i < 128u) {
+            if (g_osi_calls[i] != 0u) {
+                port_puts(" "); trap_hex(i); port_puts("="); trap_hex(g_osi_calls[i]);
+            }
+            i++;
+        }
+    }
     port_puts("\n");
     /* 串口不可靠时用 LCD 背光(GPIO13)把异常码闪出来：
      *   先长亮 1 下（表示"进陷阱了"），然后慢慢闪 (cause + 1) 下。 */

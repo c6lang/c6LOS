@@ -8,6 +8,7 @@
 
 #include <stddef.h>
 
+#if !defined(__XTENSA__)
 void *memcpy(void *dst, const void *src, size_t n)
 {
     unsigned char *d = (unsigned char *)dst;
@@ -58,3 +59,4 @@ int memcmp(const void *a, const void *b, size_t n)
     }
     return 0;
 }
+#endif

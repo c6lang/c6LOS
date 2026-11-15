@@ -476,6 +476,15 @@ u32 s3_win_wifi_init(void *cfg)
 extern void s3_wifi_osi_init(void);
 extern u32  s3_wifi_osi_funcs_ptr(void);
 
+extern void *s3_wifi_cfg_ptr(void);
+extern void *s3_wifi_calls_ptr(void);
+
+extern u32 s3_wifi_bringup(void);
+u32 s3_win_bringup(void) { return s3_wifi_bringup(); }
+
+u32 s3_win_cfg_ptr(void)   { return (u32)s3_wifi_cfg_ptr(); }
+u32 s3_win_calls_ptr(void) { return (u32)s3_wifi_calls_ptr(); }
+
 u32 s3_win_osi_init(void)
 {
     s3_wifi_osi_init();

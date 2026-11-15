@@ -1,9 +1,19 @@
 /* wifi_osi.h -- WiFi closed-source lib OS adapter table (ESP32-S3).
- * Field names come from IDF components/esp_wifi/esp32s3/esp_adapter.c,
- * the 119 designated initializers of `wifi_osi_funcs_t g_wifi_osi_funcs`.
- * Order must match exactly. The blob (libpp/libnet80211) reads it through
- * the global pointer g_osi_funcs_p. S3's ROM ld does NOT define
- * g_osi_funcs_p (C2/C6/C61 do), so we must define it ourselves. */
+ * 字段顺序**直接从** IDF 的
+ *   components/esp_wifi/include/esp_private/wifi_os_adapter.h
+ * 生成，并已去掉 S3 上不成立的两个条件块：
+ *   - `#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2 || CONFIG_ESP_WIFI_TARGET_ESP32`
+ *     包住的 _phy_common_clock_enable/_disable
+ *   - `#if CONFIG_IDF_TARGET_ESP32C6 || ...C5 || ...C61`
+ *     包住的 _regdma_link_set_write_wait_content/_sleep_retention_find_link_by_id
+ * ⇒ S3 上共 **120** 个字段，_version 在 0，_magic 在 119（偏移 0x1DC）。
+ * 这个偏移已被反汇编 libnet80211 的 wifi_osi_funcs_register 证实：
+ *   4203d43c:  l32i a12, a2, 0x1dc
+ *   4203d43f:  l32r a11, 0xdeadbeaf
+ *   ⇒ 第 119 个字必须是魔数。
+ *
+ * blob (libpp/libnet80211) 通过全局指针 g_osi_funcs_p 读这张表。
+ * S3 的 ROM ld 不定义 g_osi_funcs_p（C2/C6/C61 才有），所以由我们自己定义。 */
 #ifndef C6OS_WIFI_OSI_H
 #define C6OS_WIFI_OSI_H
 
@@ -111,6 +121,7 @@ typedef struct wifi_osi_funcs_t {
     void *_coex_enable;
     void *_coex_disable;
     void *_coex_status_get;
+    void *_coex_condition_set;
     void *_coex_wifi_request;
     void *_coex_wifi_release;
     void *_coex_wifi_channel_set;
@@ -122,9 +133,9 @@ typedef struct wifi_osi_funcs_t {
     void *_coex_schm_interval_get;
     void *_coex_schm_curr_period_get;
     void *_coex_schm_curr_phase_get;
-    void *_coex_register_start_cb;
     void *_coex_schm_process_restart;
     void *_coex_schm_register_cb;
+    void *_coex_register_start_cb;
     void *_coex_schm_flexible_period_set;
     void *_coex_schm_flexible_period_get;
     void *_coex_schm_get_phase_by_idx;

@@ -23,8 +23,12 @@ static u32 glue_ret0(void)
  * 注意：port/s3/fast.c 里的系统堆只在非 LEAN 构建里链接，而 WiFi 场景必须
  * 用 S3_LEAN=1，所以这里**自建一个独立的堆**，放在空闲 DRAM 里。
  * 0x3FCB0000 ~ 0x3FCD9000 之间是可用区间（避开栈和坏区）。 */
-#define S3_WIFI_HEAP_BASE 0x3FCB8000u
-#define S3_WIFI_HEAP_SIZE 0x00010000u   /* 64KB，落在 app 的 DRAM 段之后的空闲区 */
+/* 堆内存放在 **BSS 静态数组**里：由 IDF bootloader 统一清零、不会和
+ * .data/.bss 里的其它符号重叠（之前硬编码 0x3FCB8000 正好压在 _bss 段里，
+ * 一分配就踩坏内核全局变量）。 */
+static u32 g_wifi_heap_mem[16384];      /* 64KB */
+#define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
+#define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 
 /* 自包含的分配器：块头 16 字节 { magic, size, used, next }，首次适配 + 释放合并。
  * 不依赖 kernel/heap.c6（它在 S3_LEAN=1 下不参与链接）。 */
@@ -77,7 +81,6 @@ static void osi_free(void *p)
     if (hdr->magic == WH_MAGIC) { hdr->used = 0u; }
 }
 
-static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
 
 static void *osi_realloc(void *p, u32 n)
 {
@@ -102,13 +105,28 @@ static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz);
                                             return p; }
 static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
+extern volatile u32 g_osi_calls[128];
+extern int ets_printf(const char *fmt, ...);
+
+/* 临时诊断：库每回调一次就把字段号打出来（前 240 次）。 */
+static u32 g_osi_trace_n = 0u;
+
+#define OSI_HIT(i) do { \
+    g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
+    if (g_osi_trace_n < 240u) { \
+        g_osi_trace_n = g_osi_trace_n + 1u; \
+        ets_printf("o%u ", (u32)(i)); \
+    } } while (0)
+
 /* ---- OSI 队列：自包含的环形缓冲（WiFi 初始化阶段就要用）---- */
 typedef struct { u32 len; u32 size; u32 head; u32 tail; u32 count; u8 *buf; } WQ;
 
 static u32 osi_wifi_create_queue(u32 len, u32 size)
 {
     WQ *q = (WQ *)osi_malloc((u32)sizeof(WQ) + len * size);
-    if (q == 0) { return 0u; }
+    OSI_HIT(94);
+    if (q == 0) { ets_printf("QFAIL %u %u\n", len, size); return 0u; }
+    ets_printf("Qok %u %u -> %08x\n", len, size, (u32)(void *)q);
     q->len = len; q->size = size; q->head = 0u; q->tail = 0u; q->count = 0u;
     q->buf = (u8 *)(q + 1);
     return (u32)q;
@@ -144,43 +162,358 @@ static u32 osi_wifi_queue_recv(u32 qh, void *item, u32 ticks)
 
 static void osi_wifi_delete_queue(u32 qh) { if (qh != 0u) { osi_free((void *)qh); } }
 
+/* ===================== OSI 层：其余基础函数 =====================
+ * 说明：wifi_glue.c 整体用 windowed ABI 编译（闭源库回调我们时是 call8/retw），
+ * 这里只调用 call0 的外部符号（port_puts / os_tick_get）——windowed → call0
+ * 是安全方向（call0 被调方不发 entry，不会泄漏寄存器窗口）。 */
+#include "c6os/port.h"
+#include "c6os/tick.h"
+
+/* 调用计数：上板用信标读，能看出库走到哪一步了 */
+volatile u32 g_osi_calls[128];
+
+
+/* ---- 信号量 ---- */
+typedef struct { u32 magic; u32 cnt; u32 max; } WSem;
+#define WSEM_MAGIC 0x53454D31u
+
+static void *osi_semphr_create(u32 max, u32 init)
+{
+    WSem *s = (WSem *)osi_malloc((u32)sizeof(WSem));
+    OSI_HIT(13);
+    if (s == 0) { return 0; }
+    s->magic = WSEM_MAGIC; s->cnt = init; s->max = max;
+    return (void *)s;
+}
+static void osi_semphr_delete(void *sem) { if (sem != 0) { osi_free(sem); } }
+static int osi_semphr_take(void *sem, u32 ticks)
+{
+    WSem *s = (WSem *)sem;
+    OSI_HIT(15);
+    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
+    if (s->cnt == 0u) { return 0; }     /* 没有真正阻塞（单线程初始化阶段够用） */
+    s->cnt = s->cnt - 1u;
+    return 1;
+}
+static int osi_semphr_give(void *sem)
+{
+    WSem *s = (WSem *)sem;
+    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
+    s->cnt = s->cnt + 1u;
+    return 1;
+}
+
+/* ---- 互斥量（复用信号量）---- */
+static void *osi_mutex_create(void)
+{
+    OSI_HIT(18);
+    return osi_semphr_create(1u, 1u);      /* 互斥量创建即可用 */
+}
+static void osi_mutex_delete(void *m) { osi_semphr_delete(m); }
+static int osi_mutex_lock(void *m)
+{
+    WSem *s = (WSem *)m;
+    OSI_HIT(21);
+    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
+    if (s->cnt != 0u) { s->cnt = s->cnt - 1u; }
+    return 1;
+}
+static int osi_mutex_unlock(void *m)
+{
+    WSem *s = (WSem *)m;
+    if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
+    if (s->cnt < s->max) { s->cnt = s->cnt + 1u; }
+    return 1;
+}
+static void *osi_recursive_mutex_create(void)
+{
+    OSI_HIT(19);
+    return osi_semphr_create(0xFFFFFFFFu, 1u);   /* 递归锁：给个大上限即可 */
+}
+
+/* 当前线程的信号量（库里拿它做阻塞等待；单线程阶段给一个固定的即可） */
+static WSem g_thread_sem = { WSEM_MAGIC, 0u, 1u };
+static void *osi_thread_semphr_get(void) { OSI_HIT(17); return (void *)&g_thread_sem; }
+
+/* ---- 事件组 ---- */
+typedef struct { u32 magic; volatile u32 bits; } WEvt;
+#define WEVT_MAGIC 0x45565431u
+
+static void *osi_event_group_create(void)
+{
+    WEvt *e = (WEvt *)osi_malloc((u32)sizeof(WEvt));
+    OSI_HIT(31);
+    if (e == 0) { return 0; }
+    e->magic = WEVT_MAGIC; e->bits = 0u;
+    return (void *)e;
+}
+static void osi_event_group_delete(void *g) { if (g != 0) { osi_free(g); } }
+static u32 osi_event_group_set_bits(void *g, u32 bits)
+{
+    WEvt *e = (WEvt *)g;
+    if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
+    e->bits = e->bits | bits;
+    return e->bits;
+}
+static u32 osi_event_group_clear_bits(void *g, u32 bits)
+{
+    WEvt *e = (WEvt *)g;
+    if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
+    e->bits = e->bits & ~bits;
+    return e->bits;
+}
+static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
+                                     u32 ticks, u32 *out)
+{
+    WEvt *e = (WEvt *)g;
+    u32 got;
+    if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
+    got = e->bits & bits;
+    if (wait_all != 0) {
+        if (got != bits) { return 0u; }
+    } else {
+        if (got == 0u) { return 0u; }
+    }
+    if (clear != 0) { e->bits = e->bits & ~bits; }
+    if (out != 0) { *out = e->bits; }
+    return 1u;
+}
+
+/* ---- 通用队列（_queue_* 系列，和 _wifi_* 用同一实现）---- */
+static u32 osi_queue_create(u32 len, u32 size) { OSI_HIT(23); return osi_wifi_create_queue(len, size); }
+static void osi_queue_delete(u32 q) { osi_wifi_delete_queue(q); }
+static int osi_queue_send(u32 q, void *item, u32 ticks) { OSI_HIT(25); return (int)osi_wifi_queue_send(q, item, ticks); }
+static int osi_queue_recv(u32 q, void *item, u32 ticks) { OSI_HIT(29); return (int)osi_wifi_queue_recv(q, item, ticks); }
+static int osi_queue_msg_waiting(u32 q)
+{
+    WQ *p = (WQ *)q;
+    if (p == 0) { return 0; }
+    return (int)p->count;
+}
+
+/* ---- 任务（初始化阶段单线程，先给非零句柄）---- */
+static u32 g_fake_task = 0x7A5B0001u;
+static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
+                           u32 prio, void *handle)
+{
+    OSI_HIT(37);
+    if (handle != 0) { *(u32 *)handle = (u32)&g_fake_task; }
+    return 1;                              /* 1 = pdPASS */
+}
+static void osi_task_delete(void *h) { (void)h; }
+static u32 osi_task_get_current_task(void) { return (u32)&g_fake_task; }
+static u32 osi_task_ms_to_tick(u32 ms) { return ms; }
+static u32 osi_task_get_max_priority(void) { OSI_HIT(42); return 25u; }
+static void osi_task_yield_from_isr(void) { }
+
+/* ---- 日志：把库自己打的信息送到我们的串口 ---- */
+/* 注意：这里**不能**调 port_puts —— 它是 call0 编译的，从 windowed 代码
+ * 调过去会把寄存器窗口搞乱（实测 cause=0x14 InstrPageTableErr，
+ * 返回地址被 OR 上 bit31）。ROM 的 ets_printf 从 windowed 调是安全的
+ * （s3_win_log 一直这么用）。 */
+extern int ets_printf(const char *fmt, ...);
+
+static void osi_log_write(u32 level, const char *tag, const char *fmt, ...)
+{
+    OSI_HIT(83);
+    ets_printf("[wifi]%s: %s\n", (tag != 0) ? tag : "?", (fmt != 0) ? fmt : "?");
+    (void)level;
+}
+
+/* ---- 时间 / 随机数 ---- */
+static u64 osi_esp_timer_get_time(void)
+{
+    u32 hz = os_tick_hz();
+    u64 t = os_tick_get();
+    if (hz == 0u) { return t * 1000u; }
+    return (t * 1000000u) / (u64)hz;
+}
+static u32 osi_rand(void) { static u32 r = 0x12345678u; r = r * 1103515245u + 12345u; return r >> 16; }
+static u32 osi_get_time(void) { return (u32)(osi_esp_timer_get_time() / 1000000u); }
+static u32 osi_slowclk_cal_get(void) { return 0u; }
+
+/* ---- 其它琐碎项 ---- */
+static int osi_env_is_chip(void) { return 1; }
+static u32 osi_read_mac(u8 *mac, u32 type)
+{
+    u32 i = 0;
+    (void)type;
+    if (mac != 0) { while (i < 6u) { mac[i] = 0u; i = i + 1u; } }
+    return 0u;
+}
+static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
+
+/* ---- 表装配：用 __builtin_offsetof，彻底避免手数下标 ---- */
+#define OSI_SET(slot, fn) \
+    (((void **)(void *)&g_wifi_osi_funcs)[__builtin_offsetof(wifi_osi_funcs_t, slot) / 4u] \
+        = (void *)(fn))
+
+/* 编译期断言：_magic 必须在偏移 0x1DC（库硬读这个位置） */
+typedef char s3_osi_magic_offset_check[
+    (__builtin_offsetof(wifi_osi_funcs_t, _magic) == 0x1DCu) ? 1 : -1];
+typedef char s3_osi_size_check[(sizeof(wifi_osi_funcs_t) == 480u) ? 1 : -1];
+
 void s3_wifi_osi_init(void)
 {
-    void **tab = (void **)&g_wifi_osi_funcs;
-    u32 n = (u32)(sizeof(wifi_osi_funcs_t) / sizeof(void *));
+    void **tab = (void **)(void *)&g_wifi_osi_funcs;
+    u32 n = (u32)(sizeof(wifi_osi_funcs_t) / 4u);
     u32 i = 0;
 
-    while (i < n) {
-        tab[i] = (void *)glue_ret0;
-        i = i + 1u;
-    }
-    /* 头尾两个字不是函数指针，而是版本号和魔数 —— 闭源库会用它们校验整张表：
-     *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
-     *   ESP_WIFI_OS_ADAPTER_MAGIC   = 0xDEADBEAF
-     * 之前这里全被填成了 glue_ret0，所以 wifi_osi_funcs_register() 返回
-     * ESP_ERR_INVALID_ARG(0x102)。 */
-    tab[0]     = (void *)0x00000008u;
-    /* 注意：不能用 tab[n-1]！闭源库是从**固定偏移 0x1DC（第 119 个字）**读 _magic 的，
-     * 而头文件里的 wifi_osi_funcs_t 因为 #if CONFIG_IDF_TARGET_ESP32C6/C5/C61
-     * 那两个条件字段对我们不成立，算出来的 sizeof 比库期望的小两格。 */
-    tab[119]   = (void *)0xDEADBEAFu;
+    while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
 
-    /* 接上真正的内存函数（字段号 = wifi_os_adapter.h 里的行号 - 30） */
-    tab[43] = (void *)osi_malloc;          /* _malloc */
-    tab[44] = (void *)osi_free;            /* _free */
-    tab[46] = (void *)osi_free_heap_size;  /* _get_free_heap_size */
-    tab[92] = (void *)osi_malloc;          /* _malloc_internal */
-    tab[93] = (void *)osi_realloc;         /* _realloc_internal */
-    tab[94] = (void *)osi_calloc;          /* _calloc_internal */
-    tab[95] = (void *)osi_zalloc;          /* _zalloc_internal */
-    tab[96] = (void *)osi_malloc;          /* _wifi_malloc */
-    tab[97] = (void *)osi_realloc;         /* _wifi_realloc */
-    tab[98] = (void *)osi_calloc;          /* _wifi_calloc */
-    tab[99] = (void *)osi_zalloc;          /* _wifi_zalloc */
-    tab[100] = (void *)osi_wifi_create_queue;   /* _wifi_create_queue */
-    tab[102] = (void *)osi_wifi_delete_queue;   /* _wifi_delete_queue */
-    tab[103] = (void *)osi_wifi_queue_send;     /* _wifi_queue_send */
-    tab[104] = (void *)osi_wifi_queue_recv;     /* _wifi_queue_recv */
+    /* 头尾不是函数指针，而是版本号和魔数：
+     *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
+     *   ESP_WIFI_OS_ADAPTER_MAGIC   = 0xDEADBEAF   （固定偏移 0x1DC = 第 119 个字） */
+    OSI_SET(_version, 0x00000008u);
+    OSI_SET(_magic,   0xDEADBEAFu);
+
+    /* ---- 内存 ---- */
+    OSI_SET(_malloc,          osi_malloc);
+    OSI_SET(_free,            osi_free);
+    OSI_SET(_get_free_heap_size, osi_free_heap_size);
+    OSI_SET(_malloc_internal, osi_malloc);
+    OSI_SET(_realloc_internal, osi_realloc);
+    OSI_SET(_calloc_internal, osi_calloc);
+    OSI_SET(_zalloc_internal, osi_zalloc);
+    OSI_SET(_wifi_malloc,     osi_malloc);
+    OSI_SET(_wifi_realloc,    osi_realloc);
+    OSI_SET(_wifi_calloc,     osi_calloc);
+    OSI_SET(_wifi_zalloc,     osi_zalloc);
+
+    /* ---- 队列 ---- */
+    OSI_SET(_wifi_create_queue, osi_wifi_create_queue);
+    OSI_SET(_wifi_delete_queue, osi_wifi_delete_queue);
+    OSI_SET(_queue_create,      osi_queue_create);
+    OSI_SET(_queue_delete,      osi_queue_delete);
+    OSI_SET(_queue_send,        osi_queue_send);
+    OSI_SET(_queue_send_from_isr, osi_queue_send);
+    OSI_SET(_queue_send_to_back,  osi_queue_send);
+    OSI_SET(_queue_send_to_front, osi_queue_send);
+    OSI_SET(_queue_recv,        osi_queue_recv);
+    OSI_SET(_queue_msg_waiting, osi_queue_msg_waiting);
+
+    /* ---- 信号量 / 互斥量 ---- */
+    OSI_SET(_semphr_create,     osi_semphr_create);
+    OSI_SET(_semphr_delete,     osi_semphr_delete);
+    OSI_SET(_semphr_take,       osi_semphr_take);
+    OSI_SET(_semphr_give,       osi_semphr_give);
+    OSI_SET(_wifi_thread_semphr_get, osi_thread_semphr_get);
+    OSI_SET(_mutex_create,      osi_mutex_create);
+    OSI_SET(_recursive_mutex_create, osi_recursive_mutex_create);
+    OSI_SET(_mutex_delete,      osi_mutex_delete);
+    OSI_SET(_mutex_lock,        osi_mutex_lock);
+    OSI_SET(_mutex_unlock,      osi_mutex_unlock);
+
+    /* ---- 事件组 ---- */
+    OSI_SET(_event_group_create,     osi_event_group_create);
+    OSI_SET(_event_group_delete,     osi_event_group_delete);
+    OSI_SET(_event_group_set_bits,   osi_event_group_set_bits);
+    OSI_SET(_event_group_clear_bits, osi_event_group_clear_bits);
+    OSI_SET(_event_group_wait_bits,  osi_event_group_wait_bits);
+
+    /* ---- 任务 ---- */
+    OSI_SET(_task_create,            osi_task_create);
+    OSI_SET(_task_create_pinned_to_core, osi_task_create);
+    OSI_SET(_task_delete,            osi_task_delete);
+    OSI_SET(_task_get_current_task,  osi_task_get_current_task);
+    OSI_SET(_task_ms_to_tick,        osi_task_ms_to_tick);
+    OSI_SET(_task_get_max_priority,  osi_task_get_max_priority);
+    OSI_SET(_task_yield_from_isr,    osi_task_yield_from_isr);
+
+    /* ---- 杂项 ---- */
+    OSI_SET(_env_is_chip,   osi_env_is_chip);
+    OSI_SET(_read_mac,      osi_read_mac);
+    OSI_SET(_log_write,     osi_log_write);
+    OSI_SET(_esp_timer_get_time, osi_esp_timer_get_time);
+    OSI_SET(_rand,          osi_rand);
+    OSI_SET(_get_random,    osi_rand);
+    OSI_SET(_random,        osi_rand);
+    OSI_SET(_get_time,      osi_get_time);
+    OSI_SET(_slowclk_cal_get, osi_slowclk_cal_get);
+    OSI_SET(_spin_lock_create, osi_mutex_create);
+    OSI_SET(_spin_lock_delete, osi_mutex_delete);
+    OSI_SET(_is_from_isr,   glue_ret0);
+}
+
+/* WiFi 初始化配置块：放在 BSS 里，由 .c6 侧经桥取地址后填写。
+ * 以前 .c6 里写死 0x3FCA2000，那个地址落在 .data 段内，填配置就把
+ * 我们自己的全局变量覆盖了。 */
+u32 g_wifi_cfg_blob[64];
+
+void *s3_wifi_cfg_ptr(void) { return (void *)g_wifi_cfg_blob; }
+
+/* ===================== WiFi 启动流程（全部在 C 侧） =====================
+ * 之前这段是在 .c6 里写的，但 .c6 生成的代码在跨函数调用时会把局部变量
+ * （配置块指针）弄丢，导致 esp_wifi_init_internal 收到字符串地址而不是 cfg。
+ * wifi_glue.c 本身就是 windowed 编译，可以直接调闭源库，不需要绕桥。 */
+extern int esp_wifi_init_internal(const void *cfg);
+
+static void wcfg(u32 off, u32 v)
+{
+    *(volatile u32 *)((u8 *)g_wifi_cfg_blob + off) = v;
+}
+
+u32 s3_wifi_bringup(void)
+{
+    u32 i = 0u;
+    ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
+               (u32)g_osi_calls[0], (u32)(void *)g_wifi_osi_funcs._version,
+               (u32)(void *)&g_osi_calls[0]);
+    while (i < 40u) { *(volatile u32 *)((u8 *)g_wifi_cfg_blob + i * 4u) = 0u; i = i + 1u; }
+
+    wcfg(0u,   (u32)(void *)&g_wifi_osi_funcs);   /* osi_funcs */
+    /* wpa_crypto_funcs 紧跟其后：wifi_menuconfig_init 会检查
+     * cfg[4] == 44 (sizeof) 且 cfg[8] == 1 (version)，否则直接返回 0x102。
+     * 9 个函数指针暂时留空，等接 mbedtls 再补（WPA2/TLS 都要用）。 */
+    wcfg(4u,   44u);            /* wpa_crypto_funcs.size    */
+    wcfg(8u,   1u);             /* wpa_crypto_funcs.version */
+    wcfg(48u,  10u);            /* static_rx_buf_num  */
+    wcfg(52u,  32u);            /* dynamic_rx_buf_num */
+    wcfg(60u,  0u);             /* static_tx_buf_num  */
+    wcfg(64u,  32u);            /* dynamic_tx_buf_num */
+    wcfg(72u,  5u);             /* rx_mgmt_buf_num    */
+    wcfg(84u,  1u);             /* ampdu_rx_enable    */
+    wcfg(88u,  1u);             /* ampdu_tx_enable    */
+    wcfg(96u,  0u);             /* nvs_enable = 0     */
+    wcfg(104u, 6u);             /* rx_ba_win          */
+    wcfg(112u, 752u);           /* beacon_max_len     */
+    wcfg(116u, 6u);             /* mgmt_sbuf_num      */
+    wcfg(132u, 7u);             /* espnow_max_encrypt_num */
+    wcfg(136u, 1u);             /* tx_hetb_queue_num  */
+    wcfg(144u, 0x1F2F3F4Fu);    /* magic              */
+
+    s3_wifi_osi_init();
+    ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
+               (u32)(void *)g_wifi_osi_funcs._semphr_create,
+               (u32)(void *)g_wifi_osi_funcs._mutex_create,
+               (u32)(void *)g_wifi_osi_funcs._magic,
+               (u32)(void *)g_wifi_osi_funcs._version);
+    ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
+               (u32)(void *)g_wifi_cfg_blob,
+               *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),
+               *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 144u));
+    return (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+}
+void *s3_wifi_calls_ptr(void) { return (void *)g_osi_calls; }
+
+/* 诊断：把关键 OSI 函数的调用计数打到串口（供 .c6 侧经桥调用） */
+static void pnm(const char *n, u32 v)
+{
+    ets_printf("%s=%08x ", n, v);
+}
+
+void s3_osi_dump(void)
+{
+    ets_printf("\n[osi] ");
+    pnm("mutex",    g_osi_calls[18]);
+    pnm("lock",     g_osi_calls[21]);
+    pnm("qcreat",   g_osi_calls[23]);
+    pnm("sem",      g_osi_calls[13]);
+    pnm("task",     g_osi_calls[37]);
+    pnm("evt",      g_osi_calls[31]);
+    pnm("wmalloc",  g_osi_calls[90]);
+    pnm("log",      g_osi_calls[83]);
+    ets_printf("\n");
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */
