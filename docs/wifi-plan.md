@@ -8392,3 +8392,32 @@ call0/windowed 混合链不能参与 spill。所以要给切换路径加一个"�
 的开关（例如 `g_sched_ready`，`os_task_start` 里置 1），spill 分支只在它为真时
 执行。这一条能同时解释本轮第 1、2 版的失败（两次都死在启动早期，而不是死在
 任务的阻塞/恢复路径上）。
+
+### §199 新工具：JTAG 单步观察窗口状态（`tools/gstep_win.gdb`）
+之前的失败都是"改一版、烧一次、看串口"，太粗。现在这套能用了：
+```sh
+GDB=/media/winger/inst_26/esp/.espressif/tools/xtensa-esp-elf-gdb/14.2_20240403/\
+xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb
+sudo $GDB -q -batch -x tools/gstep_win.gdb build/wifi/c6os.elf
+```
+`tools/gstep_win.gdb` 做的是：`monitor reset halt` → `hbreak port_task_switch`
+→ 命中了之后逐步 `stepi`，只在 `windowbase`/`windowstart` 变化时打印。
+（要点：`monitor reset halt` 之后应用能正常跑起来，硬件断点可用；
+之前 `break __wrap_pp_create_task` 打不中是因为那之前就崩了，不是断点问题。）
+
+第一次切换（从启动栈切到第一个任务）的实测入口状态：
+```
+pc=port_task_switch  wb=9  ws=0x280  ps=0x60900  a1=0x3fcd8ef0(boot 栈)
+连走 60 步：windowbase/windowstart 完全没变（wb=9, ws=0x280）
+```
+`0x280` = bit7|bit9 —— live 窗口不连续，说明**启动链上就已经带着一个不干净的
+windowstart 进入第一次切换**。这为下一轮提供了明确的入手点：先在
+`os_task_start` 之前把 WINDOWSTART 收拾干净（此时还没有任务栈，最安全），
+再让切换路径去维护它。
+
+### 下一轮行动计划（按顺序，不要跳）
+1. 用 `tools/gstep_win.gdb` 在**没有 spill 的基线**上，把第一次切换的完整
+   60~200 步走完，确认 windowstart 是在哪里变成 bit7|bit9 的；
+2. 在 `os_task_start` 之前（启动栈上、无任务上下文）显式把 WINDOWSTART
+   归一化一次；
+3. 然后重新引入官方 spill（`tools/gstep_win.gdb` 逐步验证），而不是烧完看串口。
