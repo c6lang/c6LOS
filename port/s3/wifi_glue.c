@@ -199,9 +199,13 @@ extern u32  s3_w2c_current_task(void);
 
 /* 阻塞原语进入/离开标记：0x50000370 = 最后进入的，0x50000374 = 最后离开的。
  * 两者不一致就说明卡在那个原语上。1=sem_pend 2=queue_get 3=event_wait 4=mutex_pend */
+/* 按任务分开记（任务 id 取低 2 位做下标），避免两个任务互相覆盖：
+ *   0x50000370 + 8*i = 任务 i 最后进入 / 最后离开 的阻塞原语
+ *   1=sem_pend 2=queue_get 3=event_wait 4=mutex_pend */
 #define BDIAG ((volatile u32 *)0x50000370u)
-#define B_IN(id)   (BDIAG[0] = (u32)(id))
-#define B_OUT(id)  (BDIAG[1] = (u32)(id))
+#define B_SLOT (((s3_w2c_current_task() & 3u) * 2u))
+#define B_IN(id)   (BDIAG[B_SLOT] = (u32)(id))
+#define B_OUT(id)  (BDIAG[B_SLOT + 1u] = (u32)(id))
 
 #define C6_FOREVER 0xFFFFFFFFu
 
