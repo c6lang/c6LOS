@@ -1019,7 +1019,13 @@ ppTxProtoProc = 0x400056b8;
 ppTxqUpdateBitmap = 0x400056c4;
 /*pp_coex_tx_request = 0x400056d0;*/
 pp_hdrsize = 0x400056dc;
-pp_post = 0x400056e8;
+/* pp_post 必须是 libpp.a 里的那一份（`T pp_post`），不能用 ROM 的：
+ * 我们用的是 libpp 的 ppTask，它从 wifi_create_queue 建的队列收消息，
+ * 而 ROM 的 pp_post 是给 Espressif 自己的 ROM 协议栈用的，投递不到同一个
+ * 队列。用绝对符号钉住 ROM 地址会把库里的强定义顶掉，真板表现就是
+ * "初始化任务和 WiFi 任务都阻塞在同一个队列上、_queue_send 一次都没被调"。
+ * （同理 ppTask = 0x400056a0 也已经注释掉了。）*/
+/* pp_post = 0x400056e8; */
 pp_process_hmac_waiting_txq = 0x400056f4;
 rcGetAmpduSched = 0x40005700;
 rcUpdateRxDone = 0x4000570c;

@@ -5524,3 +5524,39 @@ WiFi 任务里" —— 这个判断本身是对的。
 2. 查 `pp_post`（ROM `0x400056e8`）：直接读 ROM 字节确认它是否走
    `g_osi_funcs_p` 的 `_queue_send`（字段 25）。若不走，用 `--wrap=pp_post`
    把它换成我们自己的实现（投递到 `*xphyQueue`）。
+
+## §128 `pp_post` 被 ROM 绝对符号顶掉（已修）
+
+`port/s3/rom/esp32s3.rom.ld` 里原来有一行 `pp_post = 0x400056e8;`。
+但 **`libpp.a` 自己就有强定义的 `pp_post`（`T pp_post`）**：
+
+```
+libpp.a: 0000001c T pp_post     00000074 T ppTask      U pp_post ×3
+```
+
+linker script 里的绝对符号赋值会让所有引用都解析到 ROM 那一份，库里那份
+根本不会参与链接。而 ROM 的 `pp_post` 是给 Espressif 自己的 ROM 协议栈用的，
+和我们用的 libpp `ppTask` 不配套（`ppTask` 从 `_wifi_create_queue` 建的队列
+收消息）。这就是"两个任务都阻塞在同一个队列、`_queue_send` 一次都没被调"
+最合理的解释。已按 `ppTask` 同样的处理方式把它注释掉，交还给 libpp。
+
+反汇编 libpp 的 `pp_post`（`0x42036804`）确认它确实是走我们的 OSI 表的：
+
+```
+l32i a8, osi, 40     ; _wifi_int_disable
+l32i a4, osi, 44     ; _wifi_int_restore
+callx8 a6            ; _queue_send（偏移 100 = 字段 25）
+bnei a10, 1, ...     ; 我们的 osi_queue_send 成功返回 1，对得上
+```
+
+**但真板读数没变化**：回调环仍然是 `... 37 15 16 29 29`，字段 25 依旧没出现。
+也就是说 **`pp_post` 压根没被调用** —— 初始化任务卡在比"投递"更早的地方
+（`wifi_init_in_caller_task` 里 `ic_create_wifi_task` 返回之前）。
+
+### 下一步
+
+1. 记录 `_task_create` 写回给库的句柄（任务 id），确认它是不是 2；
+   再把 `_queue_recv` 里记录的两个任务 id 与它对照。
+2. 若确认"任务 1（wifi_main）也在执行 ppTask 的 recv"，说明 `_task_create`
+   的入口函数/参数映射有问题（windowed 6 参数 → 我们 a2..a7 的顺序），
+   要按 libpp 的调用点逐参数核对。
