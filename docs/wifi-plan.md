@@ -7452,3 +7452,49 @@ queue: xphyQueue=0x3fcbf338，obj=0x3fcbf33c=&q ✓
 `blk2` 是关键：**ppTask 的另一条分支（`ppTask+0x1a7`）在"当前任务=任务1"
 时被执行**。下一步反汇编 `ppTask+0x16c`..`ppTask+0x1b0` 这段，看它是
 错误分支还是重试分支，以及它是怎么被进入的（普通跳转还是返回地址错）。
+
+## §179 `ppTask+0x17c` 起是 WiFi 任务的清理路径（不是重试分支）
+
+```
+4038217c  l32r a3, (s_pp_task_del_sem)
+40382181  beqz a10, skip
+40382186  l32i a3, a3, 64          ; 字段 16 = _semphr_give
+40382189  callx8 a3                ; _semphr_give(s_pp_task_del_sem, 0)
+4038218c  l32r a3, (s_wifi_queue)
+40382193  l32i a4, a4, 0x17c       ; 字段 95 = _queue_delete
+40382196  callx8 a4                ; _queue_delete(*s_wifi_queue)
+4038219d  s32i a10, a3, 0          ; *s_wifi_queue = 0
+403821a2  l32i a2, a2, 152         ; 字段 38 = _task_delete
+403821a5  s32i a10, a3, 0          ; pp_task_hdl = 0
+403821a7  callx8 a2                ; _task_delete(...)
+403821aa  retw.n
+```
+
+这是 **ppTask 退出时的清理**（先给删除信号量、再删队列、再删自己）。
+
+⚠️ 同时记下一个方法论教训：**`ppTask` 的地址在不同构建之间会变**
+（这一版 `ppTask=0x40382000`，之前几版是 `0x40381fb4` / `0x40381c5c` 等）。
+所以任何"`ppTask+0xNN`"的结论都必须和当次构建的 `nm` 一起记录，
+不能跨构建引用 —— 本轮之前就有过因为这点导致的对不上。
+
+## 本轮结束时的状态
+
+| 项目 | 状态 |
+|---|---|
+| PHY 校准 / enable | ✅ 真板 beacon `0xB0000212` |
+| IROM 取指（闭源库进 flash） | ✅ |
+| windowed ABI 桥 | ✅ 无 TRAP，任务入口 `callx8` 已修 |
+| `esp_wifi_init_internal` | ❌ 仍未返回（无 `W2`） |
+| OSI 回调 | 30 次后停止 |
+| `pp_post` / `_queue_send` | 从未被调用 |
+| 两个任务 | 都建起来了（`task_starts=2`），`ppTask` 阻塞在 `s_wifi_queue` |
+| 内核簿记 | 两条切换路径都核对正确 |
+
+### 下一轮建议
+
+1. 先重新抓一次**当前构建**的 `ppTask` 两个 `_queue_recv` 调用点的偏移
+   （`nm` + 反汇编，别沿用旧偏移）；
+2. 在 `osi_queue_recv_body` 里记录调用者 ctx 的尝试一直拿不到数据
+   （该 RTC 区写入后读不到），改用内核侧可靠通道：
+   在 `os_queue_get_item` 的每次 `os_task_block_prepare` 前
+   把 `q->count` 和 `port_cur_ctx()` 记进阻塞环已有的槽位。
