@@ -173,6 +173,15 @@ extern u32  s3_w2c_current_task(void);
 
 #define C6_FOREVER 0xFFFFFFFFu
 
+/* 内核 os_task_block_prepare 的约定是 **timeout 0 = 不设超时 = 永久等待**；
+ * 直接把 IDF 的 portMAX_DELAY(0xFFFFFFFF) 当 tick 数传进去，会变成
+ * "now + 0xFFFFFFFF"，立刻到期 → 每次等待都秒回超时，调用者就忙等。
+ * 所有阻塞原语统一在这里翻译。 */
+static u32 w_ticks(u32 t)
+{
+    return (t == C6_FOREVER) ? 0u : t;
+}
+
 /* ---- 信号量 ---- */
 typedef struct { WOsSem s; u32 magic; } WSem;
 #define WSEM_MAGIC 0x53454D31u
@@ -201,7 +210,7 @@ static int osi_semphr_take(void *sem, u32 ticks)
     WSem *s = (WSem *)sem;
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    return (s3_w2c_sem_pend((void *)&s->s, ticks) == 0) ? 1 : 0;
+    return (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
 }
 static int osi_semphr_give(void *sem)
 {
@@ -275,7 +284,7 @@ static int osi_mutex_lock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_lock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
-    return (s3_w2c_mutex_pend((void *)&m->m, C6_FOREVER) == 0) ? 1 : 0;
+    return (s3_w2c_mutex_pend((void *)&m->m, 0u) == 0) ? 1 : 0;
 }
 static int osi_mutex_unlock(void *p)
 {
@@ -326,14 +335,40 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
     got = s3_w2c_event_wait((void *)&e->e, bits,
-                            (wait_all != 0) ? 1u : 0u, ticks);
+                            (wait_all != 0) ? 1u : 0u, w_ticks(ticks));
     if (clear != 0 && got != 0u) { (void)s3_w2c_event_clear((void *)&e->e, got); }
     return got;
 }
 
 /* ---- 队列 ---- */
-typedef struct { WOsQueue q; u32 magic; } WQ;
+/* 注意第一个字段 self：闭源库把 `_wifi_create_queue` 的返回值当成 IDF 的
+ * `wifi_static_queue_t { QueueHandle_t queue; void *items; }` 用 —— 它会读
+ * **偏移 0 处的字**当内层队列句柄存下来（反汇编 pp_create_task 0x420343b8 里
+ * 就是 `l32i a4, a10, 0`），之后又把这个值传给 `_queue_recv`。
+ * 所以偏移 0 必须放"队列对象自己的地址"，库再拿回来时我们还能认出它。
+ * （之前偏移 0 是数组成员的 buf 指针，于是库后来传进来的是 buf，
+ *   magic 校验必然失败 → WiFi 任务在 _queue_recv 上死循环。） */
+typedef struct { u32 self; WOsQueue q; u32 magic; } WQ;
 #define WQ_MAGIC 0x51554531u
+
+static u32 g_qn = 0u;
+static u32 g_qbad = 0u;
+
+/* 库有时候（实测）会把队列的 **buf 存储** 而不是队列对象本身传给
+ * _queue_recv。这里按 magic 找不到就扫一遍 WiFi 堆，找出 buf == qh 的那个队列。
+ * 扫描范围就是自己的 g_wifi_heap_mem，代价可控。 */
+static WQ *wq_resolve(void *qh)
+{
+    WQ *q = (WQ *)qh;
+    u32 p;
+    if (q != 0 && q->magic == WQ_MAGIC) { return q; }
+    if (qh == 0) { return 0; }
+    for (p = S3_WIFI_HEAP_BASE; p + (u32)sizeof(WQ) <= S3_WIFI_HEAP_BASE + S3_WIFI_HEAP_SIZE; p += 16u) {
+        WQ *c = (WQ *)p;
+        if (c->magic == WQ_MAGIC && (u32)c->q.buf == (u32)qh) { return c; }
+    }
+    return 0;
+}
 
 static u32 osi_wifi_create_queue(u32 len, u32 size)
 {
@@ -349,8 +384,12 @@ static u32 osi_wifi_create_queue(u32 len, u32 size)
         osi_free(buf); osi_free(q); return 0u;
     }
     q->magic = WQ_MAGIC;
-    *(volatile u32 *)0x50000310u = (u32)q;              /* 记录建出来的句柄 */
-    *(volatile u32 *)0x50000314u = *(volatile u32 *)0x50000314u + 1u;
+    q->self = (u32)q;
+    *(volatile u32 *)0x50000310u = (u32)q;              /* 最近一次建出来的句柄 */
+    *(volatile u32 *)0x50000364u = (u32)q->q.buf;       /* 顺便记下 buf，验证库传的是不是它 */
+    if (g_qn < 4u) { *(volatile u32 *)(0x50000340u + 4u * g_qn) = (u32)q; }
+    g_qn = g_qn + 1u;
+    *(volatile u32 *)0x50000350u = g_qn;                /* 累计创建次数（BSS 计数，可信） */
     return (u32)q;
 }
 static void osi_wifi_delete_queue(u32 qh)
@@ -365,21 +404,41 @@ static void osi_wifi_delete_queue(u32 qh)
 }
 static u32 osi_queue_create(u32 len, u32 size) { HIT_OF(_queue_create); return osi_wifi_create_queue(len, size); }
 static void osi_queue_delete(void *qh) { osi_wifi_delete_queue((u32)qh); }
+#define SDIAG ((volatile u32 *)0x50000320u)
+
 static int osi_queue_send(void *qh, void *item, u32 ticks)
 {
-    WQ *q = (WQ *)qh;
+    WQ *q = wq_resolve(qh);
+    int r;
     HIT_OF(_queue_send);
-    if (q == 0 || q->magic != WQ_MAGIC) { return 0; }
-    return (s3_w2c_queue_put((void *)&q->q, item, ticks) == 0) ? 1 : 0;
+    if (q == 0 || q->magic != WQ_MAGIC) {
+        SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
+        SDIAG[1] = (u32)((WQ *)qh)->magic;
+        SDIAG[2] = (u32)((WQ *)qh)->q.buf;
+        SDIAG[3] = 0xBAD00000u;
+        return 0;
+    }
+    r = s3_w2c_queue_put((void *)&q->q, item, w_ticks(ticks));
+    if (r != 0) {
+        SDIAG[3] = 0xBAD10000u | (u32)(-r);
+        SDIAG[2] = ticks;
+        SDIAG[1] = q->q.count;
+        SDIAG[0] = (u32)item;
+    }
+    return (r == 0) ? 1 : 0;
 }
 /* 诊断记录区：0x50000300 放最近一次失败的线索，复位后 read-mem 可读 */
 #define QDIAG ((volatile u32 *)0x50000300u)
 
 static int osi_queue_recv(void *qh, void *item, u32 ticks)
 {
-    WQ *q = (WQ *)qh;
+    WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
+    if (g_qbad == 0u && (q == 0 || q->magic != WQ_MAGIC)) {
+        g_qbad = 1u;
+        *(volatile u32 *)0x50000360u = (u32)qh;   /* 第一个不过 magic 的 recv 句柄 */
+    }
     if (q == 0 || q->magic != WQ_MAGIC) {
         QDIAG[0] = (u32)qh;                 /* 句柄不像我们的队列 */
         QDIAG[1] = (u32)((WQ *)qh)->magic;  /* 那里到底放的是什么 */
@@ -387,7 +446,7 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         QDIAG[3] = (u32)((WQ *)qh)->q.item_size;
         return 0;
     }
-    r = s3_w2c_queue_get((void *)&q->q, item, ticks);
+    r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     if (r != 0) {
         QDIAG[1] = (u32)(-r);               /* 1=没有当前任务 3=超时表满 … */
         QDIAG[2] = ticks;

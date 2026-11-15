@@ -5322,3 +5322,63 @@ beacon slot2 = 0x00000001   (os_task_create 成功，任务 id=1)
 不是句柄简单错位。**下一步**：查是谁在循环调用 `_wifi_create_queue`
 （大概率是 `ppTask` 建自己的队列失败后重试），以及 `_queue_recv` 收到的
 那个地址到底是哪个对象。
+
+## §123 忙等根因：队列句柄错位 + portMAX_DELAY 被当成普通超时
+
+RTC 计数从 **2417 万次**降到 **30 次**、且不再增长（说明真的阻塞住了），
+靠的是两个修正：
+
+**1）队列句柄在偏移 0 处必须是"队列对象自己的地址"。**
+
+反汇编 `pp_create_task`（`0x420343a1` 附近）：
+
+```
+s32i.n a10, a4, 0     ; s_wifi_queue = _wifi_create_queue(...) 的返回值
+l32i.n a4, a10, 0     ; a4 = *(handle + 0)   <-- 读偏移 0！
+s32i.n a4, a7, 0      ; xphyQueue = *(handle + 0)
+```
+
+闭源库把 `_wifi_create_queue` 的返回值当成 IDF 的
+`wifi_static_queue_t { QueueHandle_t queue; void *items; }`，**读偏移 0 处的字**
+当内层队列句柄存下来，之后又把这个值传给 `_queue_recv`。
+
+我们的 `WQ` 原来偏移 0 是 `buf`（数组成员指针），于是库后来传进来的是 `buf`，
+`magic` 校验必然失败 → `_queue_recv` 立刻返回失败 → WiFi 任务死循环。
+
+真板诊断（RTC，复位后 read-mem 可读）：
+
+```
+0x50000340 = 0x3fcbf2c0   _wifi_create_queue 返回的队列对象
+0x50000350 = 0x00000001   创建次数 = 1（确认只建了一个队列）
+0x50000360 = 0x3fcbf300   第一个 magic 校验失败的 recv 句柄
+0x50000364 = 0x3fcbf300   该队列对象的 q.buf —— 完全一致，实锤
+```
+
+修法：`WQ` 第一个字段改成 `u32 self;`，创建时写 `q->self = (u32)q`。
+库读偏移 0 拿到的就是队列对象本身，再传回来时 magic 正常。
+
+**2）`portMAX_DELAY` 要翻译成内核的"永久等待"。**
+
+内核 `os_task_block_prepare` 的约定是 **timeout 0 = 不设超时 = 永久等待**。
+IDF 传 `portMAX_DELAY = 0xFFFFFFFF`，被当成 tick 数丢进超时表，
+`now + 0xFFFFFFFF` 立刻到期 → 每次等待都秒回超时（`-2`），调用者于是忙等。
+
+真板诊断：`0x50000304 = 2`（`-r`，即 -2 超时）、`0x50000308 = 0xFFFFFFFF`
+（就是传进来的 ticks）。
+
+修法：所有阻塞原语统一过一层 `w_ticks()`：`0xFFFFFFFF → 0`。
+
+**修正后的真板序列**（RTC 回调环，30 条，末尾）：
+
+```
+42 94 43 43 13 43 42 37 15 16 29 29
+                          ^^ _task_create —— WiFi 任务真的建出来了
+                             ^^ ^^ semphr_take/give 正常
+                                   ^^ ^^ _queue_recv，然后安静阻塞
+```
+
+### 下一步
+
+`esp_wifi_init_internal` 现在会一直等（不再忙等），WiFi 任务建好并阻塞在
+`s_wifi_queue` 上。要查的是：谁在等谁（init 等 WiFi 任务的 ack，还是
+WiFi 任务等 init 的消息），以及 `_queue_send` 有没有真的投进去。
