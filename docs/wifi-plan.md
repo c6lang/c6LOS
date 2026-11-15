@@ -5213,3 +5213,46 @@ windowed 函数（`osi_log_write`）的 `entry`/`retw` 形式，确认 `retw` �
    把 `va_list` 解出来（迷你格式化器已就绪），确认打印是否被别的路径吞掉。
 2. 或者直接用 RTC 环形追踪 + 在 `_event_group_create` / `_semphr_take` 等
    未打点槽位补 `OSI_HIT`，把 22 条之后再往后推。
+
+---
+
+## §120 ★★ 里程碑：esp_wifi_init_internal() 在真板上返回 ESP_OK
+
+**根因最后一环**：内存函数必须由 **windowed 编译单元**提供。
+
+闭源库用 `call8 memset` 调过来。之前 `rt/c6rt.c` 里的版本是 call0 编的
+（也试过手写汇编 thunk 的两种做法），无论怎么绕，返回时都无法正确维护寄存器
+窗口的簿记，最后表现为库函数自己的 `retw` 抛 IllegalInstruction
+（真板现场 `pc = 0x4203d3de`，正是 `wifi_init_in_caller_task` 结尾的 `retw.n`）。
+
+改法很直接：把这四个函数搬到 `port/s3/wifi_glue.c`（整个文件用
+`-mabi=windowed` 编译），让编译器按 windowed ABI 生成 `entry`/`retw`。
+同一个文件里的 `strlen`/`strcpy`/`strncmp`/`strncpy`/`strnlen` 一直是这么
+工作的，从来没有出过 ABI 问题。`abi_thunk.S` 不再参与链接。
+
+**真板证据**：
+
+```
+B0 osi0=00000000 osi@00000000 calls@3fcbe8c4
+B1 slot13=4037c7a0 slot18=4037c814 magic=deadbeaf ver=00000008
+B2 cfg@3fcbe7c4 osi=3fcbeac4 magic@144=1f2f3f4f
+M2 bringup returned
+```
+
+* `0x600080c0 (= slot0 = rc)` = **0x00000000 = ESP_OK**
+* RTC 回调计数 `0x50000200` = **0x98 = 152 次**（修好之前只有 22 次就挂）
+
+也就是说：IDF 闭源 WiFi 协议栈在我们的 c6LOS 上完成初始化，OSI 适配层被
+回调了 152 次（内存/队列/信号量/互斥/事件组/任务/日志/时间全都有），
+`wifi_menuconfig_init`、`pm_funcs_init`、`wdev_funcs_init`、
+`net80211_funcs_init`、`wifi_init_in_caller_task` 全部走通。
+
+### 下一步
+
+1. 把测试从 `t_wififill` 推进到真正的 `esp_wifi_start()`（需要
+   `_task_create` 真的建出一个任务、`_semphr_take` 能阻塞等待）。
+2. `esp_wifi_scan_start()` 扫一圈，把 AP 列表打出来 —— 这是第一个
+   能被外部观察到的"联网"行为。
+3. 之后依次：连 WPA2 AP（这时 `wpa_crypto_funcs` 的 9 个函数指针必须填真
+   实现，官方在 `wpa_supplicant/src/crypto/crypto_ops.c`，依赖 mbedtls）
+   → DHCP/TCP → TLS/HTTP。

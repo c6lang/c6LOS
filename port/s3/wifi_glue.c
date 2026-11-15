@@ -32,6 +32,8 @@ static u32 g_osi_ring_n = 0u;
         *OSI_RING_CNT = g_osi_ring_n; \
     } } while (0)
 
+#define HIT_OF(f) OSI_HIT((u32)(__builtin_offsetof(wifi_osi_funcs_t, f) / 4u))
+
 /* 通用的空实现：不碰参数、返回 0 */
 static u32 glue_ret0(void)
 {
@@ -252,6 +254,7 @@ typedef struct { u32 magic; volatile u32 bits; } WEvt;
 
 static void *osi_event_group_create(void)
 {
+    HIT_OF(_event_group_create);
     WEvt *e = (WEvt *)osi_malloc((u32)sizeof(WEvt));
     OSI_HIT(31);
     if (e == 0) { return 0; }
@@ -276,6 +279,7 @@ static u32 osi_event_group_clear_bits(void *g, u32 bits)
 static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
                                      u32 ticks, u32 *out)
 {
+    HIT_OF(_event_group_wait_bits);
     WEvt *e = (WEvt *)g;
     u32 got;
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
@@ -307,6 +311,7 @@ static u32 g_fake_task = 0x7A5B0001u;
 static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
                            u32 prio, void *handle)
 {
+    HIT_OF(_task_create);
     OSI_HIT(37);
     if (handle != 0) { *(u32 *)handle = (u32)&g_fake_task; }
     return 1;                              /* 1 = pdPASS */
@@ -439,6 +444,7 @@ static u32 osi_log_timestamp(void) { OSI_HIT(85); return 0u; }
 /* ---- 时间 / 随机数 ---- */
 static u64 osi_esp_timer_get_time(void)
 {
+    HIT_OF(_esp_timer_get_time);
     u32 hz = os_tick_hz();
     u64 t = os_tick_get();
     if (hz == 0u) { return t * 1000u; }
@@ -449,9 +455,11 @@ static u32 osi_get_time(void) { return (u32)(osi_esp_timer_get_time() / 1000000u
 static u32 osi_slowclk_cal_get(void) { return 0u; }
 
 /* ---- 其它琐碎项 ---- */
-static int osi_env_is_chip(void) { return 1; }
+static int osi_env_is_chip(void) {
+    HIT_OF(_env_is_chip); return 1; }
 static u32 osi_read_mac(u8 *mac, u32 type)
 {
+    HIT_OF(_read_mac);
     u32 i = 0;
     (void)type;
     if (mac != 0) { while (i < 6u) { mac[i] = 0u; i = i + 1u; } }
@@ -717,6 +725,52 @@ int esp_supplicant_deinit(void) { return 0; }
 void *malloc(u32 n);
 void free(void *p) { (void)p; }
 int puts(const char *s) { (void)s; return 0; }
+/* ---- 内存函数：必须由 windowed 编译单元提供 ------------------------------
+ * 闭源库是 windowed ABI，它用 `call8 memset` 调过来。之前用 call0 编的版本
+ * （rt/c6rt.c）会让返回地址带上 CALL 的窗口标签（bit31:30）并破坏窗口簿记，
+ * 表现为 `retw` 处 IllegalInstruction / InstrPageTableErr。
+ * 让编译器按 windowed ABI 生成 entry/retw 就一切正常 —— 同一个文件里的
+ * strlen/strcpy 一直是这么工作的。                                          */
+void *memset(void *dst, int c, unsigned int n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    while (n != 0u) { *d = (unsigned char)c; d++; n--; }
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, unsigned int n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n != 0u) { *d = *s; d++; s++; n--; }
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, unsigned int n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d < s) {
+        while (n != 0u) { *d = *s; d++; s++; n--; }
+    } else {
+        d = d + n;
+        s = s + n;
+        while (n != 0u) { d--; s--; *d = *s; n--; }
+    }
+    return dst;
+}
+
+int memcmp(const void *a, const void *b, unsigned int n)
+{
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+    while (n != 0u) {
+        if (*x != *y) { return (int)*x - (int)*y; }
+        x++; y++; n--;
+    }
+    return 0;
+}
+
 char *strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++) != '\0') { } return r; }
 u32 strlen(const char *s) { u32 n = 0; while (s[n] != '\0') { n++; } return n; }
 int strncmp(const char *a, const char *b, u32 n) { u32 i = 0; while (i < n) { if (a[i] != b[i]) { return (int)(u8)a[i] - (int)(u8)b[i]; } if (a[i] == '\0') { return 0; } i++; } return 0; }
