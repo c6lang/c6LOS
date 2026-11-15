@@ -5181,3 +5181,35 @@ RTC 追踪显示只走到 20 次回调（`... 19 43 13` 就停了），比上一
 下一步优先查 `retw` 这条路径：把 `entry a1, 16` 改成 32、或者对照 gcc 生成的
 windowed 函数（`osi_log_write`）的 `entry`/`retw` 形式，确认 `retw` 的合法性，
 以及 `PS.OWB=15` 是不是窗口溢出处理没接住。
+
+## §119 窗口标签在 a0 的 bit31:30，恢复要"清两位 + 补 0b01"
+
+`CALL<n>` 会把窗口轮转量写进 `a0` 的 **bit31:30**，覆盖掉返回地址原来的最高
+两位。实测：
+
+* `call8` → 轮转量 8/4 = **2** → `a0 = 0x8203d39c`，真实地址 `0x4203d39c`
+  （原地址最高两位 0b01，被 0b10 覆盖）
+* 还原规则：`addr = (a0 & 0x3FFFFFFF) | 0x40000000`
+  （Xtensa 代码地址恒在 `0x4000_0000~0x7FFF_FFFF`，最高两位恒为 0b01）
+
+之前只清 bit31，得到 `0x0203d39c` → InstrPageTableErr；按上面两条一起做，
+真板现场 `a0` 变成正确的 `0x4203d39c`，返回成功。
+
+同时 `abi_thunk.S` 改成**完全不碰寄存器窗口**的双 ABI 实现（两条路径都不
+`entry` / 不 `retw`，windowed 路径从 `a10/a11/a12` 取参、返回值写回 `a10`、
+只用 `a2/a3/a8..a15` 当临时）：
+
+* 消掉了 `retw` 在 `CALLINC==0` 时抛的 IllegalInstruction；
+* 消掉了 `entry` 之前踩 `a4..a7` 的违规。
+
+真板进展：RTC 追踪从 20 次回调涨到 22 次（`... 19 43 13 44 44` 收尾），
+现在失败点在 `pm/wdev/net80211_funcs_init` 之一，收尾是两条 `_free`（错误清理），
+还走不到 `wifi_api_unlock`（字段 22）。
+
+### 下一步
+
+1. 三个 `*_funcs_init` 里逐个定位谁返回非 0：它们的错误分支都会 `wifi_log`
+   （level 1），把 `g_log_level` 已调到 4，接下来要在 `_log_writev` 里
+   把 `va_list` 解出来（迷你格式化器已就绪），确认打印是否被别的路径吞掉。
+2. 或者直接用 RTC 环形追踪 + 在 `_event_group_create` / `_semphr_take` 等
+   未打点槽位补 `OSI_HIT`，把 22 条之后再往后推。
