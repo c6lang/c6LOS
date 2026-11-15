@@ -374,6 +374,7 @@ typedef struct { u32 self; WOsQueue q; u32 magic; } WQ;
 static u32 g_qn = 0u;
 static u32 g_qbad = 0u;
 static u32 g_ev_n = 0u;
+static u32 g_sp_n = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -470,18 +471,20 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         return 0;
     }
     B_IN(2u);
-    {
-        /* 事件环：只记 (任务 id, 进入/离开)，不依赖 a0。 */
-        volatile u32 *ev = (volatile u32 *)0x50000400u;
-        ev[g_ev_n & 15u] = (s3_w2c_current_task() << 8) | 1u;
-        g_ev_n = g_ev_n + 1u;
+    if (g_sp_n < 4u) {
+        /* 交叉验证：同时记栈指针（每个任务的栈范围唯一）和任务 id。 */
+        u32 sp_;
+        volatile u32 *sd = (volatile u32 *)0x50000440u;
+        __asm__ __volatile__("mov %0, a1" : "=r"(sp_));
+        sd[g_sp_n * 2u] = sp_;
+        sd[g_sp_n * 2u + 1u] = s3_w2c_current_task();
+        g_sp_n = g_sp_n + 1u;
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     {
         volatile u32 *ev = (volatile u32 *)0x50000400u;
-        ev[g_ev_n & 15u] = (s3_w2c_current_task() << 8) | 2u;
+        ev[g_ev_n & 7u] = (s3_w2c_current_task() << 8) | 2u;
         g_ev_n = g_ev_n + 1u;
-        ev[10] = g_ev_n;
     }
     B_OUT(2u);
     if (r != 0) {

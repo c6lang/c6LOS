@@ -5663,3 +5663,38 @@ rcUpdateTxDoneAmpdu2      ← 偏移 116 是它自己的结构体字段，噪声
 在 `osi_queue_recv` 里同时记录 `os_task_current_id()` **和**从 `ppTask`
 反汇编能对上的调用点，两者交叉验证；或者直接在 `ppTask` 的接收点埋
 `RTC` 计数（拿到 a1 栈帧里的返回地址），彻底确认第二次接收的来源。
+
+## §133 ★ 决定性证据：同一任务被报了**两个不同的任务 id**
+
+在 `osi_queue_recv` 里同时记 **栈指针** 和 `s3_w2c_current_task()`（RTC
+`0x50000440`）：
+
+```
+0x50000440 = 0x3fcba5c0   sp（第 1 次 recv）
+0x50000444 = 0x00000002   报出来的任务 id
+0x50000448 = 0x3fcba5c0   sp（第 2 次 recv，**完全相同**）
+0x5000044c = 0x00000001   报出来的任务 id
+```
+
+**栈指针完全一样** ⇒ 这两次 recv 是**同一个任务**发出的。
+但 `_task_get_current_task()` 两次分别返回 2 和 1。
+
+这推翻了 §131/§132 里"两个任务都进了 recv"的结论，并且直接说明：
+
+> `os_task_current_id()`（也就是 `g_cur_arr[g_core]->id`）在同一个任务里
+> 会返回不同的值。
+
+闭源库大量用 `_task_get_current_task()` 判断身份
+（`current_task_is_wifi_task`、`pp_post` 的就地处理分支等），身份不稳会
+直接导致"以为自己在 WiFi 任务里 / 不在 WiFi 任务里"判断错乱，进而出现
+本轮的静默死锁。
+
+### 下一步
+
+重点查两处：
+1. `g_cur_arr[]` 的写入点（`os_task_start_core` 里 `g_cur_arr[me] = t`）与
+   上下文切换的先后；单任务里是否可能被 `os_task_create` / 阻塞唤醒路径
+   改写成另一个任务。
+2. `port_core_id()`：它把 `s3_prid_raw()` 映射到 `g_prid_base[]` 的下标，
+   如果映射不稳定，`g_core` 会在 `g_cur_arr[0]`/`g_cur_arr[1]` 之间跳，
+   正好能解释"同一任务读到两个不同 id"。
