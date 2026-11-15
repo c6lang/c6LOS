@@ -976,6 +976,105 @@ static void *osi_wifi_zalloc(u32 n)      { OSI_HIT(93); return osi_calloc(1u, n)
 
 static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
 
+/* ---- 中断相关槽位：先做成"记录 + 空实现"，用来判断库到底用不用（§216）----
+ *
+ * 静态统计（tools/osislots.py）显示 libnet80211/libpp/libcore **没有**直接读过
+ * `_set_isr`/`_ints_on`/`_set_intr` 这些槽位，但为了确认（万一它们通过别的间接
+ * 路径用到了），这里把它们从"纯 glue_ret0"换成会记账的实现：真上板时如果库确实
+ * 调了，RTC 慢存里就有参数可查，我们据此再决定要不要接内核的中断表。
+ *
+ * RTC 慢存布局（和 §202 里其它信标错开）：
+ *   0x50000B00  set_isr 环：8 项 × 2 字（中断号, 处理函数）
+ *   0x50000B40  ints_on 次数 / 最后一次 mask
+ *   0x50000B48  ints_off 次数 / 最后一次 mask
+ *   0x50000B50  set_intr 环：4 项 × 4 字（cpu, source, num, prio）
+ *   0x50000B90  event_post 环：16 项 × 2 字（event_base, event_id）+ 计数
+ */
+#define IRQ_RING_BASE  0x50000B00u
+#define EVT_RING_BASE  0x50000B90u
+
+static void rec2(u32 base, u32 idx, u32 a, u32 b)
+{
+    volatile u32 *p = (volatile u32 *)base;
+
+    p[(idx & 7u) * 2u] = a;
+    p[(idx & 7u) * 2u + 1u] = b;
+    p[16] = p[16] + 1u;             /* 第 16 个字当计数器 */
+}
+
+static int osi_set_intr(u32 cpu_no, u32 source, u32 intr_num, u32 prio)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x50u);
+
+    p[(p[16] & 3u) * 4u] = cpu_no;
+    p[(p[16] & 3u) * 4u + 1u] = source;
+    p[(p[16] & 3u) * 4u + 2u] = intr_num;
+    p[(p[16] & 3u) * 4u + 3u] = prio;
+    p[16] = p[16] + 1u;
+    return 0;
+}
+
+static int osi_clear_intr(u32 source, u32 intr_num) { (void)source; (void)intr_num; return 0; }
+
+static int osi_set_isr(int n, void *fn, void *arg)
+{
+    volatile u32 *p = (volatile u32 *)IRQ_RING_BASE;
+
+    rec2(IRQ_RING_BASE, p[16], (u32)n, (u32)fn);
+    (void)arg;
+    return 0;
+}
+
+static int osi_ints_on(u32 mask)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    p[0] = p[0] + 1u;               /* 次数 */
+    p[1] = mask;                    /* 最后一次 mask */
+    return 0;
+}
+
+static int osi_ints_off(u32 mask)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x48u);
+
+    p[0] = p[0] + 1u;
+    p[1] = mask;
+    return 0;
+}
+
+static u32 osi_wifi_int_disable(void)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    p[2] = p[2] + 1u;
+    return 0u;
+}
+
+static void osi_wifi_int_restore(u32 state)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    p[3] = p[3] + 1u;
+    (void)state;
+}
+
+static int osi_is_from_isr(void) { return 0; }
+
+/* 事件：库通过它上报 WIFI_EVENT/IP_EVENT。我们没接事件系统，但**记下来**：
+ * 上板时 RTC 里能看到 event_base/event_id，就知道关联到哪一步了。 */
+static int osi_event_post(const char *base, int id, void *data, u32 size, u32 ticks)
+{
+    volatile u32 *p = (volatile u32 *)EVT_RING_BASE;
+    u32 n = p[32];
+
+    (void)data; (void)size; (void)ticks;
+    p[(n & 15u) * 2u] = (u32)(void *)base;
+    p[(n & 15u) * 2u + 1u] = (u32)id;
+    p[32] = n + 1u;
+    return 0;
+}
+
 /* ---- 表装配：用 __builtin_offsetof，彻底避免手数下标 ---- */
 #define OSI_SET(slot, fn) \
     (((void **)(void *)&g_wifi_osi_funcs)[__builtin_offsetof(wifi_osi_funcs_t, slot) / 4u] \
@@ -1074,7 +1173,16 @@ void s3_wifi_osi_init(void)
     OSI_SET(_slowclk_cal_get, osi_slowclk_cal_get);
     OSI_SET(_spin_lock_create, osi_mutex_create);
     OSI_SET(_spin_lock_delete, osi_mutex_delete);
-    OSI_SET(_is_from_isr,   glue_ret0);
+    OSI_SET(_is_from_isr,   osi_is_from_isr);
+    /* 中断相关：记账 + 空实现（§216，判断库到底用不用） */
+    OSI_SET(_set_intr,        osi_set_intr);
+    OSI_SET(_clear_intr,      osi_clear_intr);
+    OSI_SET(_set_isr,         osi_set_isr);
+    OSI_SET(_ints_on,         osi_ints_on);
+    OSI_SET(_ints_off,        osi_ints_off);
+    OSI_SET(_wifi_int_disable, osi_wifi_int_disable);
+    OSI_SET(_wifi_int_restore, osi_wifi_int_restore);
+    OSI_SET(_event_post,      osi_event_post);
 
     /* ---- NVS：必须返回错误码，别让库把未初始化内存当有效数据（见上面的说明）---- */
     OSI_SET(_nvs_open,        osi_nvs_open);

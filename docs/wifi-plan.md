@@ -9723,3 +9723,55 @@ W1 bringup
 只打印第一个 AP 的 SSID/信道/RSSI：`wifi_ap_record_t` 的结构体大小依赖 IDF 版本，
 只取第一个记录不需要知道 stride（按 `bssid[6]@0, ssid[33]@6, primary@39, rssi@41`
 读前几个字段，这几个偏移在各版本都稳定）。
+
+---
+
+## §216 把 OSI 的中断/事件槽位做成"记账实现"，用来判断库到底用不用
+
+### 一、为什么
+
+关联/扫描要用到 MAC 中断（RX 帧靠它），而我们的 OSI 里 `_set_isr`/`_ints_on`/
+`_set_intr` 一直是 `glue_ret0`（空实现）。静态统计（`tools/osislots.py`，以及把
+窗口收窄到 6 条指令的二次扫描）显示 **libnet80211/libpp/libcore 从来没有直接读过
+这几个槽位** —— 按 IDF 的实现（`esp_adapter.c`：`_set_isr → xt_set_interrupt_handler`、
+`_ints_on → esp_cpu_intr_enable`、`_set_intr → esp_rom_route_intr_matrix`），
+这意味着 WiFi 库大概是自带中断安装逻辑（它们能直接摸 CPU 的向量表），不经过 OSI。
+
+但"大概率不用"和"确实不用"在真板上一试就知道，而接内核的中断表是个大改动
+（handler 表 + INTENABLE 操作 + 中断矩阵路由，还得小心翼翼别碰坏现在的
+timer/调度路径）。所以这一步先做**零风险、但能给出答案**的版本：
+
+| 槽位 | 现在的实现 | RTC 慢存记账位置 |
+| --- | --- | --- |
+| `_set_isr(n, fn, arg)` | 记录后返回 0 | `0x50000B00`：8 项 ×（中断号, 函数），`[16]` 是次数 |
+| `_set_intr(cpu, src, num, prio)` | 记录后返回 0 | `0x50000B50`：4 项 × 4 字，`[16]` 是次数 |
+| `_ints_on(mask)` / `_ints_off(mask)` | 记录（次数 + 最后 mask） | `0x50000B40` / `0x50000B48` |
+| `_wifi_int_disable()` / `_restore()` | 记录次数 | `0x50000B40[2]` / `[3]` |
+| `_is_from_isr()` | 恒返回 0（不在中断里） | — |
+| `_event_post(base, id, ...)` | 记录后返回 0 | `0x50000B90`：16 项 ×（event_base, event_id），`[32]` 是次数 |
+
+### 二、上板后怎么读（**不要用 esptool read-mem**）
+
+`esptool read-mem` 会先复位芯片再读，读到的是新一轮启动的值，上一轮的账本已经
+被覆盖。要用 JTAG 附着后直接读（`tools/dbg.sh` 里的 gdb 脚本模板）：
+
+```
+x/20xw 0x50000B00     # set_isr 环 + 次数
+x/4xw  0x50000B40     # ints_on/off、wifi_int_disable/restore 的次数与最后 mask
+x/16xw 0x50000B50     # set_intr 环
+x/36xw 0x50000B90     # event_post 环 + 次数
+x/1xw  0x50000A10     # 阶段信标（§204/§215）
+```
+
+判读：
+
+| 看到什么 | 结论 |
+| --- | --- |
+| `0x50000B00[16]`（set_isr 次数）= 0 且 `0x50000B40[0]`（ints_on 次数）= 0 | 库确实不用 OSI 装中断 → 中断这条路不用管，问题在别处 |
+| 任一计数 > 0 | 库在用，必须把内核的 IRQ 表和 INTENABLE 接上（下一轮的大改动） |
+| `0x50000B90[32]`（event_post 次数）> 0 | 库在发 WiFi/IP 事件 → 可以把事件 id 解出来做状态机（比轮询更准） |
+
+### 三、构建状态
+
+`wifi` / `wifip` / `https` / 基线 `s3` 四种构建都通过，`chkimg OK`。
+这一节的改动只在 `port/s3/wifi_glue.c`，不影响任何已有行为（空实现 → 记账 + 空实现）。
