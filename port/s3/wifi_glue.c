@@ -487,7 +487,11 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
 /* 诊断记录区：0x50000300 放最近一次失败的线索，复位后 read-mem 可读 */
 #define QDIAG ((volatile u32 *)0x50000300u)
 
-static int osi_queue_recv(void *qh, void *item, u32 ticks)
+/* 真正的 OSI 回调由 port/s3/w2c.S 的汇编壳提供（它会在入口记录库的返回地址），
+ * 这里只声明；C 实现改名为 _body。 */
+int osi_queue_recv(void *qh, void *item, u32 ticks);
+
+int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     WQ *q = wq_resolve(qh);
     int r;

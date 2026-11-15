@@ -22,6 +22,11 @@
 
     .section .text, "ax", @progbits
 
+    .align  4
+7:  .word   0x50000F08   /* 诊断区：记录 **库** 调用 _queue_recv 的返回地址 */
+    .align  4
+6:  .word   0x50000F00   /* 诊断区 2：s3_w2c_queue_get 的调用者 */
+
     .macro  W2C name, target
     /* l32r 只能往前引用，所以字面量必须放在指令之前；用数字标签 9 保证
      * 每次展开都指向紧邻自己的那一个。 */
@@ -34,6 +39,30 @@
     entry   a1, 32
     addi    a1, a1, -16          /* 自己的临时槽，避开 entry 保存 a0-a3 的区域 */
     s32i    a0, a1, 0            /* 存下带窗口标签的返回地址 */
+    l32r    a8, 9b
+    callx0  a8
+    l32i    a0, a1, 0
+    addi    a1, a1, 16
+    retw
+    .endm
+
+/* 带调用点追踪的版本：在 entry 之后记录 a0（此刻它就是 windowed 调用者的
+ * 真实返回地址），存进 RTC 0x50000F00 开始的环（每项 2 字：返回地址、计数）。 */
+    .macro  W2C_TRACE name, target
+    .align  4
+9:  .word   \target
+    .align  4
+    .global \name
+    .type   \name, @function
+\name:
+    entry   a1, 32
+    addi    a1, a1, -16
+    s32i    a0, a1, 0
+    l32r    a12, 6b
+    l32i    a13, a12, 4
+    s32i    a0, a12, 0
+    addi    a13, a13, 1
+    s32i    a13, a12, 4
     l32r    a8, 9b
     callx0  a8
     l32i    a0, a1, 0
@@ -56,7 +85,7 @@
 /* ---- 队列 ---- */
     W2C s3_w2c_queue_init,     os_queue_init_ex
     W2C s3_w2c_queue_put,      os_queue_put_item
-    W2C s3_w2c_queue_get,      os_queue_get_item
+    W2C_TRACE s3_w2c_queue_get, os_queue_get_item
     W2C s3_w2c_queue_count,    os_queue_count
     W2C s3_w2c_queue_destroy,  os_queue_destroy
 
@@ -77,3 +106,34 @@
     W2C s3_w2c_tick_hz,        os_tick_hz
     W2C s3_w2c_current_task,   os_task_current_id
 
+
+/* 在 osi_queue_recv 入口处记录 **库** 的返回地址（windowed 的 call8 值），
+ * 用来定位到底是库里的哪个函数在收队列。
+ * 参数按 windowed 约定在 a2/a3/a4，转发给 C 侧要用 a10/a11/a12；
+ * a12/a13 属于调用者（callee-saved），必须先存栈再借用。 */
+    .section .text, "ax", @progbits
+    .align  4
+8:  .word   osi_queue_recv_body
+    .align  4
+    .global osi_queue_recv
+    .type   osi_queue_recv, @function
+osi_queue_recv:
+    entry   a1, 16
+    addi    a1, a1, -16
+    s32i    a12, a1, 0
+    s32i    a13, a1, 4
+    l32r    a8, 7b
+    s32i    a0, a8, 0
+    l32i    a8, a8, 4
+    s32i    a0, a1, 8
+    mov.n   a10, a2
+    mov.n   a11, a3
+    mov.n   a12, a4
+    l32r    a8, 8b
+    callx8  a8
+    mov.n   a2, a10
+    l32i    a0, a1, 8
+    l32i    a12, a1, 0
+    l32i    a13, a1, 4
+    addi    a1, a1, 16
+    retw

@@ -6315,3 +6315,47 @@ RTC 计数 +1，一次上板就能看出最后停在哪个函数。
    在 `entry` 之后、`callx0` 之前 `a0` 一定是 windowed 调用者的返回地址）。
 2. 把 `pp_create_task` 的间接调用面（`l32i aX, aY, <off>` 后跟 `callx8`）
    全部列出来，逐个对照 OSI 偏移。
+
+## §151 ★★ 拿到库侧真实调用点：`ppTask`
+
+在 `osi_queue_recv` 外面套一层汇编壳（`port/s3/w2c.S`），在 `entry` 之后
+立即把 `a0`（windowed 调用者的返回地址，带窗口标签）写进 RTC
+`0x50000F08`。注意内层 `s3_w2c_queue_get` 的追踪用的是另一个槽
+（`0x50000F00`），否则会被覆盖成我们自己的 `osi_queue_recv_body`。
+
+真板读数：
+
+```
+0x50000F08 = 0x80381c89     ->  去掉窗口标签 (a0 & 0x3FFFFFFF) | 0x40000000
+                            ->  0x40381c89
+nm 反查：0x40381c89 在 ppTask（0x40381c5c）内部
+```
+
+⇒ **库侧真正调用 `_queue_recv` 的是 `ppTask`**，和 §132 的全量枚举完全一致。
+
+### 于是矛盾收敛成一句很短的话
+
+* 内核记录：最后一次队列阻塞发生在**任务 1（初始化任务）**的上下文里
+  （`g_cur->id == 1`，ctx 里的 sp `0x3fcba370` 也在任务 1 自己的栈区）；
+* 但那次 `_queue_recv` 的调用者是 **`ppTask`**，而 `ppTask` 只作为
+  任务 2 的入口被启动过（§141 的 trampoline 记录）。
+
+⇒ **`ppTask` 的代码在任务 1 的上下文里被执行了。**
+
+最可能的机制：`pp_create_task` 里 `_task_create(ppTask, ...)` →
+我们的 `os_task_create` → 新任务（任务 2，优先级更高）立即抢占运行
+`ppTask`、`_semphr_give` 之后在 `_queue_recv` 上阻塞 → 调度回任务 1 →
+任务 1 从 `os_task_create` 返回继续走……**但它返回到了 `ppTask` 里**，
+说明任务 1 保存的返回地址被任务 2 的帧覆盖了。
+
+虽然 §149 验证了"两个 ctx 的 sp 各自在自己的栈区"，但**任务 1 的
+`s3_win_call_bringup` 调用链用的是主栈还是任务栈**值得再确认一次：
+`s3_win_call_bringup` 是 call0→windowed 桥，如果它在切换前后用的是
+`g_sched[0]`（主循环上下文）的栈，就会和任务栈混起来。
+
+### 下一轮
+
+重点查 `win_bridge.S` 的桥函数在"任务上下文里被调用"时是否仍用主栈：
+它的 `addi a1, a1, -32` 用的是**当前 a1**，在任务里就是任务栈 ✓，
+但 `port_task_switch` 保存的"主循环上下文" `g_sched[core]` 可能被
+误当成任务上下文。
