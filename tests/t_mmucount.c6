@@ -1,0 +1,23 @@
+/* 统计 MMU 表里有多少项是"有效映射"（值 != 0x4000，且 bit14=0），
+ * 并报告 entry 3 到 0x14 的实际内容，看 IROM 段映射了多少页。 */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+#include "c6os/flash.h"
+void os_main(void)
+{
+    u32 i = 0u, n = 0u, v = 0u, first_bad = 0u, got_bad = 0u;
+
+    s3_beacon(0u, 0xB0000130u);
+    os_icache_enable();
+
+    for (i = 0u; i < 64u; i = i + 1u) {
+        v = os_reg_rd(0x600C5000u + i * 4u);
+        if ((v & 0x4000u) == 0u) { n = n + 1u; }
+        else if (got_bad == 0u) { got_bad = 1u; first_bad = i; }
+    }
+    s3_beacon(1u, n);           /* 前 64 项里有效映射的页数 */
+    s3_beacon(2u, first_bad);   /* 第一个无效表项的索引 */
+    s3_beacon(3u, os_reg_rd(0x600C5010u));  /* entry 4 */
+    for (;;) { }
+}
