@@ -10032,3 +10032,69 @@ make tls12check
 这一节不改任何行为，只是把已有的两个记账装置（`g_osi_calls`、事件环）暴露到串口。
 
 `https` / `wifi` / `wifip` / 基线 `s3` 构建都通过，chkimg OK。
+
+---
+
+## §224 上板运行手册（板子回来照着做，一步一条命令）
+
+### 0. 准备
+
+- 板子插上 USB（供电 + USB-Serial-JTAG），`lsusb | grep 303a` 能看到设备；
+- 给 WiFi 账号（**只有这两项需要人给**，见 `port/s3/wifi_creds.h`）。
+
+### 1. 先验 PHY（不需要 WiFi 账号）
+
+```
+make C6_ROOT=/home/winger/c6 bringup
+```
+
+这一条会构建 `S3_PHY_BISECT=1` 的镜像、刷进去、抓 60s 串口、把日志落到
+`build/logs/s3run-*.log`，最后按顺序打印关键标记出现了没有。
+
+期望看到（依次）：
+
+```
+[bisect] done hung=0x00000000 ok=0x0000007e     ← 6 个子步骤全活着
+[phy] g_phyFuns=0x3fcxxxxx                       ← 函数表填上了（§206）
+[phy] register_chipv7_phy rc=0                   ← PHY 起来了
+W1 bringup / W2 bringup returned
+[wifi] scan start（阻塞） / scan_start=0
+[wifi] AP0 ssid=<你家 AP> ch=N rssi=-xx          ← 射频链路 OK（§215）
+```
+
+- 如果 `hung` 非 0：按 §204 的位定义定位是哪一步；
+- 如果只看到 `W0 phy start` 就没有下文：看 RTC `0x50000A10` 的阶段信标（§204）；
+- 如果扫描 `num=0`：射频还没通，先别管关联。
+
+### 2. 再验整条链（需要 WiFi 账号）
+
+```
+make C6_ROOT=/home/winger/c6 httpsflash \
+     S3_WIFI_SSID='"你家的AP"' S3_WIFI_PASS='"口令"'
+```
+
+期望看到：
+
+```
+[wifi] set_storage(RAM)=0 / set_mode(STA)=0 / set_config=0 / start=0
+[wifi] set_ps(NONE)=0
+[wifi] 已关联，ssid=... channel=N                ← 4 次握手过了（§215/§218）
+[evt] 关联成功: [wifi:2] [wifi:1] [wifi:4] ...    ← STA_START/SCAN_DONE/CONNECTED（§223）
+[lwip] ip=192.168.x.y mask=255.255.255.0 gw=...   ← DHCP 成功（§210）
+[https] TLS 握手完成（阶段=21）                    ← TLS 1.2（§213）
+[https] 第一跳 HTTP 状态 302 …                     ← 取到 https://qq.com（§214）
+```
+
+跑到最后一行就等于目标达成（真板上取到 qq.com 的页面数据）。
+
+### 3. 卡住时的对照表
+
+| 最后一行 | 看哪里 |
+| --- | --- |
+| `[ctx] 栈池不够` | §219：调 `S3_STACK_POOL` 或压小某个任务的栈 |
+| `[wifi] 关联超时` + `[evt]` 里没有 `[wifi:4]` | §223：关联被拒，看 `_log_write` 内容（`g_log_level=4` 已开） |
+| `[lwip] DHCP 超时` | §220：收包路径；`[osi]` 里看 `_queue_send`/`_task_create` 是否正常 |
+| `[https] TLS 缓冲申请失败` | §214：OSI 堆（64KB）被 WiFi+lwIP 占满，调小 `TCP_WND`/`TCP_SND_BUF` |
+| `[https] DNS 解析 qq.com 失败` | DNS 服务器（DHCP 下发）或 lwIP DNS 配置 |
+| `[https] TLS 握手失败，阶段=N` | 阶段含义见 §213（1/2/11/12/20/21） |
+| 栈相关崩溃 / 莫名复位 | §214 第五节：RSA 验签峰值栈约 3.5KB，任务栈要够 |
