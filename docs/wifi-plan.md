@@ -5493,3 +5493,34 @@ PC=4037b01b
    `_task_get_current_task()`）都记进 RTC，真板确认它们的值。
 2. 确认 `pp_post`（ROM）到底用什么机制投递：读 ROM 里 `0x400056e8` 附近
    的代码，或者直接在 libpp 里找非 ROM 版本的 `pp_post` 用 `--wrap` 拦掉。
+
+## §127 `s_wifi_task_hdl` 在库里从未被赋值
+
+反汇编 `current_task_is_wifi_task`（`0x4205ab2c`）：
+
+```
+l32i a10, osi, 164          ; _task_get_current_task()
+l32r a2, (s_wifi_task_hdl)  ; 0x3fccfc3c
+sub  a10, a2, a10
+movi a2, 1
+movnez a2, a8, a10          ; return (s_wifi_task_hdl == current)
+```
+
+而全量反汇编里 `s_wifi_task_hdl` **只有读、没有写**（只有它 +4 的一个 bool
+标志被写过 0/1）。也就是说它恒为 BSS 的 0；我们的
+`_task_get_current_task()` 返回任务 id（1/2，非 0），比较结果恒为"不在
+WiFi 任务里" —— 这个判断本身是对的。
+
+再抓"谁调的阻塞 recv"（`__builtin_return_address(0)`，RTC
+`0x500003b8`/`0x500003bc`），两个任务都落在 `0x40381ff5`（`ppTask` 内部）。
+注意这条读数可能受 windowed 函数里 a0 被回收的影响，只能当参考；
+"两个任务阻塞在同一个队列 `0x3fcbf2d4` 且 `_queue_send` 从未被调用"
+这组证据是硬的。
+
+### 下一步
+
+1. 让 `_queue_recv` 的调用者记录改用**窗口帧里的 a0**（`entry` 保存的那份）
+   或干脆在 `ppTask` 的反汇编上下文里对照，确认第二条 recv 到底来自哪个任务。
+2. 查 `pp_post`（ROM `0x400056e8`）：直接读 ROM 字节确认它是否走
+   `g_osi_funcs_p` 的 `_queue_send`（字段 25）。若不走，用 `--wrap=pp_post`
+   把它换成我们自己的实现（投递到 `*xphyQueue`）。

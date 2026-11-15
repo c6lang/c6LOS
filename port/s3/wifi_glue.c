@@ -482,6 +482,7 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
             g_ql_id[g_ql_n] = me;
             ql[g_ql_n * 2u] = me;
             ql[g_ql_n * 2u + 1u] = (u32)q;
+            ql[10u + g_ql_n] = (u32)__builtin_return_address(0);  /* 谁调的 recv */
             g_ql_n = g_ql_n + 1u;
             ql[8] = g_ql_n;
         }
