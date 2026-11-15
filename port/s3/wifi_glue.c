@@ -192,6 +192,8 @@ extern int  s3_w2c_task_create(const char *name, void *entry, void *arg,
                                u32 prio, u32 stack);
 extern int  s3_w2c_task_delete(u32 id);
 extern void s3_w2c_task_delay(u32 ticks);
+extern int  s3_w2c_task_suspend(u32 id);
+extern int  s3_w2c_task_resume(u32 id);
 extern void s3_w2c_task_yield(void);
 extern u64  s3_w2c_tick_get(void);
 extern u32  s3_w2c_tick_hz(void);
@@ -565,6 +567,9 @@ static u32 osi_queue_msg_waiting(void *qh)
 }
 
 /* ---- 任务 ---- */
+static u32 g_wifi_task_ids[4];
+static u32 g_wifi_task_n = 0u;
+
 static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
                            u32 prio, void *handle)
 {
@@ -587,6 +592,10 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     }
     if (id < 0) { return 0; }
     if (handle != 0) { *(u32 *)handle = (u32)id; }
+    /* 试过"建完立即挂起、init 返回后再恢复"：不行 —— 挂起后
+     * pp_create_task 里紧接着的 _semphr_take 握手永远等不到 _semphr_give，
+     * init 会更早卡住。所以任务必须照常运行。 */
+    if (g_wifi_task_n < 4u) { g_wifi_task_ids[g_wifi_task_n] = (u32)id; g_wifi_task_n = g_wifi_task_n + 1u; }
     return 1;
 }
 static void osi_task_delete(void *h) { (void)s3_w2c_task_delete((u32)h); }

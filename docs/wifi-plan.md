@@ -6402,3 +6402,43 @@ entry[1] = 0x40381c7c = ppTask      （WiFi 任务）
 给 `port_task_switch` / `port_task_yield` 各加一个 RTC 计数（分别记
 "从主循环切到任务"和"从任务切回主循环"的次数），并确认它们成对出现；
 若出现"两次 yield 之间没有 switch"，就说明主循环上下文被当成了任务上下文。
+
+## §153 switch / yield 计数成对（各 3 次），切换记账正常
+
+在 `port/s3/ctx.S` 的 `port_task_switch` / `port_task_yield` 里各加一个
+BSS 计数（自增后**覆写**到 RTC，避免 RTC 初值随机的干扰）：
+
+```
+0x50001000 switch_cnt = 3
+0x50001008 yield_cnt  = 3
+```
+
+两者成对 ⇒ "任务让出 → 主循环挑下一个任务" 的记账没有异常。
+
+## 本轮结束时的完整结论
+
+### 已用真板证据排除的（全部有读数支撑）
+
+| 怀疑点 | 结论 |
+|---|---|
+| windowed/call0 ABI | 正常，无 TRAP |
+| context 槽位分配 | 任务1 槽1/`0x3fcb8620`，任务2 槽2/`0x3fcba620`，各自独立 |
+| 两个 ctx 的 sp/EPC | 各自落在自己栈区，保存正确 |
+| port 上下文 vs 内核上下文 | `port_cur_ctx()` 与 `g_cur->ctx` 三次阻塞完全相等 |
+| 调度器状态机 | 全程 3 次选择、从未选中 BLOCKED 任务 |
+| switch / yield 记账 | 各 3 次，成对 |
+| 任务入口 | `wifi_main`(0x403785e4) 与 `ppTask`(0x40381c7c)，正确 |
+| 栈大小 | 两个任务都拿到 8192 |
+| 定时器 / tick | ISR 4864 次，`os_sched_tick` 同步 4864 次 |
+| `pp_post` 符号 | 已交还 libpp（rom.ld 里那条绝对赋值会顶掉库实现） |
+| `ieee80211_ioctl` / `_init` / `ic_create_wifi_task` | 都不含队列接收；`ioctl` 未被调到，`_init` 从未被调用 |
+| `ppTask` 被直接调用 | 全库没有直接调用点 |
+
+### 剩下这一个矛盾
+
+内核记录"任务 1（wifi_main）在自己的栈上阻塞在 `_queue_recv`"，
+而库侧那次调用的返回地址落在 **`ppTask`** 里（0x40381c89）。
+
+所有"簿记类"的可能性都被逐一排除了，所以下一步只能去看**实际保存的帧内容**：
+用 JTAG 在卡死点 dump 两个 ctx 指向的完整帧（a0..a15/EPC/PS），
+对比 `a0` 与调用链，确认任务 1 的帧里到底存的是哪段代码的返回地址。

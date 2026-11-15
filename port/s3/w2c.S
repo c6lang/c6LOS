@@ -100,6 +100,8 @@
 /* ---- 任务 / 时间 ---- */
     W2C s3_w2c_task_create,    os_task_create
     W2C s3_w2c_task_delete,    os_task_delete
+    W2C s3_w2c_task_suspend,   os_task_suspend
+    W2C s3_w2c_task_resume,    os_task_resume
     W2C s3_w2c_task_delay,     os_task_delay
     W2C s3_w2c_task_yield,     os_task_yield
     W2C s3_w2c_tick_get,       os_tick_get

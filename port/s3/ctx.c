@@ -24,6 +24,9 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
 #define S3_STACK_SZ  8192
 
 S3Ctx g_sched[C6OS_MAX_CORES];
+/* 诊断计数（ctx.S 里自增后覆写到 RTC，避免 RTC 初值随机的干扰） */
+u32 g_sw_cnt = 0;
+u32 g_yl_cnt = 0;
 S3Ctx *g_s3_cur[C6OS_MAX_CORES];
 
 static S3Ctx g_ctx[S3_MAX_CTX];

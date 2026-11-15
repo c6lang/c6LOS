@@ -8,6 +8,10 @@
     .literal .Lg_cur,   g_s3_cur
     .literal .Lprid_base, g_prid_base
     .literal .Lrtc_dbg, 0x50000A00
+    .literal .Lrtc_sw,  0x50001000   /* switch 计数 */
+    .literal .Lrtc_yl,  0x50001008   /* yield 计数 */
+    .literal .Lsw_cnt,  g_sw_cnt
+    .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
@@ -84,6 +88,20 @@ port_task_switch:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
+    /* 诊断：yield 计数（0x50001008=次数，0x5000100c=最近的目标 sp） */
+    l32r    a14, .Lyl_cnt
+    l32i    a15, a14, 0
+    addi    a15, a15, 1
+    s32i    a15, a14, 0
+    l32r    a14, .Lrtc_yl
+    s32i    a15, a14, 0
+    /* 诊断：switch 计数（0x50001000=次数，0x50001004=最近的目标 sp） */
+    l32r    a14, .Lsw_cnt
+    l32i    a15, a14, 0
+    addi    a15, a15, 1
+    s32i    a15, a14, 0
+    l32r    a14, .Lrtc_sw
+    s32i    a15, a14, 0
 
     /* 现场已保存，下面随便用寄存器 */
     rsr     a5, prid
