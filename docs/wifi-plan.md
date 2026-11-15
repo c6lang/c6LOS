@@ -5974,3 +5974,44 @@ ctx），而 wifi_main 此刻本应阻塞在 `s3_win_call_bringup` 里。**
 
 在 `os_task_start_core` 的主循环里、`sched_pick` 之后，把
 "选中的任务 id / 它的 state"写进 RTC，看是否出现"选中了一个 BLOCKED 任务"。
+
+## §142 调度选择埋点：调度器本身没有 bug
+
+在 `os_task_start_core` 的 `sched_pick(me)` 之后，把最近 8 次选中的
+(任务 id, 状态) 写进 RTC `0x50000B00`（状态 1=READY / 4=BLOCKED）。
+
+真板读数：
+
+```
+pick0: id=1  state=1     （wifi_main 首次运行）
+pick1: id=2  state=1     （WiFi 任务 ppTask）
+pick2: id=1  state=1     （wifi_main 第二次运行）
+（之后没有更多选择）
+```
+
+两条关键结论：
+
+1. **从来没有选中过 BLOCKED 任务** —— 调度器状态机是对的，
+   §141 里"`g_s3_cur` 为何切到 `g_ctx[0]`"的疑问解除：任务 1 确实被
+   正常选中过，切换是合法的。
+2. 全程只有 **3 次** 调度选择 —— 也就是说任务 1 第二次跑起来之后就把自己
+   阻塞了，此后系统只剩 idle（与 §138 的 PC 采样一致）。
+
+### 当前确定的事实链
+
+* WiFi 任务（ppTask）被创建并运行：先 `_semphr_give` 完成握手，再在
+  `_queue_recv` 上阻塞 ✅
+* 初始化任务（wifi_main）第二次运行后也阻塞了，之后再也没有产生任何
+  OSI 回调（回调环停在 `... 37 15 16 29 29`）
+* 全流程 `_queue_send`（字段 25）一次都没有 ✅
+* tick 正常推进、ISR 正常、栈充足、分配器已加固、调度器无 bug
+
+### 下一步
+
+任务 1 第二次运行的那一小段就是关键：它从 `pp_create_task` 返回之后，
+只可能走 `ieee80211_ioctl_init()` 然后返回。要么它在这两步之间阻塞，
+要么它其实返回了但 `esp_wifi_init_internal` 的下一步 `_wifi_zalloc`（字段
+93）没被记录 —— 需要在 `_wifi_zalloc`/`_wifi_malloc` 上也确认一次，
+并给 `wifi_init_in_caller_task` 的返回路径加一个可观测信号
+（例如在 `esp_wifi_init_internal` 之后立刻写 beacon —— 现有测试里
+`M2 bringup returned` 就是，只是它没打印出来）。

@@ -13,6 +13,8 @@ static OsTask g_tasks[C6OS_MAX_TASKS] = {0};
 static u32 g_next_id = 1;
 static u32 g_rr_arr[C6OS_MAX_CORES] = {0};
 static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
+static u32 g_dbg_n = 0;        /* os_task_current_id 诊断计数 */
+static u32 g_dbg_pick_n = 0;   /* 调度选择诊断计数 */
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
@@ -542,6 +544,16 @@ void os_task_start_core(u32 core) {
 
     while (1) {
         OsTask *t = sched_pick(me);
+        if (t != 0) {
+            /* 诊断：记录最近 8 次调度选中的 (任务 id, 状态)。
+             * 状态 4 = BLOCKED；若这里出现 4，说明选到了不该跑的任务。 */
+            volatile u32 *sd = (volatile u32 *)0x50000B00u;
+            u32 n_ = g_dbg_pick_n;
+            g_dbg_pick_n = n_ + 1;
+            sd[(n_ & 7) * 2] = t->id;
+            sd[(n_ & 7) * 2 + 1] = (u32)t->state;
+            sd[16] = g_dbg_pick_n;
+        }
         if (t == 0) {
             if (os_task_count() == 0) {
                 break;
@@ -705,7 +717,6 @@ OsTask *os_task_get(u32 id) {
  * 闭源库用 `_task_get_current_task()` 的返回值和 `_task_create()` 写回的
  * 句柄比较，判断"我现在是不是在 WiFi 任务里"。两边必须是同一个口径 ——
  * 都用任务 id，不能用栈指针之类的东西糊弄。 */
-static u32 g_dbg_n = 0;
 
 u32 os_task_current_id(void) {
     u32 me = 0;
