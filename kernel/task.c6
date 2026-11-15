@@ -302,12 +302,16 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
             spv = *(volatile u32 *)(ctxv + 64u);
             if (spv != 0u) { epcv = *(volatile u32 *)(spv + 60u); }
         }
-        bd[(n_ & 7) * 4] = g_cur->id;
-        bd[(n_ & 7) * 4 + 1] = epcv;          /* 切走时保存的 EPC */
-        bd[(n_ & 7) * 4 + 2] = (u32)(void *)g_cur->ctx;      /* 内核视角的当前 ctx */
-        bd[(n_ & 7) * 4 + 3] = 0u;
-        if (spv != 0u) {
-            bd[(n_ & 7) * 4 + 3] = *(volatile u32 *)(spv + 0u);  /* 帧里的 a0 */
+        /* 按任务 id 分槽（id&3），每个任务只保留它最后一次阻塞的信息：
+         * [0]=obj [1]=kind [2]=epc [3]=timeout */
+        {
+            u32 sl_ = (g_cur->id & 3u) * 4u;
+            (void)n_;
+            (void)epcv;
+            bd[sl_ + 0u] = (u32)obj;
+            bd[sl_ + 1u] = (u32)kind;
+            bd[sl_ + 2u] = epcv;
+            bd[sl_ + 3u] = timeout;
         }
     }
     g_cur->wait_obj = obj;

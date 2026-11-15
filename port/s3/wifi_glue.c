@@ -438,6 +438,7 @@ static u32 g_sp_n = 0u;
 static u32 g_rc_n = 0u;
 static u32 g_fr_n = 0u;
 static u32 g_gr_n = 0u;
+volatile u32 g_recv_seq = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 

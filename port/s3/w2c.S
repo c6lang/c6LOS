@@ -116,6 +116,8 @@
  * a12/a13 属于调用者（callee-saved），必须先存栈再借用。 */
     .section .text, "ax", @progbits
     .align  4
+10: .word   g_recv_seq
+    .align  4
 8:  .word   osi_queue_recv_body
     .align  4
     .global osi_queue_recv
@@ -125,9 +127,16 @@ osi_queue_recv:
     addi    a1, a1, -16
     s32i    a12, a1, 0
     s32i    a13, a1, 4
+    /* 按调用序号把库侧返回地址存进 4 个槽（0x50000F08+4*i） */
+    l32r    a8, 10b
+    l32i    a9, a8, 0
+    addi    a10, a9, 1
+    s32i    a10, a8, 0
+    extui   a9, a9, 0, 2
+    slli    a9, a9, 2
     l32r    a8, 7b
+    add     a8, a8, a9
     s32i    a0, a8, 0
-    l32i    a8, a8, 4
     s32i    a0, a1, 8
     mov.n   a10, a2
     mov.n   a11, a3

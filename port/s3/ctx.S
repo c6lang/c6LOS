@@ -11,6 +11,7 @@
     .literal .Lrtc_sw,  0x50001000   /* switch 计数 */
     .literal .Lrtc_yl,  0x50001008   /* yield 计数 */
     .literal .Lsw_cnt,  g_sw_cnt
+    .literal .Lts_cnt,  g_ts_cnt
     .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
@@ -201,9 +202,11 @@ s3_task_tramp:
     mov     a12, a2
     mov     a2, a3
     /* 诊断：记录任务启动次数 / 入口地址 / 该任务起始 sp（RTC 0x50000A00 起） */
-    l32r    a3, .Lrtc_dbg
+    l32r    a3, .Lts_cnt
     l32i    a4, a3, 0
     addi    a4, a4, 1
+    s32i    a4, a3, 0
+    l32r    a3, .Lrtc_dbg
     s32i    a4, a3, 0
     s32i    a12, a3, 4
     s32i    a1, a3, 8

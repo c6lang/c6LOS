@@ -7004,3 +7004,42 @@ ISR 采样给出了决定性读数：
   （回到 `pp_create_task` 之后为什么没有继续）；
 * 若是"等自己"，则是库内部状态机问题，需要对照 IDF 源码的
   `wifi_init_in_caller_task` 实现逐步核对。
+
+## §169 ★★ 结论修正：只有 `ppTask` 收过队列，不存在"两个任务互等"
+
+把每次 `_queue_recv` 的**库侧返回地址**按序号存进 4 个独立 RTC 槽
+（`0x50000F08 + 4*i`，由 `w2c` 壳在 `entry` 之后立刻记录 `a0`）：
+
+```
+recv0: 0x80381ee1 -> 0x40381ee1  =  ppTask(0x40381eb4) + 0x2d
+recv1: 0x80381ee1 -> 0x40381ee1  =  ppTask(0x40381eb4) + 0x2d   ← 同一个调用点
+recv2/3: 未被写过（全流程只有 2 次 recv）
+```
+
+⇒ **两次收队列都来自 `ppTask` 内部同一个调用点**。
+`ppTask` 的循环是"give sem → recv → 处理"，所以两次 recv 意味着
+**第一次是成功收到了一条消息**（于是进第二轮），第二次阻塞。
+
+这也推翻了我之前十几轮的核心假设：
+
+> **初始化任务从来没有调用过 `_queue_recv`。**
+
+之前"init 也在收队列"的证据来自 `os_task_block_prepare` 里记的
+`g_cur->id`（内核视角）—— 也就是说，**内核在 ppTask 运行的时候，
+把当前任务记成了任务 1**。这是 `g_cur` 的归属错误，不是"两个任务互等"。
+
+### 这修正了整张图
+
+* `ppTask` 收到了**第一条**消息（所以它会二次 recv），但 `_queue_send`
+  字段 25 从未出现 —— 说明那条消息不是经我们的 `_queue_send` 投递的；
+* 初始化任务真正的阻塞点**仍未找到**（它不在 `_queue_recv` 上）；
+* 主流程停在 `port_idle`（全体阻塞）。
+
+### 下一轮两个方向
+
+1. **`g_cur` 为何在 ppTask 运行时是任务 1**：查 `s3_task_tramp` 首次进入新
+   任务时 `g_cur_arr[core]` 的赋值顺序（`os_task_start_core` 里是
+   `g_cur_arr[me] = t;` 然后 `port_task_switch(t->ctx)` ✓，但 ISR 抢占路径
+   与首次进入新任务的组合还没验证过）。
+2. **init 到底阻塞在哪个对象**：把 `os_task_block_prepare` 的记录改成
+   按"表下标"而不是 `g_cur->id` 分槽，避开 `g_cur` 归属错误的干扰。
