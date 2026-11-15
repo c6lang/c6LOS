@@ -9350,3 +9350,85 @@ make C6_ROOT=/home/winger/c6 wifip      # = wifi + -DS3_WITH_LWIP + build/lwip/l
 1. `S3_PHY_BISECT=1` 的 `wifi` 镜像 → 看 `[phy] g_phyFuns=` / `rc=` / bisect mask（§204~§206）；
 2. PHY 通了再看 `esp_wifi_start` → 扫描 → 关联；
 3. 关联成功后才轮到 `wifip` 镜像里的 `[lwip] start rc=` 和 DHCP。
+
+---
+
+## §211 **决定性发现：qq.com 不支持 TLS 1.3**，方案必须改成 TLS 1.2
+
+前面几节一直按"TLS 1.3 + c6 标准库的 tlskdf/tlsrec"做规划。这一节把这条假设
+直接推到真服务器上验证，结论是**假设不成立**。
+
+### 一、实测证据（`openssl s_client`，宿主上就能做）
+
+```
+$ openssl s_client -connect qq.com:443 -servername qq.com -tls1_3 -brief
+error:0A00042E:SSL routines:ssl3_read_bytes:tlsv1 alert protocol version
+   ← 连 OpenSSL 自己都被服务端回 "protocol version" alert（alert 70）
+
+$ openssl s_client -connect qq.com:443 -servername qq.com -brief
+CONNECTION ESTABLISHED
+Protocol version: TLSv1.2
+Ciphersuite: ECDHE-RSA-AES128-GCM-SHA256
+Peer certificate: C=CN, ... CN=qq.com
+Hash used: SHA256
+Signature type: RSA-PSS
+Verification: OK
+```
+
+也就是说 `qq.com:443` **只谈 TLS 1.2**，套件是 `ECDHE-RSA-AES128-GCM-SHA256`。
+
+再确认两件决定实现量的事：
+
+```
+$ openssl s_client ... -tls1_2 -groups X25519 -brief          → 成功（组 = X25519 ✓）
+$ openssl s_client ... -tls1_2 -sigalgs rsa_pkcs1_sha256 ...  → 成功（签名 = RSA PKCS#1 v1.5 ✓）
+```
+
+证书链（`-showcerts`，三级，Verify return code: 0）：
+
+| # | subject | 公钥/签名 |
+| --- | --- | --- |
+| 0 | `C=CN, O=Shenzhen Tencent Computer Systems, CN=qq.com` | RSA-2048，RSA-SHA256 |
+| 1 | `C=US, O=DigiCert, CN=DigiCert Secure Site OV G5 TLS CN RSA4096 SHA384 2022 CA1` | RSA-4096，RSA-SHA384 |
+| 2 | `C=US, O=DigiCert, CN=DigiCert TLS RSA4096 Root G5`（← 由 `DigiCert Global Root G2` 交叉签名） | RSA-4096 |
+
+### 二、这对已有规划的影响
+
+| 原规划 | 结论 |
+| --- | --- |
+| 用 `std/net/tlskdf.c6`（TLS 1.3 密钥调度）+ `std/net/tlsrec.c6`（TLS 1.3 记录层，ChaCha20-Poly1305） | **用不上**。TLS 1.2 需要 P_SHA256 PRF + AES-128-GCM，完全是另一套 |
+| 缺的只是"握手驱动" | 不止：还缺 **AES-128-GCM**（`std/encoding/aes.c6` 只有 ECB 和 CTR，**没有 GHASH**）、**TLS 1.2 PRF**、**RSA 验签**（`std/encoding/rsa.c6` 根本不存在，`x509.c6` 的注释只是指了个还没写的模块）、**X.509 链校验** |
+
+### 三、修订后的 TLS 1.2 客户端清单（全部用 `.c6` 写，宿主可验证）
+
+| 模块 | 内容 | 估算 |
+| --- | --- | --- |
+| `aes128_gcm` | GHASH（GF(2^128) 乘）+ CTR 加密 + 16 字节 tag；`std/encoding/aes.c6` 已有 `ctr_xor` 和块加密，只缺 GHASH | ~150 行 |
+| `tls12_prf` | `P_SHA256`（`hmac_sha256` 已存在于 `std/encoding/sha256.c6`）→ master secret / key expansion / finished | ~40 行 |
+| `rsa_pkcs1_verify` | 从 SPKI 取 (n,e) → `bignum` 模幂 → 解 PKCS#1 v1.5 填充 → 比对 `DigestInfo(SHA256)` | ~120 行 |
+| `tls12_hs` | ClientHello/ServerHello/Certificate/ServerKeyExchange/ClientKeyExchange/CCS/Finished 的状态机 + 记录层 | ~700~900 行 |
+| 链校验（可选但推荐） | 叶子证书 CN=qq.com + 用 #1 的公钥验叶子签名 + 用内嵌根验 #1；根可以内嵌 `DigiCert Global Root G2` 的 DER | ~150 行 |
+
+关键简化（都由实测确认可行）：
+- **只提供 X25519**（`std/net/x25519.c6` 直接可用，不用写 P-256）；
+- **只提供 `rsa_pkcs1_sha256`** 作为 `signature_algorithms`，服务端就会用 PKCS#1 v1.5，
+  **不用写 RSA-PSS/MGF1**；
+- **只提供 `ECDHE-RSA-AES128-GCM-SHA256`**（0xC02F）一个套件；
+- ALPN 只提供 `http/1.1`（不提供 h2，省掉 HTTP/2）。
+
+### 四、宿主上的开发闭环（重要）
+
+c6 的编译器可以直接在宿主上编+跑（`tcc/c6`，多文件 + 模块源一起给就行）：
+
+```
+/home/winger/c6/tcc/c6 -B /home/winger/c6/tcc -I/home/winger/c6 -o probe \
+    /home/winger/c6/std/core/types.c6 /home/winger/c6/std/net/tcp.c6 probe.c6
+```
+
+本轮就是用这条路**手工构造了一个 TLS ClientHello 发给真 `qq.com:443`**：
+记录层/扩展长度全部正确（服务端解析后回的是 `protocol version` 这种"协议层"告警，
+而不是 `decode_error`），拿到这个结论只花了几分钟。也就是说：
+**TLS 1.2 客户端可以在宿主上对着真服务器开发、调试到通，再搬到板子上**——
+这比"上板盲试"高效得多，也把最后这段路的风险从"未知"变成"已知工作量"。
+
+板子上唯一要多做的是把 `Tcp` 换成 lwIP 的 socket 实现（§210 已经链进来了）。

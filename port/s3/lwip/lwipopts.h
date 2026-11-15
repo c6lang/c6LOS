@@ -56,9 +56,19 @@
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
 #define MEM_SIZE                        0   /* 用 libc 的 malloc 时无意义 */
-#define TCP_WND                         (8 * 1024)
-#define TCP_MSS                         1460
-#define TCP_SND_BUF                     (8 * 1024)
+/* DRAM 只剩约 10KB（§210），lwIP 的动态内存和闭源 WiFi 库共用 16KB 的
+ * g_wifi_heap_mem。取一次 https://qq.com 的页面不需要大窗口，先按小配置来：
+ *   MSS 536（经典保守值，不会分片）、窗口/发送缓冲各 4KB、TCP PCB 上限 4。
+ * 等真机上量过 peak 再决定要不要放大。 */
+#define TCP_WND                         (4 * 1024)
+#define TCP_MSS                         536
+#define TCP_SND_BUF                     (4 * 1024)
+#define MEMP_NUM_TCP_PCB                4
+#define MEMP_NUM_TCP_PCB_LISTEN         2
+#define MEMP_NUM_TCP_SEG                16
+#define MEMP_NUM_PBUF                   16
+#define PBUF_POOL_SIZE                  16
+#define PBUF_POOL_BUFSIZE               1520
 
 /* ---- 杂项 ---- */
 #define LWIP_NETIF_HOSTNAME             1
