@@ -16,6 +16,24 @@
 > 详见 `docs/refs/cache-error-observability.md` 末尾的"根因已找到"一节。
 > **WiFi 栈现在可以放进 flash，原定目标重新可推进。**
 
+
+> # 当前状态一览（最新）
+>
+> **已解决**
+> 1. **IROM 取指（卡了 60+ 轮的根因）**：I-cache 从未被配置 —— bootloader 留的是
+>    4-way/16KB/16B，无法服务 IROM。必须调
+>    `rom_config_instruction_cache_mode(16384, 8, 32)`（`ICACHE_CTRL=0x0b`）。
+> 2. **WiFi 闭源库链接进 flash**：645KB 镜像（之前 IRAM 溢出 421KB 链不出来）。
+> 3. **bootloader 接受带 WiFi 的镜像**：关键约束 —— IDF bootloader 只支持
+>    **一个 DROM + 一个 IROM 段**，且 DROM 必须正好 1 页（64KB）才不会抢走
+>    IROM 的 MMU 表项。当前布局：DROM@0x3C000020(1页) + IROM@0x42010000(entry 1 起)。
+> 4. **OSI 桩函数 ABI**：`wifi_glue.c` 必须 `-mabi=windowed` 编译（闭源库会回调它），
+>    并且改完 Makefile 规则后要**强制重建**（源文件没变时 make 不会重编，这个坑踩过）。
+>
+> **剩余唯一问题**
+> `esp_wifi_init_internal` 在**段内偏移 0xD934** 处的取指失败
+> （`cause=0`，三种基址下都是同一偏移；该地址的**数据读正常**）。
+
 # 从这里继续（交接摘要）
 
 ## 一分钟看懂现在的状态
