@@ -3960,3 +3960,41 @@ bootloader 跳过来之前可能只把入口所在的 cache 行装进了 I-cache
 在 `.flash.text` 里依次放几个**极小的 windowed 函数**，地址分别在
 **0x100 / 0x400 / 0x800 / 0x1000** 附近，逐个调用，找出**精确的失效边界**。
 如果边界恰好是 4KB 或 I-cache 行大小的整数倍，方向就明确了。
+
+### 86. ★★ 新线索：链接器报 "windowed longcall crosses 1GB boundary"
+
+在布置边界探测函数时，链接器吐出了一条很关键的警告：
+
+```
+libpp.a(lmac.o): in function `lmacProcessTxRtsError':
+(.text.lmacProcessTxRtsError+0x86): dangerous relocation:
+windowed longcall crosses 1GB boundary; return may fail: lmacEndFrameExchangeSequence
+```
+
+Xtensa 的 **windowed longcall**（`call8/call12` 的远距离形式）**只有 1GB 寻址范围**，
+一旦跨过 1GB 边界，**返回可能失败**（"return may fail"）。
+
+这和我们观察到的现象高度吻合：
+
+- 多个 trap 的 PC 是 **`0x8037xxxx` / `0x8037d834`** —— 最高位为 1
+- `0x80xxxxxx` 正是"**越过 0x80000000 边界**"的地址
+- 而 Xtensa 里 **bit31 是 `call0` 返回地址的标记位**
+
+⇒ 也就是说：**windowed 代码里的某个 longcall 返回时跳到了 `0x80xxxxxx`**，
+落进非法区域 —— 这完全可能就是 `cause=0x14 InstrFetchProhibited` 的来源！
+
+### 为什么之前没想到
+
+因为我们一直假设"trap 的 PC 就是出问题的代码地址"。而实际上
+`0x8037d834` 很可能是**另一个函数（0x4037d834）被置上 bit31 后的样子** ——
+正是 longcall 返回失败的典型表现。
+
+### 下一步（明确）
+
+1. **把所有 `dangerous relocation ... 1GB boundary` 警告都收集出来**，
+   看是哪些调用出的问题（这次只出现了一条，说明是偶发/特定布局）
+2. 考虑给 WiFi 库的编译加 `-mno-longcalls`（如果闭源库允许）或者
+   用 `--no-relax` / 调整段布局，让调用双方落在同一 1GB 区间内
+3. 特别注意：我们的 IRAM 在 **0x4037xxxx**、flash 在 **0x4201xxxx**，
+   两者都在 0x40000000~0x7FFFFFFF 内；但如果某个 longcall 的
+   **返回地址**被算到了 0x8xxxxxxx，就会出问题
