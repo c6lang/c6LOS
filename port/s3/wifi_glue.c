@@ -24,6 +24,11 @@ extern int ets_printf(const char *fmt, ...);
 #define OSI_RING_BUF  ((volatile u32 *)0x50000204u)
 static u32 g_osi_ring_n = 0u;
 
+/* port/s3/w2c.S 的 osi_queue_recv 壳用它做 4 槽环的下标。
+ * 必须和函数体里的 g_recv_seq 分开：共用一个序号时两边的写入互相覆盖，
+ * 真板上表现为"两次 recv 的库侧返回地址一模一样"，把 task1 的那条冲掉了。 */
+u32 g_lra_seq = 0u;
+
 #define OSI_HIT(i) do { \
     g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
     { \
@@ -633,6 +638,11 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     /* FreeRTOS 语义：ticks==0 = 非阻塞；tick==portMAX_DELAY = 永久等待。
      * 我们内核里 timeout==0 表示永久等待，所以 0 必须走 try 版本，
      * 否则库里的"非阻塞收"会变成永久挂起（实测就是任务再也不动）。 */
+    /* 关键诊断：在**阻塞发生的那一刻**记下是谁、收哪个队列、等多久。
+     * RTC 环在真板上会互相覆盖、read-mem 又会先复位，只有这里直接打印
+     * 才可靠（一次启动只有两三次）。 */
+    ets_printf("[recv] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
+               (unsigned)(void *)qh, (unsigned)ticks);
     if (ticks == 0u) {
         r = s3_w2c_queue_try_get((void *)&q->q, item);
     } else {

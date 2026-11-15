@@ -525,6 +525,7 @@ u32 s3_win_wifi_start(void)
  * 任务入口本身也是 windowed（配合 port_task_ctx_create 的 ABI 标志），
  * 这样任务 1 的执行流里完全没有 call0<->windowed 混用，
  * 只剩内核原语（经 port/s3/w2c.S 的正规壳）。 */
+__attribute__((section(".flash.text")))
 u32 s3_win_wifi_main(void)
 {
     u32 rc = 0;
@@ -599,76 +600,3 @@ void s3_win_stress_task(void *arg)
     }
 }
 
-/* ---- 低优先级监控任务：把所有诊断环格式化打到串口 ----------------------
- * 因为 esptool 的 read-mem 每次都会先复位芯片、而且一次只能读一个字，
- * 所以"读一串字段"既慢又对不上。由固件自己打印才是最可靠的快照通道。
- * 本函数在 windowed 岛上，可以直接调 ROM 的 ets_printf。
- */
-__attribute__((section(".flash.text")))
-static void pdump(const char *tag, u32 a, u32 b, u32 c, u32 d)
-{
-    ets_printf("%s %08x %08x %08x %08x\n", tag, (unsigned)a, (unsigned)b,
-               (unsigned)c, (unsigned)d);
-}
-
-__attribute__((section(".flash.text")))
-void s3_win_dump_diag(void)
-{
-    volatile u32 *sem = (volatile u32 *)0x50001C00u;
-    volatile u32 *blk = (volatile u32 *)0x50000C00u;
-    volatile u32 *gq  = (volatile u32 *)0x50001300u;
-    u32 i;
-
-    ets_printf("\n[diag] tick=%u task=%u\n",
-               (unsigned)s3_w2c_tick_get(), (unsigned)s3_w2c_current_task());
-    for (i = 0u; i < 8u; i = i + 1u) {
-        if (sem[i * 5u] == 0u) { continue; }
-        ets_printf("  sem n=%u op=%u obj=%08x ticks=%u r=%u\n",
-                   (unsigned)sem[i * 5u], (unsigned)sem[i * 5u + 1u],
-                   (unsigned)sem[i * 5u + 2u], (unsigned)sem[i * 5u + 3u],
-                   (unsigned)sem[i * 5u + 4u]);
-    }
-    for (i = 0u; i < 4u; i = i + 1u) {
-        if (blk[i * 5u + 1u] == 0u) { continue; }
-        ets_printf("  blk%u obj=%08x kind=%u ctx=%08x epc=%08x\n", (unsigned)i,
-                   (unsigned)blk[i * 5u], (unsigned)blk[i * 5u + 1u],
-                   (unsigned)blk[i * 5u + 2u], (unsigned)blk[i * 5u + 4u]);
-    }
-    pdump("  qrun", gq[0], gq[1], gq[2], gq[3]);
-    /* w2c.S 的 recv 壳记录的"库侧返回地址"（带 CALLINC 位，看的时候掩掉高 2 位） */
-    {
-        volatile u32 *lra = (volatile u32 *)0x50000F08u;
-
-        pdump("  lra ", lra[0], lra[1], lra[2], lra[3]);
-    }
-    /* 内核视角的任务状态：state / wait_kind / wait_obj。
-     * 状态值：0=就绪 1=运行 2=阻塞 3=挂起 4=结束（以 kernel/task.c6 为准） */
-    /* 库里到底调过哪些 OSI 回调、各多少次 —— 这一张表能直接看出 init 走到哪 */
-    {
-        extern volatile u32 g_osi_calls[128];
-        u32 j;
-
-        for (j = 0u; j < 128u; j = j + 1u) {
-            if (g_osi_calls[j] != 0u) {
-                ets_printf("  osi%u=%u\n", (unsigned)j, (unsigned)g_osi_calls[j]);
-            }
-        }
-    }
-    for (i = 0u; i < 5u; i = i + 1u) {
-        u32 st = s3_w2c_task_probe(i, 0u);
-        if (st == 0xFFFFFFFFu) { continue; }
-        ets_printf("  task%u st=%u wk=%u wobj=%08x\n", (unsigned)i, (unsigned)st,
-                   (unsigned)s3_w2c_task_probe(i, 1u),
-                   (unsigned)s3_w2c_task_probe(i, 2u));
-    }
-}
-
-__attribute__((section(".flash.text")))
-void s3_win_monitor_task(void *arg)
-{
-    (void)arg;
-    for (;;) {
-        s3_w2c_task_delay(120u);
-        s3_win_dump_diag();
-    }
-}

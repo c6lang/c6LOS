@@ -389,6 +389,23 @@ void port_init(void)
 #endif /* S3_NO_USB_REINIT */
 
     port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
+    /* RTC 慢存跨 CPU 复位是**保留**的，诊断区若不清零，读回来的就是上一次
+     * （甚至更早）启动的残留 —— 我们已经被这一点误导过：两处"库侧返回地址"
+     * 看起来都落在 ppTask 里，其实是前一次启动写下的。所以启动时统一清掉。 */
+    {
+        static const u32 diag_base[8] = { 0x50000200u, 0x50000300u, 0x500003C0u,
+                                          0x50000A00u, 0x50000C00u, 0x50000F00u,
+                                          0x50001540u, 0x50001C00u };
+        static const u32 diag_words[8] = { 65u, 16u, 16u, 16u, 20u, 24u, 24u, 40u };
+        u32 i;
+        u32 j;
+
+        for (i = 0u; i < 8u; i++) {
+            volatile u32 *p = (volatile u32 *)diag_base[i];
+
+            for (j = 0u; j < diag_words[i]; j++) { p[j] = 0u; }
+        }
+    }
     port_puts("c6os s3 boot\n");
     s3_irq_init();
     g_boot_marks[5] = 0xB3u;
@@ -413,4 +430,122 @@ void port_panic_halt(void)
 u32 port_virtual_tick(void)
 {
     return 0u;
+}
+
+/* ---- 诊断输出：纯 call0，不经过 windowed 岛 ------------------------------
+ * 之前把诊断打印放在 windowed 岛里，调用链一深就在 retw.n 上抛
+ * cause=0 IllegalInstruction（窗口用尽），读数时有时无。改到这里之后
+ * 整条链都是 call0，没有窗口轮转，稳定得多。
+ */
+extern u32 os_task_probe(u32 id, u32 what);
+extern void os_task_delay(u32 ticks);
+
+static char g_pd_buf[384];
+
+__attribute__((section(".flash.text")))
+static char *pd_s(char *o, const char *s)
+{
+    while (*s != 0) { *o++ = *s++; }
+    return o;
+}
+
+__attribute__((section(".flash.text")))
+static char *pd_x(char *o, u32 v)
+{
+    int i;
+
+    for (i = 7; i >= 0; i--) {
+        u32 d = (v >> (u32)(i * 4)) & 0xFu;
+
+        *o++ = (char)((d < 10u) ? ('0' + d) : ('a' + (d - 10u)));
+    }
+    return o;
+}
+
+/* which: 0=信号量环 1=任务状态 2=阻塞环 3=OSI 调用序列 */
+__attribute__((section(".flash.text")))
+void port_diag_ring(u32 which)
+{
+    char *o = g_pd_buf;
+    u32 i;
+    volatile u32 *p;
+
+    if (which == 0u) {
+        volatile u32 *sem = (volatile u32 *)0x50001C00u;
+
+        o = pd_s(o, "[sem]");
+        for (i = 0u; i < 8u; i++) {
+            if (sem[i * 5u] == 0u) { continue; }
+            o = pd_s(o, " op="); o = pd_x(o, sem[i * 5u + 1u]);
+            o = pd_s(o, " o=");  o = pd_x(o, sem[i * 5u + 2u]);
+            o = pd_s(o, " t=");  o = pd_x(o, sem[i * 5u + 3u]);
+            o = pd_s(o, " r=");  o = pd_x(o, sem[i * 5u + 4u]);
+        }
+        o = pd_s(o, "\n");
+        *o = 0;
+        port_puts(g_pd_buf);
+        return;
+    }
+    if (which == 1u) {
+        o = pd_s(o, "[task]");
+        for (i = 0u; i < 5u; i++) {
+            u32 st = os_task_probe(i, 0u);
+
+            if (st == 0xFFFFFFFFu) { continue; }
+            o = pd_s(o, " t"); o = pd_x(o, i);
+            o = pd_s(o, " s="); o = pd_x(o, st);
+            o = pd_s(o, "/");  o = pd_x(o, os_task_probe(i, 1u));
+            o = pd_s(o, "/");  o = pd_x(o, os_task_probe(i, 2u));
+        }
+        o = pd_s(o, "\n");
+        *o = 0;
+        port_puts(g_pd_buf);
+        return;
+    }
+    if (which == 2u) {
+        volatile u32 *blk = (volatile u32 *)0x50000C00u;
+
+        o = pd_s(o, "[blk]");
+        for (i = 0u; i < 4u; i++) {
+            if (blk[i * 5u + 1u] == 0u) { continue; }
+            o = pd_s(o, " o=");  o = pd_x(o, blk[i * 5u]);
+            o = pd_s(o, " k=");  o = pd_x(o, blk[i * 5u + 1u]);
+            o = pd_s(o, " c=");  o = pd_x(o, blk[i * 5u + 2u]);
+        }
+        o = pd_s(o, "\n");
+        *o = 0;
+        port_puts(g_pd_buf);
+        return;
+    }
+    {
+        volatile u32 *cnt = (volatile u32 *)0x50000200u;
+        u32 n = *cnt;
+
+        p = (volatile u32 *)0x50000204u;
+        if (n > 28u) { n = 28u; }
+        o = pd_s(o, "[osi] n=");
+        o = pd_x(o, *cnt);
+        for (i = 0u; i < n; i++) {
+            if ((i & 7u) == 0u) { o = pd_s(o, "\n  "); }
+            o = pd_x(o, p[i]);
+            *o++ = ' ';
+        }
+        o = pd_s(o, "\n");
+        *o = 0;
+        port_puts(g_pd_buf);
+    }
+}
+
+/* 低优先级监控任务：每次只打一类，避免缓冲/栈压力 */
+__attribute__((section(".flash.text")))
+void port_diag_task(void *arg)
+{
+    u32 ph = 0u;
+
+    (void)arg;
+    for (;;) {
+        os_task_delay(90u);
+        port_diag_ring(ph & 3u);
+        ph = ph + 1u;
+    }
 }

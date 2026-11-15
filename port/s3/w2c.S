@@ -121,7 +121,8 @@
     .align  4
 11: .word   0x50001560
     .align  4
-10: .word   g_recv_seq
+10: .word   g_lra_seq   /* 壳**自己**的序号：以前和函数体共用 g_recv_seq，
+                         双方的写入会互相覆盖，导致 task1 的返回地址被冲掉 */
     .align  4
 8:  .word   osi_queue_recv_body
     .align  4

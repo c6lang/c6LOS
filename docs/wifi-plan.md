@@ -8029,3 +8029,51 @@ w2c.S 的 recv 壳记录的"库侧返回地址"（带 CALLINC，掩掉后补 `0x
 `~/.c6os/toolchain/...` 之外，`.c6` 编译器 `/home/winger/c6/tcc/c6` 依赖
 `libtcc.so`，需要 `LD_LIBRARY_PATH=/home/winger/c6/tcc`；否则报
 `cannot open shared object file`（看起来像构建失败，其实是动态库路径）。
+
+## §193 真凶：windowed 任务在库调用链里阻塞后 `retw.n` 非法
+
+### 读数工具的两处修正（都很关键，否则会得出完全相反的结论）
+1. **RTC 必须启动时清零**。RTC 慢存跨 CPU 复位是保留的，我们一度读到"两次
+   `_queue_recv` 的库侧返回地址一模一样"，据此推断"两个任务都在 ppTask 里收
+   队列"—— 其实那是上一次启动写下的残留。`port/s3/console.c` 启动时统一清
+   `0x50000200/0x50000300/0x500003C0/0x50000A00/0x50000C00/0x50000F00/
+   0x50001540/0x50001C00` 八个区。
+2. **诊断打印搬回 call0 侧**（`port/s3/console.c` 的 `port_diag_ring` /
+   `port_diag_task`）。原先放在 windowed 岛里，调用链一深就在 `retw.n` 上抛
+   `cause=0 IllegalInstruction`（窗口用尽），读数时有时无。现在整条链是 call0，
+   没有窗口轮转，稳定。
+
+### 这一次启动的真实 OSI 回调序列（30 次，按顺序）
+```
+19 rec_mutex_create  43 malloc            21 mutex_lock      88 calloc
+43 88 43 88 43       22 mutex_unlock      18 mutex_create    43 malloc
+19 rec_mutex_create  43 malloc            18 mutex_create    43 malloc
+86 malloc_internal   43 malloc            42 task_get_max_prio
+94 wifi_create_queue 43 43               13 semphr_create   43 malloc
+42 task_get_max_prio 37 task_create       15 semphr_take     16 semphr_give
+29 queue_recv        29 queue_recv
+```
+- `_log_write`(83)=0：**库自己一个字都没打**，别指望它的日志。
+- `[recv] t=2 qh=... tk=ffffffff`（不建监控任务时 ppTask 是 task2）：
+  **只有 ppTask 走到 `_queue_recv`**。task1（我们的初始化任务）根本不在 recv
+  里，它的 `wait_kind=6` 是上一次等待的残留 —— 它实际卡在信号量上（blk0 kind=1）。
+
+### 真正的崩溃点
+```
+*** TRAP sp=... cause=00000000 pc=42032f18 ps=00060510 ws=00000006 a0=00000010
+osi_queue_recv = 0x42032ed4  ->  pc = osi_queue_recv+0x44
+42032f18:  f01d   retw.n            <- 就是这条
+```
+`cause=0` 是 IllegalInstruction，出在 `retw.n` 上，`a0=0x10`（明显是坏值）。
+**去掉监控任务照样崩**，同一个地址、同一个 `a0`，所以它不是监控任务扰动出来的。
+
+结论：ppTask（windowed）在库的调用链里阻塞在 `_queue_recv` 上，之后被恢复执行、
+函数返回时 `retw` 已经无法恢复到正确的窗口 —— 也就是**切换出去时只保存了当前
+窗口，任务在"多个窗口同时活着"的状态下被切走，恢复时物理窗口寄存器早已被
+别的任务轮转掉了**。这解释了为什么 §192 的隔离压力测试能过（那几条链的
+让出点窗口深度浅），而库的真实调用链不行。
+
+下一轮要做的是**切换时保存/恢复任务的整套窗口状态**：要么在切走前把所有活着的
+窗口溢出到该任务自己的栈上并把 WINDOWSTART 收紧（之前 `wsr windowbase/…` 四种
+写法都卡死，需要重新设计：只写 WINDOWSTART、按"最小活跃窗口"收紧，并在切回来
+之前再用 underflow 恢复），要么让库任务不在深层调用链里阻塞。
