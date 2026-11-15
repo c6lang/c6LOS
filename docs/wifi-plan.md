@@ -3218,3 +3218,11 @@ windowed 孤岛（`s3_win_call_wifi_init`）调用，但仍然在同一条指令
    （如果是 ⇒ 是"flash 里的 `entry`"这一类问题；如果否 ⇒ 是这个函数的特殊性）
 2. 检查 `esp_wifi_init_internal` 是否被**库内部**而非我们的孤岛调到
 3. 读 `0x4203d934` 前后几条指令的取指结果（比如跳到 0x4203d938 执行看看）
+
+### 82d. 相联度试验：4-way 更糟，8-way 是对的
+
+把 I-cache 从 8-way 改成 4-way（`rom_config_instruction_cache_mode(16384, 4, 32)`）后，
+应用连 `os_main` 的第一个信标都没写出来 —— 比原来更早死。
+
+⇒ **8-way / 16KB / 32B（`ICACHE_CTRL = 0x0b`，和 IDF 一致）是正确的配置**，已改回。
+`0x4203d934` 的 `entry` trap 与相联度无关，另有原因。
