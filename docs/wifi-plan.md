@@ -3780,3 +3780,42 @@ slot1 = 0x00000000    调用没返回（挂住），但没有 TRAP
 ⇒ 这是一个**尚未定位的、I-cache 在高地址处的取指问题**。
 下一步最有效的手段应该是：在 `s3_flash_end_test` 前后加更细的信标，
 确认到底执行到了哪里（是完全没进去，还是进去后跑飞）。
+
+---
+
+## 83. 这个 session 的总结（供接手）
+
+### 最大的进展
+
+1. **IROM 完全不可用 → 部分可用**：最初从 0x42xxxxxx 读数据返回 0、取指 trap；
+   现在**数据读在任何偏移都正常**、**取指在段首正常**（flash 里 `movi.n a2,42` 能返回 42）。
+   转折点是调用 ROM 的 `rom_config_instruction_cache_mode(16384, 8, 32)` —— 注意
+   原厂固件其实用的是默认 `ICACHE_CTRL=0x01`，所以起作用的不是模式值而是这个函数
+   顺带做的初始化。
+
+2. **WiFi 闭源栈能链接进 flash**：之前 IRAM 溢出 421KB 根本链不出来，现在 645KB 镜像
+   正常。关键是按归档把 `.literal/.text/.iram1` 收进 `.flash.text`，并补上 `.wifi*`
+   系列段、去掉 `g_mt`/`g_espnow_user_oui` 的重复定义。
+
+3. **bootloader 接受带 WiFi 的镜像**：IDF bootloader 的 `set_cache_and_start_app()`
+   只支持**一个 DROM + 一个 IROM 段**；并且 DROM 必须正好 1 页（64KB），否则会抢走
+   IROM 的 MMU 表项（两者共用同一张表）。当前布局：DROM@0x3C000020(1页) +
+   IROM@0x42010000(entry 1 起)。
+
+4. **OSI 桩函数 ABI**：`wifi_glue.c` 必须 `-mabi=windowed` 编译（闭源库会回调它），
+   并且改 Makefile 规则后要**强制重建**（源文件没变时 make 不重编 —— 这个坑浪费了好几轮）。
+
+### 还没打通的
+
+**IROM 高偏移处的取指**：段内偏移超过约 55KB 后，取指会 trap 或挂住，
+而同一地址的**数据读完全正常**。已排除：MMU 映射、数据通路、cache 模式、
+cache 失效、页号、表项冲突、l32r 越界、PS/窗口状态。
+
+### 建议的下一步
+
+1. 在 `s3_flash_end_test` 里加更细的信标（进入后立刻写一个），确认是"完全没进去"
+   还是"进去后跑飞"
+2. 用 `EXTMEM_ICACHE_TAG_OBJECT` 机制 dump 那个地址的 I-cache tag，
+   看是"没有有效 tag"还是"tag 指向了别的页"
+3. 考虑把 WiFi 的**热路径**（`esp_wifi_init` 及其直接依赖）留在 IRAM，
+   只把冷代码放 flash —— 这样即使高偏移取指有问题也能先跑起来
