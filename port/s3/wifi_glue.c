@@ -1246,6 +1246,7 @@ extern int esp_wifi_set_config(int iface, void *conf);
 extern int esp_wifi_start(void);
 extern int esp_wifi_connect_internal(void);
 extern int esp_wifi_sta_get_ap_info(void *conf);
+extern int esp_wifi_set_ps(int type);
 extern int esp_wifi_scan_start(const void *cfg, int block);
 extern int esp_wifi_scan_get_ap_num(unsigned short *num);
 extern int esp_wifi_scan_get_ap_records(unsigned short *num, void *records);
@@ -1255,7 +1256,11 @@ int s3_wifi_scan(void);         /* 定义在下面（先扫一遍做射频体检
 #ifdef S3_WITH_WIFI
 u32 s3_wifi_associate(const char *ssid, const char *pass)
 {
-    static u32 cfg[48];             /* 192 字节，wifi_sta_config_t 约 180 字节 */
+    /* 320 字节全零：wifi_sta_config_t 现在约 184 字节，但不同 IDF 版本会变长。
+     * 库是按**它自己编译时的 sizeof** 读这块内存的，缓冲给窄了它就会读到我们
+     * 后面的 bss 垃圾（比如 bssid_set 变成 1、channel 变成随便一个值），
+     * 表现就是"配置明明对却连不上"。多给一些零是最便宜的保险（§221）。 */
+    static u32 cfg[80];
     u32 i = 0u;
     int r1 = 0;
     int r2 = 0;
@@ -1264,7 +1269,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     int r5 = 0;
     int n = 0;
 
-    for (i = 0u; i < 48u; i++) { cfg[i] = 0u; }
+    for (i = 0u; i < 80u; i++) { cfg[i] = 0u; }
     if (ssid == 0 || ssid[0] == 0) {
         /* 没给账号：仍然把接口拉起来扫一遍，至少验证射频与收发链路 */
         ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
@@ -1291,6 +1296,10 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     ets_printf("[wifi] set_config=%d\n", r3);
     r4 = esp_wifi_start();
     ets_printf("[wifi] start=%d\n", r4);
+    /* 关掉省电：modem sleep 需要 OSI 的 `_wifi_rtc_enable/disable_iso` 和定时器
+     * （我们那两个是空实现），睡眠一开 RX 就可能收不到包。取一个页面不需要省电，
+     * 所以显式 WIFI_PS_NONE(0)（§221）。 */
+    ets_printf("[wifi] set_ps(NONE)=%d\n", esp_wifi_set_ps(0));
     /* 先扫一遍：不需要密码就能验证射频链路（也方便判断"连不上"是 AP 没扫到
      * 还是认证失败）。 */
     (void)s3_wifi_scan();
@@ -1305,14 +1314,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
  * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
 int s3_wifi_scan(void)
 {
-    u8 cfg[16];                 /* wifi_scan_config_t，全零 = 全信道扫所有 SSID */
+    /* wifi_scan_config_t 约 20~24 字节，给 64 字节零缓冲（同样避免库读到 bss 垃圾） */
+    u8 cfg[64];
     u8 rec[256];                /* 只放一个 wifi_ap_record_t，足够大 */
     unsigned short num = 0;
     unsigned short one = 1;
     int r = 0;
     int i = 0;
 
-    for (i = 0; i < 16; i++) { cfg[i] = 0; }
+    for (i = 0; i < 64; i++) { cfg[i] = 0; }
     for (i = 0; i < 256; i++) { rec[i] = 0; }
     ets_printf("[wifi] scan start（阻塞）\n");
     r = esp_wifi_scan_start((const void *)cfg, 1);

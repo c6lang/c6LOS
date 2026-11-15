@@ -9938,3 +9938,34 @@ if (nif->input(p, nif) != ERR_OK) { ... }                               // ← �
 
 这条和 §219（任务上限/栈池）是同一类问题：**单线程假设下写的代码，接了 tcpip
 线程之后必须重新检查每个"回调在哪个上下文跑"**。
+
+---
+
+## §221 两个"库会读多少字节 / 会不会去睡觉"的防御性修正
+
+### 一、配置缓冲要按**库编译时的 sizeof** 给足
+
+闭源库是按它自己编译时的 `sizeof(wifi_sta_config_t)` / `sizeof(wifi_scan_config_t)`
+读我们传进去的指针的。我们原来分别给 192 / 16 字节：
+
+- `wifi_sta_config_t` 现在约 184 字节 —— 192 只是"刚好"，一旦 IDF 版本再长一点，
+  库就会读进我们 **bss 里后面的垃圾**：`bssid_set` 变成 1（只连指定 BSSID）、
+  `channel` 变成随便一个信道，表现就是"配置明明对却连不上/一直超时"；
+- `wifi_scan_config_t` 约 20~24 字节 —— 16 字节**现在就已经不够**了，
+  `scan_type` / `home_chan_dwell_time` 会吃垃圾。
+
+改成 **320 字节**（sta config）和 **64 字节**（scan config）的零缓冲。
+多出来的零是最便宜的保险：任何"库读得比我们给的长"的字段都会落成 0（= 默认）。
+
+### 二、显式关掉省电
+
+`esp_wifi_start()` 之后加一句 `esp_wifi_set_ps(WIFI_PS_NONE=0)`。理由：modem sleep
+依赖 OSI 的两个回调 —— `_wifi_rtc_enable_iso` / `_wifi_rtc_disable_iso` —— 而我们
+那两个是空实现（RTC_CNTL_DIG_ISO 的 WIFI_FORCE_ISO 位），睡眠一开 RX 就可能
+收不到包。取一个页面完全不需要省电，所以直接关掉。
+
+串口会多一行 `[wifi] set_ps(NONE)=0`。
+
+### 三、构建状态
+
+`https` / `wifi` / `wifip` 三种构建都通过，chkimg OK。
