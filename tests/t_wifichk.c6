@@ -1,0 +1,22 @@
+/* WiFi 构建里的取指验证：段首(0x14) vs 高偏移(0xD934) */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+extern const u32 s3_flash_rodata_probe;
+extern u32 s3_win_call_flash42(void);
+extern u32 s3_win_call_cache_invalidate(void);
+extern u32 s3_win_call_wifi_init(void *cfg);
+extern u32 s3_win_call_osi_init(void);
+static u8 g_wifi_cfg[512] __attribute__((aligned(512)));
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000200u);
+    os_icache_enable();
+    s3_win_call_cache_invalidate();
+    s3_beacon(1u, s3_win_call_flash42());     /* 段首取指，期望 42 */
+    s3_beacon(2u, s3_flash_rodata_probe);     /* DROM 读，期望 0x12345678 */
+    s3_beacon(3u, 0xC0DE0001u);               /* 进入 wifi 前的标记 */
+    *(u32 *)&g_wifi_cfg[0] = s3_win_call_osi_init();
+    s3_beacon(3u, s3_win_call_wifi_init(g_wifi_cfg));  /* 这里会 trap */
+    for (;;) { }
+}

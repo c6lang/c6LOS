@@ -4595,3 +4595,42 @@ slot3 = 0x0000002A     flash42 仍返回 42
 1. 段首附近（`s3_asm_flash_42`，0x14）能否取指 —— 需要单独的信标槽，不要和 DROM 探针混用
 2. 如果 0x14 能取指、0xD934 不能 ⇒ 边界的确认
 3. 如果 0x14 也不能 ⇒ WiFi 版连第一页都有问题，方向完全不同
+
+### 104. ★★★ `esp_wifi_init_internal` 已经执行进去了！
+
+在 WiFi 构建里用独立信标槽明确验证，并加了 `S3_FLASH_FORCE_MAP`：
+
+```
+slot0 = 0xB0000200     标记
+slot1 = 0x0000002A     ← 42！**WiFi 构建里段首取指也正常**
+slot2 = 0x12345678     DROM 读正常
+slot3 = 0xC0DE0001     已进入 wifi_init
+*** TRAP cause=0x1C pc=4203d94d
+```
+
+反汇编 `esp_wifi_init_internal`：
+
+```
+4203d934:  entry   a1, 32                    <- 执行了 ✅
+4203d937:  mov.n   a4, a2                    <- 执行了 ✅
+4203d939:  bnez    a2, 4203d94d              <- 执行了 ✅
+4203d94d:  l32i.n  a10, a2, 0                <- 在这里 trap ❌（cause=0x1C 是 load/store 错）
+```
+
+⇒ **`entry` 完全正常执行，函数体跑起来了**！现在挂的是
+`l32i.n a10, a2, 0` —— 读我们传进去的 `g_wifi_cfg` 指针指向的内存。
+
+### 这意味着什么
+
+`entry` 那个"flash 里不能执行"的疑点**彻底排除**了。
+现在的问题缩小到：**传给 `esp_wifi_init_internal` 的 cfg 指针有问题**。
+
+### 下一步
+
+检查 `g_wifi_cfg`：
+1. 它在 DRAM 的哪个地址？是否被 MMU/DRAM 映射正常？
+2. `cause=0x1C`（28）在 Xtensa 里对应哪种访存错误，需要查 TRM 确认
+3. 我们传的是 `.c6` 里的 `static u8[512] __attribute__((aligned(512)))`，
+   而闭源库期望的是一个完整的 `wifi_init_config_t` 结构体 ——
+   可能它要读的字段超出了我们这块内存的范围？
+   （不过这条指令只读第一个 4 字节，应该不会越界）
