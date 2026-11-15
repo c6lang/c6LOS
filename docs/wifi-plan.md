@@ -6840,3 +6840,33 @@ g_tasks[i].id == g_cur->id`），绕开取址。
    已经不是唯一调用者了）。
 2. 或者直接给 `pp_post` 打桩：即使不被调用，也人工投一条消息进
    `s_wifi_queue`，看轮询是否结束。
+
+## §165 继续排除：阻塞机制本身没问题
+
+* `os_task_block_prepare` 确实会 `g_cur->state = OS_TASK_BLOCKED` ✓；
+* `os_obj_lock()` 在 S3 上只是 `port_irq_save()`（单核关中断），**不碰**
+  `g_sched_lock` ✓，所以不会让 `os_task_block_prepare` 返回 -4。
+
+也就是说队列/信号量的"进内核 → 置 BLOCKED → 让出"这条路径本身是通的。
+
+而 §151 的库侧返回地址追踪今天仍然可用，读数：
+
+```
+0x50000F08 = 0x80381f2d  ->  0x40381f2d  ->  ppTask(0x40381f00) + 0x2d
+```
+
+⇒ 现在在 `_queue_recv` 上反复进入的**就是 `ppTask` 自己**
+（`ppTask+0x2a` 是那句 `callx8 _queue_recv`，`+0x2d` 是它的返回地址）。
+
+配合之前的 `QDIAG` 读数（`QDIAG[1] = 2`，即 `-r = 2` → `os_queue_get_item`
+返回 `-2`=超时），说明这次接收是**以超时结束的**，而不是被消息唤醒。
+
+### 下一轮要看的两点
+
+1. `w_ticks(0xFFFFFFFF)` 应该变成 0（=内核的"永久等待"）。但库里
+   `ppTask` 传的是 `movi a12, -1`（即 0xFFFFFFFF）✓ 转换后是 0 ✓。
+   那 `-2` 超时是从哪来的？需要重查 `os_queue_get_item` 里
+   `os_task_block_prepare(q, timeout=0, ...)` 之后的 `os_task_block_wait()`
+   在 timeout=0 时到底返回什么。
+2. 若 `os_task_block_wait()` 在"没有任何超时条目"时也返回 -2，
+   那所有 timeout=0 的永久等待都会变成"立即超时"，正好解释 ppTask 的轮询。
