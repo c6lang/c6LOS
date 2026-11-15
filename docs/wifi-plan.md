@@ -9114,3 +9114,65 @@ s3_win_usb_reclaim()      ⑤ 双保险把 USB 抢回来
 两个都是我们自己的代码缺陷，不是闭源库或 windowed ABI 的问题。下一步上板如果
 还有问题，`[phy] g_phyFuns=0x…` / `[phy] register_chipv7_phy rc=…` 两行输出
 会直接指向位置；`S3_PHY_BISECT=1` 的自动二分（6 步）作为兜底。
+
+---
+
+## §207 IP 栈可行性：lwIP 能编进我们的工具链（已验证），L2 钩子在闭源库里
+
+PHY 通了之后还差一整套 IP/TCP/TLS 才能取到 `https://qq.com`。这一节把"IP 栈
+怎么来"这个最大的未知项**用编译验证**settle 掉，而不是继续靠估计。
+
+### 一、结论先说
+
+| 问题 | 答案 | 证据 |
+| --- | --- | --- |
+| 仓库里有 IP 栈吗？ | 没有（`grep lwip` 全仓库为空） | — |
+| IDF 的 lwIP 能用我们的工具链编吗？ | **能**，32 个对象全过 | `make lwip` → `build/lwip/liblwip.a`，`text 49407 / data 12 / bss 1688` |
+| lwIP 需要 FreeRTOS 吗？ | **不需要**（`NO_SYS=1` 时零依赖） | 我们只补了 `arch/cc.h` + `lwipopts.h` 两个头 |
+| 闭源 WiFi 库给不给 L2 收发的钩子？ | **给** | `esp_wifi_internal_tx`（libnet80211）、`esp_wifi_internal_reg_rxcb`（libnet80211）、`esp_wifi_internal_free_rx_buffer`（libpp） |
+| c6 标准库那套能不能直接用？ | 现在不行，需要 socket 层 | `/home/winger/c6/std/net/tcp.c6` 是 POSIX 薄封装（`socket/connect/poll/getaddrinfo`），所以最终要 `NO_SYS=0` + 自己的 `sys_arch` |
+
+也就是分工很清楚：**L2（802.3 帧收发）用闭源 WiFi 库，ARP/IP/TCP/UDP/DHCP/DNS 用
+lwIP，application 层用 c6 标准库**。不需要 IDF 的 `esp_netif`/`esp_event`/FreeRTOS。
+
+### 二、新增文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `port/s3/lwip/lwipopts.h` | 我们自己的 lwIP 配置（IDF 那份第一行就 `#include "sdkconfig.h"`，我们没有 sdkconfig 生成流程）。当前 `NO_SYS=1`；`MEM_LIBC_MALLOC=1` + `MEMP_MEM_MALLOC=1` 让 lwIP 用内核堆，静态 RAM 只占 1.7KB |
+| `port/s3/lwip/arch/cc.h` | lwIP 要的平台适配头：定宽类型、`PACK_STRUCT_*`、`LWIP_PLATFORM_DIAG/ASSERT`、`LWIP_RAND` |
+| `port/s3/lwip/c6_lwip_port.c` | 平台钩子（`sys_now`/`c6lwip_diag/assert/rand`）+ netif 粘合（`linkoutput` → `esp_wifi_internal_tx`；RX 回调 → `netif->input` + 归还 eb；`c6_lwip_start(mac)` 起 lwIP + `dhcp_start`） |
+| `Makefile` 的 `lwip` 目标 | 把上面的东西编成 `build/lwip/liblwip.a`（**还没接进 c6os.elf**，见第五节） |
+
+### 三、踩到的两个编译坑（都会复现，记下来省时间）
+
+1. **不能给 lwIP 加 `-Wa,--no-transform`**。这个开关是给手写汇编（`win_bridge.S`
+   防 `retw` 被缩成 `retw.n`）用的；加到编译器生成的代码上之后，gas 不再做分支
+   松弛，`-Os` 下生成的窄分支一旦超范围就直接报
+   ```
+   Error: operand 2 of 'bnez.n' has out of range value '4294967280'   (core/def.c)
+   ```
+2. **`LWIP_ACD=0` 时必须同时写 `LWIP_DHCP_DOES_ACD_CHECK=0`**，否则 lwIP 的
+   `init.c` 直接 `#error`（它只检查"想要 ACD 就要三件套"这一侧）。
+3. `arch/cc.h` 不能用 IDF 那份：它 `#include "sdkconfig.h"` + `esp_log.h` +
+   `arch/sys_arch.h`，三个我们都没有。
+
+### 四、集成顺序（等 PHY 在真板上跑通之后）
+
+1. `lwipopts.h` 改 `NO_SYS=0`，写 `port/s3/lwip/sys_arch.c`（我们内核已经有
+   sem/mutex/queue/task/tick/event，正好对上 `sys_sem_*`/`sys_mutex_*`/`sys_mbox_*`/
+   `sys_thread_new`/`sys_now`），开 `LWIP_SOCKET=1` + `LWIP_NETCONN=1`；
+2. `port/s3/link.ld` 里把 `liblwip.a` 的 `.text` **塞进 `.flash.text`**（IROM），
+   千万别掉进 IRAM —— IRAM 只剩几 KB（§202 的预算表）；
+3. 提供 POSIX 薄封装（`socket/connect/recv/send/poll/close` → `lwip_*`），
+   这样 `std/net/tcp.c6`、`std/net/https.c6` 就能直接用；
+4. 先 `ping`（ICMP）→ 再 DHCP 拿到地址 → 再 DNS 解析 `qq.com` → 再 TCP 443 →
+   最后才是 TLS。
+
+### 五、为什么现在不接进镜像
+
+WiFi 关联（`esp_wifi_start` → 扫描 → 4 次握手）在真板上还没跑通，PHY 才刚把
+两个真 bug 修完（§205/§206）。这时候把 48KB 的 lwIP 链进 `c6os.elf`，只会让
+一个**本来就无法验证**的镜像再叠一层不可验证的代码，排障时更难分清是谁的问题。
+所以 `liblwip.a` 先独立编出来放着，`make lwip` 可以单独验证；
+`make wifi` / 基线 `make s3` 的行为完全不变。

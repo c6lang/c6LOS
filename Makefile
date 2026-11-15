@@ -1476,3 +1476,50 @@ wifi:
 		s3
 wififlash: wifi
 	./tools/flashmon.sh build/wifi/c6os.bin 15
+
+# ---------------------------------------------------------------------------
+# lwIP（IP 栈）—— 见 docs/wifi-plan.md §207
+#
+# 这一步**不**把 lwIP 接进 c6os.elf：WiFi 关联本身还没在真板上跑通，先接进去
+# 只会让镜像多一堆无法验证的代码。这里只做两件事，都可以离线验证：
+#   1) 用我们自己的 port/s3/lwip/{lwipopts.h,arch/cc.h} 把 IDF 的 lwIP 源码
+#      编成 build/lwip/liblwip.a（证明工具链/可移植性没问题）；
+#   2) 让 port/s3/lwip/c6_lwip_port.c（平台钩子 + netif 粘合）一起编进来，
+#      这样"要接的面"是编译期就确认过的，而不是等上板才发现缺符号。
+#
+# 为什么用 -mabi=windowed：linkoutput 要调 libnet80211 的
+# esp_wifi_internal_tx()（windowed ABI）。内核侧（call0）要调这些函数时
+# 一律走 port/s3/w2c.S 的正规壳，和现有 WiFi 岛的做法一致。
+LWIP_SRC  := $(IDF_ROOT)/components/lwip/lwip/src
+LWIP_DIR  := build/lwip
+LWIP_INC  := -Iport/s3/lwip -I$(LWIP_SRC)/include
+# 注意：这里**不能**加 -Wa,--no-transform。加上之后 gas 不再做分支松弛，
+# 编译器在 -Os 下生成的 bnez.n（窄分支）一旦位移超过 ±127 就报
+#   Error: operand 2 of 'bnez.n' has out of range value '4294967280'
+# （def.c 就是这么挂的）。--no-transform 只是我们给手写汇编（win_bridge.S）
+# 防 retw 缩窄用的，编译器生成的 windowed 代码不需要它。
+LWIP_CF   := -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
+             -mlongcalls -mtext-section-literals \
+             -Wall -Wextra -Wno-unused-parameter
+LWIP_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
+             $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
+             $(wildcard $(LWIP_SRC)/netif/ethernet.c) \
+             port/s3/lwip/c6_lwip_port.c
+LWIP_HDRS := port/s3/lwip/lwipopts.h port/s3/lwip/arch/cc.h
+
+define C6_LWIP_RULE
+$(LWIP_DIR)/obj/$(notdir $(basename $(1))).o: $(1) $(LWIP_HDRS)
+	@mkdir -p $(LWIP_DIR)/obj
+	$$(XTGCC) $(LWIP_CF) $(LWIP_INC) -c $$< -o $$@
+endef
+$(foreach f,$(LWIP_SRCS),$(eval $(call C6_LWIP_RULE,$(f))))
+
+LWIP_OBJS := $(addprefix $(LWIP_DIR)/obj/,$(addsuffix .o,$(notdir $(basename $(LWIP_SRCS)))))
+
+lwip: $(LWIP_DIR)/liblwip.a
+	@echo "lwip: $(words $(LWIP_OBJS)) 个对象 -> $<"
+
+$(LWIP_DIR)/liblwip.a: $(LWIP_OBJS)
+	@mkdir -p $(dir $@)
+	$(XTP)ar rcs $@ $^
+	@$(XTP)size $(LWIP_DIR)/obj/*.o | tail -1
