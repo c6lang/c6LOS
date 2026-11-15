@@ -719,6 +719,11 @@ u32 s3_win_wifi_main(void)
         u32 n = 0u;
 
         ets_printf("[lwip] start rc=%d\n", irc);
+        {
+            extern void s3_wifi_dump_osi(const char *tag);
+
+            s3_wifi_dump_osi("init 之后");
+        }
         WSTAGE(0x1010u);
         /* 关联 + 等 IP（阶段信标：0x1021 关联中、0x1022 关联成功、0x1023 拿到 IP） */
         {
@@ -729,10 +734,17 @@ u32 s3_win_wifi_main(void)
             const char *ssid = (const char *)S3_WIFI_SSID;
             const char *pass = (const char *)S3_WIFI_PASS;
 
+            extern void s3_wifi_dump_osi(const char *tag);
+            extern void s3_wifi_dump_events(const char *tag);
+
             WSTAGE(0x1021u);
             (void)s3_wifi_associate(ssid, pass);
+            s3_wifi_dump_osi("start+scan 之后");
+            s3_wifi_dump_events("start+scan 之后");
             if (s3_wifi_wait_connected(15000) != 0) {
                 WSTAGE(0x1022u);
+                s3_wifi_dump_osi("关联成功");
+                s3_wifi_dump_events("关联成功");
                 if (c6_lwip_wait_ip(20000) != 0) {
                     WSTAGE(0x1023u);
                     c6_lwip_print_ip();

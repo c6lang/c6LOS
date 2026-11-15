@@ -10004,3 +10004,31 @@ make tls12check
 中断路径上，放 flash 完全没问题），然后 IRAM 就回去了。
 
 `https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
+
+---
+
+## §223 分阶段打印 OSI 调用统计和事件环：把"关联卡在哪"变成一行日志
+
+板子上没有断点，之前关联失败只会看到一句 `[wifi] 关联超时（15000 ms）`，
+无法判断是"根本没扫到 AP"、"扫描后没去连"、"连了但 4 次握手失败"还是
+"连上了但 DHCP 没拿到地址"。这一节把两个已有的记账装置接到串口上：
+
+| 新增输出 | 内容 |
+| --- | --- |
+| `[osi] <阶段>: 13=1 18=1 23=2 29=5 37=2 43=12 …` | `g_osi_calls[]` 里**非零的槽位**（最多 16 项）。槽位含义见 `include/c6os/wifi_osi.h`：13 `_semphr_create`、18 `_mutex_create`、23 `_queue_create`、29 `_queue_recv`、37 `_task_create`、43 `_malloc`、83 `_log_write`… |
+| `[evt] <阶段>: 共 N 条 [wifi:2] [wifi:1] [wifi:4] …` | RTC `0x50000B90` 里记的事件：`1=SCAN_DONE 2=STA_START 4=STA_CONNECTED 5=STA_DISCONNECTED`（§216 的记账） |
+
+打印时机：`esp_wifi_init_internal` 之后、`start+scan` 之后、关联成功之后。
+
+判读方法（上板直接用）：
+
+| 现象 | 结论 |
+| --- | --- |
+| `[evt]` 里有 `[wifi:2]`（STA_START）但没有 `[wifi:1]`（SCAN_DONE） | 扫描没完成 → 射频/时钟层还没通 |
+| 有 `[wifi:1]` 但没有 `[wifi:4]`（STA_CONNECTED），之后出现 `[wifi:5]` | 关联被拒 → 看 `_log_write` 的内容（`g_log_level=4` 已经打开）或考虑 PSK/认证方式 |
+| 有 `[wifi:4]` 但没有 `[lwip] ip=` | 关联成功但 DHCP 没成 → 看 `[osi]` 里有没有 `_queue_send`/`_task_create` 失败、以及 lwIP 的 netif 状态 |
+| `[osi]` 里出现我们没实现的槽位（如 120 以上的兜底项）| 说明还有 OSI 回调要补 |
+
+这一节不改任何行为，只是把已有的两个记账装置（`g_osi_calls`、事件环）暴露到串口。
+
+`https` / `wifi` / `wifip` / 基线 `s3` 构建都通过，chkimg OK。

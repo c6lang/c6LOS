@@ -1219,6 +1219,61 @@ static void wcfg(u32 off, u32 v)
     *(volatile u32 *)((u8 *)g_wifi_cfg_blob + off) = v;
 }
 
+/* ---- 事件环：库通过 _event_post 上报的 WiFi/IP 事件（§216 记的账）-------
+ * 打印 RTC 慢存 0x50000B90 起的 16 项（event_base, event_id）。
+ * 常用 event_id（IDF 的 esp_wifi_types）：
+ *   1=SCAN_DONE 2=STA_START 4=STA_CONNECTED 5=STA_DISCONNECTED 6=AUTHMODE_CHANGE
+ * 有了这一行，关联卡在哪一步就一目了然（比"关联超时"四个字强多了）。 */
+extern const char *WIFI_EVENT;      /* 定义在文件后面（"WIFI_EVENT" 的指针） */
+
+void s3_wifi_dump_events(const char *tag)
+{
+    volatile u32 *p = (volatile u32 *)0x50000B90u;
+    u32 n = p[32];
+    u32 i = 0u;
+    u32 show = (n > 8u) ? 8u : n;
+
+    ets_printf("[evt] %s: 共 %u 条", tag, (unsigned)n);
+    for (i = 0u; i < show; i++) {
+        u32 base = p[i * 2u];
+        u32 id = p[i * 2u + 1u];
+        const char *kind = "?";
+
+        if (base == (u32)(void *)WIFI_EVENT) {
+            kind = "wifi";
+        } else if (base != 0u) {
+            kind = "ip/other";
+        }
+        ets_printf(" [%s:%u]", kind, (unsigned)id);
+    }
+    ets_printf("\n");
+}
+
+/* ---- OSI 调用统计：每个阶段结束打一遍，方便判断"库到底走到哪一步" --------
+ * g_osi_calls[i] 是第 i 个 OSI 槽位被调用的次数。板子上没有断点，靠这个就能看出
+ * 例如 "_semphr_create 有、_queue_recv 没有" 这种早期失败（§223）。 */
+void s3_wifi_dump_osi(const char *tag)
+{
+    volatile u32 *c = (volatile u32 *)g_osi_calls;
+    u32 i = 0u;
+    u32 printed = 0u;
+
+    ets_printf("[osi] %s:", tag);
+    for (i = 0u; i < 128u; i++) {
+        if (c[i] != 0u) {
+            ets_printf(" %u=%u", (unsigned)i, (unsigned)c[i]);
+            printed = printed + 1u;
+            if (printed >= 16u) {
+                break;              /* 一行最多 16 项，别把串口刷爆 */
+            }
+        }
+    }
+    if (printed == 0u) {
+        ets_printf(" (还没有任何回调)");
+    }
+    ets_printf("\n");
+}
+
 /* ---- 关联（associate）：init 之后把 STA 真正连上 AP ---------------------
  *
  * 之前只做了 esp_wifi_init_internal()，**没有** set_mode/set_config/start/connect，
