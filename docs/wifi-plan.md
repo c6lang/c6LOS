@@ -8249,3 +8249,28 @@ bootloader 还在不在。
   做归一化，并把标志清掉。这个标志可以放在 `S3Ctx` 里（`r[0]` 那个闲置槽）。
 - 另：`rotw` 整圈 spill 必须在**确认 PS.WOE=1 且当前帧合法**的地方做；放在
   `RESTORE_FRAME` 或启动早期都会立刻死。
+
+### §197 续：配对方案已实现但**还没生效**（真板同签名复现）
+
+实现了：
+- `port/s3/w2c.S`：`W2C`/`W2C_TRACE` 两个壳在保存完寄存器后执行 `WIN_SPILL8`
+  （`rotw` 整圈），随后把 `g_win_spilled` 置 1；
+- `port/s3/ctx.S`：`port_task_switch` 把 `g_win_spilled` 搬进 `S3Ctx.r[0]`
+  （偏移 0，原本就是闲置占位槽）并清零；`RESTORE_FRAME` 最前面检查这个标志，
+  有标志才做 `WINDOWSTART = 1<<windowbase`（并先看 PS.WOE），用掉即清；
+  `port_task_yield` 路径明确写 0（它没有 spill）。
+- `port/s3/ctx.c`：定义 `u32 g_win_spilled`。
+
+结果：能正常启动、`[recv] t=3` 正常、没有 IllegalInstruction，但**故障签名没变**：
+```
+JTAG: exccause=28  excvaddr=0xfffffff3  a1=0xffffffff(-1)
+      epc1=0x4037e834  windowbase=3  windowstart=0x20
+```
+说明这条恢复路径上**标志没被看到**，归一化没有执行。最可疑的一点：
+`port_task_switch` 里 `s32i a1, a3, 64` 的 `a3` 是 **`&g_sched[core]`**，
+而不是任务自己的 `g_ctx[i]` —— 如果 `g_sched[core]` 只是个临时槽，
+那么写进去的 `r[0]` 标志根本不会跟着任务走，恢复时读到的就是 0。
+
+**下一轮第一件事**：查清 `g_sched[core]` 与 `g_ctx[i]` 的关系（`port/s3/ctx.c`），
+确认"每个任务自己的 ctx"到底是哪一个，然后把标志写到正确的那个 ctx 上；
+顺便确认 `port_task_ctx_create` 有没有把 `r[0]` 初始化成 0。

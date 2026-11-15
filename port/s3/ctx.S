@@ -15,9 +15,28 @@
     .literal .Ldbg2,    0x50001800
     .literal .Lwscratch, g_win_scratch
     .literal .Lyl_cnt,  g_yl_cnt
+    .literal .Lspilled, g_win_spilled
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
+    /* 只对**切走前 spill 过**的任务做 WINDOWSTART 归一化（a4 = 目标 ctx）。
+     * 为什么必须配对：归一化把 WINDOWSTART 收紧成"只剩当前窗口"，没 spill
+     * 过的任务祖先窗口还 live，收紧等于丢掉它们 —— 真板表现是整个固件连
+     * banner 都不打。标志放在 S3Ctx.r[0]（偏移 0，原本就是闲置占位槽）。 */
+    l32i    a2, a4, 0
+    beqz    a2, 8f
+    movi    a2, 0
+    s32i    a2, a4, 0            /* 用掉即清 */
+    rsr     a2, ps
+    extui   a3, a2, 18, 1
+    beqz    a3, 8f               /* PS.WOE=0（启动早期）就别碰 */
+    rsr     a2, windowbase
+    movi    a3, 1
+    ssl     a2
+    sll     a3, a3
+    wsr     a3, windowstart
+    isync
+8:
     l32i    a2, a1, 60
     wsr     a2, epc1
     l32i    a2, a1, 64
@@ -129,6 +148,11 @@ port_task_switch:
     l32r    a3, .Lg_sched
     add     a3, a3, a5
     s32i    a1, a3, 64
+    l32r    a6, .Lspilled
+    l32i    a7, a6, 0
+    s32i    a7, a3, 0            /* ctx->r[0] = 本任务切走前是否 spill 过 */
+    movi    a7, 0
+    s32i    a7, a6, 0            /* 清标志 */
     /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
     l32r    a14, .Ldbg2
     s32i    a1, a14, 0
@@ -209,6 +233,8 @@ port_task_yield:
     and     a5, a5, a6
     s32i    a5, a1, 64
     s32i    a1, a4, 64
+    movi    a6, 0
+    s32i    a6, a4, 0            /* yield 路径没有 spill，标志清零 */
     /* 诊断：yield 的外出任务 ctx 与保存的 sp */
     l32r    a14, .Ldbg2
     s32i    a4, a14, 16
@@ -219,6 +245,7 @@ port_task_yield:
     mull    a5, a11, a6
     add     a3, a3, a5
     l32i    a1, a3, 64
+    mov     a4, a3
     RESTORE_FRAME
 1:
 #ifdef __XTENSA_CALL0_ABI__

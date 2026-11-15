@@ -26,6 +26,8 @@
 7:  .word   0x50000F08   /* 诊断区：记录 **库** 调用 _queue_recv 的返回地址 */
     .align  4
 6:  .word   0x50000F00   /* 诊断区 2：s3_w2c_queue_get 的调用者 */
+    .align  4
+12: .word   g_win_spilled  /* "切走前 spill 过"标志（见 ctx.c / ctx.S） */
 
     .macro  W2C name, target
     /* l32r 只能往前引用，所以字面量必须放在指令之前；用数字标签 9 保证
@@ -46,6 +48,29 @@
     callx0  a8
     l32i    a0, a1, 32
     retw
+    .endm
+
+
+/* ---- 把祖先窗口整圈 spill 到栈上 -------------------------------------
+ * 转 16 个窗口（64 aregs / 4）正好一圈，WINDOWBASE 回到原值 —— 官方
+ * xt_asm_utils.h 的 SPILL_ALL_WINDOWS 做法（这颗芯片上不能写 WINDOWBASE）。
+ * 转完只有当前窗口 live，所以恢复时把 WINDOWSTART 归成 1<<windowbase 是
+ * 唯一正确的选择 —— 但**必须**跟这里配对（见 ctx.c 的 g_win_spilled）。
+ * `and a12,a12,a12` 是占位：写回自身，即使被溢出到栈上也仍然正确。 */
+    .macro  WIN_SPILL8
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    4
+    l32r    a9, 12b
+    movi    a10, 1
+    s32i    a10, a9, 0          /* g_win_spilled = 1 */
     .endm
 
 /* 带调用点追踪的版本：在 entry 之后记录 a0（此刻它就是 windowed 调用者的
