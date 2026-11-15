@@ -7710,3 +7710,52 @@ osi_calls = 30
 
 安全护栏：对整个改动前后各留一次"自己的 call0 任务仍能正常运行"的回归
 （自制任务的 switch/yield 计数与 beacon 输出不变），避免把调用约定搞坏。
+
+## §186 一次失败的尝试 + 一个关键的顺序错误
+
+想在新任务进入 windowed 入口前把窗口状态置干净，写成了：
+
+```
+    movi a6, 1 ; wsr a6, windowstart     ← 先置 WINDOWSTART
+    movi a7, 0 ; wsr a7, windowbase      ← 再归零 WINDOWBASE
+```
+
+结果**启动直接卡死**（串口只到 `c6os s3 boot`，连 `W0` 都没出来），已回退。
+
+原因是 `WINDOWSTART` 的**位号是绝对窗口号**，不是"相对当前窗口"：
+
+* 当前 `WINDOWBASE` 若是 6，则"活着的当前窗口"对应的是 **bit6 (0x40)**；
+* 先写 `WINDOWSTART = 1`（bit0）而 `WINDOWBASE` 还是 6，等于告诉硬件
+  "0 号窗口活着、6 号窗口没活着" —— 与 CPU 实际状态矛盾，后续
+  `callx8/retw` 立刻错乱。
+
+**正确顺序是先 `wsr windowbase, 0` 把窗口基址归零，再 `wsr windowstart, 1`**
+
+```
+    movi a6, 0 ; wsr a6, windowbase
+    movi a7, 1 ; wsr a7, windowstart
+    rsync
+```
+
+这个顺序错误本身也是有价值的：它反证了 `WINDOWSTART` 位号与 `WINDOWBASE`
+的关系，下一轮照正确顺序再做一次即可。
+
+## 第 120 轮小结
+
+* 确认崩溃（`cause=0x14`、`a0` 带着 CALLINC 标记被当指令地址取、
+  `ws=6`）**与阻塞无关**：把 `osi_queue_recv` 改成永不阻塞后依旧崩；
+* 根因方向确定在**寄存器窗口状态**（`WINDOWSTART/WINDOWBASE` 与
+  spill/fill），不在队列/OSI/任务身份；
+* 发现并记录了一个具体的顺序错误：`WINDOWSTART` 位号是绝对窗口号，
+  必须先归零 `WINDOWBASE` 再设置；
+* 顺带把 `g_wifi_noblock` 这个实验开关保留在代码里（默认 0），
+  方便以后做 A/B。
+
+### 下一轮
+
+按正确顺序（先 `windowbase=0`、再 `windowstart=1`）在 trampoline 里
+初始化窗口状态，真板验收：
+* 无 TRAP；
+* `osi_calls` 超过 30；
+* 串口出现 `W2 bringup returned`。
+若仍不行，再上真正的多级 spill（见 §184 的分步计划）。
