@@ -4331,3 +4331,33 @@ slot3 = 0xb0b0b0b0    未写入 —— 取指失败
 
 这一轮最大的收获是：**`--ram-only-header` 这个隐藏的坑**，
 它让所有之前的镜像都是残缺的，掩盖了很多真实信号。
+
+### 96. 板子已恢复，且镜像构建现在是正确的
+
+去掉 `--ram-only-header` 之后，用 `tests/t_s3_on.c6` 重新构建：
+
+```
+Segment   Length   Load addr   File offs  Memory types
+      0  0x0010c  0x3c000020  ...  DROM
+      1  ...      0x3fca0000  ...  DRAM
+      2+ ...      0x40378000  ...  IRAM
+```
+
+真板：`c6os s3 boot` + **`alive` 心跳持续输出** ⇒ **平台已恢复并正常工作**。
+
+### 另外验证过的一条
+
+显式调 ROM 的 `Cache_Enable_ICache`（`0x40001878`）会直接 trap：
+
+```
+*** TRAP cause=0x1c pc=403cccc7
+```
+
+⇒ 那个 ROM 函数在当前状态下不能这么调。cache 相关操作还是要靠
+`rom_config_instruction_cache_mode` 那一条路。
+
+### 下一步（唯一剩下的问题）
+
+IROM 取指仍然失败（`0x42030014`、`0x4203d934` 都是 `cause=0`），
+而 DROM 读完全正常。下一步照 §95 的建议：在**原厂固件的 app 里**读
+`ICACHE_CTRL` 和其它 cache 相关寄存器，和我们的逐一对比。
