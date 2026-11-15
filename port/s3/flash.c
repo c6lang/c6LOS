@@ -68,25 +68,27 @@ u32 os_flash_mmu_entry(u32 vaddr)
     return (e == 0) ? 0u : *e;
 }
 
+extern u32 s3_win_call_config_icache_mode(u32 size, u32 ways, u32 line);
+
 void os_icache_enable(void)
 {
-    /* **关键**：SHUT_CORE0_BUS 复位默认是 1（关着），不清它的话 core0 的 I 总线
-     * 根本不到 cache —— 映射再好也取不到指令（表现为 IllegalInstruction）。
-     * IDF 的 bootloader 在建完 MMU 映射后就是干这两件事。 */
-    /* SPI_MEM 的 flash 读模式：必须和能跑的固件一致（DIO）。
-     * 我们镜像头给的是 QIO 类配置(0x00ECA008)，实测导致 **cache 读回来全是 0**
-     * （跳到 IROM 里执行时是 ill）。原厂值是 0x00608000 / 0x00030103。 */
-    *(volatile u32 *)0x60002008u = 0x00608000u;
-    *(volatile u32 *)0x60002014u = 0x00030103u;
+    /* ★ 关键：按 IDF 的做法配置 I-cache 的容量/相联度/行大小。
+     *
+     * bootloader 留下的默认模式是 4-way/16KB/16B（ICACHE_CTRL = 0x01），
+     * **这种模式无法为 IROM 提供数据** —— 表现就是：
+     *   - 从 0x42xxxxxx 数据读永远返回 0
+     *   - 跳进去取指得到 IllegalInstruction（取回 0x00000000 = ill）
+     *   - 而且不报任何 cache 错误（该中断复位默认关闭）
+     *
+     * IDF 是靠 ROM 的 rom_config_instruction_cache_mode(32768, 8, 32) 把它配成
+     * 8-way/32KB/32B（ICACHE_CTRL = 0x0f）来解决的。我们之前只写了 CTRL 的
+     * ENABLE 位，没配模式，所以 IROM 一直是死的。
+     */
+    s3_win_call_config_icache_mode(32768u, 8u, 32u);
 
-    /* 这两个值是从**原厂 IDF 固件**里用 JTAG halt 读出来的（它能正常从 flash 取指）：
-     *   0x600C4068 = 0x5, 0x600C407C = 0x4
-     * 不设它们，缓存虽然"使能"了，但取指仍然拿不到数据。 */
-    *(volatile u32 *)0x600C4068u = 0x5u;
-    *(volatile u32 *)0x600C407Cu = 0x4u;
-
-    S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~0x3u;  /* 打开 core0/core1 I 总线 */
-    S3_EXTMEM_ICACHE_CTRL  = S3_EXTMEM_ICACHE_CTRL | 1u;     /* 使能 I-cache */
+    /* 打开 core0/core1 的 I 总线（SHUT_*_BUS 复位默认是 1 = 关着） */
+    S3_EXTMEM_ICACHE_CTRL1 = S3_EXTMEM_ICACHE_CTRL1 & ~0x3u;
+    S3_EXTMEM_ICACHE_CTRL  = S3_EXTMEM_ICACHE_CTRL | 1u;
 }
 
 /* ROM 里的 cache 操作函数（IDF 的 esp_rom/cache.h 同款）。

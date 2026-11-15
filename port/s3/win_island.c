@@ -453,3 +453,11 @@ u32 s3_win_cache_resume_icache(u32 state)
     ((void (*)(u32))0x400018a8u)(state);
     return 0u;
 }
+
+/* ROM rom_config_instruction_cache_mode(size, ways, line) @0x40001a1c
+ * IDF 就是靠它配置 I-cache 的容量/相联度/行大小（而不只是改 CTRL 那一位）。 */
+u32 s3_win_config_icache_mode(u32 size, u32 ways, u32 line)
+{
+    ((void (*)(u32, u32, u32))0x40001a1cu)(size, ways, line);
+    return 0u;
+}
