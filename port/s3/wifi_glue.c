@@ -108,14 +108,21 @@ static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 extern volatile u32 g_osi_calls[128];
 extern int ets_printf(const char *fmt, ...);
 
-/* 临时诊断：库每回调一次就把字段号打出来（前 240 次）。 */
-static u32 g_osi_trace_n = 0u;
+/* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
+ * 串口不可靠时用 `esptool read-mem 0x50000200` 直接读回来。
+ *   0x50000200 = 回调总次数
+ *   0x50000204 + 4*(n & 31) = 第 n 次回调的字段号                          */
+#define OSI_RING_CNT  ((volatile u32 *)0x50000200u)
+#define OSI_RING_BUF  ((volatile u32 *)0x50000204u)
+static u32 g_osi_ring_n = 0u;
 
 #define OSI_HIT(i) do { \
     g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
-    if (g_osi_trace_n < 240u) { \
-        g_osi_trace_n = g_osi_trace_n + 1u; \
-        ets_printf("o%u ", (u32)(i)); \
+    { \
+        u32 k_ = g_osi_ring_n; \
+        OSI_RING_BUF[k_ & 31u] = (u32)(i); \
+        g_osi_ring_n = k_ + 1u; \
+        *OSI_RING_CNT = g_osi_ring_n; \
     } } while (0)
 
 /* ---- OSI 队列：自包含的环形缓冲（WiFi 初始化阶段就要用）---- */

@@ -5086,3 +5086,34 @@ call8 ieee80211_ioctl_init   ; 0x4205dd50
 
 所以下一个要查的是 `misc_nvs_init` / `misc_nvs_load` 的返回值和
 `ic_create_wifi_task` 是否真的被调到。
+
+---
+
+## §116 新增调试手段：把 OSI 回调序列写进 RTC 慢存
+
+串口在 windowed 上下文里不完全可靠，`esptool read-mem` 又会先硬复位芯片，
+读 DRAM 拿到的是复位后的状态。可靠做法是把追踪写进 **RTC 慢存**
+（`0x50000000` 区，CPU/看门狗复位都不丢）：
+
+* `0x50000200` = 回调总次数
+* `0x50000204 + 4*(n & 31)` = 第 n 次回调的 `wifi_osi_funcs_t` 字段号
+
+`OSI_HIT(i)` 每次回调都写一次，`tools/beacon.sh` 同款读法即可取回。
+
+**真板读数**：整个 `esp_wifi_init_internal()` 期间只发生了 **10 次**回调：
+
+```
+19 13 21 18 13 19 13 18 13 21     (count=10)
+```
+
+（19=递归互斥、13=信号量、21=加锁、18=互斥）。字段 42
+（`_task_get_max_priority`）和 94（`_wifi_create_queue`）一次都没出现，
+说明 `pp_create_task` 根本没被调用到 —— 也就是说 `0x102` 是在
+`wifi_menuconfig_init` 返回之后、`ic_create_wifi_task` 之前产生的，
+嫌疑集中在 `misc_nvs_init` → `misc_nvs_load`。
+
+`misc_nvs_load` 里第一件事是 `callx8 [_malloc_internal]`（字段 86，偏移
+`0x158`），拿不到内存就 `movi a2, 0x101` 返回 NO_MEM。我们的 `_malloc_internal`
+确实在表里（`OSI_SET` 存在），但它没有打点，所以下一轮要在
+`_malloc_internal` / `_free` / `_semphr_take` 上也加 `OSI_HIT`，
+确认 `misc_nvs_load` 到底走到哪一步。
