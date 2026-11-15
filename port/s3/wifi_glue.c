@@ -98,3 +98,11 @@ int snprintf(char *buf, u32 n, const char *fmt, ...)
     if (n > 0u) { buf[0] = '\0'; }
     return 0;
 }
+
+/* 不链接 WiFi 闭源库的构建里给 esp_wifi_init_internal 一个弱兜底，
+ * 这样普通 make s3 也能链接通过；链接了 WiFi 库时真实符号会覆盖它。 */
+__attribute__((weak)) int esp_wifi_init_internal(const void *cfg)
+{
+    (void)cfg;
+    return -1;
+}

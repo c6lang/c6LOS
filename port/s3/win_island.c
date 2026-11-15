@@ -465,19 +465,10 @@ u32 s3_win_config_icache_mode(u32 size, u32 ways, u32 line)
 /* esp_wifi_init_internal 是 windowed ABI（入口是 entry a1,32），必须从这个
  * -mabi=windowed 的孤岛里调用；从 call0 直接 callx 会在 entry 指令上
  * IllegalInstruction。 */
-#ifdef S3_WITH_WIFI
 extern int esp_wifi_init_internal(const void *cfg);
 
 u32 s3_win_wifi_init(void *cfg)
 {
     return (u32)esp_wifi_init_internal(cfg);
 }
-#endif
 
-/* 决定性测试：把一段 **windowed 代码放进 flash**，看 entry 指令在 flash 里能否执行。
- * 如果它能在 flash 里跑通，说明 "entry in flash" 没问题，问题在 WiFi 库自身。 */
-__attribute__((section(".flash.text"), noinline))
-u32 s3_win_flash_entry_test(u32 x)
-{
-    return x + 7u;
-}

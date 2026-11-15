@@ -50,18 +50,9 @@ SECTIONS
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
     *(.flash.text .flash.text.* .flash.rodata .flash.rodata.*)
-    /* IDF 闭源 WiFi 库的代码放到 flash（IROM 取指已打通）。
-     * 每个归档的 .literal/.text 必须**成对**放在同一个输出段里，
-     * 否则 Xtensa 的 l32r 字面量池会 out of range。 */
-    *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libnet80211.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libcore.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libwapi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libphy.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libphy_win.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
-    *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    /* 闭源库暂时**放回 IRAM**（放 flash 需要 IROM 取指，还没打通）：
+     * LEAN 构建下 libphy 闭包约 38KB、我们自己的代码约 26KB，合计约 64KB，
+     * 正好在 IRAM 预算（66.8KB，坏区 0x403D9500 以下）之内。 */
     _flash_text_end = .;
   }
 
@@ -88,8 +79,6 @@ SECTIONS
     *(.iram1*)
     *(.iram.*)
     *(.iram0*)
-    /* WiFi 闭源库自带的"睡眠用 IRAM"段，不收集会变成孤儿段导致 LMA 冲突 */
-    *(SORT_BY_NAME(.wifi*))
   } > IRAM
 
   .data : AT (LOADADDR(.text) + SIZEOF(.text))

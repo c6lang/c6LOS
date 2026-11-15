@@ -781,7 +781,6 @@ s3_win_call_config_icache_mode:
     addi    a1, a1, 32
     ret
 
-#ifdef S3_WITH_WIFI
 /* u32 s3_win_call_wifi_init(void *cfg) */
     .align  4
     .global s3_win_call_wifi_init
@@ -802,39 +801,6 @@ s3_win_call_wifi_init:
     rsync
     mov     a14, a2
     call8   s3_win_wifi_init
-    mov     a2, a10
-    l32i    a12, a1, 20
-    wsr     a12, ps
-    rsync
-    l32i    a0, a1, 0
-    l32i    a12, a1, 4
-    l32i    a13, a1, 8
-    l32i    a14, a1, 12
-    l32i    a15, a1, 16
-    addi    a1, a1, 32
-    ret
-
-#endif
-
-/* u32 s3_win_call_flash_entry_test(u32 x) */
-    .align  4
-    .global s3_win_call_flash_entry_test
-    .type   s3_win_call_flash_entry_test, @function
-s3_win_call_flash_entry_test:
-    addi    a1, a1, -32
-    s32i    a0, a1, 0
-    s32i    a12, a1, 4
-    s32i    a13, a1, 8
-    s32i    a14, a1, 12
-    s32i    a15, a1, 16
-    rsr     a12, ps
-    s32i    a12, a1, 20
-    movi    a13, 1
-    slli    a13, a13, 18
-    or      a12, a12, a13
-    wsr     a12, ps
-    rsync
-    call8   s3_win_flash_entry_test
     mov     a2, a10
     l32i    a12, a1, 20
     wsr     a12, ps
