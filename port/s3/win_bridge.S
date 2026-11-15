@@ -901,7 +901,7 @@ s3_win_call_entry_test:
     or      a12, a12, a13
     wsr     a12, ps
     rsync
-    call8   s3_win_flash42_chain
+    call8   s3_win_asm_entry
     mov     a2, a10
     l32i    a12, a1, 20
     wsr     a12, ps
