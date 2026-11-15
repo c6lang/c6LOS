@@ -7200,3 +7200,55 @@ irqfill 1  = 0 / 0 / 0                     ← 第二条已清零
 1. 只有 1 次 ISR 抢占、0 次 yield ⇒ 任务 2 是怎么跑到 `ppTask` 并阻塞的？
 2. 重新确认 `task_starts` / `port_task_switch` 次数 / `os_sched_tick` 次数，
    三者要用同一套清零后的埋点口径。
+
+## §174 ★★ 重大更正：`port_task_yield` 一次都没有被调用过
+
+之前十几轮一直引用"`switch_cnt == yield_cnt == 3`，成对出现，调度正常"。
+本轮核对 `port/s3/ctx.S` 的行号才看出问题：
+
+```
+ 56: port_task_switch:
+ 94:     l32r a14, .Lyl_cnt   ← g_yl_cnt 的自增在这里
+101:     l32r a14, .Lsw_cnt   ← g_sw_cnt 的自增也在这里
+137: port_task_yield:
+180:     /* 我加的 yield 埋点在这里（Ldbg2 +16/+20） */
+```
+
+**两个计数器都在 `port_task_switch` 里面**（94 和 101 都在 56..137 之间），
+所以 `switch_cnt == yield_cnt` 是必然的 —— 那个"成对"结论完全是假象。
+
+而清零 RTC 之后，`port_task_yield` 里的埋点读到的是：
+
+```
+yl_ctx = 0        ← 从没被写过
+```
+
+⇒ **`port_task_yield` 从来没有执行到埋点位置。**
+
+而 `os_task_block_wait()` 是无条件调用 `port_task_yield()` 的：
+
+```c
+int os_task_block_wait(void) {
+    if (g_cur == 0) { return -1; }
+    port_task_yield();
+    return g_cur->wait_result;
+}
+```
+
+结合"`os_task_block_prepare` 确实记录了阻塞（kind=1/6）"这个事实，
+唯一自洽的解释是：
+
+> `port_task_yield` 进去了，但在 `beqz a4, 1f`（`g_s3_cur[core] == 0`）
+> 处**提前返回**了 —— 于是上下文没被保存、直接按 `g_sched[core]` 恢复，
+> 任务的现场就丢了。
+
+这与我之前在阻塞记录里看到"`port_cur_ctx()` 非空"并不矛盾：
+`port_cur_ctx()` 是在 `os_task_block_prepare` 里读的（那时还是对的），
+而 `port_task_yield` 里读到的是同一个数组 —— 除非两者之间被清空过。
+
+### 下一轮
+
+1. 在 `port_task_yield` 的 **`beqz` 早退分支里**也埋一个点（`Ldbg2 +24`），
+   一旦读到非零就坐实"空指针早退"；
+2. 同时在 `os_task_block_prepare` 之外的所有 `port_set_cur_ctx(0)` /
+   `g_s3_cur[core] = 0` 处埋点，找出是谁把它清成了 0。
