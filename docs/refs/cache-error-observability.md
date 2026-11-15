@@ -213,3 +213,29 @@ irom3=0x00000000      <- 仍然读不回来
 
 ⇒ cache 请求转发到 SPI0 的总闸是开的，这条也排除。
 （`REG_SPI_MEM_BASE(i) = DR_REG_SPI0_BASE - i*0x1000`，所以 `0x6000303C` 才是 SPI0 的那份。）
+
+## ★ 关键判别：**DROM 窗口能读，IROM 窗口不能**
+
+```c
+*(volatile u32 *)0x3C000020u   /* DROM，我们的 .flash.rodata（app_desc 魔数） */
+*(volatile u32 *)0x42030000u   /* IROM，我们的 .flash.text */
+```
+
+真板结果：
+
+```
+slot1 = 0xABCD5432   <- DROM 读成功了！读到的正是 app_desc 魔数（映射 entry0 -> flash 页 2）
+slot2 = 0x00000002   <- MMU[0] = 2，映射正常
+slot3 = 0x00000000   <- IROM 仍然是 0
+```
+
+### 这条的意义
+
+**cache 从 flash 读数据这件事本身是通的**（DROM 窗口证明了：MMU、SPI、DCache、
+整个数据通路都工作正常）。坏掉的**只有 IROM 窗口 / I-Cache 这一侧**。
+
+这就把范围从"cache 完全不能用"收窄到"**I-Cache 无法从 flash 取数**"，
+和"取指得到非法指令"这个原始症状完全对得上。
+
+注意：我们的代码全部跑在 IRAM，**I-Cache 从来没有被真正用过**，
+所以它坏掉不会影响其它功能——这和观察完全一致。
