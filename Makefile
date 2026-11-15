@@ -1561,3 +1561,7 @@ wifip:
 # TLS 1.2 基础件自测（宿主上跑，不需要板子）：docs/wifi-plan.md §212
 tls12check:
 	./tools/tls12_selftest.sh
+
+# 宿主上真连 qq.com 跑 TLS 1.2 握手 + HTTP GET（不需要板子）：§213
+tls12live:
+	./tools/tls12_live.sh

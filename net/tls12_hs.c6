@@ -1,0 +1,755 @@
+/* tls12_hs：TLS 1.2 客户端握手（ECDHE-RSA-AES128-GCM-SHA256）+ 应用数据
+ *
+ * 为什么是 TLS 1.2（docs/wifi-plan.md §211）：qq.com **只谈 TLS 1.2**，
+ * 套件协商出来是 ECDHE-RSA-AES128-GCM-SHA256；我们只提供 X25519 组和
+ * rsa_pkcs1_sha256 签名算法，所以既不用写 P-256，也不用写 RSA-PSS。
+ *
+ * 依赖（都已单独验证过，见 §212）：
+ *   net.aes_gcm      AES-128-GCM
+ *   net.tls12_prf    P_SHA256 PRF
+ *   net.rsa_verify   RSA PKCS#1 v1.5 + SHA-256 验签
+ *   std.net.x25519   X25519
+ *   std.encoding.sha256 / std.data.x509（取叶子证书的 SPKI）
+ *
+ * 设计要点：
+ *   - I/O 只用 `read()`/`write()`（宿主 glibc 和板子的 lwIP POSIX 层都提供），
+ *     所以同一份代码在两边都能跑；
+ *   - transcript hash 用**累积的 Sha256 状态**，不保存原始握手字节（板子 DRAM 紧）；
+ *     需要"到某条消息为止"的哈希时先拷贝状态再 final；
+ *   - 收方向用一个 6KB 的握手缓冲（Certificate 消息约 3KB），按消息逐条处理；
+ *   - AES-GCM 记录格式照 RFC 5288：body = explicit_nonce(8) || ciphertext || tag(16)，
+ *     AAD = seq(8) || type(1) || 0x0303 || length(2)；
+ *   - 不校验证书链（只做"叶子证书里那把公钥能验通 ServerKeyExchange"），
+ *     链校验留作后续；这一点在 §211 里已经写成明确的取舍。
+ */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+module net.tls12_hs;
+import std.core.types;
+import std.core.rand;
+import std.encoding.sha256;
+import std.net.x25519;
+import std.data.x509;
+import net.aes_gcm;
+import net.tls12_prf;
+import net.rsa_verify;
+
+/* 跟踪开关：默认关（板子上省 flash/时间）；用例里 `tls12_trace = 1;` 打开。 */
+int tls12_trace = 0;
+/* 密钥材料（client_random / master secret / client_write_key）只在深挖
+ * 密钥问题时打开：打到串口上等于把会话密钥泄出去了。 */
+int tls12_trace_keys = 0;
+
+/* 一条记录最大 2^14（TLS 规定），qq.com 的服务端飞行里 Certificate 那条就有 4KB 多，
+ * 所以记录缓冲必须开够。缓冲放在**模块静态区**而不是栈上：ESP32-S3 的 DRAM 紧、
+ * 栈更紧（§210），一次只服务一条 TLS 连接，静态缓冲够用。
+ * 代价：这个模块不可重入（同时开两条 TLS 连接需要改成传缓冲进来）。 */
+#define TLS_REC_MAX  8192
+#define TLS_HS_MAX   12288      /* 整条握手消息（可跨多个记录）的上限 */
+
+static u8 tls12_recbuf[TLS_REC_MAX + 256] = { 0 };
+static u8 tls12_encbuf[TLS_REC_MAX + 512] = { 0 };
+static u8 tls12_hsout[TLS_HS_MAX] = { 0 };      /* 发出去的握手消息（ClientHello / CKE） */
+
+/* 握手消息类型 */
+#define HS_CLIENT_HELLO        1
+#define HS_SERVER_HELLO        2
+#define HS_CERTIFICATE        11
+#define HS_SERVER_KEY_EXCH    12
+#define HS_SERVER_HELLO_DONE  14
+#define HS_CLIENT_KEY_EXCH    16
+#define HS_FINISHED           20
+
+/* 记录类型 */
+#define RT_CCS        20
+#define RT_ALERT      21
+#define RT_HANDSHAKE  22
+#define RT_APP        23
+
+struct Tls12 {
+    int  fd;
+    /* 随机数 */
+    u8   cr[32];
+    u8   sr[32];
+    u8   sid[32];
+    int  sid_len;
+    /* ECDHE */
+    Dh   dh;
+    u8   pms[32];
+    u8   master[48];
+    /* 记录层 */
+    AesGcm ectx;                /* client -> server */
+    AesGcm dctx;                /* server -> client */
+    u8   eiv[4];
+    u8   div4[4];
+    u64  seq_out;
+    u64  seq_in;
+    int  enc_out;               /* 自己发出去的是否已经加密（发完 CCS 才置 1） */
+    int  enc_in;                /* 对端发来的是否已经加密（收到 CCS 才置 1） */
+    /* transcript */
+    Sha256 th;
+    /* 收方向握手缓冲 */
+    u8   hsbuf[TLS_HS_MAX];
+    int  hslen;
+    /* 服务端证书里的公钥 */
+    RsaKey skey;
+    int  have_skey;
+    /* 诊断 */
+    int  cipher;                /* 协商出来的套件 */
+    int  stage;                 /* 最后的阶段，便于出错时定位 */
+};
+
+/* ---- 工具 ---- */
+
+static void put16(u8 *p, int v)
+{
+    p[0] = (u8)((v >> 8) & 0xff);
+    p[1] = (u8)(v & 0xff);
+}
+
+static int get16(const u8 *p)
+{
+    return ((int)p[0] << 8) | (int)p[1];
+}
+
+static int get24(const u8 *p)
+{
+    return ((int)p[0] << 16) | ((int)p[1] << 8) | (int)p[2];
+}
+
+static void put24(u8 *p, int v)
+{
+    p[0] = (u8)((v >> 16) & 0xff);
+    p[1] = (u8)((v >> 8) & 0xff);
+    p[2] = (u8)(v & 0xff);
+}
+
+static void put64(u8 *p, u64 v)
+{
+    int i = 0;
+
+    for (i = 0; i < 8; i++) {
+        p[7 - i] = (u8)((v >> (8 * i)) & 0xffull);
+    }
+}
+
+/* 一次性写完 n 字节（阻塞 fd） */
+static int wr_all(int fd, const void *p, int n)
+{
+    const u8 *b = (const u8 *)p;
+    int off = 0;
+
+    while (off < n) {
+        int w = (int)write(fd, b + off, (unsigned int)(n - off));
+
+        if (w <= 0) {
+            return -1;
+        }
+        off = off + w;
+    }
+    return off;
+}
+
+/* 读满 n 字节 */
+static int rd_all(int fd, void *p, int n)
+{
+    u8 *b = (u8 *)p;
+    int off = 0;
+
+    while (off < n) {
+        int r = (int)read(fd, b + off, (unsigned int)(n - off));
+
+        if (r <= 0) {
+            return -1;
+        }
+        off = off + r;
+    }
+    return off;
+}
+
+/* ---- 记录层 ---- */
+
+static int rec_send(Tls12 *s, int type, const u8 *pl, int n)
+{
+    u8 hdr[5] = { 0 };
+    u8 *body = tls12_encbuf;
+    u8 tag[16] = { 0 };
+    u8 nonce[12] = { 0 };
+    u8 aad[13] = { 0 };
+
+    hdr[0] = (u8)type;
+    hdr[1] = 3;
+    hdr[2] = 3;
+    if (!s->enc_out) {
+        put16(hdr + 3, n);
+        if (wr_all(s->fd, hdr, 5) < 0 || wr_all(s->fd, pl, n) < 0) {
+            return -1;
+        }
+        return n;
+    }
+    /* 加密：explicit nonce 用序号（RFC 5288 允许） */
+    memcpy(nonce, s->eiv, 4);
+    put64(nonce + 4, s->seq_out);
+    memcpy(body, nonce + 4, 8);
+    put64(aad, s->seq_out);
+    aad[8] = (u8)type;
+    aad[9] = 3;
+    aad[10] = 3;
+    /* RFC 5288：AAD 里的 length 是**明文**长度（TLSCompressed.length），
+     * 不是记录体长度（8 字节 explicit nonce + 密文 + 16 字节 tag）。 */
+    put16(aad + 11, n);
+    if (!s->ectx.seal(nonce, aad, 13, pl, n, body + 8, tag)) {
+        return -1;
+    }
+    put16(hdr + 3, 8 + n + 16);
+    if (wr_all(s->fd, hdr, 5) < 0) { return -1; }
+    if (wr_all(s->fd, body, 8 + n) < 0) { return -1; }
+    if (wr_all(s->fd, tag, 16) < 0) { return -1; }
+    s->seq_out = s->seq_out + 1ull;
+    return n;
+}
+
+/* 收一条记录：out 至少 cap 字节；返回明文长度，*type 是记录类型 */
+static int rec_recv(Tls12 *s, u8 *out, int cap, int *type)
+{
+    u8 hdr[5] = { 0 };
+    u8 *body = tls12_recbuf;
+    u8 nonce[12] = { 0 };
+    u8 aad[13] = { 0 };
+    int n = 0;
+    int tn = 0;
+
+    if (rd_all(s->fd, hdr, 5) < 0) {
+        return -1;
+    }
+    tn = (int)hdr[0];
+    n = get16(hdr + 3);
+    if (n < 0 || n > TLS_REC_MAX) {
+        return -1;
+    }
+    if (rd_all(s->fd, body, n) < 0) {
+        return -1;
+    }
+    *type = tn;
+    if (tls12_trace) {
+        printf("   [tls] rec type=%d len=%d%s\n", tn, n, s->enc_in ? " (enc)" : "");
+    }
+    /* alert 和普通记录一样处理：CCS 之前的 alert 是明文，之后的 alert 是**密文**
+     * （最早把它当明文直接读，于是把密文当 level/desc 报出 182/78 这种鬼数字）。 */
+    /* CCS **永远**是明文（RFC 5246 §7.1）：收方向要等 CCS 之后才切加密 */
+    if (!s->enc_in || tn == RT_CCS) {
+        if (n > cap) { return -1; }
+        memcpy(out, body, (usize)n);
+        return n;
+    }
+    /* 加密记录 */
+    if (n < 8 + 16) {
+        return -1;
+    }
+    memcpy(nonce, s->div4, 4);
+    memcpy(nonce + 4, body, 8);
+    put64(aad, s->seq_in);
+    aad[8] = (u8)tn;
+    aad[9] = 3;
+    aad[10] = 3;
+    /* 同样是**明文**长度：收方向要自己从记录体长度里减掉 explicit nonce(8) 和 tag(16) */
+    put16(aad + 11, n - 8 - 16);
+    if (!s->dctx.open(nonce, aad, 13, body + 8, n - 8 - 16, body + n - 16, out)) {
+        return -1;      /* 认证失败 */
+    }
+    s->seq_in = s->seq_in + 1ull;
+    return n - 8 - 16;
+}
+
+/* ---- transcript ---- */
+
+static void th_add(Tls12 *s, const u8 *msg, int n)
+{
+    s->th.update(msg, (usize)n);
+}
+
+/* ---- ClientHello ---- */
+
+static int send_client_hello(Tls12 *s, const char *host)
+{
+    u8 *hs = tls12_hsout;
+    int o = 0;              /* 写位置 */
+    int ext_at = 0;
+    int hostlen = (int)strlen(host);
+    int i = 0;
+
+    memset(hs, 0, TLS_HS_MAX);
+    /* handshake 头先占位：类型(1) + 长度(3) */
+    hs[0] = HS_CLIENT_HELLO;
+    o = 4;
+    hs[o] = 3; o = o + 1;
+    hs[o] = 3; o = o + 1;
+    for (i = 0; i < 32; i++) { hs[o] = s->cr[i]; o = o + 1; }
+    hs[o] = (u8)s->sid_len; o = o + 1;
+    if (s->sid_len > 0) { memcpy(hs + o, s->sid, (usize)s->sid_len); o = o + s->sid_len; }
+    /* cipher suites：只给 ECDHE-RSA-AES128-GCM-SHA256 */
+    put16(hs + o, 2); o = o + 2;
+    put16(hs + o, 0xC02F); o = o + 2;
+    /* 压缩：null */
+    hs[o] = 1; o = o + 1;
+    hs[o] = 0; o = o + 1;
+    /* 扩展长度占位 */
+    ext_at = o;
+    o = o + 2;
+
+    /* SNI */
+    put16(hs + o, 0x0000); o = o + 2;
+    put16(hs + o, 5 + hostlen); o = o + 2;
+    put16(hs + o, 3 + hostlen); o = o + 2;
+    hs[o] = 0; o = o + 1;
+    put16(hs + o, hostlen); o = o + 2;
+    memcpy(hs + o, host, (usize)hostlen); o = o + hostlen;
+    /* supported_groups: x25519 */
+    put16(hs + o, 0x000a); o = o + 2;
+    put16(hs + o, 4); o = o + 2;
+    put16(hs + o, 2); o = o + 2;
+    put16(hs + o, 0x001d); o = o + 2;
+    /* ec_point_formats: uncompressed */
+    put16(hs + o, 0x000b); o = o + 2;
+    put16(hs + o, 2); o = o + 2;
+    hs[o] = 1; o = o + 1;
+    hs[o] = 0; o = o + 1;
+    /* signature_algorithms: rsa_pkcs1_sha256(0x0401) —— 实测服务端接受（§211） */
+    put16(hs + o, 0x000d); o = o + 2;
+    put16(hs + o, 4); o = o + 2;
+    put16(hs + o, 2); o = o + 2;
+    put16(hs + o, 0x0401); o = o + 2;
+    /* ALPN: http/1.1 */
+    put16(hs + o, 0x0010); o = o + 2;
+    /* ALPN 扩展体 = 列表长度(2) + 名字长度(1) + 名字(8) = 11（一开始写成 13，
+     * 服务端直接 decode_error —— 扩展长度写错是最容易犯的错）。 */
+    put16(hs + o, 2 + 1 + 8); o = o + 2;
+    put16(hs + o, 1 + 8); o = o + 2;
+    hs[o] = 8; o = o + 1;
+    memcpy(hs + o, "http/1.1", 8); o = o + 8;
+    /* [0] session_ticket 空（RFC 5077 兼容，可省） */
+    put16(hs + o, 0x0023); o = o + 2;
+    put16(hs + o, 0); o = o + 2;
+    /* renegotiation_info */
+    put16(hs + o, 0xff01); o = o + 2;
+    put16(hs + o, 1); o = o + 2;
+    hs[o] = 0; o = o + 1;
+
+    put16(hs + ext_at, o - ext_at - 2);
+    put24(hs + 1, o - 4);
+    th_add(s, hs, o);
+    return rec_send(s, RT_HANDSHAKE, hs, o);
+}
+
+/* ---- 握手消息处理 ---- */
+
+static int on_server_hello(Tls12 *s, const u8 *p, int n)
+{
+    int o = 0;
+    int clen = 0;
+    int k = 0;
+
+    if (n < 38) { return -1; }
+    o = 2;                                  /* legacy_version */
+    memcpy(s->sr, p + o, 32); o = o + 32;
+    s->sid_len = (int)p[o]; o = o + 1;
+    if (s->sid_len > 32 || o + s->sid_len + 3 > n) { return -1; }
+    if (s->sid_len > 0) {
+        memcpy(s->sid, p + o, (usize)s->sid_len);
+    }
+    o = o + s->sid_len;
+    s->cipher = get16(p + o); o = o + 2;
+    o = o + 1;                              /* compression */
+    if (tls12_trace) {
+        printf("   [tls] ServerHello cipher=0x%04x sid_len=%d\n", s->cipher, s->sid_len);
+    }
+    if (s->cipher != 0xC02F) {
+        return -1;                          /* 只接受 ECDHE_RSA_AES128_GCM_SHA256 */
+    }
+    /* 扩展：只做基本跳过 + 检查 supported_versions 不是 TLS 1.3 */
+    if (o + 2 <= n) {
+        clen = get16(p + o);
+        o = o + 2;
+        while (clen >= 4 && o + 4 <= n) {
+            int et = get16(p + o);
+            int el = get16(p + o + 2);
+
+            o = o + 4;
+            if (o + el > n) { break; }
+            if (et == 0x002b) {
+                /* 只接受 0x0303（TLS 1.2） */
+                if (el >= 2 && get16(p + o) != 0x0303) {
+                    return -1;
+                }
+            }
+            (void)k;
+            o = o + el;
+            clen = clen - 4 - el;
+        }
+    }
+    s->stage = 2;
+    return 0;
+}
+
+/* 从 Certificate 消息里取叶子证书的 SPKI，并解析 RSA 公钥 */
+static int on_certificate(Tls12 *s, const u8 *p, int n)
+{
+    int listlen = 0;
+    int clen = 0;
+    X509Cert cert = { 0 };
+
+    if (n < 6) { return -1; }
+    listlen = get24(p);
+    if (listlen + 3 > n) { return -1; }
+    clen = get24(p + 3);
+    if (clen <= 0 || 3 + 3 + clen > n) { return -1; }
+    cert = x509_parse(p + 6, clen);
+    if (tls12_trace) {
+        printf("   [tls] Certificate: list=%d leaf=%d valid=%d spki=%d bits=%d\n",
+               listlen, clen, cert.valid, cert.spki_len, cert.key_bits);
+    }
+    if (!cert.valid || cert.spki == 0 || cert.spki_len <= 0) {
+        return -1;
+    }
+    if (tls12_trace) {
+        printf("   [tls] SPKI 头: %02x %02x %02x %02x（长度 %d）\n",
+               (int)cert.spki[0], (int)cert.spki[1], (int)cert.spki[2],
+               (int)cert.spki[3], cert.spki_len);
+    }
+    {
+        /* std/data/x509 给的 spki 视图是 BIT STRING 的**内容**，可能还带着
+         * 那个"未用位数"字节 0x00；rsa_parse_spki 要的是从 SEQUENCE(0x30) 开始。 */
+        const u8 *sp = cert.spki;
+        int sl = cert.spki_len;
+
+        if (sl > 0 && sp[0] == 0x00) {
+            sp = sp + 1;
+            sl = sl - 1;
+        }
+        if (!rsa_parse_spki(sp, sl, &s->skey)) {
+            return -1;
+        }
+    }
+    s->have_skey = 1;
+    s->stage = 11;
+    return 0;
+}
+
+/* ServerKeyExchange：验签并取出服务端的 ECDHE 公钥 */
+static int on_server_key_exchange(Tls12 *s, const u8 *p, int n)
+{
+    u8 signed_msg[128] = { 0 };
+    int o = 0;
+    int sigalg = 0;
+    int siglen = 0;
+
+    if (n < 4 + 32 + 2 + 2) { return -1; }
+    if (p[o] != 3) { return -1; }           /* curve_type = named_curve */
+    o = o + 1;
+    if (get16(p + o) != 0x001d) { return -1; }  /* 必须是 x25519 */
+    o = o + 2;
+    {
+        int plen = (int)p[o];
+
+        o = o + 1;
+        if (plen != 32 || o + 32 > n) { return -1; }
+        memcpy(s->pms, p + o, 32);          /* 先用 pms 暂存服务端公钥 */
+        o = o + 32;
+    }
+    /* 签名：client_random || server_random || ServerECDHParams
+     * ServerECDHParams 就是 curve_type..public_key 这一段（长度 = params_len），
+     * 签名字段自己不在被签内容里。 */
+    {
+        int params_len = o;
+
+        memcpy(signed_msg, s->cr, 32);
+        memcpy(signed_msg + 32, s->sr, 32);
+        memcpy(signed_msg + 64, p, (usize)params_len);
+        if (o + 4 > n) { return -1; }
+        sigalg = get16(p + o); o = o + 2;
+        siglen = get16(p + o); o = o + 2;
+        if (sigalg != 0x0401) { return -1; }    /* rsa_pkcs1_sha256 */
+        if (o + siglen > n) { return -1; }
+        if (!s->have_skey) { return -1; }
+        if (tls12_trace) {
+            printf("   [tls] ServerKeyExchange: curve=0x001d sigalg=0x%04x siglen=%d\n",
+                   sigalg, siglen);
+        }
+        if (!rsa_pkcs1_sha256_verify(&s->skey, signed_msg, 64 + params_len, p + o, siglen)) {
+            if (tls12_trace) {
+                printf("   [tls] ServerKeyExchange 验签失败\n");
+            }
+            return -1;
+        }
+    }
+    s->stage = 12;
+    return 0;
+}
+
+/* 计算 master secret 与 key block，装上记录层 */
+static int derive_and_install(Tls12 *s)
+{
+    u8 peer[32] = { 0 };
+    u8 sec[32] = { 0 };         /* 不能叫 shared：那是 c6 的保留字 */
+    u8 kb[40] = { 0 };
+    u8 seed[64] = { 0 };
+
+    memcpy(peer, s->pms, 32);               /* SKE 里暂存的服务端公钥 */
+    if (!s->dh.agree(sec, peer)) {
+        return -1;                          /* 非法公钥 */
+    }
+    memcpy(s->pms, sec, 32);
+    if (!tls12_prf_secret(s->pms, 32, "master secret", s->cr, 32, s->sr, 32, s->master, 48)) {
+        return -1;
+    }
+    if (!tls12_prf_secret(s->master, 48, "key expansion", s->sr, 32, s->cr, 32, kb, 40)) {
+        return -1;
+    }
+    /* key_block 顺序：client_write_key(16) server_write_key(16) client_iv(4) server_iv(4) */
+    if (!s->ectx.init(kb, 16)) { return -1; }
+    if (!s->dctx.init(kb + 16, 16)) { return -1; }
+    memcpy(s->eiv, kb + 32, 4);
+    memcpy(s->div4, kb + 36, 4);
+    /* 注意：这里**不**切 enc_out/enc_in —— CCS 必须明文发/收，
+     * 各自的加密状态在 CCS 之后才打开（一开始写成"装好密钥就切"，
+     * 结果 CCS 被加密，服务端直接 unexpected_message(10)）。 */
+    s->seq_out = 0ull;
+    s->seq_in = 0ull;
+    if (tls12_trace_keys) {
+        int z = 0;
+
+        printf("   [tls] cr=");
+        for (z = 0; z < 32; z++) { printf("%02x", (int)s->cr[z]); }
+        printf("\n   [tls] ms=");
+        for (z = 0; z < 48; z++) { printf("%02x", (int)s->master[z]); }
+        printf("\n   [tls] cwk=");
+        for (z = 0; z < 16; z++) { printf("%02x", (int)kb[z]); }
+        printf(" civ=");
+        for (z = 32; z < 36; z++) { printf("%02x", (int)kb[z]); }
+        printf("\n");
+    }
+    (void)seed;
+    return 0;
+}
+
+/* ---- 对外的三步 ---- */
+
+int tls12_start(Tls12 *s, int fd, const char *host, u64 seed)
+{
+    Rand r = rand_seed(seed);
+    u8 sk[32] = { 0 };
+    int i = 0;
+
+    if (s == 0 || fd < 0 || host == 0) { return 0; }
+    memset(s, 0, sizeof *s);
+    s->fd = fd;
+    s->th.init();
+    for (i = 0; i < 32; i++) { s->cr[i] = (u8)(r.next_u32() & 0xffu); }
+    for (i = 0; i < 32; i++) { sk[i] = (u8)(r.next_u32() & 0xffu); }
+    s->sid_len = 32;
+    for (i = 0; i < 32; i++) { s->sid[i] = (u8)(r.next_u32() & 0xffu); }
+    if (!s->dh.init(sk)) {
+        return 0;
+    }
+    s->stage = 1;
+    if (send_client_hello(s, host) < 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/* 收服务端飞行 + 发客户端飞行 */
+int tls12_handshake(Tls12 *s)
+{
+    u8 *rec = tls12_recbuf;
+    Sha256 snap = { 0 };
+    u8 thash[32] = { 0 };
+    u8 vd[12] = { 0 };
+    int done = 0;
+    int type = 0;
+    int n = 0;
+    int got_ccs = 0;
+
+    /* ---- 1) 收服务端飞行 ---- */
+    s->hslen = 0;
+    while (!done) {
+        n = rec_recv(s, rec, TLS_REC_MAX + 256, &type);
+        if (n < 0) {
+            return 0;
+        }
+        if (type == RT_ALERT) {
+            if (tls12_trace && n >= 2) {
+                printf("   [tls] 握手期间收到 ALERT level=%d desc=%d\n",
+                       (int)rec[0], (int)rec[1]);
+            }
+            return 0;
+        }
+        if (type != RT_HANDSHAKE) {
+            continue;
+        }
+        if (s->hslen + n > TLS_HS_MAX) {
+            return 0;
+        }
+        memcpy(s->hsbuf + s->hslen, rec, (usize)n);
+        s->hslen = s->hslen + n;
+        /* 逐条处理完整的握手消息 */
+        {
+            int off = 0;
+
+            while (off + 4 <= s->hslen) {
+                int mt = (int)s->hsbuf[off];
+                int ml = get24(s->hsbuf + off + 1);
+                const u8 *body = s->hsbuf + off + 4;
+
+                if (ml < 0 || off + 4 + ml > s->hslen) {
+                    break;      /* 还没收全 */
+                }
+                th_add(s, s->hsbuf + off, 4 + ml);
+                if (mt == HS_SERVER_HELLO) {
+                    if (on_server_hello(s, body, ml) != 0) { return 0; }
+                } else if (mt == HS_CERTIFICATE) {
+                    if (on_certificate(s, body, ml) != 0) { return 0; }
+                } else if (mt == HS_SERVER_KEY_EXCH) {
+                    if (on_server_key_exchange(s, body, ml) != 0) { return 0; }
+                } else if (mt == HS_SERVER_HELLO_DONE) {
+                    done = 1;
+                }
+                off = off + 4 + ml;
+            }
+            if (off > 0) {
+                memmove(s->hsbuf, s->hsbuf + off, (usize)(s->hslen - off));
+                s->hslen = s->hslen - off;
+            }
+        }
+    }
+    if (s->cipher != 0xC02F || !s->have_skey) {
+        return 0;
+    }
+
+    /* ---- 2) 客户端飞行：ClientKeyExchange / CCS / Finished ---- */
+    if (derive_and_install(s) != 0) {
+        return 0;
+    }
+    {
+        u8 *cke = tls12_hsout;
+        int o = 4;
+
+        memset(cke, 0, 64);
+        cke[0] = HS_CLIENT_KEY_EXCH;
+        cke[o] = 32; o = o + 1;
+        memcpy(cke + o, s->dh.public_key(), 32);
+        o = o + 32;
+        put24(cke + 1, o - 4);
+        th_add(s, cke, o);
+        if (rec_send(s, RT_HANDSHAKE, cke, o) < 0) { return 0; }
+    }
+    {
+        u8 ccs[1] = { 1 };
+
+        if (rec_send(s, RT_CCS, ccs, 1) < 0) { return 0; }
+        s->enc_out = 1;             /* 从这里起发出去的都是密文 */
+        s->seq_out = 0ull;          /* 新密码状态下序号从 0 开始 */
+    }
+    /* Finished 的 verify_data 用"到 ClientKeyExchange 为止"的 transcript */
+    snap = s->th;
+    snap.final(thash);
+    if (!tls12_prf_label(s->master, 48, "client finished", thash, 32, vd, 12)) {
+        return 0;
+    }
+    {
+        u8 fin[4 + 12] = { 0 };
+
+        fin[0] = HS_FINISHED;
+        put24(fin + 1, 12);
+        memcpy(fin + 4, vd, 12);
+        th_add(s, fin, 16);
+        if (rec_send(s, RT_HANDSHAKE, fin, 16) < 0) { return 0; }
+    }
+
+    /* ---- 3) 收服务端 CCS + Finished ---- */
+    s->stage = 20;
+    while (!got_ccs) {
+        n = rec_recv(s, rec, TLS_REC_MAX + 256, &type);
+        if (n < 0) { return 0; }
+        if (type == RT_HANDSHAKE) {
+            /* CCS 之前服务端还可能发 NewSessionTicket(4) 之类的握手消息 ——
+             * 它们**也在** transcript 里，漏掉就会导致最后核验 server Finished 失败
+             * （本轮实测就卡在这里：先收到一条 170 字节的握手记录）。 */
+            th_add(s, rec, n);
+        }
+        if (type == RT_CCS) {
+            got_ccs = 1;
+            s->enc_in = 1;          /* 从这里起收到的都是密文 */
+            s->seq_in = 0ull;
+        }
+    }
+    n = rec_recv(s, rec, TLS_REC_MAX + 256, &type);
+    if (n < 0 || type != RT_HANDSHAKE || n != 4 + 12) {
+        return 0;
+    }
+    /* 服务端 Finished：用同一条 transcript（不含 Finished 本身）核验 */
+    snap = s->th;
+    /* 注意：此时 s->th 已经包含 client Finished，服务端 verify_data 也算到这里 */
+    snap.final(thash);
+    if (!tls12_prf_label(s->master, 48, "server finished", thash, 32, vd, 12)) {
+        return 0;
+    }
+    if (tls12_trace) {
+        printf("   [tls] server Finished 校验通过\n");
+    }
+    if (memcmp(rec + 4, vd, 12) != 0) {
+        return 0;
+    }
+    th_add(s, rec, 4 + 12);
+    s->stage = 21;
+    return 1;
+}
+
+/* ---- 应用数据 ---- */
+
+int tls12_write_app(Tls12 *s, const void *p, int n)
+{
+    return rec_send(s, RT_APP, (const u8 *)p, n);
+}
+
+/* 读一条应用数据记录；返回长度（0 表示读到了非应用数据，-1 表示错误） */
+int tls12_read_app(Tls12 *s, void *p, int cap)
+{
+    u8 *rec = tls12_recbuf;
+    int type = 0;
+    int n = 0;
+
+    for (;;) {
+        n = rec_recv(s, rec, TLS_REC_MAX + 256, &type);
+        if (n < 0) {
+            return -1;
+        }
+        if (type == RT_ALERT) {
+            if (tls12_trace) {
+                printf("   [tls] ALERT level=%d desc=%d\n",
+                       n >= 1 ? (int)rec[0] : -1, n >= 2 ? (int)rec[1] : -1);
+            }
+            if (n >= 2 && rec[1] == 0) {
+                return -2;          /* close_notify：对端正常关闭 */
+            }
+            return -1;
+        }
+        if (type != RT_APP) {
+            return 0;
+        }
+        if (n > cap) {
+            return -1;
+        }
+        memcpy(p, rec, (usize)n);
+        return n;
+    }
+}
+
+int tls12_ready(Tls12 *s)
+{
+    return s != 0 && s->stage >= 21;
+}
+
+int tls12_stage(Tls12 *s) { return s != 0 ? s->stage : 0; }

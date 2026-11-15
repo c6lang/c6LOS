@@ -9480,3 +9480,67 @@ TLS 1.2 握手状态机（`net/tls12_hs.c6`）：ClientHello → ServerHello →
 → ServerKeyExchange（用上面的 RSA 验签）→ ClientKeyExchange → CCS → Finished，
 记录层用 `aes_gcm`，密钥用 `tls12_prf`。仍然先在宿主上对着真 `qq.com:443`
 跑到通，再搬板子。
+
+---
+
+## §213 **协议层打通：宿主上真取到了 https://qq.com 的页面**（TLS 1.2 客户端完成）
+
+这一节是全局目标里"协议层"那半边的终点：`net/tls12_hs.c6` 写完并在宿主上对着
+真服务器跑通了 TLS 1.2 握手 + HTTP GET（含跟随 302）。
+
+```
+$ ./tools/tls12_live.sh          # 或 make tls12live
+== 连接 qq.com:443，请求 /
+== 握手完成（阶段 21，套件 0xc02f）
+---- 第一跳 HTTP 状态 302，共 318 字节 ----
+---- 跟随重定向到 www.qq.com/ ----
+== 连接 www.qq.com:443，请求 /
+== 握手完成（阶段 21，套件 0xc02f）
+---- 第二跳 HTTP 状态 200，共 7020 字节 ----
+  <title>腾讯网</title>
+[证据] 响应里含 <title>，即拿到了 HTML 页面内容
+```
+
+也就是说：**除了"WiFi 关联 + lwIP"这半边（板上），剩下整条协议栈已经验证可用。**
+
+### 新增/改动
+
+| 文件 | 内容 |
+| --- | --- |
+| `net/tls12_hs.c6` | TLS 1.2 客户端：ClientHello/ServerHello/Certificate/ServerKeyExchange/ClientKeyExchange/CCS/Finished 状态机 + 记录层（AES-GCM）+ 应用数据读写。I/O 只用 `read()/write()`，宿主和板子（lwIP POSIX 层）通用 |
+| `tests/t_tls12_live.c6` | 真连 qq.com → 302 → www.qq.com，打印状态行与页面开头 |
+| `tools/tls12_live.sh` / `make tls12live` | 一条命令跑上面这个用例 |
+| `tools/tls12_selftest.sh` / `make tls12check` | §212 的三个基础件自测 |
+
+### 调试过程中踩到的 5 个坑（都写进了代码注释，值得记牢）
+
+1. **ALPN 扩展长度写错**（写成 13，实际 11）→ 服务端直接 `decode_error(50)`。
+   扩展长度是手写二进制协议最容易错的地方。
+2. **CCS 被当成"已加密"发出去**：原先用单个 `enc_on` 标志，装好密钥就置 1，
+   结果 CCS（必须是明文）被加密，服务端回 `unexpected_message(10)`。
+   现在收发两个方向分别有 `enc_out` / `enc_in`，各自在自己方向的 CCS 之后打开。
+3. **AES-GCM 的 AAD 长度用错**：RFC 5288 里 AAD 的 length 是**明文**长度，不是记录体
+   长度（含 8 字节 explicit nonce + 16 字节 tag）。发方向写成记录体长度 →
+   服务端 `bad_record_mac(20)`；收方向同样错 → 我们解不开服务端的 Finished。
+4. **NewSessionTicket 不在 transcript 里**：服务端在 CCS 之前会先发一条
+   `NewSessionTicket`（qq.com 上 170~218 字节），它**也计入握手哈希**，漏掉就会导致
+   "客户端 Finished 通过、服务端 Finished 验不过"这种很像密钥出错的症状。
+5. **加密的 alert**：CCS 之后的 alert 是密文（我们一开始当明文读，报出 level=182
+   desc=78 这种鬼数字）。现在 alert 也走记录层解密，`close_notify` 当 EOF 处理。
+
+另外两个工程约束：
+- 记录缓冲（8KB）和握手缓冲（12KB）都放在**模块静态区**，不占栈；代价是这个模块
+  不可重入（一次一条 TLS 连接）。板子上 DRAM 紧，这是有意的取舍。
+- `tls12_read_app()` 要求调用方缓冲 ≥ 一条记录的大小（qq.com 见过 2948 字节的记录，
+  现在用例里给 8KB）。
+- RSA 验签调用链峰值栈约 3.5KB（§212），TLS 任务栈要 ≥6KB。
+
+### 现在距离目标只差"板上那半边"
+
+| 环节 | 状态 |
+| --- | --- |
+| TLS 1.2 handshake / HTTP GET / 跟随 302 | ✅ 宿主上对着真 qq.com 验证通过 |
+| AES-128-GCM / PRF / RSA 验签 | ✅ 向量验证（§212） |
+| lwIP（ARP/IP/TCP/DHCP/DNS + BSD socket） | ✅ 编进镜像并实测内存（§210） |
+| 板子的 socket 层 = lwIP POSIX 薄封装 | ✅ 已提供（§209），只是还没在真板上跑过 |
+| **WiFi PHY/关联** | ⛔ 仍是唯一未通的一环：PHY 两个真 bug 已修（§205/§206），等板子回来验证 |

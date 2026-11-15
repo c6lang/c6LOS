@@ -251,55 +251,95 @@ static int bn_from_be(u32 *out, int cap, const u8 *p, int len)
     return 1;
 }
 
-/* 解析 RSA 公钥的 DER（SPKI）。成功返回 1 并填 key。 */
-int rsa_parse_spki(const void *der, int derlen, RsaKey *key)
+/* 解析裸 RSAPublicKey：SEQUENCE { INTEGER n, INTEGER e }（p 指向 30） */
+static int parse_rsa_pub(const u8 *p, int len, RsaKey *key)
 {
-    const u8 *p = (const u8 *)der;
     int off = 0;
     int n = 0;
-    int len = 0;
+    int fl = 0;
 
-    if (der == 0 || key == 0 || derlen <= 0) {
-        return 0;
-    }
-    memset(key, 0, sizeof *key);
-    /* SEQUENCE (SPKI) */
-    if (p[off] != 0x30) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
-    off = off + 1 + n;
-    /* AlgorithmIdentifier：SEQUENCE，整段跳过 */
-    if (p[off] != 0x30) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
-    off = off + 1 + n + len;
-    /* BIT STRING */
-    if (p[off] != 0x03) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
-    off = off + 1 + n;
-    off = off + 1;              /* unused bits 字节 */
-    /* RSAPublicKey：SEQUENCE { INTEGER n, INTEGER e } */
-    if (p[off] != 0x30) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
+    if (len < 8 || p[off] != 0x30) { return 0; }
+    fl = der_len(p + off + 1, len - off - 1, &n);
+    if (fl < 0) { return 0; }
     off = off + 1 + n;
     /* INTEGER n */
     if (p[off] != 0x02) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
+    fl = der_len(p + off + 1, len - off - 1, &n);
+    if (fl < 0) { return 0; }
     off = off + 1 + n;
-    if (!bn_from_be(key->n, RSA_LIMBS, p + off, len)) { return 0; }
+    if (!bn_from_be(key->n, RSA_LIMBS, p + off, fl)) { return 0; }
     key->nlimbs = bn_limbs(key->n, RSA_LIMBS);
-    off = off + len;
+    off = off + fl;
     /* INTEGER e */
     if (p[off] != 0x02) { return 0; }
-    len = der_len(p + off + 1, derlen - off - 1, &n);
-    if (len < 0) { return 0; }
+    fl = der_len(p + off + 1, len - off - 1, &n);
+    if (fl < 0) { return 0; }
     off = off + 1 + n;
-    if (!bn_from_be(key->e, RSA_LIMBS, p + off, len)) { return 0; }
+    if (!bn_from_be(key->e, RSA_LIMBS, p + off, fl)) { return 0; }
     key->elimbs = bn_limbs(key->e, RSA_LIMBS);
     return (key->nlimbs > 0 && key->elimbs > 0) ? 1 : 0;
+}
+
+/* 解析 SPKI 的**内容**（没有外层 SEQUENCE 头）：AlgorithmIdentifier || BIT STRING{...} */
+static int parse_spki_contents(const u8 *p, int len, RsaKey *key)
+{
+    int off = 0;
+    int n = 0;
+    int fl = 0;
+
+    /* AlgorithmIdentifier：SEQUENCE，整段跳过 */
+    if (p[off] != 0x30) { return 0; }
+    fl = der_len(p + off + 1, len - off - 1, &n);
+    if (fl < 0) { return 0; }
+    off = off + 1 + n + fl;
+    /* BIT STRING */
+    if (off >= len || p[off] != 0x03) { return 0; }
+    fl = der_len(p + off + 1, len - off - 1, &n);
+    if (fl < 0) { return 0; }
+    off = off + 1 + n;
+    if (off >= len) { return 0; }
+    off = off + 1;              /* unused bits 字节 */
+    return parse_rsa_pub(p + off, len - off, key);
+}
+
+/* 解析 RSA 公钥的 DER。**三种输入都吃**（这是实测踩出来的）：
+ *   1) 完整 SPKI：      30 { 30(algid) 03(bitstring) }
+ *   2) 裸 RSAPublicKey：30 { 02 n  02 e }   （DER 文件里直接导出的那种）
+ *   3) SPKI 的内容：    30(algid) 03(bitstring)
+ *      —— c6 的 `std/data/x509` 给的 `spki` 视图就是这一种（最外层 SEQUENCE
+ *         头已经被它吃掉，指针落在 AlgorithmIdentifier 上）。
+ * 成功返回 1 并填 key。 */
+int rsa_parse_spki(const void *der, int derlen, RsaKey *key)
+{
+    const u8 *p = (const u8 *)der;
+    int n = 0;
+    int len = 0;
+
+    if (der == 0 || key == 0 || derlen < 8) {
+        return 0;
+    }
+    memset(key, 0, sizeof *key);
+    if (p[0] != 0x30) {
+        return 0;
+    }
+    len = der_len(p + 1, derlen - 1, &n);
+    if (len < 0 || 1 + n > derlen) {
+        return 0;
+    }
+    if (1 + n + len <= derlen && len > 0) {
+        u8 first = p[1 + n];
+
+        if (first == 0x30) {
+            /* 情况 1：外层 SPKI，内容在后面 */
+            return parse_spki_contents(p + 1 + n, derlen - 1 - n, key);
+        }
+        if (first == 0x02) {
+            /* 情况 2：裸 RSAPublicKey */
+            return parse_rsa_pub(p, derlen, key);
+        }
+    }
+    /* 情况 3：SPKI 的内容（以 algid 开头） */
+    return parse_spki_contents(p, derlen, key);
 }
 
 /* ---- PKCS#1 v1.5 + SHA-256 验签 ---- */
