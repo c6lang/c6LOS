@@ -735,3 +735,28 @@ u32 os_task_current_id(void) {
     d[k * 4 + 3] = (u32)(void *)g_cur;
     return me;
 }
+
+/* 诊断探针：按任务 id 取若干内部字段（what: 0=state 1=wait_kind
+ * 2=wait_obj 3=wait_result 4=suspend_cnt）。WiFi 死锁排查用，
+ * 让一个低优先级监控任务把结果写进 RTC 慢存，复位后直接 read-mem。 */
+u32 os_task_probe(u32 id, u32 what) {
+    u32 i = 0;
+    while (i < (u32)C6OS_MAX_TASKS) {
+        OsTask *t = &g_tasks[i];
+        if (t->magic == OS_TASK_MAGIC && t->id == id) {
+            if (what == 0u) { return (u32)t->state; }
+            if (what == 1u) { return (u32)t->wait_kind; }
+            if (what == 2u) { return (u32)(void *)t->wait_obj; }
+            if (what == 3u) { return (u32)t->wait_result; }
+            if (what == 4u) { return t->suspend_cnt; }
+            return 0u;
+        }
+        i++;
+    }
+    return 0xFFFFFFFFu;
+}
+
+/* 任务总数（含已结束），监控任务遍历用 */
+u32 os_task_total(void) {
+    return (u32)C6OS_MAX_TASKS;
+}

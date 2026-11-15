@@ -46,6 +46,31 @@ static void wifi_main(void *arg)
     for (;;) { os_task_delay(100u); }
 }
 
+/* 低优先级监控任务：只在其它任务都阻塞时才轮到它跑，正好用来在死锁状态下
+ * 把各任务的 state / wait_kind / wait_obj 写进 RTC 慢存（复位后可 read-mem）。 */
+static void mon_main(void *arg)
+{
+    volatile u32 *d = (volatile u32 *)0x50000500u;
+    u32 id = 0;
+    u32 k = 0;
+    (void)arg;
+    d[64] = 0xC0DE0001u;                       /* 监控任务已启动 */
+    for (;;) {
+        d[65] = (u32)os_tick_get();            /* tick 在不在走 */
+        d[66] = d[66] + 1u;                    /* 循环次数 */
+        os_task_yield();                       /* 隔离实验：不依赖超时表 */
+        k = 0;
+        id = 0;
+        while (id < 5u) {
+            d[k] = id;                        k = k + 1u;
+            d[k] = os_task_probe(id, 0u);     k = k + 1u;
+            d[k] = os_task_probe(id, 1u);     k = k + 1u;
+            d[k] = os_task_probe(id, 2u);     k = k + 1u;
+            id = id + 1u;
+        }
+    }
+}
+
 void os_main(void)
 {
     s3_beacon(0u, 0xB0000210u);
@@ -54,6 +79,7 @@ void os_main(void)
     s3_beacon(1u, s3_win_call_flash42());   /* 期望 42：IROM 取指正常 */
 
     s3_beacon(2u, (u32)os_task_create("wifi", wifi_main, 0, 3u, 4096u));
+    s3_beacon(3u, (u32)os_task_create("mon", mon_main, 0, 30u, 1024u));
     os_task_start();
     for (;;) { }
 }

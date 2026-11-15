@@ -215,12 +215,26 @@ void *s3_timer_irq(u32 frame_sp)
     s3_wdt_kick();
     {
         static u32 isr_n;
+        volatile u32 *ic = (volatile u32 *)0x50000700u;
         isr_n = isr_n + 1u;
+        /* 诊断：每 256 次中断把计数写进 RTC，确认定时器中断在不在跑 */
+        if ((isr_n & 0xFFu) == 0u) {
+            ic[0] = isr_n;
+            ic[1] = ic[1] + 1u;
+        }
     }
     if (port_cur_ctx() != 0) {
         port_irq_fill(frame_sp);
     }
     port_isr_enter();
+    {
+        /* 诊断：记录进入 os_sched_tick 的次数（RTC 0x50000708），
+         * 与 0x50000700（INR 计数）对比，判断 tick 推进是否被跳过。 */
+        static u32 st_n;
+        volatile u32 *ic = (volatile u32 *)0x50000708u;
+        st_n = st_n + 1u;
+        if ((st_n & 0xFFu) == 0u) { ic[0] = st_n; }
+    }
     os_sched_tick();
     if (g_hook != 0) {
         g_hook();

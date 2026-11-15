@@ -5767,3 +5767,36 @@ e3: me=2  a0=2  a1=0
 不再纠结 id 记录，直接抓"初始化任务到底停在哪条指令"：JTAG 在
 `port_idle` 只能看到 idle 任务，需要读内核的 `g_tasks[]` 里各任务的
 `state`/`wait_obj`/`wait_kind`，把初始化任务的等待对象打出来。
+
+## §136 新发现：定时器 ISR 跑到 `port_isr_enter()` 之后就不再往下走了
+
+在 `s3_timer_irq` 里放两个计数（RTC）：
+
+* `0x50000700` = 进入 ISR 的次数（每 256 次写一次）
+* `0x50000708` = 进入 `os_sched_tick()` 之前的次数（每 256 次写一次）
+
+真板读数：
+
+```
+0x50000700 = 0x200      ISR 进了 512 次
+0x50000708 = 0xd7ef4660 从没被写过（还是 RTC 随机值）
+```
+
+也就是说：**中断在持续进来，但绝大多数次都到不了 `os_sched_tick()`**。
+两者之间只有三句：`port_cur_ctx()`、`port_irq_fill(frame_sp)`、
+`port_isr_enter()`。
+
+`os_tick_get()` 只有 2 —— 说明 `os_sched_tick()` 总共只真正跑了 2 次。
+这直接解释了所有"带超时的等待不会到期"的现象（`os_task_delay`、
+`_semphr_take` 的 timeout、`_queue_recv` 的 timeout 全都靠它）。
+
+另外把低优先级监控任务（`mon_main`）接好了：它把
+`os_task_probe(id, state/wait_kind/wait_obj)` 写进 RTC `0x50000500`，
+但因为它依赖延时，目前也只跑到第一轮就停住 —— 正好印证同一个问题。
+
+### 下一步
+
+1. 在 `port_cur_ctx()` / `port_irq_fill()` / `port_isr_enter()` 里各放一个
+   RTC 计数，定位是哪一句之后中断流程被打断。
+2. 重点怀疑 `port_irq_fill()`（它要写陷阱帧/切换上下文）在 WiFi 任务
+   建立之后开始出问题（有真实任务上下文时才走这条分支）。
