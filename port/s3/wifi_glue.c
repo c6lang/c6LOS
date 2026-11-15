@@ -407,6 +407,7 @@ static u32 g_qbad = 0u;
 static u32 g_ev_n = 0u;
 static u32 g_sp_n = 0u;
 static u32 g_rc_n = 0u;
+static u32 g_fr_n = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -521,12 +522,21 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
          * entry 把调用者的 a0..a3 存在帧的高端（framesize-16 ..+0），
          * 这里把 framesize=32 的几种可能位置都记下来，事后对照哪份是代码地址。 */
         {
-            /* 干净配对：(sp, id, g_s3_cur)，互不重叠 */
-            volatile u32 *cp = (volatile u32 *)0x50000900u;
-            cp[(k_ & 3u) * 4u]      = sp_;
-            cp[(k_ & 3u) * 4u + 1u] = id_;
-            cp[(k_ & 3u) * 4u + 2u] = (u32)(void *)g_s3_cur[0];
-            cp[(k_ & 3u) * 4u + 3u] = (u32)(void *)g_s3_cur[1];
+            /* 从自己的窗口帧里取调用者返回地址：
+             * osi_queue_recv 是 `entry a1, 32`，entry 把调用者 a0..a3 存在
+             * [a1+16..a1+28]。这里把 a1 与那几个字都记下来核对。 */
+            u32 a1v = 0u;
+            volatile u32 *fr = (volatile u32 *)0x50000D00u;
+            u32 k2 = g_fr_n & 3u;
+            g_fr_n = g_fr_n + 1u;
+            __asm__ __volatile__("mov %0, a1" : "=r"(a1v));
+            fr[k2 * 5u] = a1v;
+            if (a1v >= 0x3FC80000u && a1v < 0x3FD00000u) {
+                fr[k2 * 5u + 1u] = *(volatile u32 *)(a1v + 16u);
+                fr[k2 * 5u + 2u] = *(volatile u32 *)(a1v + 20u);
+                fr[k2 * 5u + 3u] = *(volatile u32 *)(a1v + 24u);
+                fr[k2 * 5u + 4u] = id_;
+            }
         }
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
