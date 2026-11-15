@@ -121,6 +121,8 @@ void port_set_cur_ctx(void *ctx)
 }
 
 /* 把 level-1 陷阱帧复制进当前任务 ctx：frame[15]=EPC1, frame[16]=PS。 */
+extern u32 os_task_current_id(void);
+
 void port_irq_fill(u32 frame_sp)
 {
     S3Ctx *c = g_s3_cur[port_core_id() & (C6OS_MAX_CORES - 1u)];
@@ -135,9 +137,10 @@ void port_irq_fill(u32 frame_sp)
         volatile u32 *d = (volatile u32 *)0x50001700u;
         u32 k_ = n_ & 7u;
         n_ = n_ + 1u;
-        d[k_ * 3u]      = n_;
-        d[k_ * 3u + 1u] = (u32)(void *)c;
-        d[k_ * 3u + 2u] = frame_sp;
+        d[k_ * 4u]      = n_;
+        d[k_ * 4u + 1u] = (u32)(void *)c;
+        d[k_ * 4u + 2u] = frame_sp;
+        d[k_ * 4u + 3u] = os_task_current_id();   /* 内核视角的当前任务 */
     }
 }
 

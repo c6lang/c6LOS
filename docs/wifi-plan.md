@@ -7387,3 +7387,68 @@ ppTask 的代码位置** —— 即某一时刻 `port_irq_fill` 把 ppTask 的�
 在 `port_irq_fill` 里除了 `(ctx, frame_sp)`，再记录**当时 `g_cur->id`**；
 在 `port_task_yield` 里记录**当时的 `g_cur->id`**。把这两组和切换追踪对齐，
 就能确定是哪一次保存把"任务 1 的 ctx"和"ppTask 的帧"配到了一起。
+
+## §178 逐条核对：两条切换路径的簿记都是对的
+
+**ISR 保存**（`port_irq_fill`，现在同时记 port 视角 ctx 与内核视角 id）：
+
+```
+#1: ctx=0x3fcbe700 frame_sp=0x3fcba5d0 kern_id=1
+#2: ctx=0x3fcbe700 frame_sp=0x3fcba5f0 kern_id=1
+```
+
+两次都一致（都是任务 1），`frame_sp` 也都在任务 1 自己的栈上 ✓。
+
+**主循环切换**（`port_task_switch` 的反汇编）：确实有
+
+```
+l32r a3, .Lg_cur ; slli a5, a12, 2 ; add a3, a3, a5 ; s32i a4, a3, 0
+```
+
+即 `g_s3_cur[core] = 目标 ctx` ✓。
+
+**ISR 切换**（`irq.c`）：`port_set_cur_ctx(next)` ✓。
+
+所以"由谁更新当前任务"这条链上，三个入口都写了。
+
+## 本轮净成果
+
+### 两个真实的 bug 修复
+
+1. `os_task_current_slot()` 用 `.c6` 的 `&g_tasks[i]` 取址（恒为 0）
+   → 改用 id 比较，`_task_get_current_task()` 恢复正常。
+2. `os_task_block_prepare()` 在永久等待（timeout=0）时没有清理本任务
+   残留的超时条目 → 补上 `os_timeout_cancel`。
+
+### 一套真正可靠的测量通道（这轮的转折点）
+
+* 查清 `esptool read-mem` 会**先复位再读**，分多次读的字段来自不同启动；
+* 摸清 RTC slow memory 实际可用范围小于标称 8KB
+  （`0x50001900` 以上读到 0）；
+* 建立了"一次性快照 + 固定低地址诊断区"的组合，从此读数可复现。
+
+### 更正了三处此前写进文档的错误结论
+
+* "`switch_cnt == yield_cnt`，调度成对正常" —— 两个计数器其实在**同一个函数**里；
+* "初始化任务也在收队列、两个任务互等" —— 只有 `ppTask` 收队列；
+* "任务 1 在执行 ppTask 的代码" —— EPC 显示任务 1 在自己的
+  `os_task_block_wait` 里，之前是残留值误判。
+
+## 仍然成立、且已用可靠通道复核过的事实
+
+```
+task_starts=2   switch=3   yield_n=348   osi_calls=30   timeout_fires=0
+blk0: kind=1 ctx=任务1         （_semphr_take 握手）
+blk1: kind=6 ctx=任务2         （ppTask 主循环 0x40381fda）
+blk2: kind=6 ctx=任务1         （ppTask 另一分支 0x40382157）
+queue: xphyQueue=0x3fcbf338，obj=0x3fcbf33c=&q ✓
+```
+
+`esp_wifi_init_internal` 仍未返回（没有 `W2`），`_queue_send` / `pp_post`
+一次都没被调用。
+
+### 下一轮
+
+`blk2` 是关键：**ppTask 的另一条分支（`ppTask+0x1a7`）在"当前任务=任务1"
+时被执行**。下一步反汇编 `ppTask+0x16c`..`ppTask+0x1b0` 这段，看它是
+错误分支还是重试分支，以及它是怎么被进入的（普通跳转还是返回地址错）。
