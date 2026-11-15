@@ -5382,3 +5382,33 @@ IDF 传 `portMAX_DELAY = 0xFFFFFFFF`，被当成 tick 数丢进超时表，
 `esp_wifi_init_internal` 现在会一直等（不再忙等），WiFi 任务建好并阻塞在
 `s_wifi_queue` 上。要查的是：谁在等谁（init 等 WiFi 任务的 ack，还是
 WiFi 任务等 init 的消息），以及 `_queue_send` 有没有真的投进去。
+
+## §124 当前阻塞点精确到"WiFi 任务在队列上空等"
+
+新增成对标记（RTC `0x50000370` = 最后进入的阻塞原语，`0x50000374` = 最后
+离开的；`1=sem_pend 2=queue_get 3=event_wait 4=mutex_pend`）。真板读数：
+
+```
+0x50000370 = 2   (最后进入：queue_get)
+0x50000374 = 1   (最后离开：sem_pend)
+```
+
+说明 **WiFi 任务正常阻塞在 `s_wifi_queue` 上空等消息**，
+而初始化任务那边**不在任何阻塞原语里**（否则 0x50000370 会是它）。
+OSI 回调计数稳定在 30 不再增长 —— 既不是忙等，也不是我们的原语卡住，
+而是库内部在等一个"WiFi 任务初始化完成"的信号，但没人发。
+
+顺带修正：`_task_get_current_task()` 以前返回的是**栈指针 token**，而
+`_task_create()` 写回给库的句柄是**任务 id**，两边口径不同，库用它判断
+"我是不是在 WiFi 任务里"会一直判错。已在内核加 `os_task_current_id()`
+（`kernel/task.c6`），`w2c` 壳改为调它。
+
+### 下一步
+
+1. 反汇编 `ieee80211_ioctl_init`（`0x4205dd50`）看它到底在等什么：
+   有可能是 `_queue_send` 之前先读某个标志，而那个标志要等 `ppTask` 跑完
+   首轮循环才置位。
+2. 给 `_queue_send`（字段 25）也补 `HIT_OF`，确认 init 到底有没有投过消息
+   （目前回调环里从没出现过 25）。
+3. 若确认 init 从没投消息，就要查 `pp_post` 的入口条件（它可能先检查
+   "当前是否已在 WiFi 任务"，而这个检查依赖第 1 点的标志）。

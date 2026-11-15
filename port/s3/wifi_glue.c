@@ -171,6 +171,12 @@ extern u64  s3_w2c_tick_get(void);
 extern u32  s3_w2c_tick_hz(void);
 extern u32  s3_w2c_current_task(void);
 
+/* 阻塞原语进入/离开标记：0x50000370 = 最后进入的，0x50000374 = 最后离开的。
+ * 两者不一致就说明卡在那个原语上。1=sem_pend 2=queue_get 3=event_wait 4=mutex_pend */
+#define BDIAG ((volatile u32 *)0x50000370u)
+#define B_IN(id)   (BDIAG[0] = (u32)(id))
+#define B_OUT(id)  (BDIAG[1] = (u32)(id))
+
 #define C6_FOREVER 0xFFFFFFFFu
 
 /* 内核 os_task_block_prepare 的约定是 **timeout 0 = 不设超时 = 永久等待**；
@@ -210,7 +216,13 @@ static int osi_semphr_take(void *sem, u32 ticks)
     WSem *s = (WSem *)sem;
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
-    return (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
+    {
+        int ok;
+        B_IN(1u);
+        ok = (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
+        B_OUT(1u);
+        return ok;
+    }
 }
 static int osi_semphr_give(void *sem)
 {
@@ -284,7 +296,13 @@ static int osi_mutex_lock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_lock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
-    return (s3_w2c_mutex_pend((void *)&m->m, 0u) == 0) ? 1 : 0;
+    {
+        int ok;
+        B_IN(4u);
+        ok = (s3_w2c_mutex_pend((void *)&m->m, 0u) == 0) ? 1 : 0;
+        B_OUT(4u);
+        return ok;
+    }
 }
 static int osi_mutex_unlock(void *p)
 {
@@ -334,8 +352,10 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
     u32 got;
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
+    B_IN(3u);
     got = s3_w2c_event_wait((void *)&e->e, bits,
                             (wait_all != 0) ? 1u : 0u, w_ticks(ticks));
+    B_OUT(3u);
     if (clear != 0 && got != 0u) { (void)s3_w2c_event_clear((void *)&e->e, got); }
     return got;
 }
@@ -446,7 +466,9 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
         QDIAG[3] = (u32)((WQ *)qh)->q.item_size;
         return 0;
     }
+    B_IN(2u);
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    B_OUT(2u);
     if (r != 0) {
         QDIAG[1] = (u32)(-r);               /* 1=没有当前任务 3=超时表满 … */
         QDIAG[2] = ticks;

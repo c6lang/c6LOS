@@ -700,3 +700,14 @@ OsTask *os_task_get(u32 id) {
     }
     return 0;
 }
+
+/* 当前任务 id（0 表示还没进调度）。WiFi 的 OSI 适配层需要它：
+ * 闭源库用 `_task_get_current_task()` 的返回值和 `_task_create()` 写回的
+ * 句柄比较，判断"我现在是不是在 WiFi 任务里"。两边必须是同一个口径 ——
+ * 都用任务 id，不能用栈指针之类的东西糊弄。 */
+u32 os_task_current_id(void) {
+    if (g_cur == 0) {
+        return 0;
+    }
+    return g_cur->id;
+}

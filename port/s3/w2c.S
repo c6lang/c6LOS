@@ -75,14 +75,5 @@
     W2C s3_w2c_task_yield,     os_task_yield
     W2C s3_w2c_tick_get,       os_tick_get
     W2C s3_w2c_tick_hz,        os_tick_hz
+    W2C s3_w2c_current_task,   os_task_current_id
 
-/* 当前任务的身份：拿栈指针当唯一 token。同一个任务里稳定、不同任务必然不同，
- * 正好满足库用 `_task_get_current_task` 判断"我是不是在 WiFi 任务里"。
- * 这里没有内层调用，a0 不会被改，直接返回即可。 */
-    .align  4
-    .global s3_w2c_current_task
-    .type   s3_w2c_current_task, @function
-s3_w2c_current_task:
-    entry   a1, 16
-    mov.n   a2, a1
-    retw
