@@ -196,6 +196,7 @@ extern void s3_w2c_task_yield(void);
 extern u64  s3_w2c_tick_get(void);
 extern u32  s3_w2c_tick_hz(void);
 extern u32  s3_w2c_current_task(void);
+extern void *g_s3_cur[2];   /* port/s3/ctx.S 里的当前 ctx（按核下标） */
 
 /* 阻塞原语进入/离开标记：0x50000370 = 最后进入的，0x50000374 = 最后离开的。
  * 两者不一致就说明卡在那个原语上。1=sem_pend 2=queue_get 3=event_wait 4=mutex_pend */
@@ -405,6 +406,7 @@ static u32 g_qn = 0u;
 static u32 g_qbad = 0u;
 static u32 g_ev_n = 0u;
 static u32 g_sp_n = 0u;
+static u32 g_rc_n = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -502,18 +504,24 @@ static int osi_queue_recv(void *qh, void *item, u32 ticks)
     }
     B_IN(2u);
     {
-        /* 交叉验证：同时记栈指针（每个任务的栈范围唯一）和任务 id。
-         * 先占位再写，避免被更高优先级任务打断后把两个任务的字段串到一起。 */
+        /* 每次 recv 记一条 (序号, 任务 id, 栈指针) 到 RTC 0x50000800 起的环，
+         * 先占位再写，避免被抢占后串字段。 */
         u32 sp_;
-        u32 k_ = g_sp_n;
-        volatile u32 *sd = (volatile u32 *)0x50000440u;
+        u32 k_ = g_rc_n;
+        u32 id_;
+        volatile u32 *rc = (volatile u32 *)0x50000800u;
         __asm__ __volatile__("mov %0, a1" : "=r"(sp_));
-        g_sp_n = k_ + 1u;
-        if (k_ < 4u) {
-            u32 id_ = s3_w2c_current_task();
-            sd[k_ * 2u] = sp_;
-            sd[k_ * 2u + 1u] = id_;
-        }
+        g_rc_n = k_ + 1u;
+        id_ = s3_w2c_current_task();
+        rc[(k_ & 7u) * 3u] = k_;
+        rc[(k_ & 7u) * 3u + 1u] = id_;
+        rc[(k_ & 7u) * 3u + 2u] = sp_;
+        rc[24] = g_rc_n;
+        /* 关键对比：port 认为的当前 ctx（g_s3_cur[0]）vs 内核认为的当前任务 id */
+        rc[(k_ & 7u) * 3u + 3u] = 0u;   /* 占位避免越界踩到下一项 */
+        rc[(k_ & 7u)] = k_;
+        rc[(k_ & 7u) + 8u] = (u32)(void *)g_s3_cur[0];
+        rc[(k_ & 7u) + 16u] = id_;
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
     {
