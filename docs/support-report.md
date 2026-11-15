@@ -138,6 +138,33 @@ IDF app**，每次装完再读它自己的 IROM：
 ⇒ 我们 `_start` 里的动作、以及我们和 IDF app 不同的那个 SPI 时钟值，
 **都不会让 IROM 读失效**。
 
+## 5d. 又一组实验：连 **ROM 直接引导**都不行
+
+参照 NuttX（`CONFIG_ESPRESSIF_SIMPLE_BOOT` 里 `PRIMARY_SLOT_OFFSET = 0`）和 Zephyr
+（注释原文："In simple boot mode, **ROM bootloader has already set up MMU mappings**
+for flash access"）的做法，我们把镜像生成在 **flash 0x0**，让 **ROM 直接引导**：
+
+```
+SHA-256 comparison failed: ... Attempting to boot anyway...
+entry 0x403788f0
+c6os s3 boot          ← ROM 完全接受并成功引导了我们的镜像
+```
+
+**但读 IROM 仍然是 0。**
+
+⇒ 这排除了"原厂 2nd-stage bootloader 没有真正把 XIP 交给我们"这个假设 ——
+**问题在我们镜像本身，而不在 bootloader 侧**。
+
+同一轮还排除了：
+
+- **镜像结构**：把 DROM 段做正常大小（4KB，不再为了对齐撑到 64KB）、IROM 放在
+  `vaddr 0x42001020 / AT 0x1020`（满足"vaddr 低 16 位 == flash 低 16 位"），
+  镜像从 102KB 降到 41KB —— 真板读 IROM 仍是 0。
+- **自建 XIP**：照 esp-hal 的顺序（`Cache_Suspend_ICache` → 写 MMU 表项 →
+  `Cache_Invalidate_Addr` 按地址失效 → `Cache_Resume_ICache`）—— 仍失败，
+  且 `Cache_Suspend_ICache()` 的返回值是 0（可疑）。
+- **SPI0 的 `CACHE_REQ_EN`**：`0x6000303C = 0x00000005`，bit0 是 **1**（已使能）。
+
 ## 6. 想请教的问题
 
 1. ESP32-S3 上，**除了 MMU 表项、Cache 使能/模式位、SPI_MEM 时钟与控制、PMS 权限**
