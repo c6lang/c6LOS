@@ -173,3 +173,20 @@ IDF/Zephyr 都会调 `Cache_Set_IDROM_MMU_Size(irom_pages, drom_pages, ...)`
 把 DROM 段做小（不做 64KB 填充），并让 IROM/DROM 的 vaddr 落在
 `Cache_Set_IDROM_MMU_Size` 预期的那套切分里 —— 即模仿 IDF 的布局：
 DROM 在 `0x3C0xxxxx`（x 按 IROM 页数定），IROM 在 `0x42000020` 起。
+
+### 试过了：紧凑布局也不行
+
+按 IDF 的布局思路，把 DROM 做成正常大小（0x0FF8，不再 64KB 填充）、
+IROM 紧接其后放在 **vaddr 0x42001020 / AT 0x1020**（低 16 位对齐 ✓），
+镜像从 102KB 降到 41KB：
+
+```
+seg0 DROM vaddr 0x3c000020 len 0x00ff8  file 0x18
+seg1 IROM vaddr 0x42001020 len 0x00018  file 0x1018   <- 数据在 0x1020，低 16 位匹配
+```
+
+真板结果：`irom3 = 0x00000000`（读的是 0x42001020）。**仍然失败。**
+
+⇒ "DROM 撑大导致 MMU 表项冲突"这个假设也排除了。
+
+已把链接脚本和 mkimg 恢复原样。
