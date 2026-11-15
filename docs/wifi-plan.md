@@ -3308,3 +3308,33 @@ c6os s3 boot
 - 或者它内部调到的某个 call0 函数污染了 `a0`
 
 （我们已经验证过窗口向量在 deep=11 时是正常的。）
+
+### 82h. ★ ABI 问题真正修好了：`esp_wifi_init` 完整执行并返回
+
+关键发现：之前几次构建**根本没重新编译 `wifi_glue.o`**（Makefile 规则改了但源文件没动，
+make 认为它是最新的），所以一直在跑旧的 call0 版本。清掉 `build/wifi` 全量重建后：
+
+```
+build/wifi/obj/wifi_glue.o:  s3_wifi_osi_init -> entry a1, 32   ← 真的 windowed 了
+```
+
+真板结果（这是本轮最重要的证据）：
+
+```
+c6os s3 boot
+wifi_init ...
+wifi_init rc=0xffffffff
+```
+
+**没有 trap，`esp_wifi_init_internal()` 完整执行并返回了！**
+`rc=0xffffffff` 是因为链接器用了我们那个弱兜底桩（`return -1`）——
+弱定义会满足引用，导致归档成员不被拉取。已给弱兜底加上 `#if !defined(S3_WITH_WIFI)`。
+
+### 当前的最后一个障碍：`.flash.wifi` 段让 bootloader 拒绝镜像
+
+把 `.flash.wifi` 放到 `vaddr 0x42100000 / flash 0x100000`（identity、页对齐）后，
+镜像变成 7 段、645KB，链接正常，但 **bootloader 复位**（`rst:0x3`），应用没起来。
+
+之前 6 段（不带 `.flash.wifi`）的镜像是能被接受的。所以问题在段的描述方式 ——
+可能是 bootloader 对 flash 段的**顺序/偏移**有要求，或者 0x100000 这个位置
+超出了它愿意映射的范围。下一步就是把段布局调成 bootloader 能接受的形式。

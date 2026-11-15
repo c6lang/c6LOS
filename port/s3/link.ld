@@ -59,7 +59,7 @@ SECTIONS
   /* IDF 闭源 WiFi 库独立成段：VMA/AT 都按 64KB 页对齐（identity），
    * 这样不会扰动 .vector/.text 的地址布局（之前把归档规则塞进 .flash.text
    * 会导致 .vector 里的 j 跳转 out of range）。 */
-  .flash.wifi 0x42050000 : AT (0x50000)
+  .flash.wifi 0x42100000 : AT (0x100000)
   {
     _flash_wifi_start = .;
     *libpp.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
@@ -94,6 +94,8 @@ SECTIONS
     *(.literal .literal.* .text .text.*)
     /* IDF 闭源库（libphy/libpp/libnet80211…）把自己的代码放在 .iram1 里，
      * 不显式收集就会变成"孤儿段"，被链接器塞到段尾甚至不该去的地方。 */
+    /* WiFi 闭源库自带的段（睡眠/RX 用的 IRAM），不收集会成为孤儿段导致 LMA 重叠 */
+    *(SORT_BY_NAME(.wifi*))
     *(.iram1*)
     *(.iram.*)
     *(.iram0*)

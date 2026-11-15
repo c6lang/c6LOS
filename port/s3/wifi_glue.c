@@ -99,10 +99,13 @@ int snprintf(char *buf, u32 n, const char *fmt, ...)
     return 0;
 }
 
-/* 不链接 WiFi 闭源库的构建里给 esp_wifi_init_internal 一个弱兜底，
- * 这样普通 make s3 也能链接通过；链接了 WiFi 库时真实符号会覆盖它。 */
+/* 只有**不链接** WiFi 闭源库的普通构建才需要这个弱兜底。
+ * 注意：弱定义会满足引用，导致归档成员不被拉取 —— 所以 WiFi 构建必须定义
+ * S3_WITH_WIFI 把它关掉。 */
+#if !defined(S3_WITH_WIFI)
 __attribute__((weak)) int esp_wifi_init_internal(const void *cfg)
 {
     (void)cfg;
     return -1;
 }
+#endif
