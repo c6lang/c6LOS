@@ -3570,3 +3570,30 @@ wifi_init ...         <- 进入 esp_wifi_init_internal
 
 所以下一步应该看**这个函数被调用的路径**：是不是从某个 call0 上下文直接 `callx8`
 过去，导致窗口状态不对。或者看 `ps=00060910` 里 `WOE` 位在 trap 时是否真的是 1。
+
+### 82q. JTAG 看 trap 现场：读到的是 exccause=4
+
+用 JTAG 停在 trap 上看寄存器：
+
+```
+epc1      = 0x400442a7    （ROM 里的地址）
+excvaddr  = 0x0
+exccause  = 0x4           （LoadStoreAlignment）
+```
+
+这和串口打印的 `cause=0 pc=4201d934` **不一致** —— 说明 JTAG 附加时
+CPU 已经又走了别的异常路径，或者现场被打断过。
+
+⇒ 结论：**JTAG 这条路对这个 trap 的取证不可靠**（之前也踩过 JTAG 读数不可信的坑）。
+后续还是应该靠"应用自己打印/写信标"的方式取证。
+
+### 本轮小结
+
+已经把能解决的都解决了：
+- I-cache 配置（根因）
+- WiFi 库链接进 flash
+- **bootloader 接受带 WiFi 的镜像**（1 页 DROM + IROM 从 entry 1）
+- OSI 桩函数 windowed ABI
+- `esp_wifi_init_internal` 被调用并进入
+
+**唯一剩余**：段内偏移 0xD934 处的取指失败（三种基址下都一样，数据读正常）。
