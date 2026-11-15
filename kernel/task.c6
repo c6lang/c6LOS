@@ -705,9 +705,33 @@ OsTask *os_task_get(u32 id) {
  * 闭源库用 `_task_get_current_task()` 的返回值和 `_task_create()` 写回的
  * 句柄比较，判断"我现在是不是在 WiFi 任务里"。两边必须是同一个口径 ——
  * 都用任务 id，不能用栈指针之类的东西糊弄。 */
+static u32 g_dbg_n = 0;
+
 u32 os_task_current_id(void) {
+    u32 me = 0;
+    u32 a0id = 0;
+    u32 a1id = 0;
+    volatile u32 *d = 0;
+    u32 k = 0;
+
     if (g_cur == 0) {
         return 0;
     }
-    return g_cur->id;
+    me = g_cur->id;
+    a0id = 0;
+    a1id = 0;
+    if (g_cur_arr[0] != 0) {
+        a0id = g_cur_arr[0]->id;
+    }
+    if (g_cur_arr[1] != 0) {
+        a1id = g_cur_arr[1]->id;
+    }
+    d = (volatile u32 *)0x500004A0u;
+    k = g_dbg_n & 3;
+    g_dbg_n = g_dbg_n + 1;
+    d[k * 4] = me;
+    d[k * 4 + 1] = a0id;
+    d[k * 4 + 2] = a1id;
+    d[k * 4 + 3] = (u32)(void *)g_cur;
+    return me;
 }

@@ -5733,3 +5733,37 @@ rcUpdateTxDoneAmpdu2      ← 偏移 116 是它自己的结构体字段，噪声
 在 `os_task_current_id()` 里把 `g_cur`、`g_cur_arr[0]`、`g_cur_arr[1]`、
 `port_core_id()` 四个值一次性记进 RTC，抓"同任务报不同 id"的现场，
 判断是 `g_cur_arr` 被改写、还是 `g_core` 下标跳变。
+
+## §135 任务 id 机制自洽；先前"同 sp 不同 id"不足为凭
+
+在 `os_task_current_id()` 里记录 `g_cur->id`、`g_cur_arr[0]->id`、
+`g_cur_arr[1]->id`（RTC `0x500004a0`，4 项环）：
+
+```
+e0: me=1  a0=1  a1=0
+e1: me=1  a0=1  a1=0
+e2: me=1  a0=1  a1=0
+e3: me=2  a0=2  a1=0
+```
+
+`g_cur_arr[1]` 恒为 0（单核运行），且 **`me` 与 `g_cur_arr[0]->id` 始终相等**
+—— 任务身份的取数链路是自洽的。而且全内核只有**一个** `port_task_switch`
+调用点（`kernel/task.c6:562`），紧邻的上一行就是 `g_cur_arr[me] = t`。
+
+所以 §133 里"同一个 sp 报出两个 id"的读数**不能作为结论**：`.c6` 编译出来的
+指针转换/取址在跨函数时已知不可靠（见 §114 的记录），那条记录里的 id 与 sp
+很可能是从不同时刻拼起来的。
+
+### 现状小结（M1 阶段）
+
+* `esp_wifi_init_internal()` 在**单线程假任务**配置下已经能返回 **ESP_OK**（§120）。
+* 换成真 RTOS 任务后：任务能建、能调度、能阻塞、队列/信号量/递归互斥都工作，
+  但 WiFi 任务在 `s_wifi_queue` 上空等，而初始化任务走不到 `pp_post`。
+* 本轮把定位工具链补齐了（RTC 回调环、事件环、阻塞原语进出标记、context 槽位
+  分配记录、任务 id 记录），并把 `pp_post` 交还给 libpp。
+
+### 下一步
+
+不再纠结 id 记录，直接抓"初始化任务到底停在哪条指令"：JTAG 在
+`port_idle` 只能看到 idle 任务，需要读内核的 `g_tasks[]` 里各任务的
+`state`/`wait_obj`/`wait_kind`，把初始化任务的等待对象打出来。
