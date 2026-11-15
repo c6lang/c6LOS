@@ -1454,6 +1454,11 @@ WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
 # 没有二级 bootloader 时没人配置 I-cache 的模式，取指会拿到 IllegalInstruction
 # （典型签名：PC = 函数首地址 + 2、cause=0）。见 docs/wifi-plan.md §15~24、§202。
 WIFI_CDEFS = -DS3_WITH_WIFI -DS3_WITH_LIBPHY -DS3_KEEP_SWD -DS3_FLASH_AUTO_MAP
+# S3_PHY_BISECT=1：打开 port/s3/win_island.c 里的"跨复位自动二分"（docs/wifi-plan.md §204）。
+# 一进 PHY 就整片从 USB 消失、只能人工断电的阶段，用它一次上电拿到故障子步骤。
+ifneq ($(S3_PHY_BISECT),)
+WIFI_CDEFS += -DS3_PHY_BISECT
+endif
 
 # 注意：目标文件的规则里**没有**把 S3_CDEFS 记成依赖，改了 -D 之后 make 不会
 # 重编已有对象（踩过一次：S3_FLASH_AUTO_MAP 没生效，镜像行为完全没变）。

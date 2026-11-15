@@ -359,10 +359,113 @@ u32 s3_win_phy_cal_word(u32 i)
 {
     return ((const u32 *)(const void *)g_phy_cal.v)[i & 0x1FFu];
 }
+
+/* ---- §204 跨复位自动二分 -------------------------------------------------
+ *
+ * 现象：一进 PHY 初始化，整块板子从 USB 上彻底消失（lsusb 里连 303a 都没了），
+ * 只能人工断电。一次实验 = 一次盲刷 + 一次拔插电源，效率极低。
+ *
+ * 办法：把 PHY 前置动作切成 N 个**累积**子步骤，每轮复位只跑 prefix[0..k]，
+ * 跑完**故意不喂狗** → RWDT(8s) 复位整片 → 下一轮 k+1。RTC 慢存跨复位不清，
+ * 所以用两个 bitmask 记：
+ *   BISECT_HUNG：进了这一步、但活到复位都没把标记清掉（= 挂死在这一步），
+ *                并且这个 bit 同时当"以后跳过它"的标记（否则会永远卡同一处）；
+ *   BISECT_OK  ：这一步活着跑完了（返回了）。
+ * 最后一轮把两个 mask 打到串口，一次上电就得到完整故障图。
+ *
+ * 局限（写在这里免得以后误读）：如果某一步只是**把 USB 掐了**而 CPU 还活着，
+ * 它会被记成 OK —— 那种情况只能靠主机端串口日志辨认：
+ * 最后一条 `[bisect] step N enter` 后面没有 `ok`，就是它。
+ */
+#define BISECT_N     7u
+#define BISECT_CUR   0x50000A20u
+#define BISECT_HUNG  0x50000A24u
+#define BISECT_OK    0x50000A28u
+#define BISECT_DONE  0x50000A2Cu
+#define BISECT_MAGIC 0x600DD0E0u
+
+static u32 bisect_get(u32 addr) { return *(volatile u32 *)addr; }
+static void bisect_set(u32 addr, u32 v) { *(volatile u32 *)addr = v; }
+static void bisect_or(u32 addr, u32 bits) { *(volatile u32 *)addr = *(volatile u32 *)addr | bits; }
+static void bisect_andn(u32 addr, u32 bits) { *(volatile u32 *)addr = *(volatile u32 *)addr & ~bits; }
+
+/* 执行"第 k 个子步骤"本身（k>=1）。返回非 0 表示这一步自己报告失败。
+ * 顺序和 IDF esp_phy_enable() 一致：common clock → phy_module_enable
+ * → phy_bbpll_en_usb → (cal data) → register_chipv7_phy。 */
+static u32 bisect_run(u32 k)
+{
+    if (k == 1u) {
+        s3_win_phy_clock_enable();                       /* WIFI_CLK_EN */
+        return 0u;
+    }
+    if (k == 2u) {
+        s3_win_phy_power_on();                           /* PWC/ISO/RST pulse */
+        return 0u;
+    }
+    if (k == 3u) {
+        phy_bbpll_en_usb(1u);                            /* 别把 USB PHY 关掉 */
+        return 0u;
+    }
+    if (k == 4u) {
+        phy_get_romfunc_addr();                          /* 填 g_phyFuns */
+        return (g_phyFuns == 0u) ? 1u : 0u;
+    }
+    if (k == 5u) {
+        (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+        return 0u;
+    }
+    if (k == 6u) {
+        return (u32)(int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    }
+    return 0u;
+}
+
+/* 返回 1 = 二分已经全部完成（正常流程可以继续）；0 = 本轮试到某一步为止，
+ * 调用者应该停下来（不喂狗），让 RWDT 复位后继续下一轮。 */
+u32 s3_win_phy_bisect(void)
+{
+    u32 k = bisect_get(BISECT_CUR);
+    u32 s = 1u;
+
+    if (bisect_get(BISECT_DONE) == BISECT_MAGIC) {
+        return 1u;
+    }
+    if (k >= BISECT_N) {
+        ets_printf("[bisect] done hung=0x%08x ok=0x%08x\n",
+                   (unsigned)bisect_get(BISECT_HUNG), (unsigned)bisect_get(BISECT_OK));
+        bisect_set(BISECT_DONE, BISECT_MAGIC);
+        return 1u;
+    }
+    ets_printf("[bisect] round k=%u\n", (unsigned)k);
+    while (s <= k) {
+        if ((bisect_get(BISECT_HUNG) & (1u << s)) != 0u) {
+            ets_printf("[bisect]   step %u SKIP(以前挂死过)\n", (unsigned)s);
+            s = s + 1u;
+            continue;
+        }
+        bisect_or(BISECT_HUNG, 1u << s);       /* 先进"挂死候选"，跑完再清 */
+        ets_printf("[bisect]   step %u enter\n", (unsigned)s);
+        {
+            u32 rc = bisect_run(s);
+
+            ets_printf("[bisect]   step %u ok rc=%u\n", (unsigned)s, (unsigned)rc);
+        }
+        bisect_andn(BISECT_HUNG, 1u << s);
+        bisect_or(BISECT_OK, 1u << s);
+        s = s + 1u;
+    }
+    bisect_set(BISECT_CUR, k + 1u);
+    return 0u;
+}
 #else
 int s3_win_phy_enable(void)
 {
     return -1;      /* 没链 libphy */
+}
+
+u32 s3_win_phy_bisect(void)
+{
+    return 1u;      /* 没链 libphy：直接当二分完成 */
 }
 
 u32 s3_win_phy_step(u32 step)
@@ -541,6 +644,14 @@ u32 s3_win_wifi_main(void)
     /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
     ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
                (unsigned)s3_w2c_tick_get());
+#ifdef S3_PHY_BISECT
+    /* §204：跨复位自动二分。没跑完就停在这儿**不喂狗**，让 RWDT(8s) 复位，
+     * 下一轮继续；跑完了（或没开这个开关）才走正常流程。 */
+    if (s3_win_phy_bisect() == 0u) {
+        for (;;) { }
+    }
+    ets_printf("[wifimain] bisect passed, normal flow\n");
+#endif
     WSTAGE(0x1001u); os_wdt_feed();
     s3_win_log("W0 phy start\n");
     WSTAGE(0x1002u); os_wdt_feed();

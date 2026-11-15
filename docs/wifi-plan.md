@@ -8866,3 +8866,101 @@ WiFi MAC 中断（`ETS_WIFI_MAC_INTR_SOURCE`）到底有没有被装进我们自
    （`MODEM_CLK`/`MODEM_RST`/`MODEM_ISO` 那一组，见 §202 末尾的清单）；
 4. PHY 过了之后才轮到"扫描 → 关联 → DHCP → 取 https://qq.com"，
    MAC 现在已经是真 MAC，DHCP 这条路才成立。
+
+---
+
+## §204 把 IDF 的 S3 PHY 上电序列逐行对上 + 跨复位自动二分装置
+
+### 一、IDF 到底做了什么（`components/esp_phy/src/phy_init.c` + `esp_hw_support/periph_ctrl.c`）
+
+S3 上 `esp_phy_enable()` 的完整链条（`SOC_MODEM_CLOCK_IS_INDEPENDENT` 为假，
+所以走的是 `periph_ll_*` 那套 ref_count 版本）：
+
+| 步骤 | IDF 代码 | 实际写哪些寄存器（S3） |
+| --- | --- | --- |
+| ① | `esp_phy_common_clock_enable()` → `wifi_bt_common_module_enable()` | `SYSTEM_WIFI_CLK_EN(0x60026014) \|= SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M(0x78078F)` |
+| ② | `phy_module_enable()` | `SYSTEM_WIFI_CLK_EN \|= SYSTEM_WIFI_CLK_PHY_EN_M(0x400000)`；顺带 RNG/WiFi 模块时钟；再 `DPORT_CLEAR_PERI_REG_MASK(SYSTEM_CORE_RST_EN_REG, 0)` |
+| ③ | `esp_phy_load_cal_and_init()`：`phy_bbpll_en_usb(true)` | 见下面"反汇编发现" |
+| ④ | 读 efuse MAC → `cal_data->mac`，`register_chipv7_phy(init_data, cal_data, mode)` | PHY 库内部 |
+| ⑤ | `phy_module_disable()` | 关 WiFi/BT 模块时钟（PHY 和 RNG 保留） |
+
+对照我们的 `s3_win_phy_clock_enable` / `s3_win_phy_power_on` / `s3_win_phy_enable`：
+`0x78078F` 和 `0x400000` 两组位都写了，顺序也对，`phy_bbpll_en_usb` 也在
+`register_chipv7_phy` 之前 —— **这一层没有漏**。所以"PHY 一初始化就整片失联"
+只可能出在 ④ 里面，或者出在我们多做的那些动作上。
+
+两个新发现：
+
+1. **`phy_bbpll_en_usb()` 反汇编出来只是写一个标志字节**（`phy_api.o`）：
+   ```
+   00000004 <phy_bbpll_en_usb>:
+       entry a1, 32
+       l32r  a8, <libphy 的 .bss 基址>
+       addmi a8, a8, 0x200
+       s8i   a2, a8, 166        ; 就是 "keep_usb_phy = en" 这样一个 byte
+       retw.n
+   ```
+   也就是说它本身不会挂；真正的动作在 `register_chipv7_phy` 里根据这个 byte
+   决定**要不要把内部 USB PHY 关掉**。IDF 的 Kconfig `ESP_PHY_ENABLE_USB` 说明
+   写得很直白："on those affected ESP targets, the ESP PHY library's
+   initialization will automatically disable the USB PHY" —— 这和我们的现象
+   （初始化后 USB-Serial-JTAG 连 `303a:` 都不见了）完全吻合。我们已经调了它，
+   但要验证它**真的生效**（即我们调的是同一份 libphy 实例里的那个 byte）。
+2. **IDF 的"清复位"其实是个空操作**：
+   `DPORT_CLEAR_PERI_REG_MASK(SYSTEM_CORE_RST_EN_REG, 0)` 的 mask 是 0，
+   一位也不清。而我们 `s3_win_phy_power_on()` 自己补了一次
+   `*rst |= 0x2A1F; *rst &= ~0x2A1F;`（assert + release）—— **比 IDF 多做了**。
+   这一步在时钟刚打开之后把 modem 各模块复位脉冲打了一遍，属于可疑动作：
+   如果 ③④ 都排除了，下一个要试的就是去掉它。
+
+### 二、装置：跨复位自动二分（`make S3_PHY_BISECT=1 wifi`）
+
+"每试一次都要人工断电"是现在最大的迭代瓶颈，所以做了个不依赖人的实验器：
+
+`port/s3/win_island.c` 里 `s3_win_phy_bisect()` 把 PHY 前置动作切成 7 个**累积**
+子步骤，每轮复位只跑 `prefix[0..k]`，跑完**故意不喂狗** → RWDT(8s) 复位整片 →
+下一轮 `k+1`。RTC 慢存跨复位不清，所以用三个字记账：
+
+| RTC 慢存地址 | 含义 |
+| --- | --- |
+| `0x50000A20` | 本轮的 k（下一轮自增） |
+| `0x50000A24` | bitmask：进了这一步、直到复位都没清掉 = **挂死在这一步**（同时当"以后跳过"标记） |
+| `0x50000A28` | bitmask：这一步活着跑完了 |
+| `0x50000A2C` | `0x600DD0E0` = 二分已全部跑完 |
+
+子步骤（对应上表）：1 `WIFI_CLK_EN`、2 `power_on`(PWC/ISO/RST 脉冲)、
+3 `phy_bbpll_en_usb(1)`、4 `phy_get_romfunc_addr()` + 检查 `g_phyFuns`、
+5 `register_chipv7_phy_init_param()`、6 `register_chipv7_phy()`、
+（7 预留给 `s3_win_usb_reclaim()` 之后要加的东西）。
+
+**怎么用**：`make C6_ROOT=/home/winger/c6 S3_PHY_BISECT=1 wifi` 刷进去，
+然后**什么都不用做**：约 7 轮 × ≤8s 自己跑完，最后一遍串口打出
+`[bisect] done hung=0x...... ok=0x......`，正常 WiFi 流程接着往下走。
+
+读法：
+- `hung` 里置位的就是**加了这一步就活不下来**的子步骤 → 下一步就是针对它改；
+- 如果某步只是**把 USB 掐了但 CPU 还活着**，它会被记成 OK —— 这种只能看
+  主机端串口日志：最后一条是 `[bisect] step N enter` 而其后的 `ok` 没出现，
+  就是第 N 步把 USB 弄没了。
+- 这个装置顺便还验证了 RWDT 自愈狗到底能不能把片子从"USB 已死"的状态救回来
+  （如果能，以后所有实验都不用人工断电）。
+
+### 三、构建状态
+
+| 命令 | 结果 |
+| --- | --- |
+| `make C6_ROOT=/home/winger/c6 S3_PHY_BISECT=1 wifi` | `Successfully created ESP32-S3 image` + `chkimg: OK` |
+| `make C6_ROOT=/home/winger/c6 wifi`（不带开关，走 `#else` 桩） | 同上 |
+| 基线 `make ... s3`（§201 那条） | 同上 |
+
+### 四、下一步（板子一回来就按这个走）
+
+1. 刷 `S3_PHY_BISECT=1` 的镜像，等它自己跑完 7 轮，抄下 `hung`/`ok` 两个 mask；
+2. 按 `hung` 定位：
+   - 挂在 step 4（`g_phyFuns` 没填上）→ ROM 函数表这条线从没通，回头查
+     `phy_get_romfunc_addr` 的调用约定；
+   - 挂在 step 6（真 `register_chipv7_phy`）→ 先试去掉 `power_on` 里那对
+     `0x2A1F` 复位脉冲，再试 `S3_PHY_CAL_MODE=1/2`，再试把 `s3_phy_init_data`
+     换成"全 0 的 128 字节"看是不是 init data 的问题（排除法）；
+3. PHY 过了以后才轮到 `esp_wifi_init_internal`（§192~§203 那套 OSI 表已经铺好，
+   NVS/MAC 两个隐患也修了），然后是扫描/关联/DHCP，最后才是取 https://qq.com。
