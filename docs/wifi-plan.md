@@ -8354,3 +8354,25 @@ g_s3_cur[0] = 0x3fcbe970  (= ctx[0]，正是当前任务)
 4. 注意 spill 会破坏 a2..a11 的当前窗口内容 —— 但我们第 1 步已经存过了，
    后面只用帧里的值，所以没问题；
 5. 恢复路径保持"只从帧恢复 + 欠载按需 fill"，不要写 WINDOWSTART。
+
+### §198 补记：把 sp 挪回原始值再 spill 也不行（真板）
+按上一节写的顺序（存帧 → sp 挪回 → spill → 挪回帧）实现后，故障变成：
+```
+exccause=29 (LoadStoreProhibited)  excvaddr=0xffffffe0(-32)  a0=0
+epc1=0x40048c33   ← **ROM 里的地址**，不是 libxt_hal.a 的 IRAM 地址
+windowbase=9  windowstart=0xaaaa（两者一致，说明 spill 确实走了一圈）
+```
+`epc1` 落在 ROM 说明 `xthal_window_spill_nw` 最终解析到的是 **ROM 里的实现**
+（HAL 里不少例程是 ROM 常驻的），它在我们这个"当前窗口属于任务自己"的上下文里
+把某个窗口的帧指针算成了垃圾（存到 -32）。
+
+**这指向一个结构性结论**：官方的 vPortYield 之所以能这么干，是因为它在
+**自己的函数帧里**执行 spill（当前窗口属于 vPortYield，不属于被切换的任务），
+所以"祖先窗口"恰好就是任务的全部窗口。我们的 `port_task_switch` 是 call0 内核
+函数、由 call0 内核调用，当前窗口就是**被中断任务自己的窗口**，语义不一样。
+
+下一轮的正确做法：写一个**专门的 windowed 汇编辅助函数**（例如
+`s3_win_spill_helper`），在里面 `entry` 建立自己的窗口 → 做 PS 舞蹈 →
+`call0 xthal_window_spill_nw` → `retw` 返回；由 `port_task_switch` 通过
+`call8` 调它（和 `port/s3/win_bridge.S` 里 call0→windowed 的桥同一套路）。
+这样"当前窗口"就是辅助函数自己的，祖先窗口才是任务的，和官方语义一致。
