@@ -8521,3 +8521,247 @@ s3_win_switch_helper:            (windowed)
 
 这条是整条线上唯一还没做过的"源头清理"，也是三次切换改造都失败后剩下的
 唯一解释。
+
+## §201 代码级核对：前几轮的 spill 其实**一次都没执行过**；本轮把三处缺口补齐
+
+这一轮没有再动真板，而是把 `port/` 里与窗口有关的代码和官方的对照读了一遍。
+结论很硬：**§197~§200 三轮"方案不成立"的读数，全部建立在"spill 生效了"这个
+错误前提上** —— 那三版代码在编出来的镜像里根本不存在。
+
+### 三个决定性事实（都能用 objdump/nm 复核）
+
+1. `port/s3/ctx.S` 里 `port_task_switch` / `port_task_yield` 开头那两段
+   `call8 xthal_window_spill`，外面包着 `#ifndef __XTENSA_CALL0_ABI__`，
+   而 Makefile 用 `-mabi=$(S3_ABI)` 编它、`S3_ABI ?= call0`（Makefile:12、
+   218-220）。**所以这两段从来没被编进去过。** 同理 `RESTORE_FRAME` 末尾那个
+   "windowed 才归一化 WINDOWSTART"的 `#else` 分支也是死的。
+2. `port/s3/w2c.S` 里 `WIN_SPILL8`（正好就是官方的 rotw 整圈）**只定义、没人调**；
+   而 `g_win_spilled = 1` 只写在它里面。于是 `ctx.S` 里那段"按标志做
+   WINDOWSTART 归一化"的代码永远读到 0 —— 这解释了 §197 续那句
+   "故障签名没变，说明归一化没执行"：不是归一化写错了，是它压根没被调用。
+3. 真正跑在板上的那三版实验，用的是 `call8 xthal_window_spill`（ROM 的 HAL
+   版本）。它的契约是"溢出**调用者的调用者**的窗口，然后**不返回**"，和
+   `xt_asm_utils.h` 的 `SPILL_ALL_WINDOWS` 是两个东西 —— 前者靠内部轮转改变
+   WINDOWBASE，后者转 16 个窗口正好一圈、**WINDOWBASE 回到原值**。
+   所以 §200 推出的"spill 必然改 WINDOWBASE，所以必须是切换前最后一件事、
+   之后的交接只能走内存、spill 完不能 retw"这一整套约束，是 HAL 版本的性质，
+   不是窗口机制的性质。§197 里我们自己写的那句"转一圈 WINDOWBASE 回到原值，
+   所以不需要写 WINDOWBASE"才是对的，后面三轮把它推翻了。
+
+### 官方 `_xt_context_save` 里还有三件我们缺的事
+
+`xt_asm_utils.h:51` 那个宏只是裸的 5 个 `rotw`。官方在它前后还做了：
+
+1. **存/恢复 EPC1**：窗口溢出是 level-1 异常，向量末尾的 `rfwo` 会消费 EPC1；
+2. **PS 舞蹈**：`PS = (PS & ~(INTLEVEL|EXCM)) | UM|WOE`，且 INTLEVEL 抬到
+   `max(当前, XCHAL_EXCM_LEVEL=3)`。官方注释写得很直白：WOE=0 时整段 rotw 是
+   "**a silent noop**"（静默空转）。我们先前两次"整圈 spill 集成"没做这一步，
+   在 WOE 关掉的上下文里就等于什么都没干；
+3. **归一化 WINDOWSTART**：转完只有当前窗口该是 live 的，必须显式写成
+   `1 << windowbase`，否则就是 §197 那个签名（`windowbase=3 / windowstart=0x20`）。
+
+### spill 该放在哪：不能放 `port_task_switch`，只能放 w2c 的壳里
+
+这是本轮推出来的关键结构结论（比"拷官方代码"更重要）：
+
+* 溢出槽位的地址 = **被 spill 窗口的调用者的栈指针减 16**（`_win_ovf4` 的
+  `s32e a0, a5, -16`，a5 = callee 的 a1；`xtensa_vectors.S:2017` 与我们
+  `port/s3/irq.S:52-125` 逐字节一致，这组向量没问题）。
+  也就是说槽位落在"被 spill 的那个窗口的**被调方**的帧顶部"。
+* `port_task_switch` 跑在我们自己的 **call0 内核栈**上（`kernel/task.c6:621`
+  的主循环、以及 `port_task_yield`）。c6 生成的 call0 帧把 a0 存在 `[sp+0]`，
+  根本没有 Xtensa ABI 那 16 字节保留区 —— 在那里 spill 就是拿窗口内容去踩
+  内核自己的局部量。§197 猜的"`_win_ovf*/_win_unf*` 与 `entry a1,48` 组合时
+  spill 区归属算错"、"spill 区越界"，就是这个。
+* w2c 壳（`port/s3/w2c.S`）正好在另一头：它刚 `entry` 完、**还没有向下调用
+  任何东西**，所以帧下方的 64 字节全是空闲栈，槽位天然落在自由区。祖先窗口
+  则是闭源库那条链（gcc 编的 windowed 帧，保留区是规范做法）。
+
+所以本轮的顺序是固定的：**先 spill，再把 sp 降 64 留死区，然后才进内核**。
+反过来（先降 sp 再 spill）槽位就落进内核帧里了。
+
+### 本轮改了四处
+
+| 文件 | 改动 |
+|---|---|
+| `port/s3/w2c.S` | 新增 `WIN_SPILL` 宏（PS 舞蹈 + 整圈 rotw + EPC1 + 归一化，全部用 a8..a11，不碰 a4..a7/a12..a15 因为这些是 callee-saved 和 retw 的返回地址）；`W2C`/`W2C_TRACE`/`osi_queue_recv` 三个壳统一改成 `entry a1,128` + 局部量从 +16 起 + 64B 死区；删掉死掉的 `WIN_SPILL8` |
+| `port/s3/ctx.S` | 删掉两处 `call8 xthal_window_spill`（反正没编进去）和 `g_win_spilled` → `ctx->r[0]` 的配对记账；`RESTORE_FRAME` 改成**无条件**（只看 PS.WOE）做 `WINDOWSTART = 1<<windowbase`，位置在恢复 a0..a15 之前 |
+| `port/s3/ctx.c` | `g_win_spilled` → `g_s3_win_spill_en`，语义从"每任务一次性标志"变成**总开关**，默认 0 |
+| `port/s3/wifi_glue.c` | `s3_wifi_osi_init()` 里打开开关；补 `net80211_printf`（闭源 .a 要、IDF 侧由开源组件提供、我们没人提供） |
+
+为什么不再需要 per-task 配对标志：只要**每条** w2c 壳进门都 spill 一次，
+"栈上有全部祖先窗口 + 寄存器文件里只有当前窗口"就是恒真状态，恢复时让欠载
+向量按 a1 链 fill 回来即可 —— 这正是官方 FreeRTOS 移植层的语义。默认关掉是
+为了保住已经跑通的 PHY/串口基线：只有闭源库那几条链需要窗口语义。
+
+### 构建侧的真实状态（本轮踩到的环境缺口，别再浪费时间）
+
+* HEAD 上 `make s3` **本来就链不过**（`w2c.o` 的 `os_queue_*` 与
+  `wifi_glue.o` 的 `__real_*`）：默认 `S3_SKIP_C6` 把 `queue/sem` 排掉了。
+  可用命令：
+  ```sh
+  make C6_ROOT=/home/winger/c6 BUILD=build/base S3_SKIP_C6="" \
+    S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+                 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+    S3_EXTRA_LIBS="/tmp/wstub.o" s3        # /tmp/wstub.o 只补 __real_*/g_log_level/esp_wifi_start
+  ```
+  这样能出 elf（本轮用它验证了汇编与链接，`text 56021`）。
+* 真 WiFi 镜像还差的**不是 ABI，是 IDF 开源层**：把
+  `~/.c6os/toolchain` 之外那批原始 `.a` 直接拿来链
+  （`esp_wifi/lib/esp32s3/lib{net80211,pp,core,phy,mesh,wapi,espnow,smartconfig}.a`
+  + `objcopy --redefine-sym memcpy=win_memcpy ...`），现在缺的是
+  `WIFI_EVENT`、`regdomain_table`、`regulatory_data`、`pp_printf`、
+  `esp_wifi_disconnect`、`esp_mesh_send_event_internal` —— 这些在 IDF 的
+  **开源**组件里（`components/esp_wifi/src/*.c`、`esp_wifi_regdomain.c` 等）。
+  下一轮要么把这些编译进来，要么按需补桩。
+
+### 下一轮（真板）判据，按顺序
+
+1. 镜像能链接 + 烧进去后，先用 `tools/gstep_win.gdb` 在**第一次**进
+   `port_task_switch` 时看 `ws`：应该是 `1<<wb`（不再是 §199 那个 `0x280`）。
+2. 再 `hbreak osi_queue_recv`，命中断点后单步看**整圈 rotw 之后**
+   `wb` 是否回到原值、`ws == 1<<wb`、`a1` 是否仍等于进壳时的帧基址。
+3. 然后看 ppTask 阻塞→唤醒→`retw` 这一趟：`retw` 必须因欠载而 fill（说明
+   祖先窗口真的在栈上），而不是直接跳走。
+4. 串口判据：`g_osi_calls` 总数越过 §192 的 30 次、且 `_log_write` 仍然为 0
+   但 `_queue_recv` 不再只在 ppTask 那一条路上出现（说明 init 走得更远）。
+
+## §202 根因找到：flash 段的 LMA ≠ 镜像文件偏移，ROM 就按 LMA 建 MMU 映射
+
+这一节是本项目"从 flash 执行必炸"的**终结**。前面 §15~§201 里所有
+`IllegalInstruction`、`PC = 函数首地址 + 2`、`cause=28/29`、`pc = 0x00000001`
+之类的怪签名，全是同一个原因：**我们让 `0x42xxxxxx` 指向了错误的 flash 字节**。
+
+### 证据链（一次串起来就能对上）
+
+1. 真板读到 `MMU[0x300] = 3`（= flash 0x30000），而 `objdump` 里
+   `.flash.text` 的 VMA 也是 `0x42030000`、`_flash_text_lma = 0x30000` ——
+   看起来"完全一致"，但：
+2. 在 `build/wifi/c6os.bin` 里按 `ELF` 的头几个字节搜
+   （`c6 01 00 00 92 42 00 1b`），**实际文件偏移是 0x10000**，
+   `esptool image-info` 也写着 `Segment 2: Load addr 0x42030000, File offs 0x0000fff8`
+   （+8 就是数据起点 = 0x10000）。
+3. 于是 `0x42030bd0`（进程 PC）命中的 flash 字节是
+   `ad 01 0c 02 29 11 …`，而 ELF 里那里应该是 `c6 01 00 00 92 42 …` ——
+   完全不同的代码。GDB `x/i` 和 `objdump -d` 对同一地址给出不同指令，
+   就是这个原因（GDB 读的是**目标机实际的 flash 内容**，objdump 读的是 ELF）。
+4. 进一步：`JP` 到 `0x42030bd0 + 0xbd0` 那一带（LMA 页 3 之后）拿到的字节
+   与 ELF 相差整整 `0x20000`（`0x30000 - 0x10000`）。
+
+### 谁在用 LMA？
+
+我们**没有二级 bootloader**（镜像直接由 ROM 引导，日志里
+`load:0x3c000020 / load:0x3fca0000 / load:0x42030000 / …` 是 ROM 打的）。
+ROM 给 flash 段（DROM/IROM）建 MMU 映射时，用的是**段头里的 load addr**
+（也就是链接脚本给这段的 LMA）>> 16 当物理页号。而 esptool 排布镜像文件时
+对 flash 段自己按 0x10000 对齐（从第 3 段开始就落在文件偏移 0x10000）。
+**两者必须相等**，否则映射到的是别的字节。
+
+IDF 之所以没这个问题：它的 `.flash.text`/IROM 段固定 `VMA = 0x42010000`、
+`LMA = 0x10000`，正好和文件偏移撞上（前面 DROM 0x10c + DRAM 0xfec4 之后
+刚好对齐到 0x10000）。
+
+### 修法
+
+| 文件 | 改动 |
+| --- | --- |
+| `port/s3/link.ld` | `.flash.text` 从 `0x42030000 : AT(0x30000)` 改成 **`0x42010000 : AT(0x10000)`**（VMA/LMA 必须 mod 0x10000 同余，MMU 页是 64KB） |
+| `tools/chkimg.py` | **新增**：构建后校验"每个 flash 段（VMA 落在 DROM 0x3C000000..0x3E000000 / IROM 0x42000000..0x44000000）的字节，必须原封不动出现在 `.bin` 的 LMA 偏移处"。`Makefile` 的 `$(BUILD)/c6os.bin` 规则里调用它，不一致直接**构建失败** |
+| `tools/flashmon.sh` | 新增可选 `SHADOW_BIN` / `SHADOW_OFF`：把一段原始字节额外补写到 flash 指定偏移（备用的兜底手段；`esptool` 拒绝同一次 write-flash 区间重叠，所以分开写两次，并在每次写之前重新探测 `ttyACM*`，因为 USB-JTAG 会重新枚举） |
+
+回归验证：把 `link.ld` 临时改回 `AT(0x30000)` 重跑 `make wifi`，
+`chkimg.py` 报 `chkimg: 失败（1 处问题）` 并让 make 失败 —— 说明这道闸门有效。
+
+### 同时修掉的两处窗口簿记（也都会炸）
+
+1. `port/s3/start.S`：**无条件**做一次窗口归一（原来这段被
+   `#ifndef __XTENSA_CALL0_ABI__` 包着，call0 构建里根本没编进去）：
+   `WINDOWSTART = 1 << WINDOWBASE`、清 `PS.OWB`。ROM 跳到我们这里时
+   WINDOWSTART 是"有空洞的活动窗口集合"（实测 `ws = 0x28`），call0 内核自己
+   从不轮转窗口，这份脏状态会一直挂到第一次 `entry`，让它去 spill 一个
+   早已不存在的老窗口 → `StoreProhibited`（`excvaddr = 0x40` 这种小地址）。
+2. `port/s3/win_bridge.S` 的 `s3_asm_flash_42`：手写的 windowed 函数必须
+   **成对** `entry` / 宽 `retw`。原来只有 `movi a2,42; retw.n`：
+   `call8` 把 `CALLINC=2` 写进 a0，`retw.n` 按 CALLINC 去"退窗口"，
+   但根本没进过窗口 → 非法指令/欠载（真板签名：`cause=0x1c`，PC 落在 `retw.n`）。
+   该文件现在用 `-Wa,--no-transform` 编译，防止 `retw` 被收窄。
+
+### IRAM 预算（WiFi 全量镜像）
+
+IRAM 又一次溢出（这次 -184 字节）。把 **`task.o`（11KB）整体挪进
+`.flash.text`**：`port_task_switch/yield` 在 `ctx.S`（仍在 IRAM），
+中断入口在 `irq.S`，切换路径本身不经过 flash，所以是安全的。
+（`kprintf.o` 上一轮已经挪过。）
+
+### 真板实测（修好之后的第一次跑通）
+
+`tests/t_s3_wifi3.c6`（新增：先打 flash 诊断，再建 windowed 任务跑 PHY +
+`esp_wifi_init` + `esp_wifi_start`），串口原文：
+
+```
+c6os s3 boot
+flash: text va=0x42010000 lma=0x00010000 end=0x4207e8df size=0x0006e8df
+flash: rodata va=0x3c000020 lma=0x00000020
+flash: mmu(text)=0x00000001 mmu(rodata)=0x00000000
+flash: icache_ctrl=0x0000000b ctrl1=0x00000000
+flash: after mmu(text)=0x00000001 mmu(rodata)=0x00000000
+flash: probe(42)=0x0000002a          <-- **从 flash 取指并 retw 回来成功**
+[wifimain] id=1 tick=0               <-- 闭源库 printf 出口（我们的 mini 格式化）也通了
+W0 phy start
+```
+
+`probe(42)=0x2a` 是本项目的分水岭：IROM 取指 + windowed `entry`/`retw`
+终于都正常了。`[wifimain] id=1 tick=0` 说明 `net80211_printf` 这类
+"闭源库调我们"的回调也已经跑起来。
+
+### 新问题：PHY 初始化把 USB-Serial-JTAG 弄没了（下一轮第一件事）
+
+`W0 phy start` 之后**再无输出**，并且板上 USB 设备**整个消失**
+（`lsusb` 里没有 `303a:`，`/dev/ttyACM*` 也不存在，`usbreset.py` 找不到设备），
+只能物理断电重插。两次抓取都是这样，第一次还抓到了 15s 的完整输出，
+第二次连串口都枚举不出来。
+下一个要看的就是 `s3_win_call_phy_cal()` / `s3_win_call_phy_enable()`
+（libphy 的 `phy_init`/`phy_enable` 路径）：
+* 最可能是在某个 `while` 忙等里死转（`register_chipv7_phy_init_param` 之类
+  需要 RTC 时钟/校准数据），CPU 卡死且看门狗被关掉 → 永不复位；
+* 也可能是 PHY 改 PLL/时钟把 USB-Serial-JTAG 的 48MHz 时钟源掐了。
+下一轮的诊断顺序（都尽量**不依赖 USB**）：
+1. 在这两个调用前后各打一颗 RTC beacon（`0x50000xxx`），复位后用
+   `tools/rd.py` 读回 —— 不需要串口在线也能知道死在哪一步；
+2. 先用 `S3_KEEP_SWD=1`（默认已开）保住 super watchdog，别让它被关掉；
+3. 如果确认是 PHY 忙等，再考虑走 IDF 的完整 `esp_phy_init` 序列
+   （`esp_phy_init.c` 里 `register_chipv7_phy_init_param` 前后的时钟/校准步骤），
+   而不是直接裸调 `phy_*`；
+4. 另外准备一路"普通 UART"日志（GPIO43/44 之外），这样 CPU 卡死时至少还能看到
+   最后一条日志。
+
+### 本轮其余代码改动
+
+* `port/s3/wifi_glue.c`：`esp_wifi_connect/disconnect`、`MESH_EVENT`、
+  `esp_mesh_send_event_internal` 这几个薄封装整段包进 `#ifdef S3_WITH_WIFI`
+  （它们引用闭源库的 `*_internal`，普通构建里会 undefined reference ——
+  别再把基线 `make s3` 弄挂）。
+* `tests/t_s3_wifi3.c6`：新的 WiFi 启动用例（flash 诊断 + windowed 任务）。
+  `Makefile` 的 `wifi` 目标默认改用它（`S3_WIFI_MAIN`）。
+* 构建状态：`make wifi` → `text 512845 / data 94816 / bss 113792`，
+  `chkimg: OK（2 个 flash 段）`；
+  基线 `make ... s3`（§201 那条命令）依旧通过。
+
+### 新增调试装置：RWDT 自愈复位 + 阶段信标（本轮最后一步，未上板验证）
+
+`W0 phy start` 之后板子从 USB 上彻底消失这件事，让"每次实验都要人工断电"
+成为最大的迭代障碍。为此新增：
+
+| 位置 | 内容 |
+| --- | --- |
+| `port/s3/flash.c` | `os_wdt_start(secs)` / `os_wdt_feed()` / `os_wdt_stop()`：直接把 ESP32-S3 的 RTC 看门狗（RWDT，`0x60008000` 区，寄存器位定义核对过 IDF 的 `rtc_cntl_struct.h`）配成"超时复位整片"。**只显式调用才生效**，不影响其它构建 |
+| `tests/t_s3_wifi3.c6` | `os_main` 一进来 `os_wdt_start(8)`：8s 不喂狗 → 整片复位 → USB 重新枚举 → 板子自己回来 |
+| `port/s3/win_island.c` | `s3_win_wifi_main()` 里每个危险调用前写阶段信标 `0x50000A10` 并 `os_wdt_feed()`：`0x1001` 进 PHY 前、`0x1002` 调 `phy_cal` 前、`0x1003` 调 `phy_enable` 前、`0x1004/0x1005` 进 `s3_wifi_bringup`、`0x1006` 之后 |
+
+RTC 慢存跨 CPU 复位不清，所以下一轮只要**复位后读一次 `0x50000A10`**就知道
+上一轮挂在哪个调用里（`tools/rd.py` / `monitor rtc`）。判据：
+- 如果 8s 后板子自己复位、串口重新出现 → 说明是**忙等死转**（CPU 还活着），
+  按信标定位到具体调用；
+- 如果连复位都没救回来 → 说明是 PHY 改时钟把 USB-Serial-JTAG 的时钟源掐了
+  （那种情况必须走 IDF 的 `esp_phy_common_clock_enable` 顺序，或者换一路普通
+  UART 日志）。

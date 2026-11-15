@@ -71,6 +71,28 @@ _start:
     rsync
 #endif
 
+    /* ★ 无条件做一遍窗口状态归一（call0 构建也要做！§202）。
+     *
+     * ROM 跳到我们这里时留下的 WINDOWSTART 是**有空洞**的活动窗口集合
+     * （真板实测 ws=0x28：窗口 3 和 5 都标着活）。我们内核是 call0，自己从不
+     * 轮转窗口，所以这堆"活窗口"会一直挂着；一旦后面调 windowed 闭源库，
+     * `entry` 触发的溢出处理会去 spill 那个早已不存在的老窗口，用它的 a1
+     * 当栈指针 → 落到 0x40 之类的地方，报 StoreProhibited（cause=29, excvaddr=0x40）。
+     *
+     * call0 代码不依赖任何祖先窗口，所以"只有当前窗口活"是唯一自洽的状态。
+     * 同时把 PS.OWB 清掉（跳转链条到这里已经断开了）。
+     * 注意 windowstart 只能写成 1<<windowbase，不能写 windowbase（§189）。 */
+    rsr     a2, windowbase
+    movi    a3, 1
+    ssl     a2
+    sll     a3, a3
+    wsr     a3, windowstart
+    rsr     a2, ps
+    movi    a3, -257                /* 清 PS.OWB(bit8) */
+    and     a2, a2, a3
+    wsr     a2, ps
+    rsync
+
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
     wsr     a2, vecbase

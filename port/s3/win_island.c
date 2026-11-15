@@ -3,6 +3,7 @@
  * port/s3/win_bridge.S 里的手写 trampoline 来往。
  */
 #include "c6os/types.h"
+#include "c6os/flash.h"
 
 /* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
 extern u32 s3_w2c_current_task(void);
@@ -525,6 +526,13 @@ u32 s3_win_wifi_start(void)
  * 任务入口本身也是 windowed（配合 port_task_ctx_create 的 ABI 标志），
  * 这样任务 1 的执行流里完全没有 call0<->windowed 混用，
  * 只剩内核原语（经 port/s3/w2c.S 的正规壳）。 */
+/* 阶段信标：每进一个危险调用之前先写 RTC 慢存 0x50000A10。
+ * 这些调用（libphy 校准、esp_wifi_init_internal）会**忙等死转**，整块板子从
+ * USB 上消失；RTC 慢存跨 CPU 复位不清，所以复位后读这个字就知道上一轮死在哪。
+ * 同时每步之后 feed 一次 RWDT（见 os_wdt_start）：超过 8s 没 feed 就整片复位，
+ * 板子自己回来，不用人工断电。 */
+#define WSTAGE(v) do { *(volatile unsigned int *)0x50000A10u = (v); } while (0)
+
 __attribute__((section(".flash.text")))
 u32 s3_win_wifi_main(void)
 {
@@ -533,11 +541,17 @@ u32 s3_win_wifi_main(void)
     /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
     ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
                (unsigned)s3_w2c_tick_get());
+    WSTAGE(0x1001u); os_wdt_feed();
     s3_win_log("W0 phy start\n");
+    WSTAGE(0x1002u); os_wdt_feed();
     (void)s3_win_phy_cal();
+    WSTAGE(0x1003u); os_wdt_feed();
     (void)s3_win_phy_enable();
+    WSTAGE(0x1004u); os_wdt_feed();
     s3_win_log("W1 bringup\n");
+    WSTAGE(0x1005u); os_wdt_feed();
     rc = s3_wifi_bringup();
+    WSTAGE(0x1006u); os_wdt_feed();
     s3_win_log("W2 bringup returned\n");
     return rc;
 }

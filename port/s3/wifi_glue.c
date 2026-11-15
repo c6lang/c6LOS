@@ -7,6 +7,8 @@
  */
 #include "c6os/types.h"
 
+#include <stdarg.h>
+
 #include "c6os/wifi_osi.h"
 
 wifi_osi_funcs_t g_wifi_osi_funcs;
@@ -919,6 +921,11 @@ typedef char s3_osi_magic_offset_check[
     (__builtin_offsetof(wifi_osi_funcs_t, _magic) == 0x1DCu) ? 1 : -1];
 typedef char s3_osi_size_check[(sizeof(wifi_osi_funcs_t) == 480u) ? 1 : -1];
 
+/* windowed 世界的窗口 spill 开关（定义在 port/s3/ctx.c，w2c.S 的壳读它）。
+ * 闭源库的回调马上要跑起来了，从这里开始每条 w2c 壳都必须把祖先窗口 spill
+ * 干净，否则库里一阻塞我们就没法把它恢复回来（§193/§197）。 */
+extern u32 g_s3_win_spill_en;
+
 __attribute__((section(".flash.text")))
 void s3_wifi_osi_init(void)
 {
@@ -927,6 +934,7 @@ void s3_wifi_osi_init(void)
     u32 i = 0;
 
     while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
+    g_s3_win_spill_en = 1u;
 
     /* 头尾不是函数指针，而是版本号和魔数：
      *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
@@ -1124,40 +1132,11 @@ void esp_log_level_set(const char *tag, int level)
 /* 注意：g_espnow_user_oui / g_mt 由 libespnow.a(manatick.o) 提供，
  * 这里不能再定义，否则 "multiple definition"。 */
 
-int hexstr2bin(const char *hex, u8 *buf, u32 len)
-{
-    u32 i = 0;
-    u32 n = 0;
-
-    (void)len;
-    while (hex[0] != '\0' && hex[1] != '\0' && i < len) {
-        u32 v = 0u;
-        int k = 0;
-        while (k < 2) {
-            char c = hex[k];
-            u32 d;
-            if (c >= '0' && c <= '9') { d = (u32)(c - '0'); }
-            else if (c >= 'a' && c <= 'f') { d = (u32)(c - 'a') + 10u; }
-            else if (c >= 'A' && c <= 'F') { d = (u32)(c - 'A') + 10u; }
-            else { return -1; }
-            v = (v << 4) | d;
-            k++;
-        }
-        buf[i] = (u8)v;
-        i++;
-        n = n + 2u;
-        hex = hex + 2;
-    }
-    return (int)i;
-}
-
 int esp_supplicant_init(void) { return 0; }
 int esp_supplicant_deinit(void) { return 0; }
 
-/* 我们 -nostdlib，newlib 的这几个函数自己给最小实现 */
+/* 我们 -nostdlib，newlib 的这几个函数自己给最小实现（free/puts 见文件末尾） */
 void *malloc(u32 n);
-void free(void *p) { (void)p; }
-int puts(const char *s) { (void)s; return 0; }
 /* ---- 内存函数：必须由 windowed 编译单元提供 ------------------------------
  * 闭源库是 windowed ABI，它用 `call8 memset` 调过来。之前用 call0 编的版本
  * （rt/c6rt.c）会让返回地址带上 CALL 的窗口标签（bit31:30）并破坏窗口簿记，
@@ -1216,6 +1195,23 @@ int vsnprintf(char *buf, u32 n, const char *fmt, void *ap) { (void)ap; if (n > 0
 u32 esp_event_handler_register(u32 a, int b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 0u; }
 u32 esp_event_handler_unregister(u32 a, int b, void *c) { (void)a; (void)b; (void)c; return 0u; }
 u32 esp_event_post(u32 a, int b, const void *c, u32 d, u32 e) { (void)a; (void)b; (void)c; (void)d; (void)e; return 0u; }
+
+/* IDF 的 wifi_init.c / mesh_event.c 里的薄封装（闭源库反调它们）。
+ * 只有链接了闭源库的构建（S3_WITH_WIFI）才有 *_internal，普通构建里必须整段
+ * 关掉，否则会对着不存在的符号报 undefined reference。 */
+#ifdef S3_WITH_WIFI
+extern int esp_wifi_connect_internal(void);
+int esp_wifi_connect(void) { return esp_wifi_connect_internal(); }
+extern int esp_wifi_disconnect_internal(void);
+int esp_wifi_disconnect(void) { return esp_wifi_disconnect_internal(); }
+/* mesh_event.c: ESP_EVENT_DEFINE_BASE(MESH_EVENT) + post。我们没有事件循环，直接返回。 */
+const char *MESH_EVENT = "MESH_EVENT";
+int esp_mesh_send_event_internal(int event_id, void *event_data, u32 event_data_size)
+{
+    (void)event_id; (void)event_data; (void)event_data_size;
+    return 0;
+}
+#endif
 
 int snprintf(char *buf, u32 n, const char *fmt, ...)
 {
@@ -1300,3 +1296,174 @@ int __wrap_wifi_init_in_caller_task(void)
     s3_wrap_bump(6u);          /* 只有它返回了才会 +1 */
     return r;
 }
+
+/* ---- 闭源库的日志/工具函数出口（IDF 里由开源组件提供，我们没人提供）----
+ *
+ * IDF 的 `esp_wifi/src/lib_printf.c` 导出 7 个 `xxx_printf(fmt, ...)`，闭源 .a
+ * 直接用它们打日志。此前我们只吞掉 net80211_printf；现在按 §202 把整套补齐，
+ * 并且**真的打出来**（§192 的 `_log_write=0` 说明库自己的日志通道不走 OSI，
+ * 这条 printf 才是唯一能看到库内部诊断的路）。
+ *
+ * 输出走 ROM 的 ets_printf（windowed，本文件也是 windowed，ABI 一致）。
+ * 只需要支持很小一部分格式：%s %d %u %x %c %% 和宽度。够读 md5/自检失败。 */
+
+extern int ets_printf(const char *fmt, ...);
+extern void s3_win_log(const char *s);
+
+static char *wp_utoa(char *end, u32 v, u32 base)
+{
+    const char *digits = "0123456789abcdef";
+    char *p = end;
+    do {
+        *p = digits[v % base];
+        p--;
+        v = v / base;
+    } while (v != 0u);
+    return p + 1;
+}
+
+/* 极简格式化：%s %c %d %i %u %x %X %p %%，支持数字宽度与 '0' 填充、'l'/'z' 长度前缀。
+ * 用标准 va_list（Xtensa 上它是结构体/数组，不是指针），所以必须靠 va_arg。 */
+static int wp_vfmt(char *out, u32 cap, const char *fmt, va_list ap)
+{
+    u32 n = 0u;
+    char tmp[16];
+
+    while (*fmt != '\0' && n + 1u < cap) {
+        if (*fmt != '%') { out[n] = *fmt; n++; fmt++; continue; }
+        fmt++;
+        if (*fmt == '\0') { break; }
+        {
+            u32 width = 0u;
+            int zero = 0;
+            char conv;
+
+            if (*fmt == '0') { zero = 1; fmt++; }
+            while (*fmt >= '0' && *fmt <= '9') { width = width * 10u + (u32)(*fmt - '0'); fmt++; }
+            while (*fmt == 'l' || *fmt == 'z' || *fmt == 'h') { fmt++; }
+            conv = *fmt;
+            fmt++;
+
+            if (conv == 's') {
+                const char *s = va_arg(ap, const char *);
+                u32 put = 0u;
+                if (s == 0) { s = "(null)"; }
+                while (s[put] != '\0' && n + 1u < cap) { out[n] = s[put]; n++; put++; }
+                while (put < width) { if (n + 1u < cap) { out[n] = ' '; n++; } put++; }
+                continue;
+            }
+            if (conv == 'c') {
+                out[n] = (char)va_arg(ap, int); n++;
+                continue;
+            }
+            if (conv == 'p') {
+                u32 v = (u32)va_arg(ap, void *);
+                char *p;
+                u32 len;
+                tmp[15] = '\0';
+                p = wp_utoa(&tmp[14], v, 16u);
+                len = (u32)(&tmp[15] - p);
+                while (len < 8u) { p--; *p = '0'; len++; }
+                if (n + 1u < cap) { out[n] = '0'; n++; }
+                if (n + 1u < cap) { out[n] = 'x'; n++; }
+                while (*p != '\0' && n + 1u < cap) { out[n] = *p; n++; p++; }
+                continue;
+            }
+            if (conv == 'd' || conv == 'i' || conv == 'u' || conv == 'x' || conv == 'X') {
+                u32 v = va_arg(ap, u32);
+                u32 base = (conv == 'x' || conv == 'X') ? 16u : 10u;
+                int neg = 0;
+                char *p;
+                u32 len;
+                if ((conv == 'd' || conv == 'i') && (v & 0x80000000u) != 0u) { neg = 1; v = (u32)(-(int)v); }
+                tmp[15] = '\0';
+                p = wp_utoa(&tmp[14], v, base);
+                if (neg) { p--; *p = '-'; }
+                len = (u32)(&tmp[15] - p);
+                while (len < width) { if (n + 1u < cap) { out[n] = zero ? '0' : ' '; n++; } width--; }
+                while (*p != '\0' && n + 1u < cap) { out[n] = *p; n++; p++; }
+                continue;
+            }
+            if (conv == '%') { out[n] = '%'; n++; continue; }
+            /* 不认识的转换：原样吐出 */
+            if (n + 1u < cap) { out[n] = '%'; n++; }
+            if (n + 1u < cap) { out[n] = conv; n++; }
+        }
+    }
+    out[n] = '\0';
+    return (int)n;
+}
+
+static int lib_printf_line(const char *tag, const char *fmt, va_list ap)
+{
+    char buf[160];
+    int n = wp_vfmt(buf, sizeof(buf), fmt, ap);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) {
+        n--;
+        buf[n] = '\0';
+    }
+    if (n > 0) {
+        ets_printf("[%s] %s\n", tag, buf);
+    }
+    return n;
+}
+
+#define LIB_PRINTF(name, tag)                     \
+    int name(const char *fmt, ...)                \
+    {                                             \
+        va_list ap;                               \
+        int r;                                    \
+        va_start(ap, fmt);                        \
+        r = lib_printf_line(tag, fmt, ap);        \
+        va_end(ap);                               \
+        return r;                                 \
+    }
+
+LIB_PRINTF(net80211_printf, "net80211")
+LIB_PRINTF(pp_printf, "pp")
+LIB_PRINTF(core_printf, "core")
+LIB_PRINTF(sc_printf, "smartcfg")
+LIB_PRINTF(mesh_printf, "mesh")
+LIB_PRINTF(wapi_printf, "wapi")
+
+/* ---- 其余闭源库要的裸符号 ----
+ * free(): libpp 的 hal_crypto 直接调 libc 的 free。我们的 osi_malloc 才是分配器，
+ *          所以 free 必须落回同一个堆（osi_free 会校验块头 magic，外来指针安全返回）。
+ * puts():  net80211_api 里的自检/断言用它。
+ * hexstr2bin(): wpa 的 "hex 字符串 -> 字节串"（ieee80211_ioctl / wapi 用）。 */
+void free(void *p)
+{
+    osi_free(p);
+}
+
+int puts(const char *s)
+{
+    if (s != 0) { s3_win_log(s); s3_win_log("\n"); }
+    return 0;
+}
+
+static int wh_hexval(char c)
+{
+    if (c >= '0' && c <= '9') { return (int)(c - '0'); }
+    if (c >= 'a' && c <= 'f') { return (int)(c - 'a') + 10; }
+    if (c >= 'A' && c <= 'F') { return (int)(c - 'A') + 10; }
+    return -1;
+}
+
+int hexstr2bin(const char *hex, u8 *buf, u32 len)
+{
+    u32 i;
+    if (hex == 0 || buf == 0) { return -1; }
+    for (i = 0u; i < len; i++) {
+        int hi = wh_hexval(hex[2u * i]);
+        int lo = wh_hexval(hex[2u * i + 1u]);
+        if (hi < 0 || lo < 0) { return -1; }
+        buf[i] = (u8)((hi << 4) | lo);
+    }
+    return 0;
+}
+
+/* WIFI_EVENT：IDF 用 ESP_EVENT_DEFINE_BASE(WIFI_EVENT) 定义的事件基址，
+ * 实际就是 `const char *WIFI_EVENT = "WIFI_EVENT";` 的 4 字节指针。
+ * 闭源库把它当指针比较/透传，我们的事件桩不解引用，给个合法指针即可。 */
+const char *WIFI_EVENT = "WIFI_EVENT";

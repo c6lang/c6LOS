@@ -175,3 +175,61 @@ u32 os_dcache_state(void)
 {
     return S3_EXTMEM_DCACHE_CTRL;
 }
+
+/* ---- RTC 看门狗（RWDT）自愈复位 ----------------------------------------
+ *
+ * 真板调试装置，不是内核功能。用途（§202 教训）：PHY 初始化这类闭源路径一挂
+ * 就是"CPU 死转 + 看门狗被关掉"，整块板子从 USB 上消失，只能人工断电重插。
+ * 有了这个自愈狗，挂住的板子会在 N 秒后自己复位重跑：串口能重新枚举、RTC
+ * 信标不会被清，于是"上一轮死在哪一步"可以直接读出来。
+ *
+ * 寄存器（ESP32-S3，RTC_CNTL 基址 0x60008000）：
+ *   0x98 WDT_CONFIG0：bit31 en、bits28-30 stg0、bit12 flashboot_mod_en、
+ *        bit11 procpu_reset_en、bit8 chip_reset_en、bits13-15 sys_reset_length、
+ *        bits16-18 cpu_reset_length、bit9 pause_in_slp
+ *   0x9C WDT_CONFIG1：时钟预分频
+ *   0xA0 WDT_CONFIG2：stage0 超时（RTC 慢时钟 tick，约 150kHz）
+ *   0xAC WDT_FEED  ：bit0 喂狗
+ *   0xB0 WDT_WPROTECT：写保护，解锁键 0x50D83AA1
+ * stage 行为编码：0 关、1 中断、2 复位 CPU、3 复位整片、4 复位 RTC 域。
+ *
+ * 超时只是"大约"，慢时钟频率不用精确 —— 我们只要几秒量级。 */
+#define S3_RTC_CNTL_WDT_CONFIG0   (*(volatile u32 *)0x60008098u)
+#define S3_RTC_CNTL_WDT_CONFIG1   (*(volatile u32 *)0x6000809Cu)
+#define S3_RTC_CNTL_WDT_CONFIG2   (*(volatile u32 *)0x600080A0u)
+#define S3_RTC_CNTL_WDT_FEED      (*(volatile u32 *)0x600080ACu)
+#define S3_RTC_CNTL_WDT_WPROTECT  (*(volatile u32 *)0x600080B0u)
+#define S3_RTC_WDT_KEY            0x50D83AA1u
+#define S3_RTC_SLOW_HZ            150000u
+
+void os_wdt_start(u32 secs)
+{
+    u32 cfg0;
+
+    S3_RTC_CNTL_WDT_WPROTECT = S3_RTC_WDT_KEY;
+    S3_RTC_CNTL_WDT_CONFIG0 = 0u;              /* 先全关 */
+    S3_RTC_CNTL_WDT_CONFIG1 = 0u;              /* 不分频 */
+    S3_RTC_CNTL_WDT_CONFIG2 = secs * S3_RTC_SLOW_HZ;
+    cfg0 = (1u << 31)                          /* en */
+         | (3u << 28)                          /* stg0 = 复位整片 */
+         | (1u << 11) | (1u << 10)             /* procpu/appcpu reset en */
+         | (1u << 8)                           /* chip_reset_en */
+         | (1u << 9)                           /* 睡眠时暂停 */
+         | (7u << 13) | (7u << 16);            /* 复位脉冲宽度取最大 */
+    S3_RTC_CNTL_WDT_CONFIG0 = cfg0;
+    S3_RTC_CNTL_WDT_WPROTECT = 0u;             /* 上锁 */
+}
+
+void os_wdt_feed(void)
+{
+    S3_RTC_CNTL_WDT_WPROTECT = S3_RTC_WDT_KEY;
+    S3_RTC_CNTL_WDT_FEED = 1u;
+    S3_RTC_CNTL_WDT_WPROTECT = 0u;
+}
+
+void os_wdt_stop(void)
+{
+    S3_RTC_CNTL_WDT_WPROTECT = S3_RTC_WDT_KEY;
+    S3_RTC_CNTL_WDT_CONFIG0 = 0u;
+    S3_RTC_CNTL_WDT_WPROTECT = 0u;
+}
