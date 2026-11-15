@@ -6049,3 +6049,36 @@ blk2: id=1  kind=6  obj=0x3fcbf234  to=0     （初始化任务，**同一个对
 `pp_post` + 信号量等待，还是直接 `_queue_recv`。若是后者，就要在
 初始化路径上补一次投递（或者在 `current_task_is_wifi_task` 为真时
 走就地处理分支，这需要让 WiFi 任务的 id 判断成立）。
+
+## §144 `ieee80211_ioctl` 不是那个接收点
+
+反汇编 `ieee80211_ioctl`（`0x420602ac`）的调用序列：
+
+```
+420602da call8 current_task_is_wifi_task
+          为真 -> 42060439 call8 ieee80211_ioctl_process   （就地处理）
+          为假 -> 4206034d call8 wifi_api_lock
+                  4206035b call8 wifi_get_init_state
+                  4206039b call8 wifi_is_stop_in_progress
+                  420603db call8 pp_post                      （投递给 WiFi 任务）
+                  420603f8 call8 wifi_api_unlock
+```
+
+**它自己不收队列**（函数范围内没有任何 `l32i aX,aY,116` + `callx8`）。
+
+而且回调环的末尾是 `... 37 15 16 29 29`，之后再没有出现过 `21`
+（`wifi_api_lock`）—— 说明 `ieee80211_ioctl` **压根没有被调到**。
+所以 §143 里初始化任务那次队列接收，发生在
+`wifi_init_in_caller_task` 内部、`pp_create_task` 之后。
+
+### 下一步
+
+`wifi_init_in_caller_task` 在 `ic_create_wifi_task()` 之后只剩
+`ieee80211_ioctl_init()` 然后返回。所以接收点要么在
+`ieee80211_ioctl_init` 内部（它调用 `ic_register_config_cb` /
+`ic_register_timer_post_cb` / `ic_get_pp_hdl`），要么就在
+`pp_create_task` 的收尾部分（我们已经确认它范围内没有偏移 116 的调用，
+但它调用的 `config_get_wifi_task_stack_size` 等子函数还没查）。
+
+最省事的验证：把 `ieee80211_ioctl_init` 的地址记进 RTC 前后各一个计数，
+确认它到底有没有被调用。
