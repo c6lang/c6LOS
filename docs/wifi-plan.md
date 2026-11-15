@@ -8192,3 +8192,48 @@ windowbase = 3   windowstart = 0x20   <- 当前窗口(3)竟然不在 live 集合
 `0x4037e7dc` 前后下断点、单步看是哪个壳写坏的；重点怀疑：
 - `_win_ovf*/_win_unf*` 向量和我们的 `entry a1,48` 组合时，spill 区归属算错；
 - `port_task_switch` 保存/恢复时 `a1` 的推进量（80 字节帧）与壳的 48 字节帧叠加。
+
+## §197 窗口状态的真正缺口：WINDOWSTART 与 WINDOWBASE 不一致
+
+### JTAG 抓到的关键读数（`tools/ghang.gdb`）
+```
+exccause = 28        excvaddr = 0xfffffff3（奇数 → 对齐异常）
+epc1 = __wrap_pp_create_task     a1 = 0xffffffffffffffff  ← SP 被毁成 -1
+windowbase  = 3
+windowstart = 0x20              ← bit5，跟 base=3 对不上
+```
+也就是说：切回来的时候 `WINDOWSTART` 里标着"live"的窗口**不是当前窗口**，
+于是下一次 `retw` 的欠载会去填一个错的窗口，把 `a1` 填成垃圾，函数一进门
+就在栈上做非对齐访问 → `cause=28`。
+
+**根因链条完整了**：
+1. windowed 任务在库的深调用链里阻塞时，祖先窗口会被别的任务轮转掉；
+2. 这些窗口被溢出到该任务自己的栈上（硬件溢出向量做的，没问题）；
+3. 但**切回来时 WINDOWSTART 是错的**（它是全局寄存器，不是每任务的），
+   欠载就从错的窗口编号去 fill → 填回垃圾。
+
+### 正确做法（下一轮按这个做）
+IDF 的 `xtensa_context.S` 里是这套组合拳，我们要照抄：
+1. 切走前用 `SPILL_ALL_WINDOWS`（`rotw` 整圈旋转 16 个窗口）把祖先窗口
+   **全部**溢出到栈上 —— 转一圈 WINDOWBASE 回到原值，所以不需要写 WINDOWBASE；
+2. 于是切回来时"只有当前窗口该是 live 的"是唯一确定的；
+3. `rfe` 之前把 `WINDOWSTART` 写成 `1 << windowbase`。
+
+### 本轮踩到的两个坑（都已记录，别重犯）
+- 把 3 这一步放在 `RESTORE_FRAME` 的**后半段**：那里 a2/a3 已经被帧内容覆盖，
+  借用它们会把恢复出来的寄存器改掉 → 真板立刻 `cause=0x14`、`pc=0x00000009`。
+  必须放在宏的最前面，且要考虑启动早期 WOE 还没开的情况（直接写
+  `windowstart` 可能异常，实测整个固件连 banner 都不打了）。
+- 早先的 rotw spill 失败，是因为当时壳的帧还是错的（保存槽压在 call8 的
+  窗口 spill 区里，见 §196 bug2）。现在帧已修好，spill 值得重新试。
+
+### 环境事故：bootloader 被擦掉了（不是代码问题）
+某一轮之后突然只打印 `invalid header: 0xffffffff`。`read-flash 0x0` 显示
+**0x0 处全是 0xFF** —— 二级 bootloader 没了。用文档里记的备份刷回来即可：
+```sh
+B=/media/winger/inst_26/esp/xiaozhi/build
+esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x0 $B/bootloader/bootloader.bin \
+  0x8000 $B/partition_table/partition-table.bin
+```
+以后遇到"固件明明刷进去了却起不来"，第一件事就是 `read-flash 0x0 32` 看
+bootloader 还在不在。
