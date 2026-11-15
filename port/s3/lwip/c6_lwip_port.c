@@ -30,6 +30,7 @@
 #include "lwip/etharp.h"
 #include "lwip/err.h"
 #include "lwip/timeouts.h"
+#include "lwip/tcpip.h"
 #include "netif/ethernet.h"
 
 /* ---- 平台钩子 ---------------------------------------------------------- */
@@ -115,7 +116,7 @@ static int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
         p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
         if (p != 0) {
             pbuf_take(p, buffer, len);
-            if (nif->input(p, nif) != ERR_OK) {
+            if (tcpip_input(p, nif) != ERR_OK) {
                 pbuf_free(p);
             }
         }
@@ -135,7 +136,11 @@ int c6_lwip_start(const unsigned char *mac)
     int i;
 
     lwip_init();
-    n = netif_add(&s_netif, 0, 0, 0, 0, c6_lwip_netif_init_cb, ethernet_input);
+    /* NO_SYS=0：收包必须交给 tcpip 线程处理（`tcpip_input` 会把它塞进
+     * tcpip 的邮箱）。之前这里传的是 `ethernet_input`，等于在 WiFi 的 RX
+     * 回调上下文里**直接**跑 lwIP 的协议栈 —— 和 tcpip 线程并发访问同一批
+     * 全局状态，轻则丢包乱序，重则把 pcb 链表踩坏（§220）。 */
+    n = netif_add(&s_netif, 0, 0, 0, 0, c6_lwip_netif_init_cb, tcpip_input);
     if (n == 0) {
         return -1;
     }

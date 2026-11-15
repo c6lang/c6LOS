@@ -9915,3 +9915,26 @@ static u32 g_pool_off;            /* 单调分配，任务不会被删所以不�
 `https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
 `https` 镜像的余量：`_bss_end = 0x3FCD7C56`、`_stack_limit = 0x3FCD8456`、
 `_stack_top = 0x3FCD9000`（主栈余量约 3KB；TLS 那些活都在任务栈上跑，不在主栈）。
+
+---
+
+## §220 收包路径必须走 `tcpip_input`（NO_SYS=0 下直接在 RX 回调里跑协议栈是错的）
+
+`c6_lwip_port.c` 里原来的 netif 注册是：
+
+```c
+netif_add(&s_netif, 0,0,0,0, c6_lwip_netif_init_cb, ethernet_input);   // ← 错
+...
+if (nif->input(p, nif) != ERR_OK) { ... }                               // ← 错
+```
+
+在 `NO_SYS=0`（我们有 tcpip 线程）下，收包应该交给 **`tcpip_input`**：它把 pbuf
+塞进 tcpip 的邮箱，由 tcpip 线程去跑 ARP/IP/TCP。直接调 `ethernet_input` 等于在
+**WiFi 的 RX 回调上下文**里并行跑 lwIP 的全部协议处理，和 tcpip 线程同时摸同一批
+全局状态（pcb 链表、memp 池）—— 轻则丢包乱序，重则把协议控制块踩坏。
+
+现在两处都改成 `tcpip_input`（`netif_add` 的输入回调和 RX 回调里），
+`TCPIP_MBOX_SIZE=16` 保证邮箱够放。
+
+这条和 §219（任务上限/栈池）是同一类问题：**单线程假设下写的代码，接了 tcpip
+线程之后必须重新检查每个"回调在哪个上下文跑"**。
