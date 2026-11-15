@@ -4167,3 +4167,31 @@ abort() was called at PC 0x403cdbe0
 确认 "flash 里的 `entry` 是否能执行"。这一步的结果会决定后续方向：
 - 如果能执行 ⇒ 问题在别处（可能是闭源库自身的某种前提）
 - 如果不能执行 ⇒ 方案是"孤岛里先 `entry`，再跳到库函数体 `func+3`"
+
+### 91. 板子故障的补充信息（重要）
+
+试过的恢复手段（都不行，仍然是 `abort() at PC 0x403cdbe0`）：
+- JTAG `monitor reset run`
+- 擦 `otadata`（0xd000）
+- 擦 app 区（0x10000 + 0x70000）
+- **整片 erase-flash**，然后重新刷 bootloader + 分区表 + app
+- 删掉 `build/won` 整个目录重新构建 `t_s3_on`
+
+⇒ 说明**不是 flash 内容的问题，是镜像本身**（`build/won/c6os.bin` 现在 131368 字节，
+而之前 `t_s3_on` 是 ~50KB）。很可能是本轮往 `win_island.c` / `win_bridge.S` 里
+加的测试函数（`s3_flash_end_test`、`s3_asm_flash_entry`、`s3_win_asm_entry`、
+`s3_win_call_entry_test`）引入了问题 —— 它们被无条件链接进所有 s3 构建。
+
+**最省事的恢复办法**：把这些测试函数移除（回到加它们之前的版本），
+`git log` 里 `35a9e8c` 是加测试函数之前的最后一个提交：
+
+```
+git checkout 35a9e8c -- port/s3/win_island.c port/s3/win_bridge.S
+```
+
+然后 `rm -rf build/won && make ... S3_MAIN=tests/t_s3_on.c6 s3`，
+应该能恢复到能跑的状态（那时 `t_s3_on` 的心跳是正常的）。
+
+**注意**：`0x403cdbe0` 这个地址在 bootloader 的区间（0x403Cxxxx）里，
+而我们的 IRAM 是 0x40378000~0x40388700 —— 所以 abort 是**bootloader** 报的，
+说明它无法加载这个镜像。
