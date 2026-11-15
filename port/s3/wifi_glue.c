@@ -73,12 +73,25 @@ static void wh_ensure(void)
 
 static void *osi_malloc(u32 n)
 {
-    u32 want = (n + 15u) & ~15u;
+    u32 want = 0u;
+    WhBlk *b = 0;
+    u32 end = 0u;
+
     OSI_HIT(43);
-    WhBlk *b;
+    /* 防御：库可能请求一个离谱的大小，n+15 会回绕成 0（want 变 0），
+     * 调用方再按原大小写下去就把整片 .bss 踩烂 —— 表现为内核全局、
+     * ISR 静态计数被莫名改写（本轮就出现过 ISR 分段计数自相矛盾）。 */
+    if (n == 0u || n > (S3_WIFI_HEAP_SIZE - (u32)sizeof(WhBlk) - 64u)) {
+        *(volatile u32 *)0x50000740u = n;
+        *(volatile u32 *)0x50000744u = *(volatile u32 *)0x50000744u + 1u;
+        return 0;
+    }
+    want = (n + 15u) & ~15u;
     wh_ensure();
     b = (WhBlk *)S3_WIFI_HEAP_BASE;
-    while (b->magic == WH_MAGIC) {
+    end = S3_WIFI_HEAP_BASE + S3_WIFI_HEAP_SIZE;
+    /* 防御：节点必须整个落在堆数组内，否则会把数组外的邻居当成块头。 */
+    while (((u32)b + (u32)sizeof(WhBlk) <= end) && b->magic == WH_MAGIC) {
         if (b->used == 0u && b->size >= want) {
             /* 够大就切一块出来 */
             if (b->size >= want + sizeof(WhBlk) + 16u) {
@@ -92,6 +105,7 @@ static void *osi_malloc(u32 n)
             b->used = 1u;
             return (u8 *)b + sizeof(WhBlk);
         }
+        if ((u32)b + (u32)sizeof(WhBlk) + b->size > end) { break; }
         b = (WhBlk *)((u8 *)b + sizeof(WhBlk) + b->size);
     }
     return 0;
@@ -123,11 +137,23 @@ static void *osi_realloc(void *p, u32 n)
     osi_free(p);
     return q;
 }
-static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz); 
-                                            u32 i = 0; u8 *q = (u8 *)p;
-                                            if (p == 0) { return 0; }
-                                            while (i < n * sz) { q[i] = 0u; i = i + 1u; }
-                                            return p; }
+static void *osi_calloc(u32 n, u32 sz)
+{
+    void *p = 0;
+    u32 i = 0u;
+    u32 total = 0u;
+    u8 *q = 0;
+
+    /* 防御：n*sz 溢出会让 osi_malloc 拿到一个很小的值、随后这里按原尺寸清零，
+     * 直接把后面的 .bss 全写掉。 */
+    if (n == 0u || sz == 0u || n > (0xFFFFFFFFu / sz)) { return 0; }
+    total = n * sz;
+    p = osi_malloc(total);
+    if (p == 0) { return 0; }
+    q = (u8 *)p;
+    while (i < total) { q[i] = 0u; i = i + 1u; }
+    return p;
+}
 static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
 

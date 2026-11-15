@@ -5800,3 +5800,48 @@ e3: me=2  a0=2  a1=0
    RTC 计数，定位是哪一句之后中断流程被打断。
 2. 重点怀疑 `port_irq_fill()`（它要写陷阱帧/切换上下文）在 WiFi 任务
    建立之后开始出问题（有真实任务上下文时才走这条分支）。
+
+## §137 修正：tick 其实在正常推进；InstructionFetchError 是监控任务引起的
+
+去掉监控任务后，ISR 分段计数完全自洽：
+
+```
+0x50000700 (进入 ISR)            = 0x1300 = 4864
+0x50000714 (port_irq_fill 之后)  = 0x0100 = 256
+0x50000718 (port_cur_ctx 为 0)   = 0x0100 = 256
+0x50000720 (os_sched_tick 之后)  = 0x1300 = 4864   <-- 与 ISR 次数吻合
+```
+
+⇒ **`os_sched_tick()` 每次都走到了，tick 在正常推进**。
+§136 里"tick 只推进到 2 次"完全是那个坏掉的监控任务造成的假象。
+
+另外：新加的监控任务（`os_task_create("mon", mon_main, 0, 30u, 1024u)`）会带来
+一个新的故障 —— `EXCCAUSE 2 (InstructionFetchError)`，`pc = 0x3fcb5d3a`
+（落在 `.data` 段里，`__c99_d2` 与 `g_prid_base` 之间），`a0 = 0`、`ws = 0`，
+即"跳到数据区执行"。把监控任务去掉就恢复正常。1024 字节栈对其中的
+`os_task_probe` 循环来说偏小，大概率是栈溢出踩了 `.data`。
+（保留 `os_task_probe` 与 `os_task_total`，只是测试里不再创建监控任务。）
+
+### 分配器加固（顺带完成）
+
+`port/s3/wifi_glue.c` 的 WiFi 堆分配器加了两道防御：
+
+* `n == 0 || n > 堆大小-64` 直接返回 0 —— 否则 `n + 15` 会回绕成 0，
+  调用方再按原尺寸写下去就会把整片 `.bss` 写烂；
+* 链表遍历加了边界判断，节点不整个落在堆数组内就停 —— 否则会把数组外的
+  邻居当成块头；
+* `osi_calloc` 加了 `n * sz` 溢出检查。
+
+### 回到主线
+
+当前状态（去掉监控任务后）与 §125/§131 一致：
+`M1 bringup` 之后不再有输出，回调环停在 `... 37 15 16 29 29`。
+也就是 `pp_create_task` 走通、WiFi 任务建好并在 `s_wifi_queue` 上等，
+而初始化任务在那之后没有再产生任何 OSI 回调。
+
+### 下一步
+
+在 `osi_queue_recv`/`osi_semphr_take`/`osi_mutex_lock` 之外，把
+`_wifi_zalloc`(93)、`_wifi_malloc`(90)、`_queue_send`(25) 也全部打点，
+确认初始化任务到底走到 `wifi_init_in_caller_task` 的哪一步；
+必要时用 JTAG 在 `port_idle` 命中后读内核任务表的 `wait_obj` 定位。

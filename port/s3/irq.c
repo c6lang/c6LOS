@@ -202,6 +202,20 @@ void s3_trap(u32 frame_sp)
     port_panic_halt();
 }
 
+/* 诊断：ISR 分段计数（RTC 0x50000710 + 4*i，每 256 次写一次）。
+ * 1=port_cur_ctx 非零 2=port_irq_fill 返回 3=port_cur_ctx 为零
+ * 4=port_isr_enter 返回 5=os_sched_tick 返回 */
+static void s3_isr_mark(u32 i)
+{
+    static u32 m[8];
+    volatile u32 *r = (volatile u32 *)0x50000710u;
+
+    if (i < 8u) {
+        m[i] = m[i] + 1u;
+        if ((m[i] & 0xFFu) == 0u) { r[i] = m[i]; }
+    }
+}
+
 void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
@@ -224,9 +238,14 @@ void *s3_timer_irq(u32 frame_sp)
         }
     }
     if (port_cur_ctx() != 0) {
+        s3_isr_mark(1u);
         port_irq_fill(frame_sp);
+        s3_isr_mark(2u);
+    } else {
+        s3_isr_mark(3u);
     }
     port_isr_enter();
+    s3_isr_mark(4u);
     {
         /* 诊断：记录进入 os_sched_tick 的次数（RTC 0x50000708），
          * 与 0x50000700（INR 计数）对比，判断 tick 推进是否被跳过。 */
@@ -236,6 +255,7 @@ void *s3_timer_irq(u32 frame_sp)
         if ((st_n & 0xFFu) == 0u) { ic[0] = st_n; }
     }
     os_sched_tick();
+    s3_isr_mark(5u);
     if (g_hook != 0) {
         g_hook();
     }
