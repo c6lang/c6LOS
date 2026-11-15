@@ -65,7 +65,8 @@ S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
 S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
            $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o \
-           $(BUILD)/obj/wifi_glue.o
+           $(BUILD)/obj/wifi_glue.o \
+           $(BUILD)/obj/wpa_crypto.o
 
 # 真正链闭源 WiFi 库（libnet80211/libpp）时才需要监管域数据表
 ifneq ($(findstring -DS3_WITH_WIFI,$(S3_CDEFS)),)
@@ -208,6 +209,10 @@ $(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
 # 所以必须用 -mabi=windowed 编译；它自己对外暴露的入口（s3_wifi_osi_init 等）
 # 由 call0 侧经孤岛桥调用。
 $(BUILD)/obj/wifi_glue.o: port/s3/wifi_glue.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
+$(BUILD)/obj/wpa_crypto.o: port/s3/wpa_crypto.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
@@ -1580,7 +1585,8 @@ tls12live:
 TLS_DIR   := $(WIFI_DIR)/tls
 TLS_SRC   := $(C6_ROOT)/std/core/types.c6 $(C6_ROOT)/std/core/bits.c6 \
              $(C6_ROOT)/std/core/rand.c6 $(C6_ROOT)/std/encoding/aes.c6 \
-             $(C6_ROOT)/std/encoding/sha256.c6 $(C6_ROOT)/std/net/x25519.c6 \
+             $(C6_ROOT)/std/encoding/sha256.c6 $(C6_ROOT)/std/encoding/sha1.c6 \
+             $(C6_ROOT)/std/net/x25519.c6 \
              net/aes_gcm.c6 net/tls12_prf.c6 net/rsa_verify.c6 \
              net/cert_parse.c6 net/tls12_hs.c6
 TLS_NAMES := $(notdir $(basename $(TLS_SRC)))

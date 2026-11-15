@@ -32,4 +32,14 @@ run rsa_verify_test \
     "$C6/std/core/types.c6" "$C6/std/core/bits.c6" "$C6/std/encoding/sha256.c6" \
     net/rsa_verify.c6 tests/t_rsa_verify.c6
 
-printf '\n全部 TLS 1.2 基础件自测通过。\n'
+run pbkdf2_test \
+    "$C6/std/core/types.c6" "$C6/std/encoding/sha1.c6" \
+    tests/t_pbkdf2.c6
+
+# WPA 加密回调（板子上给闭源 WiFi 库用的那张表）：普通 C，宿主 gcc 直接测
+printf '\n========== wpa_crypto_selftest ==========\n'
+cc -O2 -DC6_WPA_HOST_TEST -o "$OUT/wpa_crypto_selftest" \
+    tests/wpa_crypto_selftest.c port/s3/wpa_crypto.c -Iinclude
+"./$OUT/wpa_crypto_selftest"
+
+printf '\n全部 TLS 1.2 基础件 + WPA 密钥派生自测通过。\n'

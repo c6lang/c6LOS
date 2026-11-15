@@ -9805,3 +9805,56 @@ make C6_ROOT=/home/winger/c6 httpsflash \
 | `[lwip] start rc=` / `[lwip] ip=` | lwIP 起来 / DHCP 拿到地址（§210） |
 | `[https] TLS 握手完成` / `第一跳` / `第二跳` | TLS 与 HTTP（§213/§214） |
 | `panic` / `Guru` / `IllegalInstruction` | 崩了（本轮之前的老朋友） |
+
+---
+
+## §218 WPA 加密回调表：没有它，WPA2 关联必挂（PBKDF2 已用 IEEE 向量验证）
+
+### 一、问题
+
+`esp_wifi_init_internal()` 的配置块里，偏移 4 起是 `wpa_crypto_funcs`（44 字节，
+9 个函数指针）。我们之前只填了 `size=44` / `version=1`，**九个指针全是 NULL**。
+WPA2-PSK 关联时，闭源库要回调它们做两件核心的事：
+
+1. `pbkdf2_sha1`：口令 + SSID → PSK（`iterations=4096`、输出 32 字节）；
+2. `hmac_sha256_vector` / `sha256_vector`：EAPOL 的 MIC 与各种 KDF 的哈希。
+
+NULL 指针 → 关联阶段直接跑飞。这是 §215 之后发现的最致命的一个坑。
+
+### 二、做法（`port/s3/wpa_crypto.c`）
+
+| 回调 | 状态 |
+| --- | --- |
+| `pbkdf2_sha1` | ✅ 真实现（PBKDF2-HMAC-SHA1），**IEEE 802.11i 测试向量验证通过** |
+| `sha256_vector` | ✅ 真实现（向量拼接 + SHA-256），**NIST "abc" 向量验证通过** |
+| `hmac_sha256_vector` | ✅ 真实现，**RFC 4231 case 2 向量验证通过**（顺便验证多段拼接） |
+| `aes_128_encrypt` / `aes_128_decrypt` / `omac1_aes_128` / `ccmp_decrypt` / `ccmp_encrypt` / `aes_gmac` | ⏳ 先"记账 + 返回 -1"：ESP32-S3 的 MAC 有 CCMP/TKIP 硬件卸载，普通 WPA2-PSK 大概率不回调；真上板如果回调了，RTC `0x50000BC0` 起的计数会显示是哪一项 |
+
+SHA-1 / SHA-256 / HMAC **自带 C 实现**（约 200 行，不依赖 c6 模块）。这样
+`wpa_crypto.c` 是自包含的普通 C：既不拖累不链 libtls 的 `wifi` 构建，
+也能在宿主上用 gcc 直接验证（`tests/wpa_crypto_selftest.c`）。
+
+`wifi_glue.c` 里 `s3_wifi_bringup()` 现在把这张表**整块拷进 init config 的
+偏移 4**（`c6_wpa_crypto_init()` + `c6_wpa_crypto_table()`），不再是只写
+size/version。
+
+### 三、验证
+
+```
+make tls12check
+  ========== aes_gcm_test ==========      AES-128-GCM 自测通过
+  ========== tls12_prf_test ==========    TLS1.2 PRF 自测通过
+  ========== rsa_verify_test ==========   RSA 验签自测通过
+  ========== pbkdf2_test ==========       PBKDF2 自测通过（IEEE 802.11i 向量）
+  ========== wpa_crypto_selftest =====    wpa_crypto C 实现自测通过（gcc 直接编）
+  全部 TLS 1.2 基础件 + WPA 密钥派生自测通过。
+```
+
+### 四、上板后怎么判断这一层对不对
+
+关联成功（`[wifi] 已关联，ssid=…`）本身就说明 PSK 派生与 EAPOL MIC 都对
+（PSK 错的话 4 次握手必然失败，表现是 `WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT`，
+只是我们没接事件系统，看不��具体原因 —— 所以串口只会有"关联超时"）。
+
+如果 RTC `0x50000BC0[3..7]` 非 0，说明库回调了 AES/CCMP 那几项（也就是说硬件
+卸载这条路没走通），那时就要在 `wpa_crypto.c` 里补真正的 AES-128（CBC/CMAC/CCM）。

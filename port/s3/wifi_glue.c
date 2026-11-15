@@ -1233,6 +1233,10 @@ static void wcfg(u32 off, u32 v)
  * esp_wifi_sta_get_ap_info()，"拿到 IP 没有"靠轮询 lwIP 的 netif（见
  * c6_lwip_port.c 的 c6_lwip_wait_ip）。
  */
+/* wpa_crypto.c 总是会链进来（wifi 构建和基线构建都有），不受 S3_WITH_WIFI 影响 */
+extern void c6_wpa_crypto_init(void);
+extern const void *c6_wpa_crypto_table(void);
+
 #ifdef S3_WITH_WIFI
 extern int esp_wifi_set_storage(int storage);
 extern int esp_wifi_set_mode(int mode);
@@ -1387,8 +1391,20 @@ u32 s3_wifi_bringup(void)
     /* wpa_crypto_funcs @4..47：官方实现在
      * wpa_supplicant/src/crypto/crypto_ops.c 的 g_wifi_default_wpa_crypto_funcs，
      * 依赖 mbedtls；等接 TLS 时一起补。init 阶段库只校验 size/version。 */
-    wcfg(4u,   44u);            /* wpa_crypto_funcs.size    = sizeof(...) */
-    wcfg(8u,   1u);             /* wpa_crypto_funcs.version = ESP_WIFI_CRYPTO_VERSION */
+    /* wpa_crypto_funcs：44 字节的**函数指针表**（§218）。以前这里只填了
+     * size/version，九个指针全是 NULL —— WPA2-PSK 关联时要靠它做
+     * "口令 → PSK"（PBKDF2-SHA1）和 MIC 计算，NULL 就是直接跑飞。
+     * 表由 port/s3/wpa_crypto.c 提供（里面 PBKDF2-SHA1/SHA256/HMAC-SHA256
+     * 是真实现，AES 那几项先记账+返回 -1）。 */
+    c6_wpa_crypto_init();
+    {
+        const u32 *tab = (const u32 *)c6_wpa_crypto_table();
+        u32 k = 0u;
+
+        for (k = 0u; k < 11u; k++) {
+            wcfg(4u + k, tab[k]);
+        }
+    }
     wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
     wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
     wcfg(56u,  1u);             /* tx_buf_type            default 1 = dynamic */
