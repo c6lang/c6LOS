@@ -88,6 +88,13 @@ SECTIONS
     *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    /* lwIP（IP 栈，§210）：71KB 代码必须进 flash。IRAM 预算只剩几 KB，
+     * 让它掉进 .text 会直接把 IRAM 撑爆。三个粘合目标文件也一起进来，
+     * 免得它们单独落进 IRAM。 */
+    *liblwip.a:*(.literal .literal.* .text .text.*)
+    *c6_lwip_port.o(.literal .literal.* .text .text.*)
+    *c6_lwip_posix.o(.literal .literal.* .text .text.*)
+    *sys_arch.o(.literal .literal.* .text .text.*)
     *(.flashend.test)
 
     /* IDF 闭源 WiFi 库的代码也放 flash（与 .flash.text 连续，bootloader 才会一起映射） */

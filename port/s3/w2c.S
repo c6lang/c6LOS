@@ -150,6 +150,10 @@
     retw
     .endm
 
+/* 注意：堆**不**走内核的 os_sys_*（那两个在 port/s3/fast.c，LEAN 构建里
+ * 不编进来）。lwIP 的 malloc/calloc/realloc 直接落在 wifi_glue.c 的
+ * osi_malloc 堆上，和闭源库的 free() 是同一个堆（见 §210）。 */
+
 /* ---- 信号量 / 互斥 ---- */
     W2C s3_w2c_sem_init,       os_sem_init
     W2C s3_w2c_sem_destroy,    os_sem_destroy

@@ -1536,3 +1536,24 @@ netcheck:
 	@$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common -mlongcalls \
 		-Iport/s3/lwip -I$(LWIP_SRC)/include -c $(BUILD)/netcheck/t_s3_net.c -o $(BUILD)/netcheck/t_s3_net.o
 	@echo "netcheck: OK（c6 头 + lwIP POSIX 层两侧都能编）"
+
+# ---------------------------------------------------------------------------
+# wifip：WiFi + lwIP 一起链的镜像（docs/wifi-plan.md §210）
+#
+# 和 wifi 的区别只有两点：-DS3_WITH_LWIP（bringup 成功后接 IP 栈），
+# 以及把 build/lwip/liblwip.a 加进链接。目的有两个，都不需要真板：
+#   1) 验证"71KB 的 lwIP 和闭源 WiFi 库能一起塞进这颗芯片"（IRAM/DRAM 预算）；
+#   2) 验证 link.ld 把 lwIP 的 .text 正确路由进 .flash.text（否则 IRAM 直接爆）。
+IP_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP
+wifip: 
+	@rm -rf $(WIFI_DIR)
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
+	$(MAKE) C6_ROOT=$(C6_ROOT) lwip
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) S3_LEAN=1 \
+		S3_SKIP_C6="" \
+		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+		S3_CDEFS="$(IP_CDEFS)" S3_STACK_TOP=0x3FCD9000 \
+		S3_MAIN=$(S3_WIFI_MAIN) \
+		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
+		s3

@@ -9295,3 +9295,58 @@ c6c 的产物按 windowed 编一遍，两侧都过才算 OK。
 | POSIX 名字/头 | 本节完成（`make netcheck` 过） |
 | 接进 `c6os.elf` | 没做（等 PHY 通；还要把 lwIP `.text` 路由进 `.flash.text`） |
 | TLS 1.3 握手 + 证书链校验 | 没做（c6 std 只有记录层/KDF/x25519/x509，缺握手驱动与签名校验） |
+
+---
+
+## §210 把 lwIP 真正链进镜像：`make wifip` 通过（含内存预算实测）
+
+§207~§209 都是"单独编"，这一步把它**链进 c6os.elf**，第一次拿到真实的
+内存占用。新增目标：
+
+```
+make C6_ROOT=/home/winger/c6 wifip      # = wifi + -DS3_WITH_LWIP + build/lwip/liblwip.a
+```
+
+和 `wifi` 的差别只有两处：`-DS3_WITH_LWIP`（bringup 成功后接 IP 栈），
+以及链接时把 `build/lwip/liblwip.a` 塞进 `--start-group`。
+
+### 为链接做的四处改动
+
+| 位置 | 改动 | 原因 |
+| --- | --- | --- |
+| `port/s3/link.ld` | `.flash.text` 里加 `*liblwip.a:*(.literal .literal.* .text .text.*)` 以及 `c6_lwip_port.o`/`c6_lwip_posix.o`/`sys_arch.o` 三个粘合目标文件 | lwIP 有 **71KB** 代码；不显式收进 flash 文本段就会掉进 `.text`（IRAM），直接把 67KB 的 IRAM 撑爆 |
+| `port/s3/win_island.c` | `#ifdef S3_WITH_LWIP`：`s3_wifi_bringup()` 成功后调 `c6_lwip_start(mac)`，然后跑 2000 次 `c6_lwip_poll()` + 让出 CPU | 这是"关联之后"的路径；先接上、留出阶段信标 `0x1010/0x1011` 便于以后定位 |
+| `port/s3/wifi_glue.c` | 补 `malloc/calloc/realloc/atoi/_ctype_[257]` | lwIP 的 `MEM_LIBC_MALLOC`/`MEMP_MEM_MALLOC` 直接引用 `malloc/calloc/realloc`；`netif.c` 用 `atoi`；`ip4_addr.c` 的 `isdigit` 查 newlib 的 `_ctype_`。**关键：malloc 必须和已有的 `free()` 落回同一个堆**（`free` 已经指向 `osi_free`），所以 `malloc = osi_malloc` |
+| `port/s3/w2c.S` | 试着加过 `s3_w2c_sys_alloc/free/realloc`，**最后删掉** | 内核堆 `os_sys_*` 在 `port/s3/fast.c`，LEAN 构建里根本不编进来 —— 加了只会 undefined reference。结论：lwIP 的分配就走 OSI 那套 windowed 堆 |
+
+### 实测内存（`make wifip`，全部真数字）
+
+| 段 | VMA | 大小 | 说明 |
+| --- | --- | --- | --- |
+| `.flash.text`（IROM） | `0x42010000` | **490191 B (479KB)** | WiFi/PHY 闭源库 + 内核原语 + lwIP 全在这里，宽松 |
+| `.vector` + `.text`（IRAM） | `0x40378000` | 1146 + 60120 = **61266 B (59.8KB)** | 预算 67328 B，**余 ≈6KB**（没爆） |
+| `.data`（DRAM） | `0x3FCA0000` | 104192 B | |
+| `.bss`（DRAM） | `0x3FCB9700` | 116816 B，`_bss_end = 0x3FCD5F42` | `_stack_limit = 0x3FCD6742 ≤ _stack_top = 0x3FCD9000`，链接期 ASSERT 过 → 栈区约 10.5KB |
+
+`size` 口径：`text 551725 / data 104192 / bss 116816`，
+`chkimg: OK（2 个 flash 段，文件偏移 == LMA）`。同一个构建里
+`make wifi`（不带 lwIP）和基线 `make s3` 也都仍然通过。
+
+### 一个必须先记住的约束：DRAM 只剩约 10KB
+
+`_bss_end` 已经到 `0x3FCD5F42`，离 `_stack_top(0x3FCD9000)` 只剩约 12KB，
+其中 2KB 是护栏。也就是说 **lwIP 的动态内存和闭源 WiFi 库共用同一个 16KB 的
+`g_wifi_heap_mem`**（`S3_WIFI_HEAP_SIZE`），而 DRAM 已经没有空间把这个堆放大。
+
+到时候（等关联跑通、真正收发数据时）要按这个顺序调：
+1. 先量：`g_osi_*` 的 peak 会打在 RTC/串口诊断里，先看 WiFi 侧到底吃多少；
+2. 再缩 lwIP：`TCP_MSS 536`、`TCP_WND 4KB`、`TCP_SND_BUF 4KB`、`MEMP_NUM_TCP_PCB 4`
+   —— 只为取一次 `https://qq.com` 的话足够；
+3. 还不够就把 `.bss` 里的大户挪走（音频/图像缓冲在 WiFi 构建里本来就不该在）。
+
+### 下一步
+
+板子一回来，优先级顺序不变：
+1. `S3_PHY_BISECT=1` 的 `wifi` 镜像 → 看 `[phy] g_phyFuns=` / `rc=` / bisect mask（§204~§206）；
+2. PHY 通了再看 `esp_wifi_start` → 扫描 → 关联；
+3. 关联成功后才轮到 `wifip` 镜像里的 `[lwip] start rc=` 和 DHCP。

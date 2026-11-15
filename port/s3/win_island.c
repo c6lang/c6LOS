@@ -705,6 +705,28 @@ u32 s3_win_wifi_main(void)
     rc = s3_wifi_bringup();
     WSTAGE(0x1006u); os_wdt_feed();
     s3_win_log("W2 bringup returned\n");
+#ifdef S3_WITH_LWIP
+    /* §210：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调）。
+     * 这一段是"关联之后"的路径，只有 -DS3_WITH_LWIP 的镜像才有。 */
+    if (rc == 0u) {
+        extern int  c6_lwip_start(const unsigned char *mac);
+        extern void c6_lwip_poll(void);
+        extern u32  s3_w2c_task_delay(u32 ticks);
+        static const unsigned char lwip_mac[6] = { 0xccu, 0x8du, 0xa2u, 0xecu, 0x99u, 0xc4u };
+        int irc = c6_lwip_start(lwip_mac);
+        u32 n = 0u;
+
+        ets_printf("[lwip] start rc=%d\n", irc);
+        WSTAGE(0x1010u);
+        while (n < 2000u) {          /* 先跑一段，让 DHCP/DNS 有机会动起来 */
+            c6_lwip_poll();
+            s3_w2c_task_delay(1u);
+            n = n + 1u;
+        }
+        WSTAGE(0x1011u);
+        ets_printf("[lwip] polled %u\n", (unsigned)n);
+    }
+#endif
     return rc;
 }
 
