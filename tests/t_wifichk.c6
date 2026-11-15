@@ -7,7 +7,8 @@ extern u32 s3_win_call_flash42(void);
 extern u32 s3_win_call_cache_invalidate(void);
 extern u32 s3_win_call_wifi_init(void *cfg);
 extern u32 s3_win_call_osi_init(void);
-static u8 g_wifi_cfg[512] __attribute__((aligned(512)));
+/* .c6 里 static 数组取地址不可靠，改用显式 DRAM 地址做 cfg */
+#define WIFI_CFG  ((u8 *)0x3FCA2000u)
 void os_main(void)
 {
     s3_beacon(0u, 0xB0000200u);
@@ -15,8 +16,8 @@ void os_main(void)
     s3_win_call_cache_invalidate();
     s3_beacon(1u, s3_win_call_flash42());     /* 段首取指，期望 42 */
     s3_beacon(2u, s3_flash_rodata_probe);     /* DROM 读，期望 0x12345678 */
-    s3_beacon(3u, 0xC0DE0001u);               /* 进入 wifi 前的标记 */
-    *(u32 *)&g_wifi_cfg[0] = s3_win_call_osi_init();
-    s3_beacon(3u, s3_win_call_wifi_init(g_wifi_cfg));  /* 这里会 trap */
+    s3_beacon(3u, (u32)WIFI_CFG);           /* cfg 指针的值 */
+    *(u32 *)(WIFI_CFG) = s3_win_call_osi_init();
+    s3_beacon(3u, s3_win_call_wifi_init((void *)WIFI_CFG));  /* 这里会 trap */
     for (;;) { }
 }

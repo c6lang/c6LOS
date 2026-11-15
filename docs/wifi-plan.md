@@ -4634,3 +4634,47 @@ slot3 = 0xC0DE0001     已进入 wifi_init
    而闭源库期望的是一个完整的 `wifi_init_config_t` 结构体 ——
    可能它要读的字段超出了我们这块内存的范围？
    （不过这条指令只读第一个 4 字节，应该不会越界）
+
+### 105. ★★★★★ `esp_wifi_init_internal` 完整执行并返回了（无 trap！）
+
+改用显式 DRAM 地址做 cfg（`.c6` 里 `static` 数组取地址不可靠）：
+
+```c
+#define WIFI_CFG ((u8 *)0x3FCA2000u)
+*(u32 *)(WIFI_CFG) = s3_win_call_osi_init();      /* osi_funcs */
+s3_beacon(3u, s3_win_call_wifi_init((void *)WIFI_CFG));
+```
+
+真板（**没有 TRAP**）：
+
+```
+slot0 = 0xB0000200
+slot1 = 0x0000002A      flash42 取指正常（42）
+slot2 = 0x12345678      DROM 读正常
+slot3 = 0x00000102      ← esp_wifi_init_internal 的返回值
+```
+
+⇒ **`esp_wifi_init_internal` 完整执行并返回了！** `entry`、函数体、`retw` 全部正常。
+
+### 返回值 0x102 = ESP_ERR_INVALID_ARG
+
+反汇编里 `movi a2, 0x102` 就是"参数无效"的错误路径。原因很可能是：
+
+我们只填了 `wifi_init_config_t` 的第一个字段（`osi_funcs`），**其余全是 0**。
+而 IDF 的 `WIFI_INIT_CONFIG_DEFAULT()` 会给所有字段填默认值，包括：
+- `static_rx_buf_num` / `dynamic_rx_buf_num` / `tx_buf_type` 等
+- **`magic`**（必须是 `WIFI_INIT_CONFIG_MAGIC` = 0x1F2F3F4F 之类）
+- `wpa_crypto_funcs`（一个 0xA4 字节的子结构）
+
+⇒ 下一步：按 IDF 的 `WIFI_INIT_CONFIG_DEFAULT()` 把整个结构体填好。
+
+### 本轮的完整成就
+
+从"完全无法执行 flash 代码"到"**WiFi 初始化函数完整跑通并返回**"：
+
+1. `--ram-only-header` 的坑（镜像残缺）
+2. `ICACHE_CTRL` 手工改正为 0x0B（ROM 函数写的是非法的 32KB）
+3. `Cache_Invalidate_ICache_All`
+4. cfg 用显式 DRAM 地址（`.c6` 的 static 数组取地址问题）
+
+**`esp_wifi_init_internal` 现在完全可用了。**
