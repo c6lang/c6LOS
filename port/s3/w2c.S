@@ -154,6 +154,12 @@
  * 不编进来）。lwIP 的 malloc/calloc/realloc 直接落在 wifi_glue.c 的
  * osi_malloc 堆上，和闭源库的 free() 是同一个堆（见 §210）。 */
 
+/* ---- 关中断（OSI 的 _wifi_int_disable/_restore，§226）----
+ * 内核的 port_irq_save/restore 是 rsil/wsr ps，正好是 IDF portENTER_CRITICAL
+ * 的等价物。库在临界区里不会阻塞（IDF 下也是这么用的）。 */
+    W2C s3_w2c_irq_save,       port_irq_save
+    W2C s3_w2c_irq_restore,    port_irq_restore
+
 /* ---- 信号量 / 互斥 ---- */
     W2C s3_w2c_sem_init,       os_sem_init
     W2C s3_w2c_sem_destroy,    os_sem_destroy

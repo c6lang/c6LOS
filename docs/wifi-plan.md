@@ -10132,3 +10132,34 @@ OSI 槽位 120 个：已接实现 82，兜底空实现 38
 的槽位 —— §218 那个 `wpa_crypto_funcs` 全 NULL 的教训就是漏接的代价。
 
 `https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。
+
+---
+
+## §226 `_wifi_int_disable/_restore` 改成真的关中断
+
+IDF 的 OSI 表里这两个槽位就是：
+
+```c
+._wifi_int_disable = (void *)portENTER_CRITICAL,   /* 返回中断状态 */
+._wifi_int_restore = (void *)portEXIT_CRITICAL,
+```
+
+我们之前是"记账 + 什么也不做"：库以为自己在临界区里，实际上并发完全没保护 ——
+队列/链表可能被中断和任务同时改（这类 bug 在真板上表现为随机的丢包、
+`_queue_recv` 返回垃圾、甚至断言失败，极难查）。
+
+现在接上内核的：
+
+```
+port_irq_save   : rsil a2, 15     （关中断，返回原 PS）
+port_irq_restore: wsr ps, a2      （恢复）
+```
+
+经 `port/s3/w2c.S` 的 `s3_w2c_irq_save` / `s3_w2c_irq_restore` 两个壳调用。
+
+**风险与判据**：如果库里在"临界区"内阻塞（等信号量），关中断会让 tick 进不来、
+直接死锁。IDF 用同一套原语跑同一个库，所以按设计不会这样用；万真板上出现
+"关联时卡死不返回"，把这两个槽位改回空实现即可验证是不是这个原因
+（RTC `0x50000B40[2]/[3]` 记录调用次数，能看出库到底用不用）。
+
+`https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。

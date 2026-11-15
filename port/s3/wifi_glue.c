@@ -1061,12 +1061,19 @@ static int osi_ints_off(u32 mask)
     return 0;
 }
 
+/* 真的关中断（§226）：IDF 这两个槽位就是 portENTER_CRITICAL/portEXIT_CRITICAL。
+ * 只记账的空实现会让库以为自己在临界区里，实际上并发完全没保护（队列/链表
+ * 可能被 ISR 和任务同时改）。库在临界区里**不会阻塞**（IDF 下同样如此），
+ * 所以用内核的 rsil/wsr ps 是安全的。 */
+extern u32 s3_w2c_irq_save(void);
+extern void s3_w2c_irq_restore(u32 state);
+
 static u32 osi_wifi_int_disable(void)
 {
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
 
     p[2] = p[2] + 1u;
-    return 0u;
+    return s3_w2c_irq_save();
 }
 
 static void osi_wifi_int_restore(u32 state)
@@ -1074,7 +1081,7 @@ static void osi_wifi_int_restore(u32 state)
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
 
     p[3] = p[3] + 1u;
-    (void)state;
+    s3_w2c_irq_restore(state);
 }
 
 static int osi_is_from_isr(void) { return 0; }
