@@ -10,6 +10,8 @@ extern u32 s3_win_call_flash42(void);
 extern u32 s3_win_call_cache_invalidate(void);
 extern u32 s3_win_call_wifi_init(void *cfg);
 extern u32 s3_win_call_osi_init(void);
+extern u32 s3_win_call_phy_cal(void);
+extern u32 s3_win_call_phy_enable(void);
 #define CFG ((u32 *)0x3FCA2000u)
 void os_main(void)
 {
@@ -18,6 +20,11 @@ void os_main(void)
     os_icache_enable();
     s3_win_call_cache_invalidate();
     s3_beacon(1u, s3_win_call_flash42());
+
+    /* WiFi 需要 PHY/RF 先初始化 */
+    s3_win_call_phy_cal();
+    s3_win_call_phy_enable();
+    s3_beacon(0u, 0xB0000212u);   /* PHY 初始化完成 */
 
     for (i = 0u; i < 40u; i = i + 1u) { CFG[i] = 0u; }
     CFG[0] = s3_win_call_osi_init();          /* osi_funcs */

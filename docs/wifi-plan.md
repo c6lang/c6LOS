@@ -4925,3 +4925,55 @@ slot1 = 0x4037ca2c     表里第 96 项 = _wifi_malloc
 
 IDF 工具的 include 路径可以从任意一个 IDF 组件的 CMake 缓存里拿到，
 或者直接用 `idf.py` 在一个临时工程里编一个 `main.c` 打印。
+
+### 113. 试过 PHY 前置初始化，NO_MEM 依旧
+
+在 `wifi_init` 之前加上（这两步在 `t_s3_abic` 里已验证能跑通）：
+
+```c
+s3_win_call_phy_cal();
+s3_win_call_phy_enable();
+```
+
+真板：PHY 那两步正常返回（`slot0` 被写到 `0xB0000212`），
+但 `esp_wifi_init_internal` **仍然返回 `0x101`**。
+
+⇒ PHY 不是缺失的前提条件。
+
+### 目前的确定结论
+
+| 项 | 状态 |
+|---|---|
+| 镜像结构（DROM/IROM 段） | ✅ 正确 |
+| flash 取指 | ✅ 正常（`s3_asm_flash_42` 返回 42） |
+| `esp_wifi_init_internal` 执行 | ✅ 完整执行到返回 |
+| OSI 表注册 | ✅ `g_osi_funcs_p` 指向我们的表 |
+| OSI 字段索引 | ✅ `tab[96]` 确认是 `osi_malloc` |
+| `_version` / `_magic` | ✅ 校验通过（错误码从 0x102 变 0x101） |
+| PHY 前置 | ✅ 已初始化 |
+| **缓冲池分配** | ❌ `esf_buf_setup_static` 报 NO_MEM |
+
+### 剩下最可疑的一点
+
+我们的堆**一次都没被 `_wifi_malloc` 调用过**（堆头 magic 始终是 0），
+但 `tab[96]` 确实指向 `osi_malloc`。
+
+⇒ 说明库**根本没走到**分配那一步，而是在更早的地方就因为某个
+**配置字段读成 0** 而放弃了。
+
+最可能还是 `wifi_init_config_t` 的字段偏移。虽然 `magic`（144）校验通过，
+但那可能是因为 `magic` 之前的所有字段都是 0，而 `magic` 那个位置恰好
+落在我们写 0x1F2F3F4F 的地方 —— 只要 `wpa_crypto_funcs` 的实际大小
+让我们整体错位 4 字节，`magic` 就会写到 140 或 148，校验就会失败。
+既然校验**通过**了，说明 144 是对的，那其它字段的偏移也应该对。
+
+⇒ 所以更可能是**别的**原因，比如：
+- `esp_wifi_init_internal` 依赖 `g_wifi_global_lock` 等**全局对象**，
+  而这些需要先被某个函数初始化
+- 或者需要先调 `esp_netif_init()` / `esp_event_loop_create()` 之类
+
+### 下一步
+
+反汇编 `esp_wifi_init_internal` 的**开头部分**（`0x4203d934` 起），
+看它在调用一堆 OSI 函数之前，到底检查了哪些全局状态、
+按什么顺序初始化，然后逐一对齐。
