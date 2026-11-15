@@ -13,6 +13,7 @@ int esp_wifi_init_internal(const void *config);
 int esp_wifi_deinit(void);
 
 extern u32 s3_win_call_wifi_init(void *cfg);
+extern u32 s3_win_call_osi_init(void);
 
 static void pstr(const char *s) { s3_win_call_log(s); }
 
@@ -37,9 +38,8 @@ void os_main(void)
 {
     u32 rc = 0u;
 
-    s3_wifi_osi_init();
-    /* osi_funcs = &g_wifi_osi_funcs */
-    *(u32 *)&g_wifi_cfg[0] = (u32)s3_wifi_osi_funcs_ptr();
+    /* 经孤岛初始化 OSI 表 */
+    *(u32 *)&g_wifi_cfg[0] = s3_win_call_osi_init();
 
     /* 用 RTC 信标记录进度（不依赖 gdb） */
     s3_beacon(0u, 0xB0000F00u);

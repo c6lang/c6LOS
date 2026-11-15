@@ -472,3 +472,12 @@ u32 s3_win_wifi_init(void *cfg)
     return (u32)esp_wifi_init_internal(cfg);
 }
 
+/* wifi_glue.c 现在是 windowed 编译，call0 侧必须经孤岛调它 */
+extern void s3_wifi_osi_init(void);
+extern u32  s3_wifi_osi_funcs_ptr(void);
+
+u32 s3_win_osi_init(void)
+{
+    s3_wifi_osi_init();
+    return s3_wifi_osi_funcs_ptr();
+}

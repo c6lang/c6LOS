@@ -172,9 +172,12 @@ $(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
 	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
 
 # WiFi OS 适配层（纯 call0 即可，不碰闭源库 ABI）
+# wifi_glue.c 里那批 wifi_osi_funcs_t 桩函数会被 **windowed ABI 的闭源库回调**，
+# 所以必须用 -mabi=windowed 编译；它自己对外暴露的入口（s3_wifi_osi_init 等）
+# 由 call0 侧经孤岛桥调用。
 $(BUILD)/obj/wifi_glue.o: port/s3/wifi_glue.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) $(XTFLAGS) -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj

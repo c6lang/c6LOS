@@ -3253,3 +3253,27 @@ wifi_init ...                                  <- 进入 esp_wifi_init_internal
 
 把那批 OSI 桩函数放到**用 `-mabi=windowed` 编译的文件**里（像 `win_island.c` 那样），
 或者让 `wifi_glue.c` 整体用 windowed 编译。这是纯工程改动，方向明确。
+
+### 82f. 把 OSI 桩函数改成 windowed 编译 —— 又前进了一步
+
+`wifi_glue.c` 改用 `-mabi=windowed` 编译（并给 `s3_wifi_osi_init` 加了孤岛桥）后：
+
+```
+c6os s3 boot
+*** TRAP cause=00000014 pc=8037d260      <- 又是 call0 标记的地址
+```
+
+- 之前是 `pc=8037d21d`（在 `s3_win_call_wifi_init` 里）
+- 现在变成 `pc=8037d260`（更靠后），而且 `wifi_init ...` **没打印出来**
+  ⇒ 说明现在是在 `s3_win_call_osi_init` 阶段就出问题，比之前更早
+
+⇒ ABI 方向是对的，但**还有别的地方在用 call0 标记的地址**。可能是：
+- `wifi_glue.c` 里通过函数指针/表项调到的其他 call0 代码
+- 或者孤岛桥本身在这种"表里存了函数指针再回调"的路径上不够用
+
+### 目前确认可行的部分（都是真板证据）
+
+1. IROM 取指完全正常（I-cache 配置修好之后）
+2. WiFi 闭源库能链接进 flash（独立 `.flash.wifi` 段）
+3. `esp_wifi_init_internal` 的 `entry` 能执行（windowed 代码从 flash 跑没问题）
+4. 剩下的纯粹是 **call0/windowed ABI 边界**的工程问题
