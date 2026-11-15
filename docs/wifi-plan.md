@@ -10098,3 +10098,37 @@ make C6_ROOT=/home/winger/c6 httpsflash \
 | `[https] DNS 解析 qq.com 失败` | DNS 服务器（DHCP 下发）或 lwIP DNS 配置 |
 | `[https] TLS 握手失败，阶段=N` | 阶段含义见 §213（1/2/11/12/20/21） |
 | 栈相关崩溃 / 莫名复位 | §214 第五节：RSA 验签峰值栈约 3.5KB，任务栈要够 |
+
+---
+
+## §225 OSI 表覆盖审计：82/120 已接实现，剩下 38 个逐个说明为什么可以空着
+
+用新工具 `tools/osi_audit.py` 把 `s3_wifi_osi_init()` 的 `OSI_SET(...)` 与
+`include/c6os/wifi_osi.h` 的字段顺序对齐（§203 的 `osislots.py` 是"库调了哪些"，
+这个是"我们接了哪些"，正好互补）：
+
+```
+$ tools/osi_audit.py
+OSI 槽位 120 个：已接实现 82，兜底空实现 38
+```
+
+### 这一轮补上的两个（原来确实是漏洞）
+
+| 槽位 | 现在 | 为什么必须补 |
+| --- | --- | --- |
+| 39 `_task_delay` | → `s3_w2c_task_delay` | 实现函数一直存在，**但从来没 `OSI_SET` 过** —— 库调它拿到的是"立即返回"，所有"等一会儿再重试"都变成空转（我们调度是抢占的所以不会彻底卡死，但时序全乱） |
+| 64/65 `_wifi_rtc_enable_iso` / `_disable_iso` | 置/清 `RTC_CNTL_DIG_ISO(0x60008094)` 的 `WIFI_FORCE_ISO(bit28)` | 和 IDF 的 `esp_wifi_rtc_enable_iso()` 完全一致；`wifi_hw_start/stop`、MAC sleep/wake 都会调 |
+
+### 剩下 38 个空实现，分四类（都有理由）
+
+| 类别 | 槽位 | 理由 |
+| --- | --- | --- |
+| 静态统计证明**库从不直接调用** | 52~54 `_phy_*`、56~60 `_timer_*`、61 `_wifi_reset_mac`、62/63 `_wifi_clock_*` | `tools/osislots.py` 全库反汇编统计里一次都没出现；PHY 由我们自己按 IDF 顺序显式初始化（§205/§206） |
+| 返回 0 就是**正确答案** | 96~118 `_coex_*` | 我们的 BT 是关的，"没有 BT 活动 / 无共存需求" 就是 0 |
+| 纯性能/时钟优化，空实现无害 | 48~51 `_dport_access_stall_*`、`_wifi_apb80m_*` | IDF 用它们优化 APB 访问与 80MHz 时钟，缺了只是慢一点 |
+| 事件系统没接（有意） | 45 已接（记账）、其余事件相关走队列/信号量 | 我们不注册事件处理函数，"关联成功"靠轮询 `esp_wifi_sta_get_ap_info()`（§215） |
+
+以后任何新镜像上板前都可以先跑一次 `tools/osi_audit.py`，确认没有"本该接却漏接"
+的槽位 —— §218 那个 `wpa_crypto_funcs` 全 NULL 的教训就是漏接的代价。
+
+`https` / `wifi` / `wifip` / 基线 `s3` 四种构建都通过，chkimg OK。

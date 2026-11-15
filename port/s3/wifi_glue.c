@@ -752,6 +752,22 @@ static u32 osi_task_ms_to_tick(u32 ms)
 static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); return 31u; }
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
 static void osi_task_delay(u32 ticks) { s3_w2c_task_delay(ticks); }
+static void osi_wifi_rtc_enable_iso(void)
+{
+    volatile u32 *iso = (volatile u32 *)0x60008094u;   /* RTC_CNTL_DIG_ISO */
+
+    HIT_OF(_wifi_rtc_enable_iso);
+    *iso = *iso | (1u << 28);                           /* WIFI_FORCE_ISO */
+}
+
+static void osi_wifi_rtc_disable_iso(void)
+{
+    volatile u32 *iso = (volatile u32 *)0x60008094u;
+
+    HIT_OF(_wifi_rtc_disable_iso);
+    *iso = *iso & ~(1u << 28);
+}
+
 
 /* ---- 日志：把库自己打的信息送到我们的串口 ---- */
 /* 注意：这里**不能**调 port_puts —— 它是 call0 编译的，从 windowed 代码
@@ -1185,6 +1201,9 @@ void s3_wifi_osi_init(void)
     OSI_SET(_wifi_int_disable, osi_wifi_int_disable);
     OSI_SET(_wifi_int_restore, osi_wifi_int_restore);
     OSI_SET(_event_post,      osi_event_post);
+    OSI_SET(_task_delay,      osi_task_delay);
+    OSI_SET(_wifi_rtc_enable_iso,  osi_wifi_rtc_enable_iso);
+    OSI_SET(_wifi_rtc_disable_iso, osi_wifi_rtc_disable_iso);
 
     /* ---- NVS：必须返回错误码，别让库把未初始化内存当有效数据（见上面的说明）---- */
     OSI_SET(_nvs_open,        osi_nvs_open);
@@ -1274,6 +1293,20 @@ void s3_wifi_dump_osi(const char *tag)
     ets_printf("\n");
 }
 
+/* ---- 剩下几个"库会调但我们还没实现"的槽位（§225）----------------------
+ *
+ * 逐个说明（对照 tools/osislots.py 的静态统计）：
+ *   _task_delay            IDF 映射到 vTaskDelay —— 必须真延迟，否则库里的
+ *                          "等一会儿再重试"变成空转（我们的调度是抢占的，所以
+ *                          不会彻底卡死，但时序完全不对）。
+ *   _wifi_rtc_enable_iso / _disable_iso
+ *                          IDF 就是置/清 RTC_CNTL_DIG_ISO 的 WIFI_FORCE_ISO(bit28)，
+ *                          照抄即可（我们已关省电，但库在 hw_start/hw_stop 会调）。
+ *   其余（_phy_*、_timer_*、_wifi_clock_*、_coex_*、apb80m、dport_stall）
+ *                          静态统计显示闭源库**从不直接调用**；coex 那几个即使被
+ *                          调用，返回 0 也表示"没有 BT 活动/无共存需求"，是正确
+ *                          答案（我们的 BT 是关的）。所以继续保持空实现。
+ */
 /* ---- 关联（associate）：init 之后把 STA 真正连上 AP ---------------------
  *
  * 之前只做了 esp_wifi_init_internal()，**没有** set_mode/set_config/start/connect，
