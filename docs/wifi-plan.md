@@ -3998,3 +3998,40 @@ Xtensa 的 **windowed longcall**（`call8/call12` 的远距离形式）**只有 
 3. 特别注意：我们的 IRAM 在 **0x4037xxxx**、flash 在 **0x4201xxxx**，
    两者都在 0x40000000~0x7FFFFFFF 内；但如果某个 longcall 的
    **返回地址**被算到了 0x8xxxxxxx，就会出问题
+
+### 87. 把 WiFi 入口放到段首也没用（trap 跟着函数走）
+
+把 `ieee80211_api.o`（含 `esp_wifi_init_internal`）排到 `.flash.text` 的**最前面**
+（在通配规则之前），它落在 **0x420111fc（段内偏移 0x11FC）**：
+
+```
+*** TRAP cause=0 pc=420111fc
+```
+
+⇒ 和之前 0x1214 时一样。而**同一个段里**、偏移只有 **0x14** 的
+`s3_asm_flash_42`（同样是 windowed、同样经孤岛调用）是**能执行**的。
+
+### 归纳出的精确对比
+
+| 函数 | 段内偏移 | 大小 | 结果 |
+|---|---|---|---|
+| `s3_asm_flash_42`（手写汇编 `movi.n a2,42; retw.n`） | 0x14 | 8 字节 | ✅ 返回 42 |
+| `esp_wifi_init_internal`（闭源库） | 0x11FC | 数百字节 | ❌ trap on `entry` |
+
+两者的调用路径**完全相同**。⇒ 差别在**函数本身**：不是位置、不是偏移，
+而是这个闭源函数在被调用时的某种前提条件没满足。
+
+### 最可能的原因（新的判断）
+
+`entry a1, 32` 会**分配一个寄存器窗口**。如果此时 **`WindowStart` 位图**
+没有为这个 callinc=8 的窗口留好位置，`entry` 就会触发
+**WindowOverflow4/8/12** 异常 —— 而如果我们的窗口溢出向量处理不正确，
+就会表现为 trap。
+
+之前测过"窗口向量在 deep=11 时正常"，但那是**我们自己代码**递归的情形；
+闭源库里的 `entry a1, 32` 可能是从**不同的窗口层级**进来的。
+
+### 下一步
+
+在调用 `esp_wifi_init_internal` 之前，把 `WindowStart`（`rsr a12, windowstart`）
+的值记到信标里，看进入时窗口位图是什么状态、OWB 是多少。
