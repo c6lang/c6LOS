@@ -29,6 +29,7 @@ S3Ctx g_sched[C6OS_MAX_CORES];
  * s3_task_tramp 用 callx0 调我们自己的 call0 任务，
  * 但库创建的 ppTask 是 windowed 的，必须用 callx8 + WOE 才能正确 entry/retw。*/
 u32 g_next_task_windowed = 0;
+u32 g_win_scratch[8] = {0};
 u32 g_ts_cnt = 0;   /* 任务启动次数 */
 u32 g_sw_cnt = 0;
 u32 g_yl_cnt = 0;

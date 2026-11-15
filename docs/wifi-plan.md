@@ -7804,3 +7804,50 @@ osi_calls = 30
 `W2 bringup returned` 出现、无 TRAP、`osi_calls` 超过 30。
 
 若这样仍不行，再考虑真正的多级 spill（§184 的计划）。
+
+## §188 三种"重置窗口状态"的尝试全部失败 —— 结论必须做真正的 spill
+
+在 `s3_task_tramp` 的 windowed 分支里依次试过三种写法，真板结果：
+
+| 尝试 | 写法 | 结果 |
+|---|---|---|
+| A | 先 `wsr windowstart,1` 再 `wsr windowbase,0` | 启动卡死（只到 `c6os s3 boot`） |
+| B | 先 `wsr windowbase,0` 再 `wsr windowstart,1` | 同样卡死 |
+| C | 只 `wsr windowstart, (1<<windowbase)`，不动 base | 同样卡死 |
+
+C 也失败这一点很关键：即使**只把 WINDOWSTART 收紧到"只有当前窗口"**，
+也会立刻坏掉 —— 因为那等于告诉硬件"祖先窗口不再活着"，**但它们的寄存器
+并没有被存到栈上**。下一次 `retw` 逐级回退时，硬件按 WINDOWSTART 认为
+要**从栈上 fill**，于是取到的是栈上的垃圾。
+
+⇒ **不能靠改 WINDOWSTART 来"假装干净"，必须先把祖先窗口真正 spill 出去。**
+
+（另外记一个工具细节：这个 Xtensa 汇编器**不接受三操作数的 `sll at,as,ar`**，
+会报 `too many arguments`；要算 `1 << windowbase` 得用
+`ssl a8` + `sll a9, a9` 这两条两操作数形式。这个坑本轮踩过一次。）
+
+## 第 120 轮最终状态（已回退到已知可用状态）
+
+```
+c6os s3 boot / W0 phy start / W1 bringup / B0 B1 B2 全部通过
+*** TRAP sp=3fcbc660 cause=00000014 pc=820328e4 vaddr=820328e4 ws=00000006 a0=820328e4
+osi_calls = 30
+```
+
+崩溃签名与 §185 完全一致（`pc==vaddr==a0`、带 CALLINC 标记、`ws=6`）。
+
+### 下一轮：实现真正的祖先窗口 spill
+
+必须按 Xtensa 的标准做法来（这也是 `xthal_window_spill` 在做的）：
+
+1. 先把**当前窗口**的 a0..a15 存到当前帧（现在已经在做）；
+2. 读 `WINDOWSTART` 与 `WINDOWBASE`，确定还有几个祖先窗口活着；
+3. 对每一个祖先：`rotw -1` 之后，祖先的 **a0..a3 会出现在我们的 a0..a3**、
+   祖先的 **sp 会出现在我们的 a1**，用 `s32i`/`s32e` 把这 4 个寄存器
+   存到 `[a1 - 16 .. a1 - 4]`；
+4. 全部存完后 `rotw +N` 转回来（N = 转了多少次）；
+5. 最后才可以把 `WINDOWSTART` 收紧为"只有当前窗口"。
+
+注意第 3 步只拿得到祖先的 a0..a3，它的 a4..a15 在 `rotw` 之后并不可见 ——
+这正是标准实现要用 `s32e` 配合固定偏移、而不是简单 `s32i` 的原因，
+下一轮必须照标准序列逐条抄，不能凭直觉写。

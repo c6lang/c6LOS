@@ -13,6 +13,7 @@
     .literal .Lsw_cnt,  g_sw_cnt
     .literal .Lts_cnt,  g_ts_cnt
     .literal .Ldbg2,    0x50001800
+    .literal .Lwscratch, g_win_scratch
     .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
