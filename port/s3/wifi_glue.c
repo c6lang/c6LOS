@@ -102,6 +102,48 @@ static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz);
                                             return p; }
 static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
+/* ---- OSI 队列：自包含的环形缓冲（WiFi 初始化阶段就要用）---- */
+typedef struct { u32 len; u32 size; u32 head; u32 tail; u32 count; u8 *buf; } WQ;
+
+static u32 osi_wifi_create_queue(u32 len, u32 size)
+{
+    WQ *q = (WQ *)osi_malloc((u32)sizeof(WQ) + len * size);
+    if (q == 0) { return 0u; }
+    q->len = len; q->size = size; q->head = 0u; q->tail = 0u; q->count = 0u;
+    q->buf = (u8 *)(q + 1);
+    return (u32)q;
+}
+
+static u32 osi_wifi_queue_send(u32 qh, const void *item, u32 ticks)
+{
+    WQ *q = (WQ *)qh;
+    const u8 *src = (const u8 *)item;
+    u8 *dst;
+    u32 i = 0u;
+    if (q == 0 || item == 0 || q->count >= q->len) { return 0u; }
+    dst = q->buf + q->tail * q->size;
+    while (i < q->size) { dst[i] = src[i]; i = i + 1u; }
+    q->tail = (q->tail + 1u) % q->len;
+    q->count = q->count + 1u;
+    return 1u;
+}
+
+static u32 osi_wifi_queue_recv(u32 qh, void *item, u32 ticks)
+{
+    WQ *q = (WQ *)qh;
+    u8 *dst = (u8 *)item;
+    const u8 *src;
+    u32 i = 0u;
+    if (q == 0 || item == 0 || q->count == 0u) { return 0u; }
+    src = q->buf + q->head * q->size;
+    while (i < q->size) { dst[i] = src[i]; i = i + 1u; }
+    q->head = (q->head + 1u) % q->len;
+    q->count = q->count - 1u;
+    return 1u;
+}
+
+static void osi_wifi_delete_queue(u32 qh) { if (qh != 0u) { osi_free((void *)qh); } }
+
 void s3_wifi_osi_init(void)
 {
     void **tab = (void **)&g_wifi_osi_funcs;
@@ -134,7 +176,11 @@ void s3_wifi_osi_init(void)
     tab[96] = (void *)osi_malloc;          /* _wifi_malloc */
     tab[97] = (void *)osi_realloc;         /* _wifi_realloc */
     tab[98] = (void *)osi_calloc;          /* _wifi_calloc */
-    tab[99] = (void *)osi_zalloc;          /* _wifi_zalloc（若有） */
+    tab[99] = (void *)osi_zalloc;          /* _wifi_zalloc */
+    tab[100] = (void *)osi_wifi_create_queue;   /* _wifi_create_queue */
+    tab[102] = (void *)osi_wifi_delete_queue;   /* _wifi_delete_queue */
+    tab[103] = (void *)osi_wifi_queue_send;     /* _wifi_queue_send */
+    tab[104] = (void *)osi_wifi_queue_recv;     /* _wifi_queue_recv */
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */

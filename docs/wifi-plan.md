@@ -4794,3 +4794,30 @@ tab[99]  = osi_zalloc        _wifi_zalloc
 
 我们的 RTOS 有 `kernel/queue.c6`，但对不上 IDF 的队列语义；
 最直接的是用**环形缓冲 + 我们自己的实现**。
+
+### 109. 队列也接上了，NO_MEM 仍来自更早的地方
+
+已实现（`port/s3/wifi_glue.c`，全部自包含、不依赖别的模块）：
+
+| 字段 | 函数 | 实现 |
+|---|---|---|
+| 43/44/46 | `_malloc` / `_free` / `_get_free_heap_size` | 自包含首次适配分配器 |
+| 92-95 | `_malloc_internal` / `_realloc_internal` / `_calloc_internal` / `_zalloc_internal` | 同上 |
+| 96-99 | `_wifi_malloc` / `_wifi_realloc` / `_wifi_calloc` / `_wifi_zalloc` | 同上 |
+| 100 | `_wifi_create_queue` | 环形缓冲 |
+| 102-104 | `_wifi_delete_queue` / `_wifi_queue_send` / `_wifi_queue_recv` | 同上 |
+
+**但 `esp_wifi_init_internal` 仍返回 `0x101`，而且堆头的 magic 还是 0**
+⇒ 我们的任何函数都**没被调用过**。
+
+⇒ NO_MEM 来自**更早**的某处。剩下的嫌疑：
+- `_event_post`（字段 45，`glue_ret0` 返回 0，可能被判为失败）
+- `_semphr_create` / `_mutex_create`（返回 0 当作句柄无效）
+- `_task_create`（返回 0 当作任务创建失败）
+
+### 下一步最有效的做法
+
+**反汇编 `esp_wifi_init_internal` 里报 `0x101` 的那条路径**，看它是
+在调完哪个函数指针后跳到 `movi a2, 0x101` 的 —— 这样能精确定位是哪个 OSI 函数。
+
+（`0x101` 这个常量在库里应该很容易搜到。）
