@@ -225,7 +225,22 @@ extern void *g_s3_cur[2];   /* port/s3/ctx.S 里的当前 ctx（按核下标） 
  * 验证这是否足以让 init 走完（WiFi 任务照常阻塞等下一条消息）。 */
 static u32 g_init_task = 0u;
 
-#define INIT_NOBLOCK() (g_init_task != 0u && s3_w2c_current_task() == g_init_task)
+static u32 g_nb_n = 0u;
+static u32 s3_init_noblock(void)
+{
+    u32 me = s3_w2c_current_task();
+    u32 hit = (g_init_task != 0u && me == g_init_task) ? 1u : 0u;
+    if (g_nb_n < 8u) {
+        volatile u32 *nd = (volatile u32 *)0x50001410u;
+        u32 k = g_nb_n;
+        g_nb_n = k + 1u;
+        nd[k * 2u] = me;
+        nd[k * 2u + 1u] = hit;
+        nd[16] = g_init_task;
+    }
+    return hit;
+}
+#define INIT_NOBLOCK() (s3_init_noblock() != 0u)
 
 static u32 w_ticks(u32 t)
 {
@@ -511,7 +526,16 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
-    if (INIT_NOBLOCK()) { return 0; }   /* 初始化任务不阻塞在收队列上 */
+    if (INIT_NOBLOCK()) {
+        /* 初始化任务在等一条"回复消息"。这里直接返回成功并给一条全零消息，
+         * 看它能否据此继续往下走（库若只看返回码就会前进）。 */
+        u8 *it = (u8 *)item;
+        u32 z = 0u;
+        if (it != 0) {
+            while (z < 16u) { it[z] = 0u; z = z + 1u; }
+        }
+        return 1;
+    }
     if (g_qbad == 0u && (q == 0 || q->magic != WQ_MAGIC)) {
         g_qbad = 1u;
         *(volatile u32 *)0x50000360u = (u32)qh;   /* 第一个不过 magic 的 recv 句柄 */
@@ -972,6 +996,7 @@ u32 s3_wifi_bringup(void)
                (u32)(void *)g_wifi_osi_funcs._magic,
                (u32)(void *)g_wifi_osi_funcs._version);
     g_init_task = s3_w2c_current_task();
+    *(volatile u32 *)0x50001400u = g_init_task;
     ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
                (u32)(void *)g_wifi_cfg_blob,
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),

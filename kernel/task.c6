@@ -801,11 +801,15 @@ u32 os_task_total(void) {
  * `_task_create` 写回的句柄与 `_task_get_current_task()` 用的是同一口径。 */
 u32 os_task_current_slot(void) {
     u32 i = 0;
+    u32 cid = 0;
     if (g_cur == 0) {
         return 0u;
     }
+    /* 注意：.c6 编译出来的 `&g_tasks[i]` 取址不可靠（见 docs §114），
+     * 这里改成比较 id（g_tasks[] 只在 os_task_create 里分配，id 唯一）。 */
+    cid = g_cur->id;
     while (i < (u32)C6OS_MAX_TASKS) {
-        if (&g_tasks[i] == g_cur) {
+        if (g_tasks[i].magic == OS_TASK_MAGIC && g_tasks[i].id == cid) {
             return i + 1u;      /* 0 保留给"无当前任务" */
         }
         i++;
