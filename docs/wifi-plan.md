@@ -6082,3 +6082,44 @@ blk2: id=1  kind=6  obj=0x3fcbf234  to=0     （初始化任务，**同一个对
 
 最省事的验证：把 `ieee80211_ioctl_init` 的地址记进 RTC 前后各一个计数，
 确认它到底有没有被调用。
+
+## §145 kind 常量核对：两次阻塞确实都是**队列接收**
+
+内核里各原语的等待类型常量：
+
+| 文件 | 调用 | kind |
+|---|---|---|
+| `kernel/sem.c6:49` | `os_task_block_prepare(s, timeout, 1u, 0u)` | **1** |
+| `kernel/mutex.c6:155` | `os_task_block_prepare(m, timeout, 2u, 0u)` | **2** |
+| `kernel/queue.c6:144` | `os_task_block_prepare(q, timeout, Q_WAIT_GET, 0u)`，`#define Q_WAIT_GET 6u` | **6** |
+| `kernel/queue.c6:105` | `Q_WAIT_PUT` | 5 左右 |
+| `kernel/event.c6:84` | 由调用方传入 | — |
+
+所以 §143 的读数（blk1、blk2 都是 `kind=6`）**确实是队列接收**，
+不是信号量、也不是互斥量：
+
+```
+blk0: id=1  kind=1  obj=0x3fcbf8c0   初始化早期的信号量等待
+blk1: id=2  kind=6  obj=0x3fcbf234   WiFi 任务在 WiFi 队列上收
+blk2: id=1  kind=6  obj=0x3fcbf234   初始化任务**也在同一个队列上收**
+```
+
+对象 `0x3fcbf234` = `WQ` 对象（`0x3fcbf230`）的 `WOsQueue` 成员（偏移 4），
+也就是 `s_wifi_queue`。全场只创建过 **1 个**队列（`g_qn = 1`）。
+
+结合 §144（`ieee80211_ioctl` 及其 `_init` 都不含队列接收、且 `ioctl`
+压根没被调到），剩下的唯一解释是：
+
+> 初始化任务在恢复执行时，跑进了 `ppTask` 的代码。
+
+如果属实，根因就在上下文恢复：两个任务虽然各有独立栈（§140 已确认
+`0x3fcb8620` / `0x3fcba620`，各 8192），但某一方保存的帧 PC 落到了
+另一方的栈里。
+
+### 下一步
+
+把两个 ctx 里保存的 EPC（帧偏移 60）读出来比一比：
+`g_ctx[0].sp` 指向的帧里 `[sp+60]` 应该是 `wifi_main` 被切走时的 PC，
+`g_ctx[1].sp` 的 `[sp+60]` 应该是 `ppTask` 的。用 JTAG 或
+（更稳的）在 `os_task_block_prepare` 里把 `g_cur->ctx` 和该帧的 `[sp+60]`
+一起记进 RTC。
