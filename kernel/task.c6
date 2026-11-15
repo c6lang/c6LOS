@@ -315,6 +315,13 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     g_cur->wait_bits = 0;
     g_cur->wait_result = 0;
     g_cur->delay_left = timeout;
+    if (timeout == 0u) {
+        /* 永久等待：先清掉本任务可能残留的超时条目。
+         * 否则上一次带超时的等待留下的条目一旦到期，会把这次永久等待
+         * 误唤醒成"超时"（os_task_block_wait 返回 -2），
+         * 表现为调用方在 _queue_recv 上不停重试。 */
+        (void)os_timeout_cancel(g_cur->id);
+    }
     if (timeout != 0u && os_timeout_add(g_cur->id, timeout) != 0) {
         g_cur->wait_obj = 0;
         g_cur->delay_left = 0;

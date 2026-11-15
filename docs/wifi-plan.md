@@ -6870,3 +6870,46 @@ g_tasks[i].id == g_cur->id`），绕开取址。
    在 timeout=0 时到底返回什么。
 2. 若 `os_task_block_wait()` 在"没有任何超时条目"时也返回 -2，
    那所有 timeout=0 的永久等待都会变成"立即超时"，正好解释 ppTask 的轮询。
+
+## §166 ★ 修复 stale 超时条目：永久等待前先取消本任务的超时
+
+`QDIAG` 一直在报 `os_queue_get_item` 返回 **-2（超时）**，而我们传给内核的
+超时是 `w_ticks(0xFFFFFFFF) = 0`（永久等待，根本不注册超时条目）。
+-2 只可能来自 `os_task_block_wait()` 返回 `wait_result`，
+而 `wait_result = -2` 是 `os_sched_tick()` 里"超时到期 → `unblock(t, -2)`"
+写进去的。
+
+⇒ **有 stale 超时条目**：本任务之前某次带超时的等待留下了表项，
+到期后把这次的永久等待误唤醒成"超时"。
+
+修法（`kernel/task.c6` 的 `os_task_block_prepare`）：
+
+```c
+    if (timeout == 0u) {
+        /* 永久等待：先清掉本任务可能残留的超时条目 */
+        (void)os_timeout_cancel(g_cur->id);
+    }
+```
+
+真板效果：OSI 回调总数从**百万级**降到**百级**（746~1537），
+轮询大幅收敛 —— 确认 stale 超时条目确实是那个自旋的主因。
+
+不过仍然没有 `W2`：尾部回调还都是 `29`（`_queue_recv`），
+只是重试次数少了很多。说明还有残留的唤醒源（或库本身就是轮询式设计）。
+
+## 这一轮的两个实质修复
+
+| 修复 | 效果（真板） |
+|---|---|
+| `os_task_current_slot` 改用 id 比较（.c6 取址不可靠） | `_task_get_current_task()` 不再恒返 0；库行为大变，回调 30 → 百万级 |
+| `os_task_block_prepare` 永久等待前取消残留超时 | 自旋从百万级降到百级 |
+
+这两个都是**真实的 bug**，且都不是靠猜——都有 RTC 读数定位。
+
+### 下一轮
+
+继续把 `_queue_recv` 的剩余重试收敛到 0：在 `os_queue_get_item` 的
+"被唤醒后重新检查"路径上也加一次 `os_timeout_cancel`，
+或者直接检查 `os_sched_tick` 的 `unblock(t,-2)` 是否会把**没有超时条目**
+的任务也误唤醒。目标是让 `ppTask` 真正稳定阻塞在队列上、把 CPU 让给
+初始化任务跑完。
