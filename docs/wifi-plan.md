@@ -3277,3 +3277,34 @@ c6os s3 boot
 2. WiFi 闭源库能链接进 flash（独立 `.flash.wifi` 段）
 3. `esp_wifi_init_internal` 的 `entry` 能执行（windowed 代码从 flash 跑没问题）
 4. 剩下的纯粹是 **call0/windowed ABI 边界**的工程问题
+
+### 82g. 精确定位：`call8` 的返回地址被置上了 call0 的最高位
+
+反汇编 `s3_win_call_osi_init`（孤岛桥）:
+
+```
+4037d25d:  call8   4037c9f0 <s3_win_osi_init>
+4037d260:  mov.n   a2, a10          ← 这条就是 trap 报的 PC（0x8037d260）
+```
+
+而 `s3_win_osi_init`（在 `win_island.c`，**确实是 windowed 编译**）:
+
+```
+4037c9f0:  entry   a1, 32
+4037c9f3:  call8   4037ca0c <s3_wifi_osi_init>
+4037c9f6:  call8   4037ca20 <s3_wifi_osi_funcs_ptr>
+4037c9f9:  or      a2, a10, a10
+4037c9fc:  retw                     ← 用的是 retw，正确
+```
+
+⇒ trap 的 PC 是 `0x8037d260`（= `0x4037d260` 置了 bit31），也就是 **`call8` 的返回地址
+在返回时被加上了 call0 的标记位**。
+
+`S3_SHIM_ABI ?= windowed` 确认无误，孤岛本身是 windowed 的。
+
+可能的来源：
+- `s3_wifi_osi_init()` 内部把寄存器窗口压到比 PHY 测试更深的层级，
+  触发了我们窗口溢出/欠载向量还没覆盖到的层
+- 或者它内部调到的某个 call0 函数污染了 `a0`
+
+（我们已经验证过窗口向量在 deep=11 时是正常的。）
