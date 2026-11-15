@@ -422,6 +422,7 @@ static u32 g_ev_n = 0u;
 static u32 g_sp_n = 0u;
 static u32 g_rc_n = 0u;
 static u32 g_fr_n = 0u;
+static u32 g_gr_n = 0u;
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -564,6 +565,19 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         }
     }
     r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    {
+        /* 诊断：每次收到的返回值 + 当前队列 count，判断第一次是"真收到"
+         * 还是我们错误地返回了成功。 */
+        volatile u32 *gd = (volatile u32 *)0x50001300u;
+        u32 kk = g_gr_n;
+        g_gr_n = kk + 1u;
+        if (kk < 4u) {
+            gd[kk * 4u]      = (u32)(int)r;
+            gd[kk * 4u + 1u] = q->q.count;
+            gd[kk * 4u + 2u] = s3_w2c_current_task();
+            gd[kk * 4u + 3u] = *(volatile u32 *)0x3fcef904u;
+        }
+    }
     {
         volatile u32 *ev = (volatile u32 *)0x50000400u;
         ev[g_ev_n & 7u] = (s3_w2c_current_task() << 8) | 2u;
