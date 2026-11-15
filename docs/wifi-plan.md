@@ -7127,3 +7127,42 @@ irqfill1: seq=2 ctx=0x3fcbe660 sp=0x3fcba550
 * `port_task_switch`：记录 `a4`（= 目标 ctx）与它恢复出来的 `a1`。
 
 只要有一次「任务 1 的 ctx 被写进了任务 2 的帧」或反之，就找到了根因。
+
+## §172 switch / yield 的 sp 埋点：switch 正确，yield 读数异常
+
+在 `port/s3/ctx.S` 里给两处埋点（RTC `0x50001800` 起）：
+
+```
+sw_out_sp  = 0x3fcd8ef0   （主循环的 sp，落在主栈顶端附近 ✓）
+sw_tgt_ctx = 0x3fcbe660   （目标任务 1 的 ctx ✓）
+sw_tgt_sp  = 0x3fcba3a0   （在任务 1 自己的栈区 0x3fcb8620..0x3fcba620 ✓）
+yl_ctx     = 0x62503d0a   （**不是 ctx 地址**，异常）
+yl_sp      = 0x3fcbe660   （**这是 ctx 地址，不是栈指针**，异常）
+```
+
+* **`port_task_switch` 一侧完全正确**：保存主循环的 sp、目标 ctx 与目标 sp
+  三者都能对上；
+* **`port_task_yield` 一侧两个读数看起来被"错位"了**：本该是 ctx 的槽里是
+  垃圾、本该是 sp 的槽里却是 ctx 地址。
+
+这有两种可能：
+
+1. 埋点插入的位置落在 `beqz a4, ...` 的**空指针分支之后**或寄存器已被改写的
+   位置，导致读到的是别的寄存器（埋点问题）；
+2. `port_task_yield` 里真有寄存器被提前改写（真 bug）。
+
+反汇编核对（`0x4037b4d0` 起）确认：`a4 = g_s3_cur[core]` 是在
+`l32i.n a4, a4, 0` 之后才有值的，`beqz a4` 会跳到空指针分支。
+埋点如果落在 `addi a1, a1, -80` 之前，`a1` 还是**调用者的栈指针**；
+落在之后才是帧指针。需要把埋点明确放到 `s32i a1, a4, 64` 之后核对。
+
+### 下一轮
+
+把 `port_task_yield` 的埋点改成记录 `(a4, a1, a4->sp)` 三个值并放到
+`s32i a1, a4, 64` 之后，确认：
+* `a4` 是不是真的 ctx；
+* `a1` 是不是真的落在该 ctx 对应任务的栈区。
+
+如果确认 `a4`/`a1` 都对，那"任务 1 执行 ppTask 代码"就只剩
+`port_task_switch` 恢复目标帧时 RESTORE_FRAME 的 EPC 来源问题，
+可以对照 `S3Ctx.r[]`/`sp` 的布局再核一次。

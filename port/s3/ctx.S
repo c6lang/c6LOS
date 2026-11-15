@@ -12,6 +12,7 @@
     .literal .Lrtc_yl,  0x50001008   /* yield 计数 */
     .literal .Lsw_cnt,  g_sw_cnt
     .literal .Lts_cnt,  g_ts_cnt
+    .literal .Ldbg2,    0x50001800
     .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
@@ -117,13 +118,18 @@ port_task_switch:
     l32r    a3, .Lg_sched
     add     a3, a3, a5
     s32i    a1, a3, 64
-
+    /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
+    l32r    a14, .Ldbg2
+    s32i    a1, a14, 0
     l32i    a4, a1, 4               /* 目标任务 ctx（参数先前存在帧里） */
+    s32i    a4, a14, 4
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5
     s32i    a4, a3, 0
     l32i    a1, a4, 64
+    l32r    a14, .Ldbg2
+    s32i    a1, a14, 8              /* 恢复出来的目标 sp */
     RESTORE_FRAME
 
     .global port_task_yield
@@ -170,6 +176,10 @@ port_task_yield:
     and     a5, a5, a6
     s32i    a5, a1, 64
     s32i    a1, a4, 64
+    /* 诊断：yield 的外出任务 ctx 与保存的 sp */
+    l32r    a14, .Ldbg2
+    s32i    a4, a14, 16
+    s32i    a1, a14, 20
 
     l32r    a3, .Lg_sched
     movi    a6, 76
