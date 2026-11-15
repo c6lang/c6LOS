@@ -7969,3 +7969,63 @@ windowed 调用返回时 `a0` 是**带 CALLINC 标记**的地址（如 `0x820328
 问题在 `osi_queue_recv_body` 内部某处把 PS 写坏了；如果已经变成 0，
 那就是我们自己的某个函数（`w2c` 垫片、`s3_w2c_current_task` 等）改了 PS。
 这一步能把范围从"整条链"缩到"某一个函数"。
+
+## §192 固件侧诊断通道 + init 停在 _queue_recv（真板读数）
+
+### 换掉的观测手段
+`esptool read-mem` 每次调用都会**先复位芯片**，而且这一版只接受地址（读 4 字节），
+所以"逐字段读"既慢又对不上——每个字段来自不同次启动。两条替代：
+
+1. `tools/rd.py`：一次连接读一整段（走 stub 的读接口）。
+   注意 `tools/serial.py` 会顶掉 pyserial 的 `serial` 包，导入 esptool 前要先把它
+   从 `sys.path` 里摘掉，否则报 `'serial' is not a package`。
+2. **固件自己打印**（最终采用）：`port/s3/win_island.c` 里加一个低优先级 windowed
+   任务 `s3_win_monitor_task`，每 120 tick 打一次 `s3_win_dump_diag()`：
+   信号量操作环、阻塞环、内核任务状态（`os_task_probe`）、整张 OSI 调用计数表。
+   这条路既一致又可重复，后面所有读数都来自它。
+
+### 根因确认（上一轮的结论，本轮补上证据链）
+`wifi_glue.c` 是 `-mabi=windowed` 编的，里面直接调了 call0 编的 `port_cur_ctx()`。
+`call8` 进去、对方 `ret.n` 返回，返回地址被打上 CALLINC 标记（`0x82xxxxxx`）⇒
+`cause=0x14 InstrFetchProhibited`，`pc==vaddr==a0`。改用 `s3_w2c_current_task()`
+（走 `port/s3/w2c.S` 的正规壳）后，隔离测试 `s3_wifi_test_recv` 从"必崩"变为
+完全成功。
+
+### 真板现状
+```
+[wifimain] id=1 tick=0        <- 初始化任务就是 task1
+W0 phy start
+W1 bringup
+B0 osi0=00000000 osi@00000000 calls@3fcbea9c
+B1 slot13=4037d3f4 slot18=4037d2f0 magic=deadbeaf ver=00000008
+B2 cfg@3fcbe994 osi=3fcbec9c magic@144=1f2f3f4f
+```
+任务状态（`os_task_probe`）：
+```
+task1 st=4(BLOCKED) wk=6(queue get) wobj=<pp 队列>
+task2 st=2(RUNNING)  <- 监控任务
+task3 st=4(BLOCKED) wk=6(queue get) wobj=<pp 队列>
+```
+OSI 调用计数表（索引 = `wifi_osi_funcs_t` 里的字节偏移/4）：
+```
+13 _semphr_create=1      15 _semphr_take=1     16 _semphr_give=1
+18 _mutex_create=2       19 _recursive_mutex_create=2
+21 _mutex_lock=1         22 _mutex_unlock=1
+29 _queue_recv=2         37 _task_create=1     42 _task_get_max_priority=2
+43 _malloc=11            86 _malloc_internal=1 88 _calloc_internal=3
+94 _wifi_create_queue=1
+```
+要点：`_log_write`(83)=0 —— **库自己一个字都没打**，所以不能指望它的日志；
+而且总调用数只有 30 左右，init 极早就停了。
+
+w2c.S 的 recv 壳记录的"库侧返回地址"（带 CALLINC，掩掉后补 `0x40000000`）是
+`0x40382149` / `0x40382159` ⇒ 按当前构建 `nm` 落在 **`ppTask+0x85` / `ppTask+0x95`**。
+也就是说观测到的 3 次 `_queue_recv` 全部来自 ppTask；而内核视角下 task1（我们的
+初始化任务）也在同一个队列上阻塞。下一轮要解决的就是这个矛盾：
+要么 task1 的 `wait_kind/wait_obj` 字段是上一次等待的残留，要么还有一条
+不经过 `osi_queue_recv` 壳的阻塞路径。
+
+### 环境坑
+`~/.c6os/toolchain/...` 之外，`.c6` 编译器 `/home/winger/c6/tcc/c6` 依赖
+`libtcc.so`，需要 `LD_LIBRARY_PATH=/home/winger/c6/tcc`；否则报
+`cannot open shared object file`（看起来像构建失败，其实是动态库路径）。

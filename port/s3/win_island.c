@@ -4,6 +4,11 @@
  */
 #include "c6os/types.h"
 
+/* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
+extern u32 s3_w2c_current_task(void);
+extern u32 s3_w2c_tick_get(void);
+extern u32 s3_w2c_task_probe(u32 id, u32 what);
+
 /* 桥进出计数（win_bridge.S 自增，供 RTC 诊断） */
 u32 g_wb_in = 0;
 u32 g_wb_out = 0;
@@ -524,6 +529,9 @@ u32 s3_win_wifi_main(void)
 {
     u32 rc = 0;
 
+    /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
+    ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
+               (unsigned)s3_w2c_tick_get());
     s3_win_log("W0 phy start\n");
     (void)s3_win_phy_cal();
     (void)s3_win_phy_enable();
@@ -557,6 +565,7 @@ extern u32 s3_w2c_task_delay(u32 ticks);
  * s3_win_deep(16) 递归 16 层 —— 4 个窗口装不下，必然触发
  * _win_ovf4/8/12 与 _win_unf4/8/12。返回值是固定算术值，
  * 所以计数器的整除关系能直接证明整条链算对了。 */
+__attribute__((section(".flash.text")))
 u32 s3_win_stress(u32 depth, u32 rounds)
 {
     if (depth == 0u) {
@@ -569,6 +578,7 @@ u32 s3_win_stress(u32 depth, u32 rounds)
     return s3_win_stress(depth - 1u, rounds) + 1u;
 }
 
+__attribute__((section(".flash.text")))
 void s3_win_stress_task(void *arg)
 {
     volatile u32 *d = (volatile u32 *)0x50001300u;
@@ -594,10 +604,6 @@ void s3_win_stress_task(void *arg)
  * 所以"读一串字段"既慢又对不上。由固件自己打印才是最可靠的快照通道。
  * 本函数在 windowed 岛上，可以直接调 ROM 的 ets_printf。
  */
-extern u32 s3_w2c_tick_get(void);
-extern u32 s3_w2c_current_task(void);
-extern u32 s3_w2c_task_probe(u32 id, u32 what);
-
 __attribute__((section(".flash.text")))
 static void pdump(const char *tag, u32 a, u32 b, u32 c, u32 d)
 {
@@ -629,6 +635,12 @@ void s3_win_dump_diag(void)
                    (unsigned)blk[i * 5u + 2u], (unsigned)blk[i * 5u + 4u]);
     }
     pdump("  qrun", gq[0], gq[1], gq[2], gq[3]);
+    /* w2c.S 的 recv 壳记录的"库侧返回地址"（带 CALLINC 位，看的时候掩掉高 2 位） */
+    {
+        volatile u32 *lra = (volatile u32 *)0x50000F08u;
+
+        pdump("  lra ", lra[0], lra[1], lra[2], lra[3]);
+    }
     /* 内核视角的任务状态：state / wait_kind / wait_obj。
      * 状态值：0=就绪 1=运行 2=阻塞 3=挂起 4=结束（以 kernel/task.c6 为准） */
     /* 库里到底调过哪些 OSI 回调、各多少次 —— 这一张表能直接看出 init 走到哪 */
