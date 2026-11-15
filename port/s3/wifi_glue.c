@@ -12,6 +12,26 @@
 wifi_osi_funcs_t g_wifi_osi_funcs;
 void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
+extern volatile u32 g_osi_calls[128];
+extern int ets_printf(const char *fmt, ...);
+
+/* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
+ * 串口不可靠时用 `esptool read-mem 0x50000200` 直接读回来。
+ *   0x50000200 = 回调总次数
+ *   0x50000204 + 4*(n & 63) = 第 n 次回调的字段号                          */
+#define OSI_RING_CNT  ((volatile u32 *)0x50000200u)
+#define OSI_RING_BUF  ((volatile u32 *)0x50000204u)
+static u32 g_osi_ring_n = 0u;
+
+#define OSI_HIT(i) do { \
+    g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
+    { \
+        u32 k_ = g_osi_ring_n; \
+        OSI_RING_BUF[k_ & 63u] = (u32)(i); \
+        g_osi_ring_n = k_ + 1u; \
+        *OSI_RING_CNT = g_osi_ring_n; \
+    } } while (0)
+
 /* 通用的空实现：不碰参数、返回 0 */
 static u32 glue_ret0(void)
 {
@@ -51,6 +71,7 @@ static void wh_ensure(void)
 static void *osi_malloc(u32 n)
 {
     u32 want = (n + 15u) & ~15u;
+    OSI_HIT(43);
     WhBlk *b;
     wh_ensure();
     b = (WhBlk *)S3_WIFI_HEAP_BASE;
@@ -77,6 +98,7 @@ static void osi_free(void *p)
 {
     WhBlk *hdr;
     if (p == 0) { return; }
+    OSI_HIT(44);
     hdr = (WhBlk *)((u8 *)p - sizeof(WhBlk));
     if (hdr->magic == WH_MAGIC) { hdr->used = 0u; }
 }
@@ -105,25 +127,6 @@ static void *osi_calloc(u32 n, u32 sz)    { void *p = osi_malloc(n * sz);
                                             return p; }
 static void *osi_zalloc(u32 n)            { return osi_calloc(1u, n); }
 
-extern volatile u32 g_osi_calls[128];
-extern int ets_printf(const char *fmt, ...);
-
-/* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
- * 串口不可靠时用 `esptool read-mem 0x50000200` 直接读回来。
- *   0x50000200 = 回调总次数
- *   0x50000204 + 4*(n & 31) = 第 n 次回调的字段号                          */
-#define OSI_RING_CNT  ((volatile u32 *)0x50000200u)
-#define OSI_RING_BUF  ((volatile u32 *)0x50000204u)
-static u32 g_osi_ring_n = 0u;
-
-#define OSI_HIT(i) do { \
-    g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
-    { \
-        u32 k_ = g_osi_ring_n; \
-        OSI_RING_BUF[k_ & 31u] = (u32)(i); \
-        g_osi_ring_n = k_ + 1u; \
-        *OSI_RING_CNT = g_osi_ring_n; \
-    } } while (0)
 
 /* ---- OSI 队列：自包含的环形缓冲（WiFi 初始化阶段就要用）---- */
 typedef struct { u32 len; u32 size; u32 head; u32 tail; u32 count; u8 *buf; } WQ;
@@ -228,6 +231,7 @@ static int osi_mutex_lock(void *m)
 static int osi_mutex_unlock(void *m)
 {
     WSem *s = (WSem *)m;
+    OSI_HIT(22);
     if (s == 0 || s->magic != WSEM_MAGIC) { return 0; }
     if (s->cnt < s->max) { s->cnt = s->cnt + 1u; }
     return 1;
@@ -320,12 +324,117 @@ static void osi_task_yield_from_isr(void) { }
  * （s3_win_log 一直这么用）。 */
 extern int ets_printf(const char *fmt, ...);
 
-static void osi_log_write(u32 level, const char *tag, const char *fmt, ...)
+/* 只有落在 flash/IROM/IRAM/DRAM 里的指针才当字符串用。 */
+static int c6_ok_str(u32 p)
+{
+    if (p >= 0x3C000000u && p < 0x3C800000u) { return 1; }   /* DROM */
+    if (p >= 0x42000000u && p < 0x42800000u) { return 1; }   /* IROM */
+    if (p >= 0x40300000u && p < 0x40400000u) { return 1; }   /* IRAM */
+    if (p >= 0x3F000000u && p < 0x3FE00000u) { return 1; }   /* DRAM */
+    return 0;
+}
+
+/* 注意：窗口是 8 个寄存器，call8 的轮转量是 8，所以库放在 a10..a15 的参数
+ * 到我们这里就是 a2..a7 —— 也就是 6 个参数。
+ *   _log_write(level, tag, fmt, arg)
+ *   _log_writev(level, tag, fmt, &va_list, buf, len)                        */
+/* ROM ld 里没有 vsnprintf，所以自己按格式串把 va_list 里的参数还原出来。
+ * Xtensa 的 va_list 是"指向参数保存区的指针"，这里 ap 又是这个 va_list
+ * 的地址，所以 *(u32*)ap 才是参数区首地址。 */
+static void c6_log_fmt(const char *fmt, void *app)
+{
+    char out[128];
+    u32 o = 0u;
+    u32 n = 0u;
+    u32 *args = 0;
+
+    if (app != 0) {
+        u32 p = *(u32 *)app;
+        if (p >= 0x3F000000u && p < 0x3FE00000u) { args = (u32 *)p; }
+    }
+    while (fmt != 0 && *fmt != '\0' && o < (u32)sizeof(out) - 16u) {
+        if (*fmt != '%') { out[o] = *fmt; o++; fmt++; continue; }
+        fmt++;
+        if (*fmt == '%') { out[o] = '%'; o++; fmt++; continue; }
+        while (*fmt == '-' || *fmt == '+' || *fmt == ' ' || *fmt == '#' ||
+               (*fmt >= '0' && *fmt <= '9') || *fmt == '.' ||
+               *fmt == 'l' || *fmt == 'h' || *fmt == 'z') { fmt++; }
+        {
+            u32 v = 0u;
+            u32 k;
+            u32 i;
+            char t[12];
+            if (args != 0) { v = args[n]; }
+            n++;
+            if (*fmt == 's') {
+                u32 sp = v;
+                if (c6_ok_str(sp)) {
+                    const char *cs = (const char *)sp;
+                    while (*cs != '\0' && o < (u32)sizeof(out) - 2u) { out[o] = *cs; o++; cs++; }
+                } else { out[o] = '?'; o++; }
+            } else if (*fmt == 'c') {
+                out[o] = (char)(v & 0xFFu); o++;
+            } else if (*fmt == 'd') {
+                u32 u;
+                int d = (int)v;
+                k = 0u;
+                if (d < 0) { out[o] = '-'; o++; u = (u32)(-d); } else { u = (u32)d; }
+                if (u == 0u) { t[k] = '0'; k++; }
+                while (u != 0u) { t[k] = (char)('0' + (u % 10u)); k++; u = u / 10u; }
+                for (i = 0u; i < k; i++) { out[o] = t[k - 1u - i]; o++; }
+            } else if (*fmt == 'x' || *fmt == 'X' || *fmt == 'u' || *fmt == 'p') {
+                u32 u = v;
+                u32 base = (*fmt == 'u') ? 10u : 16u;
+                k = 0u;
+                if (*fmt == 'p') { out[o] = '0'; o++; out[o] = 'x'; o++; }
+                if (u == 0u) { t[k] = '0'; k++; }
+                while (u != 0u) { t[k] = "0123456789abcdef"[u % base]; k++; u = u / base; }
+                for (i = 0u; i < k; i++) { out[o] = t[k - 1u - i]; o++; }
+            } else {
+                out[o] = '?'; o++;
+            }
+            if (*fmt != '\0') { fmt++; }
+        }
+    }
+    out[o] = '\0';
+    ets_printf("%s", out);
+}
+
+static void osi_log_write(u32 level, const char *tag, const char *fmt, const char *arg)
 {
     OSI_HIT(83);
-    ets_printf("[wifi]%s: %s\n", (tag != 0) ? tag : "?", (fmt != 0) ? fmt : "?");
-    (void)level;
+    if (level < 2u) {
+        ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+        if (c6_ok_str((u32)(void *)fmt)) { ets_printf("%s", fmt); }
+        ets_printf("\n");
+    }
+    (void)arg;
 }
+
+static void osi_log_writev(u32 level, const char *tag, const char *fmt,
+                           void *ap, char *buf, u32 len)
+{
+    OSI_HIT(84);
+    if (level > 2u) { return; }             /* 只打 WARN/ERROR，避免刷屏 */
+    ets_printf("[v%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+    if (!c6_ok_str((u32)(void *)fmt)) {
+        /* fmt 不是字符串：把 va_list 里的东西直接摊开看 */
+        u32 p = (ap != 0) ? *(u32 *)ap : 0u;
+        ets_printf("(fmt=%08x)", (u32)(void *)fmt);
+        if (p >= 0x3F000000u && p < 0x3FE00000u) {
+            u32 i;
+            u32 *w = (u32 *)p;
+            ets_printf(" args@%08x:", p);
+            for (i = 0u; i < 6u; i++) { ets_printf(" %08x", w[i]); }
+        }
+        ets_printf("\n");
+        return;
+    }
+    c6_log_fmt(fmt, ap);
+    ets_printf("\n");
+    (void)buf; (void)len;
+}
+static u32 osi_log_timestamp(void) { OSI_HIT(85); return 0u; }
 
 /* ---- 时间 / 随机数 ---- */
 static u64 osi_esp_timer_get_time(void)
@@ -348,6 +457,18 @@ static u32 osi_read_mac(u8 *mac, u32 type)
     if (mac != 0) { while (i < 6u) { mac[i] = 0u; i = i + 1u; } }
     return 0u;
 }
+
+/* 库对同一份实现会用不同槽位调用（内部堆 / wifi 专用堆），分开包装
+ * 才能从 RTC 追踪里看出到底是哪个槽位在失败。 */
+static void *osi_malloc_internal(u32 n)  { OSI_HIT(86); return osi_malloc(n); }
+static void *osi_realloc_internal(void *p, u32 n) { OSI_HIT(87); return osi_realloc(p, n); }
+static void *osi_calloc_internal(u32 n, u32 sz)   { OSI_HIT(88); return osi_calloc(n, sz); }
+static void *osi_zalloc_internal(u32 n)  { OSI_HIT(89); return osi_calloc(1u, n); }
+static void *osi_wifi_malloc(u32 n)      { OSI_HIT(90); return osi_malloc(n); }
+static void *osi_wifi_realloc(void *p, u32 n)     { OSI_HIT(91); return osi_realloc(p, n); }
+static void *osi_wifi_calloc(u32 n, u32 sz)       { OSI_HIT(92); return osi_calloc(n, sz); }
+static void *osi_wifi_zalloc(u32 n)      { OSI_HIT(93); return osi_calloc(1u, n); }
+
 static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
 
 /* ---- 表装配：用 __builtin_offsetof，彻底避免手数下标 ---- */
@@ -378,14 +499,14 @@ void s3_wifi_osi_init(void)
     OSI_SET(_malloc,          osi_malloc);
     OSI_SET(_free,            osi_free);
     OSI_SET(_get_free_heap_size, osi_free_heap_size);
-    OSI_SET(_malloc_internal, osi_malloc);
-    OSI_SET(_realloc_internal, osi_realloc);
-    OSI_SET(_calloc_internal, osi_calloc);
-    OSI_SET(_zalloc_internal, osi_zalloc);
-    OSI_SET(_wifi_malloc,     osi_malloc);
-    OSI_SET(_wifi_realloc,    osi_realloc);
-    OSI_SET(_wifi_calloc,     osi_calloc);
-    OSI_SET(_wifi_zalloc,     osi_zalloc);
+    OSI_SET(_malloc_internal, osi_malloc_internal);
+    OSI_SET(_realloc_internal, osi_realloc_internal);
+    OSI_SET(_calloc_internal, osi_calloc_internal);
+    OSI_SET(_zalloc_internal, osi_zalloc_internal);
+    OSI_SET(_wifi_malloc,     osi_wifi_malloc);
+    OSI_SET(_wifi_realloc,    osi_wifi_realloc);
+    OSI_SET(_wifi_calloc,     osi_wifi_calloc);
+    OSI_SET(_wifi_zalloc,     osi_wifi_zalloc);
 
     /* ---- 队列 ---- */
     OSI_SET(_wifi_create_queue, osi_wifi_create_queue);
@@ -431,6 +552,8 @@ void s3_wifi_osi_init(void)
     OSI_SET(_env_is_chip,   osi_env_is_chip);
     OSI_SET(_read_mac,      osi_read_mac);
     OSI_SET(_log_write,     osi_log_write);
+    OSI_SET(_log_writev,    osi_log_writev);
+    OSI_SET(_log_timestamp, osi_log_timestamp);
     OSI_SET(_esp_timer_get_time, osi_esp_timer_get_time);
     OSI_SET(_rand,          osi_rand);
     OSI_SET(_get_random,    osi_rand);
@@ -463,31 +586,52 @@ static void wcfg(u32 off, u32 v)
 u32 s3_wifi_bringup(void)
 {
     u32 i = 0u;
+    /* 库的 wifi_log 先看它自己的 g_log_level，默认级别会把错误信息过滤掉，
+     * 调高之后 init 失败的原因才会通过 _log_writev 送到串口。 */
+    { extern int g_log_level; g_log_level = 4; }
+
     ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
                (u32)g_osi_calls[0], (u32)(void *)g_wifi_osi_funcs._version,
                (u32)(void *)&g_osi_calls[0]);
     while (i < 40u) { *(volatile u32 *)((u8 *)g_wifi_cfg_blob + i * 4u) = 0u; i = i + 1u; }
 
+    /* ---- 严格照 IDF 官方 WIFI_INIT_CONFIG_DEFAULT() 填，不再猜 --------------
+     * 依据（官方源文件）：
+     *   components/esp_wifi/include/esp_wifi.h     WIFI_INIT_CONFIG_DEFAULT()
+     *   components/esp_wifi/Kconfig                各 CONFIG_ESP_WIFI_* 的 default
+     *   components/esp_wifi/esp32s3/esp_adapter.c   官方 OSI 表
+     * 偏移见 include/c6os/wifi_osi.h 里 wifi_init_config_t 的布局。          */
     wcfg(0u,   (u32)(void *)&g_wifi_osi_funcs);   /* osi_funcs */
-    /* wpa_crypto_funcs 紧跟其后：wifi_menuconfig_init 会检查
-     * cfg[4] == 44 (sizeof) 且 cfg[8] == 1 (version)，否则直接返回 0x102。
-     * 9 个函数指针暂时留空，等接 mbedtls 再补（WPA2/TLS 都要用）。 */
-    wcfg(4u,   44u);            /* wpa_crypto_funcs.size    */
-    wcfg(8u,   1u);             /* wpa_crypto_funcs.version */
-    wcfg(48u,  10u);            /* static_rx_buf_num  */
-    wcfg(52u,  32u);            /* dynamic_rx_buf_num */
-    wcfg(60u,  0u);             /* static_tx_buf_num  */
-    wcfg(64u,  32u);            /* dynamic_tx_buf_num */
-    wcfg(72u,  5u);             /* rx_mgmt_buf_num    */
-    wcfg(84u,  1u);             /* ampdu_rx_enable    */
-    wcfg(88u,  1u);             /* ampdu_tx_enable    */
-    wcfg(96u,  0u);             /* nvs_enable = 0     */
-    wcfg(104u, 6u);             /* rx_ba_win          */
-    wcfg(112u, 752u);           /* beacon_max_len     */
-    wcfg(116u, 6u);             /* mgmt_sbuf_num      */
-    wcfg(132u, 7u);             /* espnow_max_encrypt_num */
-    wcfg(136u, 1u);             /* tx_hetb_queue_num  */
-    wcfg(144u, 0x1F2F3F4Fu);    /* magic              */
+    /* wpa_crypto_funcs @4..47：官方实现在
+     * wpa_supplicant/src/crypto/crypto_ops.c 的 g_wifi_default_wpa_crypto_funcs，
+     * 依赖 mbedtls；等接 TLS 时一起补。init 阶段库只校验 size/version。 */
+    wcfg(4u,   44u);            /* wpa_crypto_funcs.size    = sizeof(...) */
+    wcfg(8u,   1u);             /* wpa_crypto_funcs.version = ESP_WIFI_CRYPTO_VERSION */
+    wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
+    wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
+    wcfg(56u,  1u);             /* tx_buf_type            default 1 = dynamic */
+    wcfg(60u,  0u);             /* static_tx_buf_num      动态模式下为 0      */
+    wcfg(64u,  32u);            /* dynamic_tx_buf_num     default 32          */
+    wcfg(68u,  1u);             /* rx_mgmt_buf_type       DYNAMIC_RX_MGMT_BUF default 1 */
+    wcfg(72u,  5u);             /* rx_mgmt_buf_num        default 5           */
+    wcfg(76u,  0u);             /* cache_tx_buf_num       feature_caps 未开 CACHE_TX_BUFFER */
+    wcfg(80u,  0u);             /* csi_enable             default n           */
+    wcfg(84u,  1u);             /* ampdu_rx_enable        default y           */
+    wcfg(88u,  1u);             /* ampdu_tx_enable        default y           */
+    wcfg(92u,  0u);             /* amsdu_tx_enable        default n           */
+    wcfg(96u,  0u);             /* nvs_enable             官方默认 y，但需要 NVS 子系统，先关 */
+    wcfg(100u, 0u);             /* nano_enable            default n           */
+    wcfg(104u, 6u);             /* rx_ba_win              default 6           */
+    wcfg(108u, 0u);             /* wifi_task_core_id      单核跑，用 0 号核    */
+    wcfg(112u, 752u);           /* beacon_max_len         default 752         */
+    wcfg(116u, 32u);            /* mgmt_sbuf_num          default 32          */
+    wcfg(120u, 0u);             /* feature_caps 低 32 位   先全关             */
+    wcfg(124u, 0u);             /* feature_caps 高 32 位                       */
+    wcfg(128u, 1u);             /* sta_disconnected_pm    default y           */
+    wcfg(132u, 7u);             /* espnow_max_encrypt_num default 7           */
+    wcfg(136u, 1u);             /* tx_hetb_queue_num      default 1           */
+    wcfg(140u, 0u);             /* dump_hesigb_enable     default n           */
+    wcfg(144u, 0x1F2F3F4Fu);    /* magic = WIFI_INIT_CONFIG_MAGIC             */
 
     s3_wifi_osi_init();
     ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",

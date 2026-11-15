@@ -5117,3 +5117,67 @@ call8 ieee80211_ioctl_init   ; 0x4205dd50
 确实在表里（`OSI_SET` 存在），但它没有打点，所以下一轮要在
 `_malloc_internal` / `_free` / `_semphr_take` 上也加 `OSI_HIT`，
 确认 `misc_nvs_load` 到底走到哪一步。
+
+---
+
+## §117 按官方源文件校准 wifi_init_config_t（不再猜）
+
+依据（都是官方源文件，不是推测）：
+
+* `components/esp_wifi/include/esp_wifi.h` → `WIFI_INIT_CONFIG_DEFAULT()`
+* `components/esp_wifi/Kconfig` → 各 `CONFIG_ESP_WIFI_*` 的 `default`
+* `components/esp_wifi/esp32s3/esp_adapter.c` → 官方 `g_wifi_osi_funcs` 表
+* `components/esp_wifi/include/esp_private/wifi_os_adapter.h` → 各槽位原型
+
+之前手填的配置里有两处关键错误：`tx_buf_type` 和 `rx_mgmt_buf_type` 都填了 0
+（静态缓冲），可官方默认是 **1（动态）**，而 `static_tx_buf_num` 又是 0 ——
+等于一个 TX 缓冲都没有。按官方默认值整表重填后：
+
+* `tx_buf_type = 1`、`dynamic_tx_buf_num = 32`、`cache_tx_buf_num = 0`
+* `rx_mgmt_buf_type = 1`、`rx_mgmt_buf_num = 5`
+* `mgmt_sbuf_num = 32`（官方默认；之前填 6 只是下限）
+* `sta_disconnected_pm = 1`、`feature_caps = 0`（配套 `cache_tx_buf_num = 0`）
+
+**真板结果：`wifi_menuconfig_init()` 从返回 `0x102` 变成通过**，init 往前走了一步
+（新的卡点在 `wifi_init_process` 里，见下）。
+
+## §118 thunk 里 ABI 探测寄存器不能用 a4..a7
+
+`call8` 的窗口轮转量是 **8**（`call8` = 8 个寄存器的窗口，轮转 16-8=8，已由
+`_log_write(level, tag, fmt)` 实测印证：库放在 a10/a11/a12 的三个参数正好落到
+我们的 a2/a3/a4）。于是：
+
+* 被调方 `a12..a15` = 调用者 `a4..a7` → **必须保留**；
+* `a0` 是返回地址、`a1` 是栈指针；
+* 调用者 `a8..a15` = 被调方 `a0..a7`，可以随便踩。
+
+之前的 `ABI_RETURN` 探测用了 `a5` —— 它在 `entry` **之前**执行，此刻还没有轮转，
+踩的就是调用者自己的 `a5`，而 windowed 调用者恰恰要求 `a5` 保留。后果：
+`wifi_init_process` 在 `callx8 memset` 之后 `l32i a9, a5, 96`，`a5` 已被踩成 1，
+于是以 `vaddr = 0x61` 挂掉。已改成用 **`a8`** 探测。
+
+顺带确认官方日志槽位签名（`wifi_os_adapter.h`）：
+
+```c
+void (* _log_write)(unsigned int level, const char* tag, const char* format, ...);
+void (* _log_writev)(unsigned int level, const char* tag, const char* format, va_list args);
+```
+
+库自己的 `wifi_log` 会先看它内部的 `g_log_level`，默认级别会把错误信息过滤掉，
+`g_log_level = 4` 之后才能看到（我们的 `_log_writev` 用自带的迷你格式化器
+把 `va_list` 还原成文本，因为 ROM ld 里没有 `vsnprintf`）。
+
+### 下一步
+
+当前真板现场（换成 a8 探测之后）：
+
+```
+*** TRAP sp=3fcd8eb0 cause=00000000 pc=4037e2d2 ps=00060f10 vaddr=00000000 a0=00000001
+```
+
+`pc = 0x4037e2d2` 是我们的 `memset` 里 windowed 路径的 `retw.n`，
+`cause=0` 是 IllegalInstruction，`ps.OWB = 15`（寄存器窗口几乎用满）。
+RTC 追踪显示只走到 20 次回调（`... 19 43 13` 就停了），比上一版少。
+下一步优先查 `retw` 这条路径：把 `entry a1, 16` 改成 32、或者对照 gcc 生成的
+windowed 函数（`osi_log_write`）的 `entry`/`retw` 形式，确认 `retw` 的合法性，
+以及 `PS.OWB=15` 是不是窗口溢出处理没接住。

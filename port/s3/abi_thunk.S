@@ -86,15 +86,21 @@
 
 /* ---- 分发：a0 的 bit31 表明调用者用的是 windowed ABI ------------------- */
 
-/* 每个函数：先判 ABI，再走对应路径。a5 只用来存判定结果，它是调用者
- * 可以随便丢的寄存器（call0 下是 caller-saved，windowed 下是它的 a9）。 */
+/* 每个函数：先判 ABI，再走对应路径。
+ *
+ * 判 ABI 只能用 **a8..a11**：apply `entry` 之前还没有发生窗口轮转，此刻踩的
+ * 就是调用者自己的寄存器。windowed 调用者（call8 轮转 8）要求 a4..a7 必须
+ * 保留（它们就是被调方的 a12..a15），a0 是返回地址，a1 是栈指针；只有
+ * a8..a15 是调用者允许被踩的。call0 下 a8..a11 同样 caller-saved。
+ * （之前用 a5 探测，把 wifi_init_process 的 a5 踩成了 1，它随后
+ *  `l32i a9, a5, 96` 就以 vaddr=0x61 挂掉。） */
 
     .align  4
     .global memcpy
     .type   memcpy, @function
 memcpy:
-    extui   a5, a0, 31, 1
-    bnez    a5, .Lmemcpy_win
+    extui   a8, a0, 31, 1
+    bnez    a8, .Lmemcpy_win
     addi    a1, a1, -16
     s32i    a12, a1, 0
     s32i    a13, a1, 4
@@ -117,8 +123,8 @@ memcpy:
     .global memset
     .type   memset, @function
 memset:
-    extui   a5, a0, 31, 1
-    bnez    a5, .Lmemset_win
+    extui   a8, a0, 31, 1
+    bnez    a8, .Lmemset_win
     addi    a1, a1, -16
     s32i    a12, a1, 0
     s32i    a13, a1, 4
@@ -141,8 +147,8 @@ memset:
     .global memmove
     .type   memmove, @function
 memmove:
-    extui   a5, a0, 31, 1
-    bnez    a5, .Lmemmove_win
+    extui   a8, a0, 31, 1
+    bnez    a8, .Lmemmove_win
     addi    a1, a1, -16
     s32i    a12, a1, 0
     s32i    a13, a1, 4
@@ -165,8 +171,8 @@ memmove:
     .global memcmp
     .type   memcmp, @function
 memcmp:
-    extui   a5, a0, 31, 1
-    bnez    a5, .Lmemcmp_win
+    extui   a8, a0, 31, 1
+    bnez    a8, .Lmemcmp_win
     addi    a1, a1, -16
     s32i    a12, a1, 0
     s32i    a13, a1, 4
