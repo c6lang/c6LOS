@@ -294,10 +294,17 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         volatile u32 *bd = (volatile u32 *)0x50000C00u;
         u32 n_ = g_dbg_blk_n;
         g_dbg_blk_n = n_ + 1;
+        u32 ctxv = (u32)(void *)g_cur->ctx;
+        u32 spv = 0;
+        u32 epcv = 0;
+        if (ctxv != 0u) {
+            spv = *(volatile u32 *)(ctxv + 64u);
+            if (spv != 0u) { epcv = *(volatile u32 *)(spv + 60u); }
+        }
         bd[(n_ & 7) * 4] = g_cur->id;
-        bd[(n_ & 7) * 4 + 1] = (u32)kind;
+        bd[(n_ & 7) * 4 + 1] = epcv;          /* 切走时保存的 EPC */
         bd[(n_ & 7) * 4 + 2] = (u32)obj;
-        bd[(n_ & 7) * 4 + 3] = timeout;
+        bd[(n_ & 7) * 4 + 3] = (u32)kind;
     }
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;

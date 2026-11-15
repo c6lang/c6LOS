@@ -6123,3 +6123,47 @@ blk2: id=1  kind=6  obj=0x3fcbf234   初始化任务**也在同一个队列上�
 `g_ctx[1].sp` 的 `[sp+60]` 应该是 `ppTask` 的。用 JTAG 或
 （更稳的）在 `os_task_block_prepare` 里把 `g_cur->ctx` 和该帧的 `[sp+60]`
 一起记进 RTC。
+
+## §146 两个任务保存的 EPC
+
+在 `os_task_block_prepare` 里除了 (id, kind, obj) 再记录
+`g_cur->ctx` 指向的帧里的 EPC（`[sp+60]`）：
+
+```
+blk0: id=1  epc=0x00000066   obj=0x3fcbf8c0  kind=1
+blk1: id=2  epc=0x4037b955   obj=0x3fcbf234  kind=6
+blk2: id=1  epc=0x403794b3   obj=0x3fcbf234  kind=6
+```
+
+`nm` 反查：
+
+* `0x403794b3` = **`os_task_block_wait`** —— 任务 1（初始化）的恢复点落在
+  正常阻塞路径里，说明它确实是通过标准原语阻塞的，而不是被踩坏了 PC。
+* `0x4037b955` = `s3_task_tramp`（任务引导入口）—— 这个值偏旧，
+  说明记录到的可能是任务 2 的**初始帧**，不能代表它当前阻塞点。
+
+### 本轮结束时的状态
+
+已经用**内核级**证据确认：
+
+1. 只有两个任务启动（`ppTask` 与测试的 `wifi_main`），调度器状态机正确
+   （从未选中 BLOCKED 任务，全程 3 次切换）；
+2. 两个任务先后在**同一个队列对象** `0x3fcbf234`（= `s_wifi_queue`，全场只
+   创建过 1 个队列）上做队列接收并阻塞；
+3. 初始化任务的恢复点在 `os_task_block_wait`，是正常阻塞；
+4. 全流程 `_queue_send`（字段 25）一次都没有出现 —— 没人投递；
+5. `ieee80211_ioctl`（`esp_wifi_init_internal` 里 `wifi_init_in_caller_task`
+   之后的下一步）压根没被调到（回调环里之后没有 `21`）。
+
+### 下一步（下一轮从这里继续）
+
+矛盾点收敛为一句话：**初始化任务在 `wifi_init_in_caller_task` 内部就阻塞在
+WiFi 队列上了，但它能走到的库里没有任何收这个队列的代码。**
+
+要解这个，下一轮应该：
+
+1. 在 `osi_queue_recv` 里把"调用者 EPC 来自窗口帧"这件事换成在
+   `port_task_yield` 处记录（那里 a0 一定是真实返回地址），拿到可靠调用点；
+2. 或者直接给 `wifi_init_in_caller_task` 的每一步加可观测信号
+   （它调用的每个子函数入口都用一个 RTC 计数），把"最后一步"精确定位到
+   单个函数。
