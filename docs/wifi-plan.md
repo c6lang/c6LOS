@@ -8116,3 +8116,36 @@ _win_ovf8/12、_win_unf12 同理（标准 Xtensa spill/fill 写法）
    就是拿垃圾值去写；这条是"单做 WINDOWSTART 恢复也 hang"的最可疑解释。
 3. 确认 `rotw` 在 `entry a1,48` 的壳里是否安全：壳自己的窗口不能在这一圈里
    被溢出掉（它的 a1 必须有效），否则整个 spill 会写到错误的位置。
+
+## §195 USB-JTAG 接入：拿到 hang 处的**真实**现场（这条路以后就一直用）
+
+仓库里早就有 gdb 脚本，但 gdb 本身不在我们平时用的那个 toolchain 里。位置：
+```
+GDB=/media/winger/inst_26/esp/.espressif/tools/xtensa-esp-elf-gdb/14.2_20240403/\
+xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gdb
+```
+OpenOCD 已经在跑（`-f board/esp32s3-builtin.cfg`，端口 3333）。新加了
+`tools/ghang.gdb`：让固件自己跑到卡住，然后 `monitor halt` 抓现场。
+
+真板读数（这次是 CPU 真实状态，不是我们自己的诊断变量）：
+```
+pc = 0x4037b977  (s3_trap)
+ps = 0x60510     (WOE=1, EXCM=0, INTLEVEL=0, CALLINC=2)
+windowbase  = 3
+windowstart = 0x8        <- 只有当前窗口是 live 的
+epc1 = 0x42032f18        <- osi_queue_recv+0x44 == retw.n
+exccause = 0             <- IllegalInstruction
+调用栈: s3_trap <- _vec_exc <- ... <- osi_queue_recv (0x42032f18)
+        中间还能看到 0x82032f08 —— 那是 call8 的返回地址（带 CALLINC 标记）
+```
+**结论**：
+- 调用者窗口（窗口 1）确实已经不在寄存器里（`windowstart=0x8`），所以这条
+  `retw` 必须走**窗口欠载**向量把调用者窗口从栈上 fill 回来。
+- 而这颗 CPU 上，**窄格式 `retw.n` 在需要欠载时是不合法的**（`cause=0`），
+  必须用宽格式 `retw`。也就是说问题既不是"忘了 spill"，也不是 WINDOWSTART
+  没恢复 —— 是**汇编器把 `retw` 收窄成了 `retw.n`**。
+- 试过 `-Wa,--no-transform` 强制宽格式：**不行**。GCC 自己会生成 `bnez.n`
+  这类窄指令，禁用 transform 后汇编直接报错（`operand out of range`）。
+  需要的是"只让 retw 不收窄"的办法，下一轮要验证：手写 `.byte` 编码出宽
+  `retw`（先 `as --no-transform` 汇编一小段确认字节），或者查 GAS 是否支持
+  逐指令关闭 transform。
