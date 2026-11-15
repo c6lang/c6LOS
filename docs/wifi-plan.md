@@ -4821,3 +4821,32 @@ tab[99]  = osi_zalloc        _wifi_zalloc
 在调完哪个函数指针后跳到 `movi a2, 0x101` 的 —— 这样能精确定位是哪个 OSI 函数。
 
 （`0x101` 这个常量在库里应该很容易搜到。）
+
+### 110. 精确定位到 NO_MEM 的出处：`esf_buf_alloc_dynamic`
+
+用 `objdump | grep -B3 "movi.*0x101"` 定位到两处，其中一处是
+**`esf_buf_setup_static`**（RX 缓冲池初始化）：
+
+```
+42034c96:  addi  a3, a3, -1
+42034c98:  l32r  a8, esf_buf_alloc_dynamic
+42034c9b:  callx8 a8
+42034c9e:  bnez.n a10, ok        ; a10 == 0 就报错
+42034cb1:  call8  wifi_log
+42034cb4:  movi  a3, 0x101       ← ESP_ERR_NO_MEM
+```
+
+⇒ **`esf_buf_alloc_dynamic()` 返回了 NULL**，然后 `esf_buf_setup_static`
+就报 `ESP_ERR_NO_MEM`。
+
+### 这解释了为什么我们的堆没被碰过
+
+`esf_buf_alloc_dynamic` 内部用的可能**不是**我们接上的那几个 malloc 字段
+（43/92/96），而是走**另一条路**（比如直接从某个全局池里取，或者
+用的是 `_wifi_malloc` 之外的另一套）。
+
+⇒ 下一步就是继续往下追 `esf_buf_alloc_dynamic` 内部的调用，
+找到它最终调的是 `wifi_osi_funcs_t` 里的**哪一个**函数指针。
+
+（`esf_buf_alloc_dynamic` 在 `0x40381fe0`（IRAM），函数体较长，
+需要完整反汇编来分析。）
