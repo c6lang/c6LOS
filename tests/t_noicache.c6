@@ -1,0 +1,14 @@
+/* 对照：不调用 os_icache_enable()，直接用 bootloader 建好的 cache 去取指 flash */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/reg.h"
+extern const u32 s3_flash_rodata_probe;
+extern u32 s3_win_call_flash42(void);
+void os_main(void)
+{
+    s3_beacon(0u, 0xB00001C0u);
+    s3_beacon(1u, *(volatile u32 *)0x600C4060u);   /* ICACHE_CTRL：bootloader 留下的值 */
+    s3_beacon(2u, s3_flash_rodata_probe);          /* DROM 读，应 0x12345678 */
+    s3_beacon(3u, s3_win_call_flash42());          /* flash 取指，期望 42 */
+    for (;;) { }
+}

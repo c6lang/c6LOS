@@ -4290,3 +4290,44 @@ slot2 = 0x12345678              <- DROM 段里的探针值，读取完全正常
 
 **下一步**：用这个正确的镜像重新构建 WiFi 版本，看 flash 取指/IPC 是否
 在"镜像结构正确"的前提下恢复正常。
+
+### 95. 镜像修好后的精确状态：DROM ✓ / IROM ✗
+
+用**正确构建**的镜像（`--ram-only-header` 已去掉）做对照测试，
+**完全不调用** `os_icache_enable()`，直接用 bootloader 留下的 cache：
+
+```c
+s3_beacon(1, *(u32*)0x600C4060);   /* ICACHE_CTRL */
+s3_beacon(2, s3_flash_rodata_probe);  /* DROM 读 */
+s3_beacon(3, s3_win_call_flash42());  /* flash 取指 */
+```
+
+真板：
+
+```
+slot1 = 0x00000001    ICACHE_CTRL = 0x01（bootloader 默认值，cache 已使能）
+slot2 = 0x12345678    DROM 读完全正常
+slot3 = 0xb0b0b0b0    未写入 —— 取指失败
+*** TRAP cause=0 pc=42030014
+```
+
+⇒ **DROM 通路 ✓、IROM 取指 ✗**，这就是最初那个现象。
+
+而且：
+- 用 bootloader 默认的 `0x01` → IROM 取指失败
+- 用我们 `rom_config_instruction_cache_mode(16384,8,32)` 的 `0x0b` → 也失败
+
+但**原厂 xiaozhi 固件用 `0x01` 就能正常从 flash 执行**。
+
+### 现在的关键问题
+
+镜像结构已经正确（DROM/IROM 段都在、bootloader 接受了、DROM 读正常），
+**只剩 IROM 取指**。下一步应该看：
+
+1. 原厂固件在**进入 app 之后**的 `ICACHE_CTRL` 到底是什么
+   （在 app 里读，而不是用 JTAG 读 bootloader 的状态）
+2. 原厂 app 是否调用了额外的 cache 配置函数
+3. 我们的 IROM 段**物理位置**（flash 0x30000）是否和原厂 app 的 IROM 位置对齐方式不同
+
+这一轮最大的收获是：**`--ram-only-header` 这个隐藏的坑**，
+它让所有之前的镜像都是残缺的，掩盖了很多真实信号。
