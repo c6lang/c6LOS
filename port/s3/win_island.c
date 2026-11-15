@@ -4,6 +4,7 @@
  */
 #include "c6os/types.h"
 #include "c6os/flash.h"
+#include "wifi_creds.h"
 
 /* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
 extern u32 s3_w2c_current_task(void);
@@ -706,7 +707,8 @@ u32 s3_win_wifi_main(void)
     WSTAGE(0x1006u); os_wdt_feed();
     s3_win_log("W2 bringup returned\n");
 #ifdef S3_WITH_LWIP
-    /* §210：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调）。
+    /* §210/§215：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调），
+     * 然后关联 AP、等 DHCP 拿到地址，最后取 https://qq.com。
      * 这一段是"关联之后"的路径，只有 -DS3_WITH_LWIP 的镜像才有。 */
     if (rc == 0u) {
         extern int  c6_lwip_start(const unsigned char *mac);
@@ -718,6 +720,27 @@ u32 s3_win_wifi_main(void)
 
         ets_printf("[lwip] start rc=%d\n", irc);
         WSTAGE(0x1010u);
+        /* 关联 + 等 IP（阶段信标：0x1021 关联中、0x1022 关联成功、0x1023 拿到 IP） */
+        {
+            extern u32 s3_wifi_associate(const char *ssid, const char *pass);
+            extern int s3_wifi_wait_connected(int ms);
+            extern int c6_lwip_wait_ip(int ms);
+            extern void c6_lwip_print_ip(void);
+            const char *ssid = (const char *)S3_WIFI_SSID;
+            const char *pass = (const char *)S3_WIFI_PASS;
+
+            WSTAGE(0x1021u);
+            (void)s3_wifi_associate(ssid, pass);
+            if (s3_wifi_wait_connected(15000) != 0) {
+                WSTAGE(0x1022u);
+                if (c6_lwip_wait_ip(20000) != 0) {
+                    WSTAGE(0x1023u);
+                    c6_lwip_print_ip();
+                } else {
+                    ets_printf("[lwip] DHCP 超时\n");
+                }
+            }
+        }
         while (n < 2000u) {          /* 先跑一段，让 DHCP/DNS 有机会动起来 */
             c6_lwip_poll();
             s3_w2c_task_delay(1u);

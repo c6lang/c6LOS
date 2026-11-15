@@ -155,3 +155,50 @@ void c6_lwip_poll(void)
 {
     sys_check_timeouts();
 }
+
+/* ---- 等 DHCP 拿到地址（§215）------------------------------------------
+ * WiFi 事件系统我们没接，所以"拿到 IP 没有"直接看 netif 的地址：DHCP 是 lwIP
+ * 自己跑的，只要把 sys_check_timeouts() 转起来 + 定期让出 CPU，它就会自己完成。
+ * 返回 1 = 拿到地址（非 0 且不是 0.0.0.0）。 */
+extern unsigned int s3_w2c_task_delay(unsigned int ticks);
+extern int ets_printf(const char *fmt, ...);
+
+int c6_lwip_wait_ip(int ms)
+{
+    int waited = 0;
+
+    while (waited < ms) {
+        sys_check_timeouts();
+        if (netif_default != 0) {
+            const ip4_addr_t *a = netif_ip4_addr(netif_default);
+
+            if (a != 0 && a->addr != 0u) {
+                return 1;
+            }
+        }
+        s3_w2c_task_delay(1u);
+        waited = waited + 10;
+    }
+    return 0;
+}
+
+/* 打印当前地址（调试用） */
+void c6_lwip_print_ip(void)
+{
+    if (netif_default == 0) {
+        ets_printf("[lwip] netif 不存在\n");
+        return;
+    }
+    {
+        const ip4_addr_t *a = netif_ip4_addr(netif_default);
+        const ip4_addr_t *m = netif_ip4_netmask(netif_default);
+        const ip4_addr_t *g = netif_ip4_gw(netif_default);
+        const u8_t *ab = (const u8_t *)a;
+        const u8_t *mb = (const u8_t *)m;
+        const u8_t *gb = (const u8_t *)g;
+
+        ets_printf("[lwip] ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u\n",
+                   ab[0], ab[1], ab[2], ab[3], mb[0], mb[1], mb[2], mb[3],
+                   gb[0], gb[1], gb[2], gb[3]);
+    }
+}

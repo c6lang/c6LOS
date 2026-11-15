@@ -1109,6 +1109,106 @@ static void wcfg(u32 off, u32 v)
     *(volatile u32 *)((u8 *)g_wifi_cfg_blob + off) = v;
 }
 
+/* ---- 关联（associate）：init 之后把 STA 真正连上 AP ---------------------
+ *
+ * 之前只做了 esp_wifi_init_internal()，**没有** set_mode/set_config/start/connect，
+ * 所以就算 PHY 起来了也永远不会关联。这里按 IDF 的顺序补齐：
+ *   esp_wifi_set_storage(RAM)   —— 先关掉 NVS 存储（我们没接 NVS 子系统）
+ *   esp_wifi_set_mode(STA)
+ *   esp_wifi_set_config(STA, cfg) —— cfg 是 192 字节全零缓冲，只填 ssid/password
+ *                                   （wifi_sta_config_t 的这两个字段在最前面，
+ *                                     偏移 0 / 32，跨 IDF 版本都稳定）
+ *   esp_wifi_start()
+ *   esp_wifi_connect_internal()
+ *
+ * 事件系统我们没接（OSI 的 _event_post 是空实现），所以"连上没有"靠轮询
+ * esp_wifi_sta_get_ap_info()，"拿到 IP 没有"靠轮询 lwIP 的 netif（见
+ * c6_lwip_port.c 的 c6_lwip_wait_ip）。
+ */
+#ifdef S3_WITH_WIFI
+extern int esp_wifi_set_storage(int storage);
+extern int esp_wifi_set_mode(int mode);
+extern int esp_wifi_set_config(int iface, void *conf);
+extern int esp_wifi_start(void);
+extern int esp_wifi_connect_internal(void);
+extern int esp_wifi_sta_get_ap_info(void *conf);
+#endif
+
+#ifdef S3_WITH_WIFI
+u32 s3_wifi_associate(const char *ssid, const char *pass)
+{
+    static u32 cfg[48];             /* 192 字节，wifi_sta_config_t 约 180 字节 */
+    u32 i = 0u;
+    int r1 = 0;
+    int r2 = 0;
+    int r3 = 0;
+    int r4 = 0;
+    int r5 = 0;
+    int n = 0;
+
+    for (i = 0u; i < 48u; i++) { cfg[i] = 0u; }
+    if (ssid == 0 || ssid[0] == 0) {
+        ets_printf("[wifi] 没给 SSID，跳过关联\n");
+        return 0xFFFFFFFFu;
+    }
+    while (ssid[n] != 0 && n < 32) { ((u8 *)cfg)[n] = (u8)ssid[n]; n++; }
+    if (pass != 0) {
+        n = 0;
+        while (pass[n] != 0 && n < 64) { ((u8 *)cfg)[32 + n] = (u8)pass[n]; n++; }
+    }
+    ets_printf("[wifi] associate ssid=%s\n", ssid);
+    /* wifi_storage_t: 0 = WIFI_STORAGE_FLASH, 1 = WIFI_STORAGE_RAM */
+    r1 = esp_wifi_set_storage(1);
+    ets_printf("[wifi] set_storage(RAM)=%d\n", r1);
+    /* wifi_mode_t: 1 = WIFI_MODE_STA */
+    r2 = esp_wifi_set_mode(1);
+    ets_printf("[wifi] set_mode(STA)=%d\n", r2);
+    /* wifi_interface_t: 0 = WIFI_IF_STA */
+    r3 = esp_wifi_set_config(0, (void *)cfg);
+    ets_printf("[wifi] set_config=%d\n", r3);
+    r4 = esp_wifi_start();
+    ets_printf("[wifi] start=%d\n", r4);
+    r5 = esp_wifi_connect_internal();
+    ets_printf("[wifi] connect=%d\n", r5);
+    return (u32)r5;
+}
+
+/* 轮询"连上 AP 了吗"：返回 1 = 已关联。ap_info 至少 64 字节（我们只用前几个字节）。 */
+int s3_wifi_wait_connected(int ms)
+{
+    u8 ap[96];
+    int waited = 0;
+    int i = 0;
+    int r = 0;
+
+    while (waited < ms) {
+        for (i = 0; i < 96; i++) { ap[i] = 0; }
+        r = esp_wifi_sta_get_ap_info((void *)ap);
+        if (r == 0) {
+            ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
+                       (const char *)ap, (unsigned)ap[40]);
+            return 1;
+        }
+        s3_w2c_task_delay(1u);
+        waited = waited + 10;
+    }
+    ets_printf("[wifi] 关联超时（%d ms），sta_get_ap_info=%d\n", ms, r);
+    return 0;
+}
+#else
+u32 s3_wifi_associate(const char *ssid, const char *pass)
+{
+    (void)ssid; (void)pass;
+    return 0xFFFFFFFFu;         /* 没链 WiFi 库：跳过关联 */
+}
+
+int s3_wifi_wait_connected(int ms)
+{
+    (void)ms;
+    return 0;
+}
+#endif
+
 u32 s3_wifi_bringup(void)
 {
     u32 i = 0u;

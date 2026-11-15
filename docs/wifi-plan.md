@@ -9631,3 +9631,73 @@ TLS 的缓冲（收记录 6.4KB + 发送 2KB + 握手消息 1KB + 握手累积 6
    如果真板上出现 `[https] TLS 缓冲申请失败`，说明堆不够，优先把
    `TCP_WND`/`TCP_SND_BUF`（现在各 4KB）再调小，或者把 TLS 缓冲降到
    4KB 记录 + 4KB 握手累积。
+
+---
+
+## §215 补上"关联"这一环：init 之后其实从来没连过 AP
+
+§210~§214 把 IP 栈和 TLS 都铺好了，但回头看 `s3_wifi_bringup()` 会发现一个
+致命缺口：它只调了 `esp_wifi_init_internal()` —— **从来没 set_mode / set_config /
+start / connect**。也就是说即使 PHY 起来了、`esp_wifi_init` 成功了，板子也永远
+不会去关联 AP。
+
+### 一、补上的调用（`port/s3/wifi_glue.c`）
+
+按 IDF 的顺序（每个调用都打一行结果，失败原因看串口）：
+
+```c
+esp_wifi_set_storage(1);       /* 1 = WIFI_STORAGE_RAM：我们没接 NVS，别落盘 */
+esp_wifi_set_mode(1);          /* 1 = WIFI_MODE_STA */
+esp_wifi_set_config(0, cfg);   /* 0 = WIFI_IF_STA，cfg 见下 */
+esp_wifi_start();
+esp_wifi_connect_internal();   /* 公共 API esp_wifi_connect() 在闭源库里没有，
+                                * 只有 *_internal 版本（和 esp_wifi_init 一样） */
+```
+
+`cfg` 是一块 192 字节全零缓冲，只填 `wifi_sta_config_t` 的头部两个字段：
+`ssid[32]` @0、`password[64]` @32 —— 这两个字段在 IDF 各版本里位置都稳定，
+其余全零表示"用默认值"（任意 authmode、无 PMF、快速扫描）。
+
+### 二、怎么知道连上了 / 拿到地址了
+
+我们的 OSI 里 `_event_post` 是空实现（事件系统没接），所以**不靠事件**：
+
+| 判断 | 手段 |
+| --- | --- |
+| 关联成功 | 轮询 `esp_wifi_sta_get_ap_info()` 返回 0（`s3_wifi_wait_connected(ms)`，默认等 15s） |
+| 拿到 IP | 轮询 lwIP netif 的地址（`c6_lwip_wait_ip(ms)`，默认等 20s），期间不停调 `sys_check_timeouts()` 让 DHCP 自己跑 |
+
+阶段信标（RTC 慢存 `0x50000A10`）：`0x1021` 开始关联、`0x1022` 关联成功、
+`0x1023` 拿到 IP、`0x1020` HTTPS 演示结束。DHCP 超时会打印 `[lwip] DHCP 超时`。
+
+### 三、账号怎么给
+
+`port/s3/wifi_creds.h` 是默认值（空串 = 跳过关联），构建时可以用 make 变量覆盖：
+
+```
+make C6_ROOT=/home/winger/c6 https \
+     S3_WIFI_SSID='"你家的AP名字"' S3_WIFI_PASS='"口令"'
+```
+
+（额外那层单引号是给 shell 的：`'"…"'` 让 C 看到带双引号的字符串字面量。）
+
+### 四、板上串口应该看到的完整链路（板子回来后的验收清单）
+
+```
+W0 phy start
+[phy] g_phyFuns=0x........            ← §206
+[phy] register_chipv7_phy rc=0        ← §205/§206
+W1 bringup
+[wifi] associate ssid=...
+[wifi] set_storage(RAM)=0 / set_mode(STA)=0 / set_config=0 / start=0 / connect=0
+[wifi] 已关联，ssid=... channel=N      ← 关联成功
+[lwip] ip=192.168.x.y mask=... gw=...  ← DHCP 成功
+[https] TLS 握手完成（阶段=21）
+[https] 第一跳 HTTP 状态 302 ...        ← 协议层跑通（宿主上已验证，§213）
+```
+
+### 五、构建状态
+
+`make https`（含关联 + lwIP + TLS）与 `wifi` / `wifip` / 基线 `s3` 四种构建都通过，
+`chkimg OK`。基线构建里新增的两个函数被 `#ifdef S3_WITH_WIFI` 包住（否则会引用
+不存在的 `esp_wifi_set_storage` 等符号 —— 这次就踩到了，已修）。

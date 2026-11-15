@@ -1614,7 +1614,11 @@ $(WIFI_DIR)/obj/c6_https_demo.o: port/s3/c6_https_demo.c
 		-Iinclude -Iport/s3/lwip -I$(LWIP_SRC)/include -c $< -o $@
 
 # https：在 wifip 的基础上加 TLS 1.2 客户端 + 板级 HTTPS 演示
-HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS
+# WiFi 账号：make S3_WIFI_SSID='"名字"' S3_WIFI_PASS='"口令"'（见 port/s3/wifi_creds.h）
+# 没传就不定义，交给 port/s3/wifi_creds.h 里的默认（空串 = 跳过关联）
+WIFI_CREDS = $(if $(S3_WIFI_SSID),-DS3_WIFI_SSID=$(S3_WIFI_SSID)) \
+             $(if $(S3_WIFI_PASS),-DS3_WIFI_PASS=$(S3_WIFI_PASS))
+HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS $(WIFI_CREDS)
 https:
 	@rm -rf $(WIFI_DIR)
 	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
