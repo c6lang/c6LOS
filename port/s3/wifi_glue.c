@@ -511,6 +511,16 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
     HIT_OF(_task_create);
     id = s3_w2c_task_create(name, fn, arg, p, stack);
+    /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */
+    {
+        volatile u32 *td = (volatile u32 *)0x500003c0u;
+        td[0] = (u32)fn;
+        td[1] = (u32)arg;
+        td[2] = stack;
+        td[3] = (u32)id;
+        td[4] = s3_w2c_current_task();
+        td[5] = prio;
+    }
     if (id < 0) { return 0; }
     if (handle != 0) { *(u32 *)handle = (u32)id; }
     return 1;

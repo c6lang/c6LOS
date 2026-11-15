@@ -5560,3 +5560,28 @@ bnei a10, 1, ...     ; 我们的 osi_queue_send 成功返回 1，对得上
 2. 若确认"任务 1（wifi_main）也在执行 ppTask 的 recv"，说明 `_task_create`
    的入口函数/参数映射有问题（windowed 6 参数 → 我们 a2..a7 的顺序），
    要按 libpp 的调用点逐参数核对。
+
+## §129 `_task_create` 的参数完全正确
+
+RTC `0x500003c0` 记录的 `_task_create` 调用现场：
+
+```
+0x500003c0 = 0x40381ff8   fn     = ppTask           （对上）
+0x500003c4 = 0x00000000   arg    = 0
+0x500003c8 = 0x00000e00   stack  = 3584
+0x500003cc = 0x00000002   返回的任务 id = 2
+0x500003d0 = 0x00000001   调用者（wifi_main）id = 1
+0x500003d4 = 0x0000001d   prio   = 29
+```
+
+⇒ 任务创建这一环没有问题：入口是 `ppTask`，新任务 id=2，调用者（初始化任务）
+id=1。所以之前 `__builtin_return_address(0)` 把"任务 1 也在 ppTask 的 recv
+上"这条读数确实不可靠（windowed 函数里 a0 会被回收）。
+
+### 下一步
+
+任务 1（初始化任务）到底在哪里调了 `_queue_recv`？两种可能：
+1. 是 `__builtin_return_address` 的假象，任务 1 其实卡在别处（那就改成
+   在 `_queue_recv` 里只记任务 id、用"进入/离开"标记判断谁没返回）。
+2. `ieee80211_ioctl` 在"就地处理"分支里自己也收队列，那就需要核对
+   `current_task_is_wifi_task` 之外的其他前置判断。
