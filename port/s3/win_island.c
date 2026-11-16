@@ -890,7 +890,7 @@ __attribute__((section(".flash.text")))
 void s3_win_stress_task(void *arg)
 {
     extern int s3_wifi_test_recv(u32 rounds);
-    volatile u32 *d = (volatile u32 *)0x50001300u;
+    volatile u32 *d = (volatile u32 *)0x50000A40u;
 
     (void)arg;
     d[0] = 0xC0DE1234u;              /* 已进入 windowed 任务 */
