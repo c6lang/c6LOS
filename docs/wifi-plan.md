@@ -11843,3 +11843,29 @@ BBPLL/I2C 状态。
    （这两个符号库里都有：`0x4204d604` / `0x4204d9b0`），看是否能把模拟域叫醒。
 3. 换思路：把 IDF 的 `esp_phy` 组件源码直接编进我们镜像（`phy_init.c` 里真正需要
    替换的只有 nvs 存储那几处），这样上面 1~5 步全按 IDF 走，不用手工复刻。
+
+### §283 板子 USB 又没了（PHY 老毛病复发）—— 需要人工断电重插
+
+想用历史镜像对比"当年的 `register_chipv7_phy rc=0`"，于是构建了分步诊断镜像：
+
+```
+make C6_ROOT=/home/winger/c6 S3_PHY_BISECT=1 wifi      # 成功
+./tools/flashmon.sh build/wifi/c6os.bin 40             # 刷完，没有 bisect 输出
+./tools/flashmon.sh build/wifi/c6os.bin 35             # → "没有串口"
+lsusb | grep 303a                                      # → 设备没了
+```
+
+也就是说这个 `S3_PHY_BISECT=1` 镜像一进 PHY 初始化就把内部 USB-Serial-JTAG
+关掉了 —— 正是 §205 描述过的那个失败模式（`register_chipv7_phy()` 会顺手关掉
+USB PHY，除非先 `phy_bbpll_en_usb(1)`）。现在 `303a` 不在 `lsusb` 里，
+**只能人工断电重插**（软件无法恢复）。
+
+顺带记两条：
+- `make wphy` / `make wphyflash` **目标本身是坏的**：链 `build/phy/c6os.elf` 时
+  `w2c.o` 引用 `os_event_set/clear/wait/destroy/get` 全都 undefined（那个最小镜像
+  不链内核）。这是既有问题，和本次改动无关，不去修。
+- 以后刷"会跑 PHY 初始化"的镜像前，先把 USB 恢复路径（`s3_win_usb_reclaim()`）
+  确认在 PHY 失败路径上也会被调用，否则一刷就失联。
+
+**恢复后要做的第一件事**：重新刷回 `https` 镜像（现在板上是 bisect 镜像，一上电
+又会把 USB 关掉）。
