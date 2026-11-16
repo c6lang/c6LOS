@@ -143,6 +143,37 @@ void port_task_ctx_free(void *ctx)
     c->size = 0u;
 }
 
+/* §294：切换目标是闭源库的任务时，它的 sp 必须是"自己那块栈里、且 16 字节对齐"
+ * 的值。历史上出过 sp 一路走穿到 DRAM 底部（0x3fca0565，还不对齐）然后在 ROM 里
+ * 取到非法指令的事故；这个守卫把第一现场打出来并停机。 */
+void port_task_ctx_check(void *ctx)
+{
+    S3Ctx *c = (S3Ctx *)ctx;
+    u32 sp;
+    u32 lo;
+    u32 hi;
+
+    if (c == 0) {
+        return;
+    }
+    lo = (u32)(c->stack);
+    hi = lo + (u32)(c->size);
+    sp = c->sp;
+    if (lo == 0u || sp < lo || sp >= hi || (sp & 3u) != 0u) {
+        extern int ets_printf(const char *fmt, ...);
+        volatile u32 *m = (volatile u32 *)0x50000100u;
+        m[0] = 0xBAD1u;
+        m[1] = sp;
+        m[2] = lo;
+        m[3] = hi;
+        m[4] = (u32)(void *)c;
+        ets_printf("[ctx] sp 越界：sp=%08x stack=[%08x,%08x) ctx=%08x\n",
+                   (unsigned)sp, (unsigned)lo, (unsigned)hi, (unsigned)(u32)(void *)c);
+        while (1) {
+        }
+    }
+}
+
 void port_leave_task(void)
 {
     g_s3_cur[port_core_id() & (C6OS_MAX_CORES - 1u)] = 0;

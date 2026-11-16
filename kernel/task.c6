@@ -625,6 +625,7 @@ void os_task_start_core(u32 core) {
         {
             u64 t0 = port_cycles();
             port_enter_task();
+            port_task_ctx_check(t->ctx);
             port_task_switch(t->ctx);
             t->run_cycles = t->run_cycles + (port_cycles() - t0);
             t->switches = t->switches + 1u;

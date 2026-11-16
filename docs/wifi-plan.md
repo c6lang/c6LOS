@@ -12286,3 +12286,40 @@ b*** TRAP sp=3fca0565 cause=00000000 pc=40048c6e ps=00060410 vaddr=00000000 call
    的断言（§276 那种守卫，但针对 sp 越界），把跑飞的第一现场抓到。
 2. 已经证明 **PHY/射频这块通了**（`register_chipv7_phy rc=1`、
    `0x6001c08c=03fffa00`），所以后续不必再在 PHY 初始化上花时间。
+
+## §294 切换前 sp 守卫：ctx 本身是干净的
+
+`kernel/task.c6` 在 `port_task_switch(t->ctx)` 之前加了一句
+`port_task_ctx_check(t->ctx)`（实现放在 `port/s3/ctx.c`）：目标 ctx 的
+`sp` 必须落在它自己的 `[stack, stack+size)` 里且 4 字节对齐，否则打印
+`[ctx] sp 越界：...` 并停机（同时把 sp/lo/hi/ctx 写进 RTC 0x50000100）。
+
+真板跑下来**守卫一次都没触发**，而且崩溃后用 JTAG 把 `g_ctx`
+（0x3fcc2e40，8×76 字节）整个 dump 出来看，两个任务都正常：
+
+```
+ctx[0] sp=3fcbeaf0 stack=3fcbce40 size= 8192 OK
+ctx[1] sp=3fcc0330 stack=3fcbee40 size= 6144 OK
+```
+
+⇒ **不是 ctx 被写坏，也不是栈太小**。§293 里那个 `sp=3fca059b` 更像是
+"被抓到时 a1 已经是垃圾"，而不是任务栈指针本身。
+
+另外试过把栈池从 24KB 抬到 40KB、库任务栈抬到 12KB —— 链接器直接报
+`S3 BSS/stack collision`：DRAM 顶（`S3_STACK_TOP=0x3FCD9000`，坏区以下）
+已经用满了，**没有空间再抬栈**，所以回退了这两个改动。
+
+### 当前墙的形态
+
+* `[recv] t=2 qh=... tk=ffffffff` → 内核 `b`（阻塞）→ 之后立刻
+  `cause=0`（**非法指令**）`pc=0x40048c6e`（ROM 区）`a0=0x00060000`
+  `callinc=2`、`PS.WOE=1`。
+* `cause=0` + ROM 代码 + 垃圾 a0/a1，历史上（link.ld 注释里写过）
+  都是 **`retw` 恢复出错误返回地址**的典型症状：ROM 里的闭源函数是
+  windowed，如果它被 **call0** 方式调用（或反过来），`retw` 在
+  `n==0`/`m!=n` 时就是非法指令。
+* 也就是说：下一个要抓的是 **"哪个入口的 ABI 用错了"**——
+  优先怀疑 OSI 表里还没套 `W2C` 壳的回调（`HIT_OF` 打印的槽号
+  0x0d/0x10/0x12/0x13/0x15/0x16/0x1d/0x25/0x2a/0x2b/0x56/0x58/0x5e
+  就是这条路上被调到的），以及库自己创建的任务（`ppTask` 等）第一次
+  被真正调度时的窗口基址。
