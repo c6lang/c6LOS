@@ -13208,3 +13208,24 @@ windowbase=0x9   windowstart=0xaaaa   槽位=0x0f(双重异常)
 
 至此"手写向量 + 手写切换"这一路已经试穿：无论怎么改，只要跨 windowed 上下文
 切换就会坏。按 §336 的结论，接下来移植 IDF/FreeRTOS 的 Xtensa 端口汇编。
+
+## §338 用 RTC 探针把崩溃点夹住了：崩在**切走之后、新任务里**
+
+在阻塞路径上加了三处纯 RTC 探针（不经过串口）：
+
+| 探针 | 位置 | 真板结果 |
+|---|---|---|
+| `0xB1` | `os_task_block_prepare` 打完 `'b'` 之后 | **没写进 RTC**（被后续噪声盖掉，不可靠） |
+| `0xB2` | `os_task_block_wait` 入口 | **有值** ✓ |
+| `0xB3` | `port_task_yield()` 返回之后 | 没有（说明**再也没切回来**） |
+
+⇒ 阻塞路径本身走到了 `port_task_yield()`（也就是做了上下文切换），
+崩的是**切过去以后在目标任务里跑的代码**。结合 `S3_NO_PREEMPT` 已经关掉了定时器
+抢占、而崩溃 PC 又落在 ROM 的 windowed 打印代码（`uart_tx_one_char` 的 `retw.n`），
+最合理的解释是：**这次切换切到了闭源库自己建的新任务（`ppTask`，id=2），
+它一开口用 ROM 打印就 `retw` 炸了** —— 也就是我们
+`s3_task_tramp` / 新任务初始帧 / 窗口状态这套"任务第一次被调度"的代码有问题。
+
+下一轮就从这里下手：审计 `port/s3/ctx.S` 的 `s3_task_tramp`（a4=ABI 标志、设 WOE、
+`callx8`）、`port_task_create` 造初始帧时写进去的 PS/CALLINC/a1/a0，
+以及 `RESTORE_FRAME` 里 `WINDOWSTART` 归一化对"新 windowed 任务"是否正确。

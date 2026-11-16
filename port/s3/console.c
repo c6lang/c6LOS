@@ -29,7 +29,9 @@ u32 s3_reg(u32 addr)
     return *(volatile u32 *)addr;
 }
 
-u32 s3_mark_get(u32 idx)
+void s3_mark2(u32 idx, u32 v) { s3_mark(idx, v); }
+
+ u32 s3_mark_get(u32 idx)
 {
     return *(volatile u32 *)(0x50000000u + idx * 4u);
 }
