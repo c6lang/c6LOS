@@ -13,7 +13,7 @@
 
 | 里程碑 | 状态 | 可复现证据 |
 |---|---|---|
-| L0 门禁 / 能力模型 | **完成** | `make LINUX_ABI=1 s3` → 明确拒绝（`tools/chk-caps.sh`） |
+| L0 门禁 / 能力模型 | **完成** | `make LINUX_ABI=1 s3` → 解析期 `$(error)` 直接拒绝；`make LINUX_ABI=1 x86-dyn` 放行（§2.2） |
 | L1 ring3 通路 | **完成** | `make check-linuxabi` → `PASS: linux-abi L1（ring3 + int 0x80）` |
 | L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
 | L3 initramfs + 文件语义 | **完成** | `make check-linuxabi-l3` → `PASS: linux-abi L3（initramfs + 文件语义）` |
@@ -385,6 +385,16 @@ Tier 3 是目标，但低 tier 必须始终可构建、可回归。
 | `port/sim` / host | ❌ 隔离靠宿主进程 | ❌ | 只做 ABI **语义**回归（不验证特权切换） |
 
 ### 2.2 构建期门禁（两道）
+
+> 实现在 `Makefile` 里分两道：**解析期** `$(error)`（`LINUX_ABI=1` 且目标含
+> `s3`/`all` 时直接停，一个字节都不产出）和每个 port 目标上的
+> `caps-check-<port>` recipe（调 `tools/chk-caps.sh`）。
+>
+> 这里踩过两个坑，都已修：①recipe 里原来用 shell 变量 `$CAPS_x86` 取能力位，
+> 那是 make 变量、不进 recipe 环境，永远展开成 0 —— 结果连 x86 都会被拒；
+> 能力位必须在 **make 展开期** 填进去。②`caps-check-<port>` 作为隐含规则
+> 前提，在目标不是命令行显式目标时可能被 make 的依赖判定跳过，所以又加了
+> 解析期那道。
 
 1. **配置检查**：`C6OS_LINUX_ABI=1` 但 `C6OS_PORT_CAPS & (MMU|USER|IRQ_USER)` 不完整
    → `tools/chk-caps.sh` 在 make 的最前面以可读错误信息失败，**不产生半成品镜像**。

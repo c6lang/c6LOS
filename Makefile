@@ -25,10 +25,25 @@ CAPS_X86  := 7
 CAPS_S3   := 0
 CAPS_RV32 := 0
 
+# 解析期门禁：make 的依赖判定有可能（在目标不是命令行显式目标时）跳过
+# 下面的 caps-check-%，所以在解析阶段就把"无 MMU/无特权级端口 + LINUX_ABI=1"
+# 这种自相矛盾的配置直接打断，一个字节的产物都不产出。
+ifeq ($(LINUX_ABI),1)
+ifneq ($(filter s3 all,$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)),)
+$(error c6os: 配置错误：C6OS_LINUX_ABI=1，但 port "s3" 能力不足（需要 MMU|USER|IRQ_USER = 0x7，实际 0x0）。无 MMU / 无特权级的移植层（如 ESP32-S3）不能打开 Linux ABI；要么切回 C6OS_LINUX_ABI=0，要么换到 port/x86_64。依据：docs/linux-abi.md §2)
+endif
+endif
+
 # 构建期门禁：配置与硬件能力矛盾时立刻失败，不产出半成品镜像。
-caps-check-%:
-	@eval "CAPS=\$$CAPS_$$(echo '$*' | tr 'a-z' 'A-Z')"; \
-	 tools/chk-caps.sh '$*' "$${CAPS:-0}" '$(LINUX_ABI)'
+# 注意：能力位必须在**make 展开期**就填进去。之前写成 shell 里的 $CAPS_x86，
+# 那是 make 变量、根本不进 recipe 环境，于是永远算 0 —— 连 x86 都会被拒。
+.PHONY: caps-check-x86 caps-check-s3 caps-check-rv32
+caps-check-x86:
+	@tools/chk-caps.sh x86 '$(CAPS_X86)' '$(LINUX_ABI)'
+caps-check-s3:
+	@tools/chk-caps.sh s3 '$(CAPS_S3)' '$(LINUX_ABI)'
+caps-check-rv32:
+	@tools/chk-caps.sh rv32 '$(CAPS_RV32)' '$(LINUX_ABI)'
 
 # 我们自己的代码是 call0，闭源库是 windowed：两边不能共用同一个 memset。
 # 库的 memset/memcpy/... 由 port/s3/wifi_glue.c（-mabi=windowed）提供；
