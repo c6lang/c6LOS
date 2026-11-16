@@ -11629,3 +11629,32 @@ level-1 定时器中断里做任务切换时，往被中断任务的 ctx 里存�
 `port_task_switch` 这条链，确认"被中断任务的 sp"到底是哪个值被存进
 `ctx->sp`；对照 `port_task_ctx_create` 里 `r[16]` 占位、`sp@64` 的约定
 （`ctx.c` 注释写的就是"保持 sp@64 布局"）。
+
+### §275 level-1 中断里的切换约定（已核对代码，问题在"谁写 ctx->sp"）
+
+`port/s3/irq.S` 的 `_vec_level1` 尾部是：
+
+```
+call8 s3_timer_irq        /* a10 = 返回的 ctx（0 表示不切换） */
+beqz a10, 2f
+l32i a1, a10, 64          /* a1 = ctx->sp（S3Ctx 里 sp@64） */
+2:
+l32i a2, a1, 60 ; wsr epc1 ; l32i a2, a1, 64 ; ori 16 ; wsr ps
+l32i a0..a15, a1, ...     /* 从 a1 指的 80 字节陷阱帧恢复 */
+addi a1, a1, 80 ; rfe
+```
+
+也就是说约定很清楚：**`ctx->sp` 必须指向该任务自己的 80 字节陷阱帧**，
+恢复时 `a1 = ctx->sp + 80` 就是它继续跑用的栈。
+
+再对照 §274 的实测：ctx[1]（ppTask，栈 0x3fcbee00/0x1800）存的
+`sp = 0x3fcd8ea0`，而 HR 串口打印的陷阱帧基址也正是 `0x3fcd8ea0` ——
+说明**这个值就是"当前这次中断的陷阱帧"**，被当成了 ppTask 的保存现场。
+以约定推回去：这说明"被打断时正在跑"的那个任务的 sp 本来是
+`0x3fcd8ef0`（≈`S3_STACK_TOP` 下面 4 字节对齐处），却被记到了 ctx[1] 名下。
+
+所以下一步要看的不是 irq.S，而是：
+1. `s3_timer_irq()` 里"当前任务 → next 任务"的判定和 `cur->ctx->sp = 陷阱帧地址`
+   的写法（谁被当成 cur）；
+2. `port_task_switch`（`port/s3/ctx.S:98`）里保存 sp 的那段，和
+   `port_task_ctx_create` 的 `r[16]` 占位/`sp@64` 布局是否一致。
