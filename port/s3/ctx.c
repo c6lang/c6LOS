@@ -165,8 +165,28 @@ void port_irq_fill(u32 frame_sp)
 {
     S3Ctx *c = g_s3_cur[port_core_id() & (C6OS_MAX_CORES - 1u)];
 
-    if (c != 0) {
-        c->sp = frame_sp;
+    /* §276（真板实测找到的病根）：这里以前无条件把 frame_sp 记成"当前任务
+     * 的保存 sp"。但 g_s3_cur 指的那个 ctx 不一定就是**真正在跑**的那个任务
+     * （典型情况：闭源库的 ppTask 挂在 g_s3_cur 上，而主流程其实跑在主任务
+     * 的栈上）。于是别人的陷阱帧被记进了 ppTask 的 ctx —— JTAG 实测
+     * ctx[1]（ppTask，栈 0x3fcbee00+0x1800）的 sp 是 0x3fcd8ea0，那是主任务
+     * 栈上的帧，比它自己的栈高 41KB。它下次被恢复时 sp 就指到别的栈上，
+     * 一路弹栈弹进数据区，最后跳到 task.c6 的静态数据（§273/§274）。
+     *
+     * 修正：只有帧确实落在这个任务自己的栈范围内，才认它是保存点。 */
+    if (c != 0 && c->stack != 0) {
+        u32 lo = (u32)(void *)c->stack;
+        u32 hi = lo + c->size;
+
+        if (frame_sp >= lo && frame_sp < hi) {
+            c->sp = frame_sp;
+        } else {
+            volatile u32 *r = (volatile u32 *)0x500017C0u;
+
+            r[0] = r[0] + 1u;        /* 被拒的次数 */
+            r[1] = frame_sp;         /* 最后一个被拒的帧 */
+            r[2] = (u32)(void *)c;   /* 当时 g_s3_cur 指的 ctx */
+        }
     }
     /* 陷阱帧里的 PS 也要带上 WOE：中断进来时硬件保存的是被打断代码的 PS，
      * 而被打断的多半是我们自己的 call0 代码（WOE=0）。如果不补这一位，

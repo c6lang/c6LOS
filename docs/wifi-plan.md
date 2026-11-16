@@ -11658,3 +11658,59 @@ addi a1, a1, 80 ; rfe
    的写法（谁被当成 cur）；
 2. `port_task_switch`（`port/s3/ctx.S:98`）里保存 sp 的那段，和
    `port_task_ctx_create` 的 `r[16]` 占位/`sp@64` 布局是否一致。
+
+### §276 ★找到病根并修掉：`port_irq_fill` 把别的任务的陷阱帧记成了"当前任务的保存 sp"
+
+`port/s3/ctx.c` 的 `port_irq_fill()` 原来是无条件：
+
+```c
+if (c != 0) { c->sp = frame_sp; }      /* c = g_s3_cur[core] */
+```
+
+`g_s3_cur` 指的 ctx **不一定就是真正在跑的那个任务**（典型：闭源库的 ppTask
+挂在 `g_s3_cur` 上，而主流程其实跑在主任务栈 `S3_STACK_TOP` 那片上）。于是
+**别人的**陷阱帧被记进了 ppTask 的 ctx —— 就是 §274 里 JTAG 看到的
+`ctx[1].sp = 0x3fcd8ea0`（不在它自己的 `0x3fcbee00+0x1800` 里）。它下次被恢复时
+sp 指到别的栈上，一路弹栈弹进数据区，最后跳到 `task.c6` 的静态数据（§273）。
+
+修法（最小改动）：只有陷阱帧确实落在**这个任务自己的栈范围**内，才认作保存点；
+否则拒绝，并把 (次数, frame_sp, ctx) 写到 RTC `0x500017C0` 方便上板核对。
+
+**效果（真板实测，立竿见影）**：
+
+```
+之前： [wifi] associate ssid=weforpay.com
+       ..[wifi] set_storage(RAM)=0
+       .Wu2.b*** TRAP ... cause=00000002 pc=3fcb9d4d   ← 卡在 set_mode 前
+
+现在： b[wifi] set_mode(STA)=0                            ← set_mode 成功返回！
+       .Wu2.b.[v2]wifi|Password length matches WPA2 standards,
+                authmode threshold changes from OPEN to WPA2   ← set_config 也被处理了
+       *** TRAP sp=3fcc0500 cause=0000001c pc=420458c7 ...
+```
+
+也就是说 §259/§261 以来那条"一调闭源库就崩"的路**已经通了**，剩下的是一连串
+新的、更靠后的问题。
+
+### §277 新的崩点：`sta_is_wpa3_enabled` 里空指针 +0x1b4
+
+新陷阱：`cause=0x1c`（LoadStoreAlignment）、`vaddr=0x48`、`pc=0x420458c7`、
+`a0=0x82037492`（返回地址 = `wifi_set_config_process+402`）。反汇编：
+
+```
+420458bc <sta_is_wpa3_enabled>:
+  entry a1, 32
+  l32r  a2, <g_cnxMgr 的地址>          ; JTAG 读出来 a2 = 0x3fcd55e8 = g_cnxMgr
+  l32i  a8, a2, 0x1b4                  ; a8 = *(g_cnxMgr+0x1b4) = NULL  ← 就是它
+  movi.n a2, 0
+  l32i  a9, a8, 72                     ; 读 NULL+0x48 → cause=0x1c（不是普通 load，是宽对齐访问）
+```
+
+`nm` 里 `0x3fcd55e8` 正是闭源库的 **`g_cnxMgr`**（size 3944），JTAG 读
+`0x3fcd579c`（= `g_cnxMgr+0x1b4`）确实是 0。旁边 `g_cnxMgr+0x1b0` 也是 0。
+
+所以：**库的某个子对象还没被创建**，`sta_is_wpa3_enabled` 就把它当非空用了。
+好消息是这份库**带符号表**（`sta_is_wpa3_enabled`、`wifi_set_config_process`
+都能解析），下一轮可以直接查"是谁写 `g_cnxMgr+0x1b4`"（按符号名找
+`esp_wifi_start` / `wifi_init_*` / `net80211_*` 里对 0x1b4 的 store），
+把那条初始化路径补上；或者反过来先把 `esp_wifi_start()` 提前/单独跑一次验证。
