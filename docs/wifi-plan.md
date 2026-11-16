@@ -12049,3 +12049,68 @@ NRX 0x6001CC00 之间，就是 WiFi MAC）的时钟不是 SYSCON 给的，八成
 顺带确认了两件事：
 - `clk_ll_bbpll_enable` 只需要一次寄存器操作，成本可忽略（已留在代码里，无害）；
 - 打印 `0x6001c08c` / `OPTIONS0` 的探针也留下了，以后每次进 PHY 都能看见。
+
+### §289 ★ 让 c6os 改用 **IDF 真正的二级 bootloader** 引导 —— 成功了：内核能在 IDF 的时钟树/cache/MMU 环境下启动
+
+前面 §277~§288 一直卡在同一件事上：**我们的镜像自己就是二级 bootloader**（ROM 直接
+从 0x0 加载它），所以 IDF 二级 bootloader 干的活（`bootloader_clock_configure()`
+→ `rtc_clk_init()` 选时钟源/开 SPLL/配 CK8M、cache & MMU、PSRAM…）**没有任何人做**。
+§287 测出的 `RTC_CNTL_CLK_CONF` 差异（0x1158321c vs 0x30c8069c）就是这么来的。
+
+**改法（本轮实现，已生效）**
+
+1. `port/s3/link.ld`：flash 段的 LMA 改成 `AT (0x20 + __app_base)` /
+   `AT (0x10000 + __app_base)`，VMA 一律不动（同余关系保持）。`PROVIDE(__app_base = 0)`
+   保证默认行为不变。
+2. `Makefile`：新增 `S3_APP_BASE`（默认 `0x0` = 老行为），链接时
+   `-Wl,--defsym=__app_base=$(S3_APP_BASE)`，并把它传给 `tools/chkimg.py`
+   （比较时先把 `p_paddr` 减去应用基址）。
+3. `tools/flashbl.sh`：把 **参照工程那套 IDF 二级 bootloader** 写进去
+   （`bootloader.bin@0x0` + 分区表`@0x8000` + 我们的应用`@0x20000`），再擦掉 otadata
+   让 bootloader 确定地启 `ota_0`。
+4. 构建：`make ... S3_APP_BASE=0x20000 https`。
+
+**结果：真的起来了！** 串口完整输出（`boot:0x8 SPI_FAST_FLASH_BOOT` 之后
+`load:0x3fce2820` … `entry 0x403c88f4` 是 IDF bootloader，再往后是我们的内核）：
+
+```
+c6os s3 boot
+M1 icache ok
+flash: text va=0x42010000 lma=0x00030000 …   ← LMA 已经是基址后的 0x30000 ✓
+flash: mmu(text)=0x00000003 mmu(rodata)=0x00000002
+flash: probe(42)=0x0000002a                    ← flash 读实测正确 ✓
+M5 tasks ok, starting scheduler
+T1 call0 任务进入 windowed 主流程
+```
+
+顺带测量（**这次是 IDF bootloader 之后的寄存器**）：
+
+| 寄存器 | 参照(IDF) | 我们(ROM 直接引导) | 我们(IDF bootloader 引导) |
+|---|---|---|---|
+| `0x60008074` CLK_CONF | `30c8069c` | `1158321c` | **`10c8069c`** ← 已经很接近了 |
+| `0x6001c08c` MAC 计数器 | 活的 | 0 | 仍然 **0**（这时 PHY 还没初始化，属正常） |
+| `0x60026014` WIFI_CLK_EN | `ffffdfdf` | `fffce7bf` | `fffce030` |
+
+**新问题（下一轮的主线）**：走 bootloader 这条路时，windowed 的 WiFi 任务在 `T1`
+之后**立刻**死在 `_vec_default`，JTAG 抓到的现场（`0x50000100`）：
+
+```
+标记 0000bad0  EXCCAUSE=0000001d  EXCVADDR=ffffffe0  EPC1=400442a7(ROM 里的代码)
+PS=00060e10 (EXCM=1, INTLEVEL=6)  a0=0  a1=3fcbeda0  WINDOWBASE=0
+```
+同样的镜像走 **ROM 直接引导**（`S3_APP_BASE=0x0`）时，同一个任务能一路走到
+`[phy] calling register_chipv7_phy(mode=0)` 才卡住（§281）。所以差异完全是
+"谁先启动"造成的，不是我们的 windowed 主流程本身。
+
+可疑点（下一轮按顺序查）：
+1. **窗口溢出/下溢向量**：ROM 引导时那 6 个向量由 ROM 处理；我们 `_start` 里
+   `wsr vecbase` 换成自己的表以后，这 6 个槽位落到了 `_vec_default`。
+   若 IDF bootloader 让 ROM 库进入更深的 `call8` 层级，就必炸。
+   查法：在 `_vec_default` 里把 **%index/向量号**也存进 RTC（现在只有 EXCCAUSE），
+   或者干脆补一套 xtos 风格的 `_WindowOverflow4/8/12`、`_WindowUnderflow4/8/12`。
+2. **高优先级中断**：`PS.INTLEVEL=6` 说明异常发生在异常/中断上下文里；
+   IDF bootloader 可能留下了我们没接管的中断源（RTC/WDT/PMU）。
+3. 我们的 `_vec_level1` 是否在新环境下仍被正确挂上。
+
+**目前默认仍是老路径**（`S3_APP_BASE=0x0`，已验证行为不变，板子上跑的就是它）。
+新路径随时可用 `S3_APP_BASE=0x20000 + tools/flashbl.sh` 复现。

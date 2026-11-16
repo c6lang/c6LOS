@@ -273,17 +273,21 @@ $(BUILD)/obj/start.o: port/s3/start.S
 S3_STACK_TOP ?= 0x3FCEF000
 S3_IMG_FLAGS ?=
 S3_STACK_LD := -Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP)
+# §289：应用基址。0 = 我们的镜像自己当二级 bootloader（ROM 直接引导，历史默认）；
+# 0x20000 = 交给 IDF 真正的二级 bootloader 引导（先刷 bootloader@0x0 + 分区表@0x8000）。
+S3_APP_BASE ?= 0x0
+S3_APP_LD := -Wl,--defsym=__app_base=$(S3_APP_BASE)
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
-		$(S3_STACK_LD) \
+		$(S3_STACK_LD) $(S3_APP_LD) \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
 	esptool --chip esp32s3 elf2image $(S3_IMG_FLAGS) --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
-	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@
+	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@ $(S3_APP_BASE)
 
 image-info: $(BUILD)/c6os.bin
 	esptool --chip esp32s3 image-info $<

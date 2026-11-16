@@ -12,7 +12,9 @@
 判据很直接：ELF 里每个 PT_LOAD 段（尤其 p_paddr 落在 0x3Cxxxxxx/0x42xxxxxx 这些
 flash 窗口里的）的字节，必须原封不动地出现在 .bin 的 p_paddr 偏移处。
 
-用法: tools/chkimg.py <elf> <bin>
+用法: tools/chkimg.py <elf> <bin> [app_base]
+  app_base 是镜像在 flash 里的起始偏移（默认 0；用 IDF bootloader 引导时是 0x20000），
+  比较时先把 p_paddr 减去它。
 退出码 0 = 通过；1 = 不一致（附诊断）。
 """
 import struct
@@ -23,6 +25,10 @@ DROM_HI = 0x3E000000
 IROM_LO = 0x42000000          # IROM 窗口（0x42000000..0x44000000）
 IROM_HI = 0x44000000
 PAGE = 0x10000
+
+
+def main_base():
+    pass
 
 
 def load_phdrs(path):
@@ -47,9 +53,10 @@ def load_phdrs(path):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit('用法: %s <elf> <bin>' % sys.argv[0])
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit('用法: %s <elf> <bin> [app_base]' % sys.argv[0])
     elf_path, bin_path = sys.argv[1], sys.argv[2]
+    base = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0
     elf, phdrs = load_phdrs(elf_path)
     with open(bin_path, 'rb') as f:
         img = f.read()
@@ -65,21 +72,22 @@ def main():
             continue
         checked += 1
         kind = 'IROM' if p_vaddr >= IROM_LO else 'DROM'
+        lma = p_paddr - base     # 镜像文件里的偏移（应用基址之外的部分）
         if (p_vaddr - p_paddr) % PAGE != 0:
             print('!! %s: VMA 0x%08x 与 LMA 0x%08x 不是 mod 0x10000 同余（MMU 页 64KB）'
                   % (kind, p_vaddr, p_paddr))
             bad += 1
-        if p_paddr + p_filesz > len(img):
-            print('!! %s: LMA 0x%08x + 长度 0x%x 超过镜像大小 0x%x'
-                  % (kind, p_paddr, p_filesz, len(img)))
+        if lma < 0 or lma + p_filesz > len(img):
+            print('!! %s: LMA 0x%08x(基址外 0x%x) + 长度 0x%x 超过镜像大小 0x%x'
+                  % (kind, p_paddr, lma, p_filesz, len(img)))
             bad += 1
             continue
         want = elf[p_offset:p_offset + p_filesz]
-        got = img[p_paddr:p_paddr + p_filesz]
+        got = img[lma:lma + p_filesz]
         if want != got:
             first = next(i for i in range(p_filesz) if want[i] != got[i])
             print('!! %s: 镜像里 flash 偏移 0x%08x 处的字节和 ELF 不一致（首个差异 +0x%x）'
-                  % (kind, p_paddr, first))
+                  % (kind, lma, first))
             print('   ELF: %s' % want[max(0, first - 4):first + 8].hex())
             print('   BIN: %s' % got[max(0, first - 4):first + 8].hex())
             print('   → 说明段数据实际被 esptool 放在别的文件偏移，而 ROM 会按 LMA')
