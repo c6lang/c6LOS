@@ -11284,3 +11284,59 @@ OSI 表接错。
 少了 IDF 里的 `esp_wifi_set_mode` 前置动作，例如 `esp_netif_create_default_wifi_sta`
 对应的 OSI 槽位），可以用"把我们所有 OSI 桩的返回值/写入地址都记到 DRAM"的办法，
 事后 dump 出库到底读了哪个槽位。
+
+### §261 崩溃点收窄到"闭源库的 API 锁/init 状态"这一层
+
+用"叶函数 vs 会嵌套的函数"对照实验把范围压到了很窄的一条缝：
+
+| 实验 | 结果 |
+| --- | --- |
+| 连调两次 `esp_wifi_set_storage`（叶函数） | **两次都成功**（第二次后仍打印正常） |
+| 跳过 `esp_wifi_set_mode`，直接 `esp_wifi_set_config` | 崩点不变（说明不是 set_mode 特有） |
+| 把调用顺序换成先 `set_mode` 再 `set_storage` | **一进 set_mode 就崩**（确认是函数本身） |
+| 人为多加一层 windowed 调用（`noinline` 包装） | 崩点不变 ⇒ **"嵌套深度/窗口溢出"假设被否掉** |
+
+再把 `esp_wifi_set_mode`（0x4203d594）反汇编出来看它到底做了什么：
+
+```
+entry a1, 32
+call8 wifi_init_completed          ; ← 崩点在这条链里
+l32r a8, g_osi_funcs_p
+movi a10, 24
+l32i a8, a8, 0        ; a8 = OSI 表
+l32i a8, a8, 0x174    ; 槽 93 = _wifi_zalloc
+callx8 a8             ; 分配 24 字节消息块
+... 填 block[0]=10, block[4]=wifi_set_mode_process, block[8]=mode
+call8 ieee80211_ioctl
+```
+
+而 JTAG 现场取证表明：
+
+- OSI 表本身是**好的**：槽 17（`ieee80211_ioctl` 里用来拿锁的那个槽）= 0x4037c104（我们的
+  glue，合法 flash 地址）；
+- 崩溃前后 `g_osi_calls[]` **一个都没变**，连槽 93（`_wifi_zalloc`，之前计数 5）和槽 43
+  （`_mutex_lock`，计数 0x25）都没涨 ⇒ 崩在 `wifi_init_completed` → `wifi_api_lock`
+  的**前几条指令**里，连 OSI 都还没调到。
+
+`wifi_init_completed`（0x4203c744）的结构是：
+
+```
+call8 wifi_api_lock            ; ← 拿库自己的 API 锁
+...
+l32r a8, (3fcba318)            ; 读"初始化状态"全局
+l32i a8, a8, 0
+beqi a8, 3, ...                ; == 3 表示完成
+```
+
+所以下一轮最该查的是 **`wifi_api_lock`（0x4203c6d8）一开始读的那个全局**：如果它在
+`esp_wifi_init_internal` 之后仍然是垃圾（我们把这套初始化"半手动"跑起来，库里有些
+静态对象可能依赖 IDF 的 `esp_wifi_init` 包装层），那就对上了"叶函数能过、只要一碰
+锁就跳野地址"的全部现象。用 JTAG 在崩住后 dump 0x3fcba318 附近 + 反汇编
+`wifi_api_lock` 的前 20 条即可确认。
+
+### §262 顺手把 `WIN_SPILL` 结尾的归一化去掉了（对齐 IDF）
+
+IDF 的 `SPILL_ALL_WINDOWS`（xt_asm_utils.h）转完一圈就结束，**不动 WINDOWSTART**
+（由硬件的 overflow/`rfwo` 自己维护）。我们原来在结尾多做了一次
+"归一化成 `1<<WINDOWBASE`"，会把祖先窗口的 live 位抹掉；现在已删除、并在源码里
+写了原因。实测崩点未变（说明它不是当前的主因），但这是与官方实现对齐的正确做法。

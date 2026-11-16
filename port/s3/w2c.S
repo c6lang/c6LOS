@@ -75,12 +75,12 @@
     wsr     a8, ps               /* 恢复原 PS */
     rsync
     wsr     a9, epc1
-    rsr     a10, windowbase
-    movi    a11, 1
-    ssl     a10
-    sll     a11, a11
-    wsr     a11, windowstart
-    isync
+    /* §262：spill 完之后**绝不能**把 WINDOWSTART 归一化成 1<<WINDOWBASE。
+     * IDF 的 SPILL_ALL_WINDOWS（xt_asm_utils.h）转完一圈就结束，WindowsStart
+     * 由硬件的 overflow/rfwo 自己维护；归一化会把祖先窗口的 live 位抹掉，
+     * 而它们的寄存器内容其实还在物理寄存器里 —— 之后需要它们时硬件会走
+     * "下溢填充"去读一个从没写过的 spill 槽，读回来的就是栈上的垃圾
+     * （真板症状：PC 跳进栈地址、a0=0、ws=0）。 */
 .Lspill_end\@:
     .endm
 
