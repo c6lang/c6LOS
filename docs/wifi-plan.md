@@ -11987,3 +11987,43 @@ NRX 0x6001CC00 之间，就是 WiFi MAC）的时钟不是 SYSCON 给的，八成
    找它凭**什么条件**才去点亮 MAC（很可能是某个 `get_chip_version()`/effuse 分支）；
 2. 直接把 IDF 的 `esp_phy` 组件源码编进镜像（打桩 nvs/esp_log/esp_timer/efuse），
    让序列不再是我们复刻的 —— 这条更稳，建议下一轮直接上。
+
+### §287 参照实验（二）：**RTC_CNTL_CLK_CONF 明显不一样** —— 我们根本没有 IDF 的二级 bootloader 时钟配置
+
+把参照固件再刷一遍，对着同一批寄存器读（这次多读了时钟配置）：
+
+| 寄存器 | IDF 正常系统 | 我们 |
+|---|---|---|
+| `0x60026000` SYSCON 侧 CPU/外设配置 | `00000001` | （待读） |
+| `0x60008074` **RTC_CNTL_CLK_CONF** | **`30c8069c`** | **`1158321c`** |
+| `0x60008070` PLL 配置 | `00000000` | `00000000` |
+| `0x6001c08c` MAC 块计数器 | `03fff9f5`（在动） | `00000000` |
+
+按 `soc/esp32s3/register/soc/rtc_cntl_reg.h` 的 CLK_CONF 字段位：
+
+- bit29 `FAST_CLK_RTC_SEL`：参照 **1**，我们 **0**；
+- bit28 `XTAL_GLOBAL_FORCE_NOGATING`：都是 1；
+- 参照比我们多 `0x20800480`（bit29 / bit23 / bit10 / bit7），
+  我们比参照多 `0x11103000` 那一片（含 CK8M 相关位）。
+
+**根因线索**：`Makefile` 里那句注释说得对 —— **我们的镜像没有二级 bootloader**
+（`S3_FLASH_AUTO_MAP` 就是为此存在）。而 IDF 的二级 bootloader 第一件事就是
+`bootloader_clock_configure()`：选时钟源、开 SPLL、配 CK8M、把 CPU 拉到 80MHz。
+这些**谁都没替我们做**，ROM bootloader 只做最小配置。
+
+也就是说：PHY 初始化卡住的真正原因，很可能是**芯片的 RTC/CPU 时钟树还是 ROM 的默认状态**，
+而 `register_chipv7_phy()` 里 `ram_iq_est_enable()` 依赖的 MAC 块计数器正是挂在
+某个（没开出来的）时钟域上。
+
+**试过但没用的（本轮）**：
+- 让 `_phy_enable` 回调第一次进来只"上电"、把完整 PHY 初始化推迟到
+  `esp_wifi_init_internal()` 之后（IDF 的天然顺序 init→phy）→ **init 自身卡在
+  `[lockok]`**（库本来就指望这个回调返回时 PHY 已经好了）。改动已回退。
+- 把 `SYSCON_WIFI_CLK_EN` 写成 `0xffffffff` → MAC 计数器仍 0（§286 已记）。
+
+**下一轮（明确的两条路）**
+1. **把 IDF 的 `rtc_clk` 初始化搬过来**：`components/esp_hw_support/port/esp32s3/rtc_clk.c`
+   里的 `rtc_clk_init()` / `rtc_clk_cpu_freq_set_config(RTC_CPU_FREQ_80M)`，
+   在 kernel 启动早期（进 PHY 之前）执行一次，让 `0x60008074` 与参照一致。
+   这是目前证据最硬的一条。
+2. 若仍不行，再上"把 IDF `esp_phy` 整组件编进镜像"的终极方案（§286 备选）。
