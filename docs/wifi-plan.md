@@ -10273,3 +10273,36 @@ B2 cfg@… osi=… magic@144=1f2f3f4f
 一次），要查库为什么没建第二个任务 —— 大概率还是某个 OSI 返回值让它以为失败。
 `[task]` / `[take]` / `[evwait]` / `[recv]` 这些打印是这一轮加的，会一直留在代码里
 （它们是定位这类"卡在某个同步点"的唯一手段）。
+
+### §229 同步点追踪：init 卡在 ppTask 握手之后（两个任务同时失声）
+
+给 OSI 的信号量/互斥/队列加了序号化追踪（`[semnew] / [mtxnew] / [take] / [give] /
+[lock] / [unlock] / [send] / [recv]`，只在内核 bringup 期间打开，`g_dbg_sync`）。
+真板串口现在的完整流程：
+
+```
+W1 bringup
+B1 … magic=deadbeaf ver=00000008
+B2 cfg@… osi=… magic@144=1f2f3f4f
+[lock]   t=1 m#… p=…                  ← esp_wifi_init_internal 拿锁
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+[unlock] t=1 m#… p=…
+[mtxnew] #1 / [mtxnew] #2             ← 建两个互斥
+[semnew] #1 p=… max=1 init=0 t=1      ← 建握手信号量
+[task]   库建任务 fn=… id=2 stack=6144 prio=29(->2)   ← ppTask 起来了
+[take]   t=1 sem#1 tk=ffffffff        ← init 等 ppTask 就绪
+[give]   t=2 sem#1                    ← ppTask 给了 ✓
+（之后**两个任务都不再有动静**）
+```
+
+也就是：`pm_funcs_init / wdev_funcs_init / net80211_funcs_init` 都过了，ppTask 建
+起来并完成了启动握手；**紧接着 init 任务（t=1）和 ppTask（t=2）同时失去进展**，
+而且没有 TRAP、没有任何后续 OSI 调用（`[send]/[recv]/[lock]` 都没出现）。
+
+这几乎可以断定问题在**上下文切换 / 窗口保存恢复**这一层（之前几次 `TRAP cause=0`
+且 `pc` 落在 `retw.n`、`a0` 是垃圾值，正是窗口被子被踩的症状）：
+- 下一步①在 `port_switch` 里加打印（切换前后任务 id + WINDOWSTART），确认 give 之后
+  是否发生了任务切换、切换后窗口状态是否正确；
+- 下一步②检查 `ctx.S` 的任务切换对 **windowed 任务**是否正确地保存/恢复了
+  a0-a15 与 WINDOWSTART（我们只验证过 call0 任务，windowed 任务是实验性的）。

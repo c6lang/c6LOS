@@ -257,7 +257,13 @@ static u32 w_ticks(u32 t)
 }
 
 /* ---- 信号量 ---- */
-typedef struct { WOsSem s; u32 magic; } WSem;
+/* 同步点追踪（§229）：只在 bringup 期间打开，打印信号量的建/给/取，
+ * 用来定位"init 卡在等哪个同步对象"。 */
+u32 g_dbg_sync = 0u;
+static u32 g_sem_seq = 0u;
+static u32 g_sem_id_of(void *p) { (void)p; return 0u; }
+
+typedef struct { WOsSem s; u32 magic; u32 seq; } WSem;
 #define WSEM_MAGIC 0x53454D31u
 
 static WSem *wsem_new(u32 max, u32 init)
@@ -266,6 +272,13 @@ static WSem *wsem_new(u32 max, u32 init)
     if (s == 0) { return 0; }
     if (s3_w2c_sem_init((void *)&s->s, init, max) != 0) { osi_free(s); return 0; }
     s->magic = WSEM_MAGIC;
+    g_sem_seq = g_sem_seq + 1u;
+    s->seq = g_sem_seq;
+    if (g_dbg_sync != 0u) {
+        ets_printf("[semnew] #%u p=%08x max=%u init=%u t=%u\n",
+                   (unsigned)s->seq, (unsigned)(void *)s, (unsigned)max, (unsigned)init,
+                   (unsigned)s3_w2c_current_task());
+    }
     return s;
 }
 
@@ -299,8 +312,10 @@ static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
 
-    ets_printf("[take] t=%u sem=%x tk=%x\n",
-               (unsigned)s3_w2c_current_task(), (unsigned)(void *)sem, (unsigned)ticks);
+    if (g_dbg_sync != 0u) {
+        ets_printf("[take] t=%u sem#%u tk=%x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)((s != 0) ? s->seq : 0u), (unsigned)ticks);
+    }
     int ok;
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
@@ -315,6 +330,10 @@ static int osi_semphr_give(void *sem)
     WSem *s = (WSem *)sem;
     int r;
     HIT_OF(_semphr_give);
+    if (g_dbg_sync != 0u) {
+        ets_printf("[give] t=%u sem#%u\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)((s != 0) ? s->seq : 0u));
+    }
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(2u, (u32)sem, 0u, 0xEEu); return 0; }
     r = (s3_w2c_sem_post((void *)&s->s) == 0) ? 1 : 0;
     sem_trace(2u, (u32)sem, 0u, (u32)r);
@@ -361,10 +380,22 @@ static void *wmux_new(void)
     return (void *)m;
 }
 
+static u32 g_mtx_seq = 0u;
+
 static void *osi_mutex_create(void)
 {
+    void *m = wmux_new();
+
     HIT_OF(_mutex_create);
-    return wmux_new();
+    if (m != 0) {
+        g_mtx_seq = g_mtx_seq + 1u;
+        *(u32 *)((u8 *)m + 8u) = g_mtx_seq;   /* WMtx 的第 3 个字当序号 */
+        if (g_dbg_sync != 0u) {
+            ets_printf("[mtxnew] #%u p=%08x t=%u\n", (unsigned)g_mtx_seq,
+                       (unsigned)m, (unsigned)s3_w2c_current_task());
+        }
+    }
+    return m;
 }
 static void *osi_recursive_mutex_create(void)
 {
@@ -385,6 +416,10 @@ static int osi_mutex_lock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_lock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    if (g_dbg_sync != 0u) {
+        ets_printf("[lock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
+    }
     {
         int ok;
         B_IN(4u);
@@ -398,6 +433,10 @@ static int osi_mutex_unlock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_unlock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    if (g_dbg_sync != 0u) {
+        ets_printf("[unlock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
+    }
     return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 1 : 0;
 }
 
@@ -535,6 +574,10 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_send);
+    if (g_dbg_sync != 0u) {
+        ets_printf("[send] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)qh, (unsigned)ticks);
+    }
     if (q == 0 || q->magic != WQ_MAGIC) {
         SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
         SDIAG[1] = (u32)((WQ *)qh)->magic;
@@ -1574,6 +1617,7 @@ u32 s3_wifi_bringup(void)
     wcfg(140u, 0u);             /* dump_hesigb_enable     default n           */
     wcfg(144u, 0x1F2F3F4Fu);    /* magic = WIFI_INIT_CONFIG_MAGIC             */
 
+    g_dbg_sync = 1u;               /* 打开同步点追踪（§229） */
     s3_wifi_osi_init();
     ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
                (u32)(void *)g_wifi_osi_funcs._semphr_create,
@@ -1586,7 +1630,13 @@ u32 s3_wifi_bringup(void)
                (u32)(void *)g_wifi_cfg_blob,
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 144u));
-    return (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+    {
+        u32 irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+
+        ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
+        g_dbg_sync = 0u;
+        return irc;
+    }
 }
 void *s3_wifi_calls_ptr(void) { return (void *)g_osi_calls; }
 
