@@ -11789,3 +11789,57 @@ BBPLL/I2C 状态。
    （文档里 `[phy] register_chipv7_phy rc=0` 就是那么来的），所以分歧点一定在
    "bisect 路径 vs 正常路径"的调用顺序/上下文差异上，值得先把 bisect 的 6 个
    子步骤和 `s3_win_phy_enable()` 逐句对照一遍。
+
+### §282 `register_chipv7_phy` 卡死的排查记录（电源/时钟/复位全都对，PHY 那块寄存器仍是死的）
+
+有 IDF 源码在手（`/media/winger/inst_26/esp/esp-idf`），可以逐条比对了。
+
+**IDF 在 `register_chipv7_phy` 之前做的全部事情**（`components/esp_phy/src/phy_init.c`
+的 `esp_phy_enable()`→`esp_phy_load_cal_and_init()`）：
+
+1. `esp_phy_common_clock_enable()` = `wifi_bt_common_module_enable()`
+   → `SYSCON_WIFI_CLK_EN(0x60026014) |= SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M (0x78078)`（S3 不是
+   `SOC_MODEM_CLOCK_IS_INDEPENDENT`，走老的那条路）
+2. `phy_module_enable()` → `periph_ll_phy_calibration_module_enable_clk_clear_rst()`
+   （`|= SYSTEM_WIFI_CLK_PHY_EN_M (0x400000)`）+ RNG 时钟 +
+   `periph_ll_wifi_module_enable_clk_clear_rst()`（`|= SYSTEM_WIFI_CLK_WIFI_EN_M`）
+3. `phy_init_param_set(1)`  ← 只有 `SOC_PHY_COMBO_MODULE`（S3 是 WiFi+BLE 组合片）
+4. `phy_bbpll_en_usb(true)`（`CONFIG_ESP_PHY_ENABLE_USB`）
+5. `register_chipv7_phy(init_data, cal_data, cal_mode)`
+
+我们的 `s3_win_phy_power_on()`/`clock_enable()` 覆盖了 1、2、4，掩码也对得上
+（`0x78078F` ⊇ `0x78078`，另外补了 `0x400000`）。
+
+**JTAG 实测（卡住时）**：
+
+| 寄存器 | 值 | 结论 |
+|---|---|---|
+| `0x60026014` SYSCON_WIFI_CLK_EN | `0xfffce7bf` | WiFi/BT/PHY 时钟位全置 1 ✓ |
+| `0x60008090` RTC_CNTL_DIG_PWC | `0x00545010` | **bit18 = WIFI_FORCE_PU = 1**、bit17 = FORCE_PD = 0 ✓ 电源域是开的 |
+| `0x60008094` RTC_CNTL_DIG_ISO | `0xaa805080` | bit28 = 0 ✓ 已解隔离 |
+| `0x60026018` SYSCON_WIFI_RST_EN | `0` | 复位已释放 ✓ |
+| `0x60006000` PHY 基址 | `0x0e828040` | 这块**能读**，非 0 |
+| `0x60006174` 被轮询的那个 | **0** | 死 0；`0x60006170/0x60006178` 也都是 0 |
+| `mww 0x60006174 0x10000` 后回读 | 仍为 0 | **写不进去**（只读/无响应） |
+
+补充事实：
+- `RTC_CNTL_WIFI_FORCE_PU` 是 **BIT(18)**，不是 BIT(16)（`soc/esp32s3/register/soc/rtc_cntl_reg.h`）；
+  所以 §282 里试过的"补 PU 位"其实一直是开的，那次改动已回退。
+- `S3_PHY_CAL_MODE=2`（`PHY_RF_CAL_NONE`）**不能**绕开这一步，照样卡在同一 PC。
+- 补上 IDF 的 `phy_init_param_set(1)`（combo 模式）也**没有**变化。
+- `make wphy` / `make wphyflash` 这两个目标**本身就是坏的**（链 `w2c.o` 时缺
+  `os_event_*`），和本次无关，不去追。
+
+**判断**：PHY 的"模拟/BB 寄存器窗口"整体没有响应（0x60006174 一带恒 0 且写不进），
+而 APB 侧的 `0x60006000` 是活的。最可能是**还缺一个把 PHY 模拟域从复位/掉电里真正
+拉起来的动作**（IDF 里由 `phy_module_enable` 的 RNG 时钟 + 一步步 `periph_ll_*` 完成，
+我们只搬了一部分），或者这块 libphy 期望先有 `phy_init_param_set`/`esp_phy_apply_phy_init_data`
+的某种组合。
+
+**下一步建议（按性价比）**
+1. 逐位对照 `syscon_reg.h` 把 `syscon_wifi_clk_en` 的目标值算出来（不要再用猜的掩码），
+   写完回读确认每一位都真的置上了。
+2. 在 `register_chipv7_phy` 之前先调一次 `phy_wakeup_init()` / `ram_phy_wakeup_init()`
+   （这两个符号库里都有：`0x4204d604` / `0x4204d9b0`），看是否能把模拟域叫醒。
+3. 换思路：把 IDF 的 `esp_phy` 组件源码直接编进我们镜像（`phy_init.c` 里真正需要
+   替换的只有 nvs 存储那几处），这样上面 1~5 步全按 IDF 走，不用手工复刻。
