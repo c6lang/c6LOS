@@ -1,14 +1,14 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/linux_abi.h"
 
 /* x86-64 特权级底座：GDT（含 DPL3 用户段）+ TSS + 系统调用门。
  *
- * 选择子布局刻意与 Linux 一致，便于后续接 syscall/sysret：
+ * 选择子布局刻意与 Linux 一致，便于 syscall/sysret 的 STAR 语义：
  *   0x08 内核代码 DPL0      0x10 内核数据 DPL0
  *   0x18 用户 32 位代码 DPL3（占位，不用）
  *   0x20 用户数据 DPL3      0x28 用户 64 位代码 DPL3     0x30 TSS
- * SYSRET 语义：CS = STAR[63:48]+16 | 3，SS = STAR[63:48]+8 | 3，
- * 因此内核侧要写 STAR[63:48] = 0x18（L2 接入时使用）。
+ *   STAR[47:32]=0x08（内核段），STAR[63:48]=0x18（用户基）
  */
 
 typedef struct {
@@ -23,25 +23,6 @@ typedef struct {
     u16 iomap;
 } __attribute__((packed)) X86Tss;
 
-/* 与 user_entry.S 的压栈顺序严格对应（低地址在前）。 */
-typedef struct {
-    u64 r15;
-    u64 r14;
-    u64 r13;
-    u64 r12;
-    u64 r11;
-    u64 r10;
-    u64 r9;
-    u64 r8;
-    u64 rbp;
-    u64 rdi;
-    u64 rsi;
-    u64 rdx;
-    u64 rcx;
-    u64 rbx;
-    u64 rax;
-} X86Regs;
-
 typedef struct {
     u16 limit;
     u64 base;
@@ -52,8 +33,77 @@ static X86Gdtr g_gdtr;
 static X86Tss g_tss;
 static u8 g_kstack[16384] __attribute__((aligned(16)));
 
+/* user_entry.S 用：syscall 入口换栈、以及用户栈的暂存。 */
+u64 x86_kern_stack = 0;
+u64 x86_user_rsp = 0;
+
 extern void x86_int80_entry(void);
+extern void x86_syscall_entry(void);
 extern void x86_idt_set(int n, void (*fn)(void), u8 dpl);
+extern void *x86_exc_table[32];
+
+static void dbg_hex(u64 v)
+{
+    const char *d = "0123456789abcdef";
+    int i;
+
+    for (i = 15; i >= 0; i--) {
+        port_putc((int)d[(u8)((v >> (u8)(4 * i)) & 0xfull)]);
+    }
+}
+
+static void dbg_dec(u64 v)
+{
+    char b[24];
+    int i = 0;
+
+    if (v == 0ull) {
+        port_putc('0');
+        return;
+    }
+    while (v != 0ull && i < 24) {
+        b[i] = (char)('0' + (int)(v % 10ull));
+        v /= 10ull;
+        i++;
+    }
+    while (i > 0) {
+        i--;
+        port_putc(b[i]);
+    }
+}
+
+/* 异常统一出口：栈上是 LxRegs 之后紧跟 vec/err/rip/cs/rflags/rsp/ss。 */
+void x86_exc_dump(LxRegs *r, u64 cr2)
+{
+    u64 *p = (u64 *)r + 15ull;
+
+    port_puts("\n!! CPU 异常 vec=");
+    dbg_dec(p[0]);
+    port_puts(" err=");
+    dbg_hex(p[1]);
+    port_puts("\n   cr2=");
+    dbg_hex(cr2);
+    port_puts(" cs=");
+    dbg_hex(p[3]);
+    port_puts(" rip=");
+    dbg_hex(p[2]);
+    port_puts(" rsp=");
+    dbg_hex(p[5]);
+    port_puts(" rflags=");
+    dbg_hex(p[4]);
+    port_puts("\n   rax=");
+    dbg_hex(r->rax);
+    port_puts(" rcx=");
+    dbg_hex(r->rcx);
+    port_puts(" rdx=");
+    dbg_hex(r->rdx);
+    port_puts(" rsi=");
+    dbg_hex(r->rsi);
+    port_puts(" rdi=");
+    dbg_hex(r->rdi);
+    port_puts("\n");
+    port_panic_halt();
+}
 
 static u64 tss_desc(u64 base, u32 limit)
 {
@@ -67,51 +117,20 @@ static u64 tss_desc(u64 base, u32 limit)
     return d;
 }
 
-static void put_dec(u64 v)
+static void wrmsr(u32 msr, u32 lo, u32 hi)
 {
-    char buf[24];
-    int i = 0;
-
-    if (v == 0ull) {
-        port_putc('0');
-        return;
-    }
-    while (v != 0ull && i < 24) {
-        buf[i] = (char)('0' + (int)(v % 10ull));
-        v /= 10ull;
-        i++;
-    }
-    while (i > 0) {
-        i--;
-        port_putc(buf[i]);
-    }
+    __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(msr));
 }
 
-/* 系统调用分发：L1 只有 write / exit，L2 起接完整表。 */
-void x86_syscall_dispatch(X86Regs *r)
+static void rdmsr32(u32 msr, u32 *lo, u32 *hi)
 {
-    u64 nr = r->rax;
+    __asm__ __volatile__("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(msr));
+}
 
-    if (nr == 1ull) {                    /* write(fd, buf, len) */
-        const char *buf = (const char *)r->rsi;
-        u64 n = r->rdx;
-        u64 i;
-
-        for (i = 0; i < n; i++) {
-            port_putc((int)(u8)buf[i]);
-        }
-        r->rax = n;
-        return;
-    }
-    if (nr == 60ull || nr == 231ull) {   /* exit / exit_group */
-        port_puts("\n[ring3] exit(");
-        put_dec(r->rdi);
-        port_puts(")\n");
-        port_puts("L1: ring3 通路已验证，停机。\n");
-        port_panic_halt();
-        return;
-    }
-    r->rax = (u64)-38ll;                 /* -ENOSYS */
+/* int 0x80 与 syscall 两条通道都汇到这里；语义在 linux/sys.c。 */
+void x86_syscall_dispatch(LxRegs *r)
+{
+    lx_syscall(r);
 }
 
 void port_linux_arch_init(void)
@@ -130,34 +149,52 @@ void port_linux_arch_init(void)
     base = (u64)&g_tss;
     limit = (u32)sizeof(X86Tss) - 1u;
     g_tss.rsp0 = (u64)(&g_kstack[0]) + (u64)sizeof(g_kstack);
-    g_tss.iomap = (u16)sizeof(X86Tss);    /* 无 IO 位图 */
+    g_tss.iomap = (u16)sizeof(X86Tss);
     g_gdt[6] = tss_desc(base, limit);
-    g_gdt[7] = (base >> 32) & 0xffffffffull;   /* TSS 描述符高半部分：必须在 GDT 限长内，
-                                                * 否则 ltr 直接 #GP（64 位描述符是 16 字节）。 */
+    g_gdt[7] = (base >> 32) & 0xffffffffull;   /* 64 位描述符 16 字节，高半必须在
+                                                * GDT 限长内，否则 ltr 直接 #GP */
 
     g_gdtr.limit = (u16)(sizeof(g_gdt) - 1u);
     g_gdtr.base = (u64)&g_gdt[0];
     __asm__ __volatile__("lgdt %0" : : "m"(g_gdtr));
-    /* 现有 CS=0x08 / DS=0x10 与新表同值，段缓存仍有效，无需重载。 */
     __asm__ __volatile__("ltr %0" : : "r"((u16)0x30u));
 
-    /* ---- 系统调用门：int 0x80，DPL3 ---- */
+    /* ---- 系统调用门：int 0x80（兼容/调试）与 syscall（Linux 主通道）---- */
+    {
+        int i;
+
+        for (i = 0; i < 32; i++) {
+            x86_idt_set(i, (void (*)(void))x86_exc_table[i], 0u);
+        }
+    }
     x86_idt_set(0x80, x86_int80_entry, 3u);
+
+    x86_kern_stack = (u64)(&g_kstack[0]) + (u64)sizeof(g_kstack);
+    {
+        u32 lo = 0u;
+        u32 hi = 0u;
+        u64 ent = (u64)&x86_syscall_entry;
+
+        rdmsr32(0xc0000080u, &lo, &hi);
+        lo |= 1u;                                  /* EFER.SCE */
+        wrmsr(0xc0000080u, lo, hi);
+
+        wrmsr(0xc0000081u, 0x00080000u, 0x00180000u);   /* STAR */
+        wrmsr(0xc0000082u, (u32)(ent & 0xffffffffull), (u32)(ent >> 32));  /* LSTAR */
+        wrmsr(0xc0000084u, 0x600u, 0u);                 /* SFMASK: 清 IF|DF */
+    }
 }
 
 void port_user_set_fsbase(u64 va)
 {
-    u32 lo = (u32)(va & 0xffffffffull);
-    u32 hi = (u32)(va >> 32);
-
-    __asm__ __volatile__("wrmsr" : : "a"(lo), "d"(hi), "c"(0xc0000100u));
+    wrmsr(0xc0000100u, (u32)(va & 0xffffffffull), (u32)(va >> 32));
 }
 
 u64 port_user_get_fsbase(void)
 {
-    u32 lo;
-    u32 hi;
+    u32 lo = 0u;
+    u32 hi = 0u;
 
-    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xc0000100u));
+    rdmsr32(0xc0000100u, &lo, &hi);
     return ((u64)hi << 32) | (u64)lo;
 }

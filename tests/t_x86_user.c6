@@ -8,6 +8,7 @@
 
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/linux_abi.h"
 
 extern u8 _user_blob_start[];
 extern u8 _user_blob_end[];
@@ -39,6 +40,7 @@ void os_main(void)
         port_puts("FAIL: port_as_create\n");
         return;
     }
+    lx_proc_init(as, 0x402000u);        /* 系统调用层需要知道当前地址空间 */
     code_pa = port_phys_alloc();
     stack_pa = port_phys_alloc();
     if (code_pa == 0u || stack_pa == 0u) {

@@ -1,0 +1,83 @@
+/* L2 验收：从磁盘读入一个**未修改的** Linux x86-64 静态 ELF，
+ * 解析、按段建立用户地址空间、搭 argv/envp/auxv、进 ring3 跑起来。
+ *
+ * 二进制由宿主 gcc 静态链接（tests/linux/hello.c），内核侧零改造。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/linux_abi.h"
+
+#define IMG_PA 0x04000000u          /* 64MB 处放文件映像（PMM 里先扣掉） */
+
+void os_main(void)
+{
+    u64 as = 0u;
+    u64 size = 0u;
+    u64 sec = 0u;
+    u64 entry = 0u;
+    u64 phdr = 0u;
+    u64 phnum = 0u;
+    u64 phent = 0u;
+    u64 brk = 0u;
+    u64 rsp = 0u;
+    u64 sbase = 0u;
+
+    port_init();
+    port_puts("c6os linux-abi L2: load an unmodified static Linux ELF\n");
+
+    port_mmu_init();
+    port_linux_arch_init();
+    port_phys_reserve(IMG_PA, 0x00400000u);
+
+    if (port_ata_read(1024u, 8u, IMG_PA) != 0) {
+        port_puts("FAIL: ata read (磁盘没挂上?)\n");
+        return;
+    }
+    size = lx_elf_image_size(IMG_PA, 0x00200000u);
+    if (size == 0u) {
+        port_puts("FAIL: 不是有效的 ELF64 映像\n");
+        return;
+    }
+    port_puts("elf: size ok\n");
+    sec = (size + 511u) / 512u;
+    if (sec > 8u) {
+        u64 off = 0u;
+        u64 chunk = 0u;
+
+        while (off < sec) {
+            chunk = sec - off;
+            if (chunk > 200u) {
+                chunk = 200u;
+            }
+            if (port_ata_read(1024u + (u32)off, (u32)chunk,
+                              IMG_PA + off * 512u) != 0) {
+                port_puts("FAIL: ata read 2\n");
+                return;
+            }
+            off += chunk;
+        }
+        port_puts("elf: image read\n");
+    }
+
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: port_as_create\n");
+        return;
+    }
+    if (lx_elf_load(as, IMG_PA, size, &entry, &phdr, &phnum, &phent, &brk) != 0) {
+        port_puts("FAIL: lx_elf_load（只支持 ET_EXEC 静态）\n");
+        return;
+    }
+    port_puts("elf: segments mapped\n");
+
+    lx_proc_init(as, brk);
+    if (lx_build_stack(as, entry, phdr, phnum, phent, &rsp, &sbase) != 0) {
+        port_puts("FAIL: lx_build_stack\n");
+        return;
+    }
+    port_puts("elf: stack ready, entering userland\n");
+
+    port_user_enter(as, entry, rsp, 0u);
+
+    port_puts("FAIL: returned from userland（不应发生）\n");
+}

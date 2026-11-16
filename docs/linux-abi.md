@@ -1,6 +1,6 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：设计定稿 · 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：L2 已跑通（未修改的静态 Linux ELF 在 ring3 运行）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -12,31 +12,78 @@
 |---|---|---|
 | L0 门禁 / 能力模型 | **完成** | `make LINUX_ABI=1 s3` → 明确拒绝（`tools/chk-caps.sh`） |
 | L1 ring3 通路 | **完成** | `make check-linuxabi` → `PASS: linux-abi L1（ring3 + int 0x80）` |
-| L2 syscall 通道 + ELF64 静态加载 | 未开始 | — |
+| L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
 ```
-mmu: e820=00000007 free_kb=0003fdec
-mmu: cr3=00006000
+c6os linux-abi L1: ring3 bring-up
+mmu: e820=00000007 free_kb=0003ef80
+mmu: cr3=00402000
 mmu: ok
 arch: gdt/tss/int80 ok
 blob loaded
 entering ring3 @0x400000 ...
 hello from ring3
 
-[ring3] exit(0)
+[lx] exit(0) —— 用户进程正常结束
 ```
 
-已在 L1 打通的硬件事实：E820 采集（boot16）→ PMM 位图 → 每进程 4 级页表 →
+L2 实测输出（`build/x86/elf-disk.img`）。用户态二进制由宿主
+`gcc -static` 编译的**普通 Linux 程序**（`tests/linux/hello.c`），经磁盘
+LBA 1024 载入，内核侧对它零改造：
+
+```
+c6os linux-abi L2: load an unmodified static Linux ELF
+mmu: e820=00000007 free_kb=0003ef80
+mmu: cr3=00402000
+elf: size ok
+elf: image read
+elf: segments mapped
+elf: stack ready, entering userland
+[user] hi from an unmodified Linux x86-64 ELF
+
+[lx] exit(0) —— 用户进程正常结束
+```
+
+它的系统调用序列与同一二进制在宿主上的 `strace -f` **逐条一致**：
+`brk brk arch_prctl set_tid_address set_robust_list rseq(→ENOSYS) prlimit64
+readlinkat getrandom brk brk brk mprotect write exit_group`。
+
+已在 L1/L2 打通的硬件事实：E820 采集（boot16）→ PMM 位图 → 每进程 4 级页表 →
 PML4[256] 直接映射窗口 → GDT/TSS（`ltr` 的 16 字节描述符必须在 GDT 限长内）→
-`int 0x80` 中断门（DPL3）→ iretq 双向切换。
+`int 0x80` 中断门（DPL3）与 `syscall`（MSR_LSTAR）两条陷入通道 → iretq 双向切换 →
+异常 0..31 全部装桩并打印 `vec/err/cr2/cs/rip/rsp`。
 
-L1 的已知简化（L2 修）：
+L2 修掉的 L1 简化：
 
-- 进入用户态时 `RFLAGS.IF=0`：**中断不能在用户态发生**，`IRQ_USER` 尚未实现；
-- 系统调用走 `int 0x80` 且用自定义的 64 位寄存器约定，不是 Linux 的 `syscall` 约定；
-- `copy_from_user` 未接入（L1 的 write 直接读用户指针，仅用于验证通路）。
+- 系统调用主通道换成 `syscall`，寄存器约定与 Linux 一致（`rax`=号，
+  `rdi/rsi/rdx/r10/r8/r9` 传参，返回值在 `rax`）；`int 0x80` 保留作调试通道；
+- 每次陷入换到**内核栈**（`x86_kern_stack`，TSS.RSP0 同源），为 L5 的阻塞式
+  系统调用铺路；
+- 用户指针校验接上（`copy_from_user` / `port_as_user_range_ok`），
+  `write/getrandom/readlinkat/prlimit64` 都会先验范围；越界返回 `-EFAULT`。
+
+仍未做（后续里程碑）：用户态中断（`RFLAGS.IF=1` + `IRQ_USER`）、
+`fork/execve/wait`、动态链接、信号。
+
+### 0.1 L2 踩到的三个坑（都已写进代码注释）
+
+1. **PMM 会把内核自己分配出去。** E820 里低 4MB 是 usable，而内核就住在
+   0x10000（boot16 装载）/ 0x20000（链接）且 `.bss` 到 ~0x3d000。L1 只分配十几个
+   页所以碰不到；L2 一次映射上百页，分配器越过 0x20000 之后把内核代码当页表页
+   清零 —— 现象是"日志断在半行"（三重故障）。现在 `pmm_init` 无条件扣掉
+   `[0, KERNEL_RESERVED_END)`。
+2. **auxv 的 type/value 顺序。** 栈向低地址长，`push8(type)` 之后再
+   `push8(value)`，内存里是 `[value][type]`；Linux 读的是 `[type][value]`。
+   必须**先压 value 再压 type**。
+3. **argv 的 NULL 结尾 + 对齐填充的位置。** 漏掉 argv 结尾会让 glibc 的
+   `envp = argv + argc + 1` 直接落到 auxv 上；而"在 envp 与 auxv 之间垫 8 字节
+   对齐"会被 glibc 当成 `AT_NULL`，auxv 整个读空，`_dl_random` 为 NULL，
+   启动时立刻读空指针。16 字节对齐只能垫在**字符串与 auxv 之间**。
+
+这三条都是"内核看起来完全正常、用户态静默跑飞"的类型，所以异常桩（上面第
+三条硬件事实）在 L2 阶段就必须有：没有它，任何内核 trap 都是整机消失。
 
 ---
 
@@ -138,7 +185,7 @@ Tier 3 是目标，但低 tier 必须始终可构建、可回归。
 | 通道 | 用途 | 栈切换 | 备注 |
 |---|---|---|---|
 | `int 0x80` | L1 起步、兼容老二进制 | CPU 经 TSS.RSP0 自动换栈 | 简单，先做 |
-| `syscall`（LSTAR） | x86-64 主通道（glibc/musl 默认） | 手工 `swapgs` + 读 per-CPU RSP0 | L2 必须实现 |
+| `syscall`（LSTAR） | x86-64 主通道（glibc/musl 默认） | 手工换到内核栈 + `iretq` 返回 | L2 已实现（`x86_syscall_entry`） |
 
 ### 4.3 返回用户态
 
@@ -204,7 +251,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 |---|---|---|
 | **L0** ✅ | 配置门禁、能力模型、`port_caps()`、本文档 | `C6OS_LINUX_ABI=0` 全目标不受影响；`=1` 在 S3 上 make 明确拒绝 |
 | **L1** ✅ | GDT/TSS/IDT、ring3、PMM、4 级页表、`int 0x80`、首次返回用户态 | 用户态打印 `hello from ring3` 并 `exit(0)`，内核收到状态 0 |
-| **L2** | `syscall` 通道、最小 syscall 集、`copy_from_user`、ELF64 静态加载器 | 加载**未修改的 static musl** `hello`，输出正确 |
+| **L2** ✅ | `syscall` 通道、最小 syscall 集、`copy_from_user`、ELF64 静态加载器 | 加载**未修改的 Linux 静态 ELF**，它自己打印的那行字出现在串口上，并以 `exit_group(0)` 结束 |
 | **L3** | 静态 `busybox`（sh + echo + ls）：open/read/write/brk/mmap/futex/ioctl | `busybox sh -c 'echo hi'` 通过 |
 | **L4** | VFS + romfs/initramfs、`ld.so` 所需 syscall、`mmap` 文件映射 | 动态链接 glibc `printf` 程序跑通 |
 | **L5** | 进程模型：`fork`(CoW)、`execve`、`wait4`、`pipe`、fd 继承 | `sh -c 'a | b'` 管道通，`fork` 子进程退出码正确 |
@@ -213,15 +260,20 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 
 每级验收必须在 `make check-linuxabi` 里可复现，且**上一级不退**。
 
+> 关于验收二进制：本机没有 musl 工具链（`/usr/bin/musl-gcc` 不存在），L2 用的是
+> 宿主 `gcc -static` 链接的 glibc 程序。glibc 对 auxv 与 TLS 的要求**比 musl 更
+> 严**（前者的启动代码会读 `AT_RANDOM` 建栈保护、读 `AT_PHDR` 校验装载），先用它
+> 更容易暴露问题；换 musl 只是换一个输入文件，内核侧不需要改。
+
 ---
 
 ## 8. syscall 面（x86-64 号）
 
 | 归属 | syscall |
 |---|---|
-| L2 最小集 | `read`(0) `write`(1) `exit`(60) `exit_group`(231) `brk`(12) `mmap`(9) `munmap`(11) `arch_prctl`(158) `set_tid_address`(218) `set_robust_list`(273) `getrandom`(318) `rseq`(334) `futex`(202) `nanosleep`(35) `clock_gettime`(228) |
-| L3 文件 | `openat`(257) `close`(3) `fstat`(5) `newfstatat`(262) `lseek`(8) `getdents64`(217) `ioctl`(16) `readlink`(89) `uname`(63) `getpid`(39) `getuid`(102) 等 |
-| L4 动态 | `mprotect`(10) `pread64`(17) `readlinkat`(267) `prlimit64`(302) `fcntl`(72) `poll`(7) `epoll_create1`(291) |
+| L2 最小集 ✅ | `read`(0) `write`(1) `exit`(60) `exit_group`(231) `brk`(12) `mmap`(9) `munmap`(11) `mprotect`(10) `arch_prctl`(158) `set_tid_address`(218) `set_robust_list`(273) `getrandom`(318) `rseq`(334，返回 ENOSYS) `prlimit64`(302) `readlinkat`(267) `uname`(63) `getpid`(39) `gettid`(186) `futex`(202，单线程空实现) |
+| L3 文件 | `openat`(257) `close`(3) `fstat`(5) `newfstatat`(262) `lseek`(8) `getdents64`(217) `ioctl`(16) `readlink`(89) `getuid`(102) 等 |
+| L4 动态 | `pread64`(17) `fcntl`(72) `poll`(7) `epoll_create1`(291)、`ld.so` 的重定位与 `mmap` 文件映射 |
 | L5 进程 | `clone`(56) `fork`(57) `vfork`(58) `execve`(59) `wait4`(61) `pipe2`(293) `dup2`(33) `getppid`(110) `chdir`(80) `getcwd`(79) `kill`(62) |
 | L6 信号 | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `rt_sigtimedwait`(128) |
 | L7 线程 | `clone` 完整语义、`futex` 完整、`sched_yield`(24) `gettid`(186) `tgkill`(234) |
@@ -240,6 +292,20 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 3. `kernel/linux/` 下所有文件**不参与** S3 的编译单元列表（不是被 `#if 0` 掉）。
 
 这条是"可配置"的实质：不是开关写着 0，而是代码根本不进镜像。
+
+L2 阶段的实际证据与限制：
+
+- 第 3 条已结构性成立：`linux/*.c` 只出现在 `X86S_NAME=elf` 的对象列表里，
+  唯一出口是 `X86S_OBJ` 这个变量；S3 的对象列表里既没有 `linux/`，也没有
+  `-DC6OS_LINUX_ABI`。
+- `make LINUX_ABI=1 s3` 在**编译开始之前**就被 `tools/chk-caps.sh` 拒绝
+  （S3 的 `C6OS_PORT_CAPS=0`，缺 `MMU|USER|IRQ_USER`），见 §2.2。
+- 第 1、2 条（与基线的字节对比、tick P99）目前**拿不到基线**：`main` 上的
+  `make s3` 因 `os_event_get` 未参与链接而失败（`kernel/event.c6` 不在 S3 的
+  对象列表里），`make check-host` 也因 `port_cur_ctx / port_snapshot /
+  port_switch_trace` 未定义而失败。这两处与本特性无关（本特性的改动只在
+  `port/x86_64/`、`linux/`、`include/c6os/` 与 x86 相关目标），属于既有问题；
+  修好后本节三条证据才能补齐。
 
 ---
 

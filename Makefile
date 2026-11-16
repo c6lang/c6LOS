@@ -947,9 +947,9 @@ X86S_DIR   := $(X86)/$(X86S_NAME)
 X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
               kernel/timer.c6 kernel/log.c6 kernel/panic.c6 kernel/timeout.c6
 
-# L1 的 ring3 bring-up 只验证 port 层（MMU/特权级/陷入），不链接调度器，
+# personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifeq ($(X86S_NAME),user)
+ifneq ($(filter user elf,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
@@ -965,7 +965,18 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
               $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
-              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
+              $(X86S_DIR)/obj/sys.o
+endif
+
+# L2 载荷：再多带磁盘与 ELF64 加载器。
+ifeq ($(X86S_NAME),elf)
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
+              $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
+              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
+              $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o
 endif
 
 x86: caps-check-x86 $(X86)/disk.img
@@ -1112,6 +1123,18 @@ $(X86S_DIR)/obj/userblob.o: port/x86_64/userblob.S
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -c -o $@ $<
 
+$(X86S_DIR)/obj/ata.o: port/x86_64/ata.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/sys.o: linux/sys.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/elf64.o: linux/elf64.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 x86-user: caps-check-x86
 	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
 		$(X86)/user-disk.img
@@ -1128,6 +1151,31 @@ check-linuxabi: x86-user
 		| grep -q "hello from ring3" \
 	  && echo "PASS: linux-abi L1（ring3 + int 0x80）" \
 	  || { echo "FAIL: linux-abi L1"; exit 1; }
+
+# ---- L2：未修改的 Linux 用户态二进制（宿主 gcc 静态链接，内核侧零改动）----
+APP_C   := tests/linux/hello.c
+APP_ELF := $(X86)/app.elf
+
+$(APP_ELF): $(APP_C)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+x86-elf: caps-check-x86
+	$(MAKE) X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(X86)/elf-disk.img
+
+run-x86-elf: x86-elf
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L2 验收：qemu 里跑未修改的 Linux 静态 ELF，用**它自己**打的那行字判定。
+check-linuxabi-l2: x86-elf
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/elf-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| grep -q "hi from an unmodified Linux x86-64 ELF" \
+	  && echo "PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）" \
+	  || { echo "FAIL: linux-abi L2"; exit 1; }
 
 $(X86S_DIR)/stage2.elf: $(X86)/stage2.o $(X86S_OBJ) port/x86_64/stage2.ld
 	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ \
@@ -1149,10 +1197,22 @@ $(X86S_DIR)/flat.elf: $(X86S_DIR)/stage1.o port/x86_64/stage1.ld
 $(X86S_DIR)/flat.bin: $(X86S_DIR)/flat.elf
 	llvm-objcopy -O binary $< $@
 
-$(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin
-	dd if=/dev/zero of=$@ bs=1M count=1 status=none
+# elf 目标把用户态 ELF 也写进磁盘（LBA 1024 = 512KB 处），其它目标不留空位。
+ifeq ($(X86S_NAME),elf)
+DISK_DEPS  := $(APP_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(APP_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+endif
+
+$(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin $(DISK_DEPS)
+	dd if=/dev/zero of=$@ bs=1M count=$(DISK_MB) status=none
 	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
 	dd if=$(X86S_DIR)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+	$(DISK_APP)
 
 
 # ---- rv32 参考目标（c6 -> LLVM IR，qemu-riscv32 user-mode） ----

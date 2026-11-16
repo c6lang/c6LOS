@@ -45,6 +45,8 @@ static int bmp_get(u64 f) { return (int)((g_bmp[f >> 3] >> (u8)(f & 7ull)) & 1u)
 static void bmp_set(u64 f) { g_bmp[f >> 3] = (u8)(g_bmp[f >> 3] | (u8)(1u << (u8)(f & 7ull))); }
 static void bmp_clr(u64 f) { g_bmp[f >> 3] = (u8)(g_bmp[f >> 3] & (u8)~(u8)(1u << (u8)(f & 7ull))); }
 
+#define KERNEL_RESERVED_END 0x400000ull   /* 内核镜像（含 .bss 与引导栈）区间上界 */
+
 static void pmm_init(void)
 {
     u32 n = E820_COUNT;
@@ -85,6 +87,16 @@ static void pmm_init(void)
             s += PAGE_SZ;
         }
     }
+    /* 内核自己就住在低端：boot16 装到 0x10000，链接在 0x20000，.bss 到 ~0x3d000。
+     * 这段在 E820 里是 usable，必须整块扣掉 —— 否则分配器跑到 0x20000 之后
+     * 会把内核代码/数据当作页表页清零（L2 一次映射上百页时必然踩到）。 */
+    for (k = 4ull; k < (KERNEL_RESERVED_END >> 12); k++) {
+        if (!bmp_get(k)) {
+            bmp_set(k);
+            g_free--;
+        }
+    }
+
     /* 管理上界取最高的可用帧（用于 free_kb 报表） */
     for (k = PMM_MAX_FRAMES; k > 0ull; k--) {
         if (!bmp_get(k - 1ull) || k == 4ull) {
@@ -122,6 +134,25 @@ void port_phys_free(u64 pa)
     if (f >= 4ull && f < PMM_MAX_FRAMES && bmp_get(f)) {
         bmp_clr(f);
         g_free++;
+    }
+}
+
+void port_phys_reserve(u64 pa, u64 bytes)
+{
+    u64 f = pa >> 12;
+    u64 n = (bytes + PAGE_SZ - 1ull) >> 12;
+    u64 i;
+
+    for (i = 0; i < n; i++) {
+        u64 idx = f + i;
+
+        if (idx < 4ull || idx >= PMM_MAX_FRAMES) {
+            continue;
+        }
+        if (!bmp_get(idx)) {
+            bmp_set(idx);
+            g_free--;
+        }
     }
 }
 

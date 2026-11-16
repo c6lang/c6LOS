@@ -85,6 +85,10 @@ u64  port_phys_free_kb(void);
 void port_mmu_init(void);
 /* 物理帧的内核虚拟地址（直接映射窗口），用于把用户映像写进去。 */
 void *port_phys_map(u64 pa);
+/* 把一段物理内存从分配器里扣掉（内核要在固定物理地址放磁盘映像/帧缓冲）。 */
+void port_phys_reserve(u64 pa, u64 bytes);
+/* ATA PIO 读（L2 用它把 ELF 从磁盘搬进内存；L4 的 VFS 复用）。 */
+int  port_ata_read(u32 lba, u32 count, u64 dst_pa);
 
 /* 特权级底座：GDT/TSS/IDT、syscall 通道、每个 CPU 的内核栈。 */
 void port_linux_arch_init(void);/* 进入 ring3。不返回（返回路径由 syscall 的 iretq 负责）。 */
