@@ -13096,3 +13096,33 @@ f[0](a0)=00060900   f[16](帧里的PS)=00060f00   f[15](EPC)=40048c6e
   （`$IDF/components/mbedtls/mbedtls/library/`），能拿 xtensa 工具链直接编；
   现有 `net/tls12_*.c6` 是之前的极简实现。等 WiFi 关联这段通了，优先评估
   直接用 mbedTLS（DRAM/IRAM 预算允许的话），不再自己维护 TLS 状态机。
+
+## §331 ISR 里 spill 加 WOE 判断再试：还是不行，回滚
+
+加了"只有被打断的代码 `PS.WOE=1`（在 windowed 里）才 spill"的判断后重试：
+不再像上一轮那样立刻崩，但 **`[phy] calling register_chipv7_phy(mode=0)` 之后就没了**
+（没有 `rc=1`、也没有 TRAP）—— PHY 初始化跑不完。
+
+原因推断：闭源 PHY/库自己在跑的时候，活窗口和它们的 sp 链并不是我们
+`WIN_SPILL` 那套假设的样子；在 ISR 里对这些窗口做显式 spill 会**覆盖库正在用的
+溢出槽**（同一个栈帧的 [sp-16..sp-4]）。这条路上又试死了一次，**已回滚**。
+
+结论（重要，别再重复）：**在我们这套"call0 内核 + windowed 闭源库"的混合架构里，
+不能从 ISR 或内核栈上对库的活窗口做 spill。** 窗口只能由硬件向量按需要 spill/fill。
+
+## §332 因此下一步只剩"全 windowed 构建"这一条自洽的路
+
+混合架构无解的原因已经很清楚：
+- 从 **W2C 壳**切走时：窗口链在壳里可见，`WIN_SPILL` 能干净地 spill ✓；
+- 从 **ISR/内核**切走时：被打断的窗口链要么是闭源库的（不能碰，§331），
+  要么根本不存在（call0），而 `RESTORE_FRAME` 的"单窗口"假设又要求
+  切走时只剩一个活窗口 —— 两者矛盾。
+
+全 windowed 构建下这个矛盾消失：**所有**任务都在窗口里，切走时必然可以从
+当前窗口顺着 [sp-12] 链干净地 spill（FreeRTOS/IDF 的做法），
+`RESTORE_FRAME` 的单窗口假设天然成立。要改的点：
+1. `S3_ABI=windowed`（内核 `.c6` 生成的 C 也用 windowed 编）；
+2. `w2c.S` 里的 `W2C`/`W2C_TRACE` 改成 `.set name, target` 别名（同 ABI 不需要壳）；
+3. `port_task_switch` 里恢复 `call8 s3_win_spill`（全 windowed 下这条链是合法的）；
+4. `irq.S` 用现成的 `#else`（windowed）分支：置 WOE 后 `call8 s3_timer_irq`；
+5. `ctx.S` 的 `S3_SPILL_ALL`（rotw 链）仍然不要用，改走 IDF 的 `s3_win_spill`。
