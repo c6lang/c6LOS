@@ -11245,3 +11245,42 @@ Wu2.b*** TRAP sp=3fcd8ea0 cause=00000002 pc=3fcb9d45 ps=00000b10 vaddr=3fcb9d44 
    槽，读回来就是 `a0=0` / 栈地址这种垃圾 —— 和现场吻合；
 3. 若确认，就在 tramp 里 `callx8` 之前把 `WS` 设为 `(1<<0)|(1<<2)` 之外的正确
    组合（或者干脆让 tramp 用 `entry`+`retw` 的 windowed 序列进入口）。
+
+### §260 **又一次大跨步**：lwIP 起来了，并且进了关联流程
+
+两处"库还没 start 就调 API"是这一段的元凶：
+
+| 调用 | 原来放在 | 现象 | 改到 |
+| --- | --- | --- | --- |
+| `esp_wifi_internal_reg_rxcb` | `c6_lwip_start` 里（bringup 之后、`esp_wifi_start` 之前） | 真板直接崩：`pc` 跳进栈地址、`a0=0`、`ws=0` | 关联成功之后（`c6_lwip_start_dhcp`，和 DHCP 一起） |
+| `dhcp_start` | 同上（§253 已改） | 卡在 dhcp_start 里 | 同上 |
+
+真板现在的完整链路（可复现）：
+
+```
+[wifi] esp_wifi_init_internal -> 0
+[wifi] bringup rc=0
+W2 bringup returned
+[lwip] start rc=0
+[wifi] associate ssid=weforpay.com
+[wifi] set_storage(RAM)=0
+*** TRAP cause=00000002 pc=3fcb9d45 vaddr=3fcb9d44 ws=00000000 a0=00000000
+```
+
+即 **WiFi 库初始化 + lwIP 启动都通了**，卡在 `s3_wifi_associate()` 里
+`esp_wifi_set_storage()` 之后的下一个调用（`esp_wifi_set_mode()`）。
+
+**取证结论**：崩溃前后 `g_osi_calls[]` 计数完全没变（JTAG 直接 dump 3FCC3984 起的
+128 个字）⇒ `esp_wifi_set_mode()` 里**一次 OSI 回调都没发生**就跳进了栈地址
+⇒ 是**闭源库内部的函数指针还没被初始化**（DRAM 里残留的栈数据），不是我们的
+OSI 表接错。
+
+**并且这一段时序极敏感**：仅仅在 `set_mode` 前后加一句 `ets_printf`，整条链路就
+退回到连 `associate ssid` 都到不了。所以后续请用"DRAM 计数器/信标"取证，
+**不要在这几行里加打印**。
+
+下一轮从"`esp_wifi_set_mode` 内部跳野指针"接：方向是查库里哪张表应该在
+`esp_wifi_init_internal` 阶段被填（很可能是我们 `esp_wifi_init_internal` 之后
+少了 IDF 里的 `esp_wifi_set_mode` 前置动作，例如 `esp_netif_create_default_wifi_sta`
+对应的 OSI 槽位），可以用"把我们所有 OSI 桩的返回值/写入地址都记到 DRAM"的办法，
+事后 dump 出库到底读了哪个槽位。

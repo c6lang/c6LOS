@@ -165,9 +165,10 @@ int c6_lwip_start(const unsigned char *mac)
      * 发第一包时经过 esp_wifi_internal_tx → 库里的发送路径，而这时还没关联 AP，
      * 真板实测会卡在 dhcp_start 里出不来。 */
     LWSTAGE(0x205);
+    /* 注册 RX 回调也推迟到关联之后（§260）：现在调
+     * esp_wifi_internal_reg_rxcb 会在真板上直接崩——PC 跳进栈地址、a0=0。
+     * 这一步同样依赖 WiFi 驱动已经 start 起来，早调就是踩未初始化的内部状态。 */
     LWSTAGE(0x206);
-    (void)esp_wifi_internal_reg_rxcb(C6_WIFI_IF_STA, (void *)c6_lwip_rx);
-    LWSTAGE(0x207);
     return 0;
 }
 
@@ -176,6 +177,9 @@ int c6_lwip_start_dhcp(void)
 {
     LWSTAGE(0x211);
     LWSTAGE2(1, 0x2111u);
+    LWSTAGE(0x212);
+    (void)esp_wifi_internal_reg_rxcb(C6_WIFI_IF_STA, (void *)c6_lwip_rx);
+    LWSTAGE(0x213);
     if (netif_default == 0) {
         return -1;
     }
