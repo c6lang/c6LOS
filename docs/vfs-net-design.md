@@ -1,6 +1,6 @@
 # 内核子系统补课：VFS/文件系统 + 网络（SAL）
 
-> 状态：**设计稿（待落地）** · 关联 [architecture.md](architecture.md) §3 ABI 规则 ·
+> 状态：**M9-0 已落地**（VFS 核心 + romfs，`make check-vfs` 绿）；M9-1..M9-4 / M10 待做 · 关联 [architecture.md](architecture.md) §3 ABI 规则 ·
 > [liteos-comparison.md](liteos-comparison.md) 功能矩阵 · [todo.md](todo.md) M9/M10 ·
 > [api.md](api.md) 错误码 · [wifi-plan.md](wifi-plan.md)（S3 闭源 WiFi，另立）
 >
@@ -314,3 +314,34 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 - 网络：IPv6、分片重组、SACK、拥塞控制高级部分、DHCP/DNS、TLS；
 - S3 闭源 WiFi 栈的改造（另见 `docs/wifi-plan.md`）；
 - 块设备 DMA、写缓存回写、日志/掉电一致性（先直写）。
+
+## 8. 施工记录
+
+### M9-0（VFS 核心 + romfs）已完成
+
+落地文件：`include/los/los_fs.h`、`include/los/los_block.h`（只有声明，实现在 M9-2）、
+`include/c6os/vfs.h`、`include/c6os/string.h`、`kernel/vfs.c6`（挂载表/路径解析/file 表）、
+`kernel/romfs.c6`（newc cpio 只读后端）、`kernel/fsapi.c6`（`LOS_Fs*` + 按 fs 类型分发）、
+`tests/t_vfs.c6`；`Makefile` 里 `C6OS_VFS` 默认 0，为 1 才编这三个 `.c6`。
+
+验收：
+
+- `make check-vfs` → `PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）`
+- `make check-vfs-zero` → `PASS: C6OS_VFS=0 时 S3 不编 VFS（零侵入）`
+- 回归：`check-linuxabi` 与 `-l2..-l8` 全绿（`-O1` 改动后复跑）
+
+施工中撞到的两件事（都影响 M9-1/M10）：
+
+1. **x86 stage2 只能装 255 扇区（≈127.5KB）**。`port/x86_64/boot16.S` 用三个 DAP
+   读 LBA 1..255（127+120+8），所以 `flat.bin` 超过 130560 字节就会被**静默截断** ——
+   现象是内核一句日志都不打就死（连 banner 都没有），非常像链接/入口问题。
+   VFS 一上来把镜像顶到 157KB 直接撞线；现在压回 117KB。M10 网络必然会再撞，
+   届时得扩 boot16 的 DAP 列表（或改成循环读）。
+2. **c6 产出的 IR 需要 `-O1`**。`X86IRFLAGS` 之前没有优化级，clang 按 -O0 编 IR，
+   几百行的内核文件就能吃掉 10KB+ 代码段（VFS 三个文件加了 44KB）。
+   统一加 `-O1` 后：L3 镜像 111KB→108KB、vfs 镜像 158KB→117KB。
+   S3 那条链（c6 → C99 → xtensa-gcc）不受影响。
+
+另外：`LOS_Fs*` 的错误约定是 `-errno`（POSIX 风格），与 LiteOS-M 原文的
+`LOS_ERRNO_*` 不同 —— 见 `include/los/los_fs.h` 顶部说明；函数名与参数顺序
+保持与 LiteOS-M 一致。

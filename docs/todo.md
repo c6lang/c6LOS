@@ -211,7 +211,7 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M9-0 门禁与 VFS 核心 | `include/los/los_fs.h` + `los_block.h`；`kernel/vfs.c6`（挂载表/路径解析/file 表/ops 分发）+ `kernel/romfs.c6`（把现有 newc cpio 包成只读 fs）+ `kernel/fsapi.c6`（errno ↔ LOS 错误码） | `make check-vfs`：`LOS_FsMount("/","romfs")` 成功、`open("/bin/busybox")` 成功、`read` 前 4 字节 `\x7fELF`；关闭开关时 `make -n s3` 不含新增对象 |
+| M9-0 门禁与 VFS 核心 | `include/los/los_fs.h` + `los_block.h`；`kernel/vfs.c6`（挂载表/路径解析/file 表）+ `kernel/romfs.c6`（把现有 newc cpio 包成只读 fs）+ `kernel/fsapi.c6`（`LOS_Fs*` + 按 fs 类型分发） | **完成**：`make check-vfs` → `PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）`；`make check-vfs-zero` → S3 零侵入；施工记录见 `docs/vfs-net-design.md` §8 |
 | M9-1 ramfs 可读写 | 32 节点静态池（文件名/父/兄弟/首子），数据按需 alloc；create/write/read/lseek/readdir/unlink/mkdir/rmdir/rename/truncate | 写 1KB 读回逐字节一致；readdir 看到该文件；unlink 后 open 失败 |
 | M9-2 块设备层 + ATA 写 | `LOS_DeviceRegister/BlockRead/BlockWrite`（8 项注册表）；`port_ata_write`（PIO + flush 0xE7）；直通、不做页缓存 | 写 8 扇区到 LBA 4096 再读回逐字节一致（qemu） |
 | M9-3 FAT16/32 只读 | BPB → FAT → 簇链 → 8.3 目录项；<8MB 镜像；不做长名/写/格式化 | `mkfs.vfat` 造的镜像挂上后 readdir 看到文件、read 内容一致 |
