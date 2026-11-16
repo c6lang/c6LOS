@@ -10306,3 +10306,47 @@ B2 cfg@… osi=… magic@144=1f2f3f4f
   是否发生了任务切换、切换后窗口状态是否正确；
 - 下一步②检查 `ctx.S` 的任务切换对 **windowed 任务**是否正确地保存/恢复了
   a0-a15 与 WINDOWSTART（我们只验证过 call0 任务，windowed 任务是实验性的）。
+
+### §230 JTAG 现在能用了 + 当前故障的精确定位
+
+**重要工具进展**：板子正常运行（USB CDC 工作）时，`tools/dbg.sh` 的 OpenOCD+JTAG
+能附着（之前失败是因为当时 USB 控制传输坏了）。于是可以直接：
+
+```
+./tools/dbg.sh build/wifi/c6os.elf /tmp/halt.gdb     # monitor halt + info registers pc
+```
+
+`_vec_default` 会把未处理异常的现场写进 RTC（`+0x100`=0xBAD0 标记、`+0x104`=EXCCAUSE、
+`+0x108`=EXCVADDR、`+0x10C`=EPC1），用 gdb `x/4xw 0x50000100` 直接读，不用复位。
+
+本次实测读到：
+
+```
+EXCCAUSE = 3          (LoadStoreError)
+EXCVADDR = 0x40043ca4 (ROM 里的地址 —— 就是说"往 ROM 写"或"用 ROM 当地址"了)
+EPC1     = 0x42014415 (s3_w2c_current_task 中间，w2c 壳里)
+```
+
+结合 halt 时 `a1=0x3fcc0430`（落在 ppTask 的 6KB 栈内）、`windowbase=13`、
+`windowstart=0xa002`（明显是坏的窗口状态），可以确认：
+
+**故障点 = w2c 壳（windowed → call0 的跳板）在 ppTask 上下文里用了被踩坏的
+栈指针/窗口状态**。这和之前 PHY 里 `set_chan_freq_hw_init` 的 `retw.n` TRAP 是同一
+类问题（windowed ABI 与 call0 内核交界处的窗口簿记）。
+
+已经做的两个对照实验（都还没解决）：
+
+| 实验 | 结果 |
+| --- | --- |
+| `S3_NO_WIN_SPILL=1`（壳里不 spill 祖先窗口） | 比开着 spill 多走一步（ppTask 会回到 `_queue_recv`），但随后 init 任务（t=1）无声卡死 |
+| `ctx.S` 里改成**每个任务保存/恢复 WINDOWSTART**（帧偏移 68，替代"恢复时归一化"） | 没有改变症状（说明归一化不是这次的主因） |
+
+下一步方向（按代价从低到高）：
+
+1. **把 w2c 壳改成不含任何窗口操作的版本**：`entry` → 存 a0 到帧 → `callx0` →
+   从帧取回 a0 → `retw`（把 WIN_SPILL 与 128 字节大帧都去掉），再用 JTAG 看是否还炸。
+   如果好了，就说明 WIN_SPILL 的偏移/假设有问题（那套东西从没在真板上验证过）。
+2. 若 1 不行：把 OSI 回调里"需要调内核"的那几个（sem/mutex/queue/task/tick）
+   改成**纯汇编手写**的窗口安全版本，逐个替换、逐个用 JTAG 验证。
+3. 或者换思路：让内核原语也编成 **windowed**（同一份 .c6 用 `-mabi=windowed` 编到
+   一个单独的库里给 windowed 侧用），彻底消除 windowed→call0 的边界。

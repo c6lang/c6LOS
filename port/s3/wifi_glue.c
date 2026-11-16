@@ -1196,7 +1196,11 @@ void s3_wifi_osi_init(void)
     u32 i = 0;
 
     while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
+#ifdef S3_NO_WIN_SPILL
+    g_s3_win_spill_en = 0u;    /* 对照实验：不 spill 祖先窗口（§230） */
+#else
     g_s3_win_spill_en = 1u;
+#endif
 
     /* 头尾不是函数指针，而是版本号和魔数：
      *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008

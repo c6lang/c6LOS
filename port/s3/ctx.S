@@ -32,10 +32,12 @@
     l32i    a2, a1, 64
     extui   a3, a2, 18, 1
     beqz    a3, 8f
-    rsr     a4, windowbase
-    movi    a5, 1
-    ssl     a4
-    sll     a5, a5
+    /* 恢复这个任务被切走时的 WINDOWSTART（而不是"归一化成只有当前窗口"）。
+     * 归一化的前提是"切走前 w2c 壳已经把祖先窗口 spill 到栈上"，但真板实测
+     * 那套 spill + 归一化会让 windowed 任务在切换后 retw 跳飞（§230）。
+     * 这里改成每个任务各自保存/恢复 WINDOWSTART（帧偏移 68）。 */
+    l32i    a5, a1, 68
+    beqz    a5, 8f
     wsr     a5, windowstart
     isync
 8:
@@ -115,6 +117,9 @@ port_task_switch:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
+    /* 保存 WINDOWSTART（帧偏移 68），恢复时按任务各自的窗口状态还原 */
+    rsr     a5, windowstart
+    s32i    a5, a1, 68
     /* 诊断：yield 计数（0x50001008=次数，0x5000100c=最近的目标 sp） */
     l32r    a14, .Lyl_cnt
     l32i    a15, a14, 0
@@ -215,6 +220,9 @@ port_task_yield:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
+    /* 保存 WINDOWSTART（帧偏移 68），恢复时按任务各自的窗口状态还原 */
+    rsr     a5, windowstart
+    s32i    a5, a1, 68
     s32i    a1, a4, 64
     /* 诊断：yield 的外出任务 ctx 与保存的 sp */
     l32r    a14, .Ldbg2
