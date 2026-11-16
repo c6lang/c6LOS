@@ -49,6 +49,18 @@
  * 破坏 a8..a11（windowed ABI 的 caller-saved）；a4..a7 与 a12..a15 一个字节
  * 都不能动（a4..a7 = 调用者的 a12..a15 是 callee-saved，a12..a15 = 调用者的
  * a0..a3 是 retw 要用的返回地址和帧指针）。 */
+#ifdef S3_ONE_ABI
+/* §332：全 windowed 构建下**不需要壳** —— 内核也是 windowed，同一套 ABI，
+ * 名字直接别名到目标函数即可（省掉 entry/callx0/retw 和 spill）。 */
+    .macro  W2C name, target
+    .global \name
+    .set    \name, \target
+    .endm
+    .macro  W2C_TRACE name, target
+    .global \name
+    .set    \name, \target
+    .endm
+#else
     .macro  WIN_SPILL
     /* §315：改用 IDF 官方 `window_spill_function`（下面 s3_win_spill）来
      * spill 祖先窗口。之前这里是手写的一圈 `rotw`：rotw 落到活窗口上会触发
@@ -205,6 +217,7 @@
     l32i    a13, a1, 24
     retw
     .endm
+#endif  /* S3_ONE_ABI */
 
 /* 注意：堆**不**走内核的 os_sys_*（那两个在 port/s3/fast.c，LEAN 构建里
  * 不编进来）。lwIP 的 malloc/calloc/realloc 直接落在 wifi_glue.c 的

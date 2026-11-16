@@ -13126,3 +13126,25 @@ f[0](a0)=00060900   f[16](帧里的PS)=00060f00   f[15](EPC)=40048c6e
 3. `port_task_switch` 里恢复 `call8 s3_win_spill`（全 windowed 下这条链是合法的）；
 4. `irq.S` 用现成的 `#else`（windowed）分支：置 WOE 后 `call8 s3_timer_irq`；
 5. `ctx.S` 的 `S3_SPILL_ALL`（rotw 链）仍然不要用，改走 IDF 的 `s3_win_spill`。
+
+## §333 全 windowed 构建：能编能链，但连第一条打印都到不了
+
+按 §332 动手做了第 1、2 步：
+- `w2c.S` 里加了 `#ifdef S3_ONE_ABI`：`W2C`/`W2C_TRACE` 退化成
+  `.set name, target` 别名（全 windowed 时不需要壳）✓ 已提交；
+- `make S3_ABI=windowed S3_C6FLAGS="… -DS3_ONE_ABI"` **编译链接全通过**，
+  镜像也生成了 ✓。
+
+真板结果：bootloader 打印完 `entry 0x403c88f4` 之后**彻底安静**，
+连 `M1`/`M2` 这些最早期标记都没有 → 死在 `start.S` 里。
+原因很清楚：`start.S` 也是用 `-mabi=$(S3_ABI)` 编的，切成 windowed 后
+它会被当成 `entry/retw` 的 windowed 函数，而我们是**从 ROM 直接跳进来的**
+（call0 约定），入口就对不上。
+
+要做全 windowed 还得改至少这些：
+1. `start.S` 保持 call0 入口（单独用 `-mabi=call0` 编），只在进入 C 之前
+   手工建一个 windowed 帧（或直接 `callx8` 到 windowed 的 `main`）；
+2. `port_task_switch`/`RESTORE_FRAME` 在切换点做 spill（§332 第 3 条）；
+3. `irq.S` 走 windowed 分支（现成的 `#else`）。
+
+这条路仍然自洽但工作量不小，**当前先把混合架构的已知镜像恢复回来**。
