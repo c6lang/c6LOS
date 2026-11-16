@@ -219,6 +219,8 @@ s3_w2c_sp_probe:
 /* ---- 看门狗（§228）：os_wdt_feed/os_wdt_start 是 call0 的 C 函数（flash.c），
  * windowed 岛里不能直接调 —— 必须过这个壳，否则返回地址带窗口标签、
  * 一返回就跳飞（真板实测：TRAP cause=0 pc=0x8037a7e9，正是带标签的 a0）。 */
+    /* §269：windowed 侧想睡一会儿只能走这个桥（直接调 call0 的 os_task_delay 会 TRAP） */
+    W2C s3_w2c_delay,          os_task_delay
     W2C s3_w2c_wdt_feed,       os_wdt_feed
     W2C s3_w2c_wdt_start,      os_wdt_start
 

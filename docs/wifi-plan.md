@@ -11453,3 +11453,42 @@ volatile 的读被提到了循环外，效果等于 `if (g == 0) { for (;;); }` 
    `s3_w2c_delay(ms)` 桥（现在没有，直接调 `os_task_delay` 会 TRAP），然后在
    `s3_wifi_associate` 最前面调用它。
 3. 另一个便宜的对照：把 `S3_MAX_CTX`/任务栈调大一点，确认不是上下文池/栈的边界问题。
+
+### §269 先睡 2 秒再关联：崩点完全不变 ⇒ 不是"库还没起来"的竞态
+
+新加了 windowed→call0 的桥 `s3_w2c_delay(ticks)`（`port/s3/w2c.S`，映射到
+`os_task_delay`；windowed 侧直接调 call0 的 `os_task_delay` 会 TRAP，历史坑）。
+在 `s3_wifi_associate` 里 `esp_wifi_print` 之后先 `s3_w2c_delay(200)`（2 秒，
+`C6OS_TICK_HZ=100`）再动库 API。
+
+结果：**崩点一模一样**（`set_storage` 成功 → `TRAP cause=2 pc=3fcb9d4d`）。
+⇒ 这个崩溃是**确定性**的，不是 ppTask 没跑起来的时序竞态。这条结论很值钱：
+之前所有"时序敏感"的现象（§259）影响的是**能走到多远**，不是这次崩不崩。
+
+### §270 关键收窄：`esp_wifi_get_mode` 能成功，只有"设置"这一路崩
+
+把 `esp_wifi_set_mode(1)` 换成只读的 `esp_wifi_get_mode(&m)`（照样走
+`ieee80211_ioctl` 的队列/等应答全流程）：
+
+```
+[wifi] associate ssid=weforpay.com
+..[wifi] set_storage(RAM)=0
+..[wifi] get_mode=0 m=2          ← ★ 整整一个 ioctl 来回，成功
+.Wu2.b*** TRAP ...              ← 紧接着的 esp_wifi_set_config 崩
+```
+
+这一下把范围压得很死：
+
+- ioctl 消息队列、semaphore、`_wifi_zalloc`、等应答 —— **全都是好的**（否则
+  get_mode 不可能成功）；
+- 崩的是 `esp_wifi_set_mode` / `esp_wifi_set_config` 这条**"应用模式/配置"**的路；
+- 结合 §261/§265：入口、OSI 表、init 状态（=3）都正常，崩在库内部某张**按模式
+  初始化时才用的函数表/对象**上（`wifi_set_mode_process` 一类）。
+
+补充：把两次 `set_mode`（先 NULL 再 STA）一起塞进源码后，连 `associate ssid` 都
+到不了（布局一变就变样，§259 又一次）。已全部回退，只留下 `s3_w2c_delay` 这个桥
+（未使用、无害）。
+
+**下一轮**：用 get_mode/set_mode 这个对照继续二分 —— 比如只调 `esp_wifi_set_mode(0)`
+（NULL 模式，最轻）看崩不崩；崩就说明是"模式切换机制"本身，不崩就说明是 STA 模式
+特有的初始化（那就要盯 `net80211_funcs_init` / `esp_wifi_set_mode_privacy` 那条路）。
