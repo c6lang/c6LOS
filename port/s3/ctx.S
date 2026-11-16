@@ -36,14 +36,11 @@
     l32i    a2, a1, 64
     extui   a3, a2, 18, 1
     beqz    a3, 8f
-    l32i    a5, a1, 68
-    bnez    a5, 7f
-    /* 新任务：归一化到当前 base */
+    /* 纯归一化（配合壳里 spill 的成对语义）*/
     rsr     a4, windowbase
-    movi    a5, 1
+    movi     a5, 1
     ssl     a4
     sll     a5, a5
-7:
     wsr     a5, windowstart
     isync
 8:

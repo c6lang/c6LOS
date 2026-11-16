@@ -10868,3 +10868,51 @@ w2c 壳 → call0 内核）时，`retw` 的窗口簿记出错（`retw.n` 直接 
 切换，**故障签名完全一样**（`ws=0x06, sp=0x3fcbebb0, pc=0x4037c284, a0=0x3fcbebe0`），
 所以目前的故障点**不经过任务切换**（是两个 windowed 上下文交替时寄存器文件被
 互相覆盖，归一化策略救不了）。
+
+### §249 **spill 打开 + 纯归一化 = 不再崩**；新卡点：队列里有消息但接收者没被唤醒
+
+配置（本次实测）：
+
+```
+make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" \
+     S3_PHY_VIA_OSI=1 https         # 注意：**不**加 S3_NO_WIN_SPILL（spill 打开）
+```
+
+串口（这是目前为止最健康的一次，全程没有任何 TRAP）：
+
+```
+[task] 库建任务 fn=40381584 id=2 stack=6144 prio=29(->2)
+[take] t=1 sem#1 tk=ffffffff
+[give] t=2 sem#1
+[recv] t=2 qh=3fcc443c tk=ffffffff        ← ppTask 在收包循环里等消息
+[semnew] #2 p=3fcc4afc max=1 init=0 t=1   ← init 又建了一个信号量
+[lock] t=1 m#…                            ← 拿锁
+[send] t=1 qh=3fcc443c tk=1               ← **往 ppTask 的队列里发了一条消息**
+[unlock] t=1
+[take] t=1 sem#2 tk=ffffffff              ← init 等 sem#2（等 ppTask 干完活）
+（之后就静止了）
+```
+
+JTAG 侧证据（halt 时）：
+
+- CPU 在 `port_idle`（说明两个任务都阻塞着，**没有崩、没有 TRAP**）；
+- 队列计数：`0x50001208`(put_ok) = 1、`0x5000120C`(put_try) = 1 → **消息确实入队了**；
+- `0x50000320`（队列诊断区）全 0 → 句柄没坏。
+
+所以现在的**唯一卡点**：消息进了队列，接收方（ppTask，阻塞在 `os_queue_get_item` 的
+`Q_WAIT_GET`）却没有被唤醒/没有被调度。`os_queue_put_item` 里是：
+```
+slot_write/tail++/count++ → os_task_wake_first(q, Q_WAIT_GET, 0) → os_obj_unlock
+```
+`os_task_wake_first_id` 的匹配条件是 `state==BLOCKED && wait_obj==obj && wait_kind==kind`，
+`best` 取优先级最高者 → `unblock(best, 0)`。
+
+下一轮就从这里查（很具体、代价小）：
+1. 在 `os_task_wake_first_id` 里加"找到/没找到"的计数（RTC 或 `ets_printf`），
+   确认是**没匹配上**（wait_obj/kind 不一致）还是**匹配上了但没被调度**；
+2. 特别注意：`osi_queue_recv` 传给内核的是 `&q->q`（WQ 内嵌的 OsQueue），
+   而 `os_queue_put_item` 收到的是同一个指针 —— 需要确认 `s3_w2c_queue_put` 的
+   w2c 壳没有把指针"按值复制"或偏移；
+3. 如果匹配没问题，就查 idle 循环的调度：`port_idle` 里是否只看
+   `os_sched_preempt_ctx()` 而漏掉了"被 unblock 的任务"（S3_NO_PREEMPT 已关，
+   但 idle→任务的切换路径要单独确认）。
