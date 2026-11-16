@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -994,7 +994,8 @@ endif
 endif
 # M10：SAL/协议栈只在 C6OS_NET=1 时编（默认 0 时对象列表完全不变）。
 ifeq ($(C6OS_NET),1)
-X86S_C6        += kernel/sal.c6
+X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
+                  kernel/net/arp.c6 kernel/net/ip.c6 kernel/net/icmp.c6
 endif
 
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
@@ -1017,7 +1018,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 net,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1412,9 +1413,26 @@ check-sal: x86-net
 	  && echo "PASS: sal M10-0（协议栈注册表 + 16 槽 socket 表 + 函数表分发）" \
 	  || { echo "FAIL: sal M10-0"; exit 1; }
 
+# ---- M10-1：ARP + IPv4 + ICMP echo + loopback ----
+x86-ip: caps-check-x86
+	$(MAKE) X86S_NAME=ip X86S_MAIN=tests/t_net.c6 C6OS_NET=1 \
+		$(X86)/ip-disk.img
+
+run-x86-ip: x86-ip
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/ip-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+check-ip: x86-ip
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/ip-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: net M10-1" \
+	  && echo "PASS: net M10-1（ARP + IPv4 + ICMP echo + loopback）" \
+	  || { echo "FAIL: net M10-1"; exit 1; }
+
 # 零侵入：C6OS_NET=0 时 S3 的对象列表里不该出现 SAL/协议栈源文件
 check-net-zero:
-	@n=$$(make -n s3 2>/dev/null | grep -c "kernel/sal.c6"); \
+	@n=$$(make -n s3 2>/dev/null | grep -cE "kernel/sal.c6|kernel/net/"); \
 	 test "$$n" = "0" \
 	  && echo "PASS: C6OS_NET=0 时 S3 不编 SAL/协议栈（零侵入）" \
 	  || { echo "FAIL: SAL 漏进 S3 对象列表"; exit 1; }
@@ -1537,6 +1555,10 @@ DISK_MB    := 16
 DISK_APP   = dd if=$(M9_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),net)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),ip)
 DISK_DEPS  :=
 DISK_MB    := 1
 DISK_APP   := @true

@@ -1,0 +1,60 @@
+/* kernel/net/netbuf.c6 —— 收发缓冲池（M10-1）
+ *
+ * 静态池，不碰堆：数量固定（LOS_NET_MAX_BUFS），谁拿谁还。
+ * 每个缓冲尾部固定一整块 data[LOS_NET_BUF_SIZE]，off 是当前数据起点，
+ * 所以"加头"只是把 off 往前挪，"去头"往回挪，不搬数据。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+static LosNetBuf g_bufs[LOS_NET_MAX_BUFS] = {0};
+static UINT32 g_buf_used = 0u;
+
+LosNetBuf *NetBufAlloc(UINT32 hdr_room, UINT32 len)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    UINT32 i = 0u;
+
+    if (hdr_room + len > (UINT32)LOS_NET_BUF_SIZE) {
+        return (LosNetBuf *)0;
+    }
+    i = 0u;
+    while (i < (UINT32)LOS_NET_MAX_BUFS) {
+        if (g_bufs[i].used == 0u) {
+            p = &g_bufs[i];
+            i = (UINT32)LOS_NET_MAX_BUFS;
+        } else {
+            i++;
+        }
+    }
+    if (p == (LosNetBuf *)0) {
+        return (LosNetBuf *)0;
+    }
+    (void)memset((VOID *)p, 0, (UINT32)sizeof(*p));
+    p->used = 1u;
+    p->off = hdr_room;
+    p->len = len;
+    g_buf_used = g_buf_used + 1u;
+    return p;
+}
+
+VOID NetBufFree(LosNetBuf *p)
+{
+    if (p == (LosNetBuf *)0) {
+        return;
+    }
+    if (p->used == 0u) {
+        return;
+    }
+    (void)memset((VOID *)p, 0, (UINT32)sizeof(*p));
+    if (g_buf_used > 0u) {
+        g_buf_used = g_buf_used - 1u;
+    }
+}
+
+UINT32 NetBufInUse(VOID)
+{
+    return g_buf_used;
+}

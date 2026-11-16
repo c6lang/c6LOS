@@ -502,3 +502,41 @@ sendto（不需 connect）/recvfrom/setopt/listen/accept(-EAGAIN)/poll/close
 4. **`VOID **` 出参回调不可靠** —— `socket(VOID **priv)` 里 `*priv = ...`
    写不出去（读回来是 0），换成 `UINT64 *` 出参则连调用都崩。最后干脆取消
    出参：`socket` 只返 0/负错误码，`priv` 由 SAL 自己发槽位号。
+
+### M10-1（ARP + IPv4 + ICMP echo + loopback）已完成
+
+`include/los/net.h` + `kernel/net/{netbuf,netif,arp,ip,icmp}.c6`，`C6OS_NET=0` 时不编译。
+
+- `NetBuf`：16 个 512 字节的静态缓冲池，`off` 前后挪动来加头/去头，不搬数据；
+  `NetBufAlloc(hdr_room, len)` 预留头空间，池空返 0。
+- `NetIf`：4 张网卡；MAC/IP/掩码/网关 + `linkoutput`（驱动运行时挂）+
+  `link` 标志位（**不拿函数指针和 0 比**，见 M10-0 的坑 2）+ rx/tx/丢包计数。
+  `NetIfOutput` 补源 MAC 后交给驱动，`NetIfInput` 看以太类型分给 ARP/IP，
+  所有权约定"输入处理函数吃掉 buf"。
+- `arp.c6`：8 项表（LRU 替换），收到任何 ARP 先学发送方再决定回应；
+  `ArpResolve` 未命中就发请求并返回 0（上层丢包重试，语义简单可靠）。
+- `ip.c6`：20 字节头、`NetCsum`（RFC 1071 反码和）、TTL 64、不分片不转发；
+  **环回在 IP 头造好之后判断**，`dst == nif->ip` 就直接 `IpInput`。
+- `icmp.c6`：echo request → 原样搬一份改 type 0 回；reply 记进 8 项应答表，
+  `IcmpPing()` = 发 + 查（同步线下一发一收当场就回来），`IcmpGotReply()` 供
+  异步场景轮询。
+
+验收：`make check-ip` —— 测试里用"同步线"把两张网卡对接（一块的 `linkoutput`
+就是另一块的 `NetIfInput`），**对端因此也是一套完整协议栈**，自己会回 ARP、
+自己会回 echo，不用在测试里手搓包。覆盖：缓冲池耗尽/归还、网卡表上限、
+`NetIfSetIp` 参数校验、`NetIfUp` 之前的 `-ENODEV`、ARP 未命中→学习→命中
+（MAC 逐字节比对）、ping 对端（抓到的帧按以太头/IP 头/ICMP 校验和逐字段验）、
+ping 本机走环回、ping 不可达地址的 `-EHOSTUNREACH` 与丢包计数、坏包
+（截断/未知以太类型）计 `rx_dropped`、收尾缓冲池回零（不泄漏）。
+`make check-net-zero` —— `C6OS_NET=0` 时 SAL 和 `kernel/net/` 都不进构建。
+
+两个坑：
+
+1. **环回必须在 IP 头造好之后判断** —— 第一版在 `IpOutput` 开头看到
+   `dst == nif->ip` 就直接 `IpInput(p)`，而那时缓冲里还只有 ICMP 载荷，
+   `IpInput` 把载荷当 IP 头解析 → 一律丢包（症状：ping 本机返回 0，
+   对端 ping 却全过）。顺序改成"先造头 → 再判环回 → 再 ARP → 再上线"。
+2. **测试自己别把缓冲池占满** —— 验收脚本里有一节"池子有多大"，
+   第一版把 16 个缓冲全 alloc 出来不还，后面的 ARP/ping 全都拿不到缓冲，
+   连着报了一串不相干的失败（ARP 学不到、帧长 0）。池子测试要留句柄数组，
+   测完逐个 `NetBufFree`，并用 `NetBufInUse() == 0` 收尾。
