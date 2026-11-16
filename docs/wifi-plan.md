@@ -13610,3 +13610,17 @@ tramp      : 启动过 2 个任务（wifi 主任务 + ppTask）
 **下一步（方向已定）**：`-DS3_ONE_ABI`（全 windowed 构建）在 §335 之后没再试过，
 而 §361 正好修掉了当时最可能的干扰源（中断踩溢出槽）。全 windowed 能把混合
 ABI 的壳、spill、win_bridge 全部去掉，值得重测一次。
+
+## §365 全 windowed 构建（`-DS3_ONE_ABI` + `S3_ABI=windowed`）在 §361 之后重测：仍然起不来
+
+干净重建后能链接成功，但真板**连 `c6os s3 boot` 都打不出来**（ROM 引导打印完
+就没有了，`Saved PC=0x40379d98`）。所以"用全 windowed 消掉混合 ABI"这条路
+还需要把 `start.S`/`irq.S`/`ctx.S`/`win_bridge.S`/`abi_thunk.S` 里
+"假定内核是 call0"的地方逐个改成 windowed —— 不是一轮能做完的事。
+已回滚到标准构建（`S3_ABI=call0` + 壳）。
+
+**当前最好状态**（就是本轮的默认镜像）：
+开机 → `[phy] register_chipv7_phy rc=1` → `W1 bringup` → `[net80211]` →
+`[task] 库建任务` → `[give] t=2 sem#1` → `b`，然后停在 `_vec_default`
+（活寄存器：`pc=40379e48`、`a1=0x50000b00`、`exccause=1d`、
+`epc1=0x4201860e` 是软件写入的假 PC）。
