@@ -11545,3 +11545,55 @@ flash MMU 约束）。
 里的大块静态缓冲挪走、或缩小栈池），单纯调大 `g_wifi_heap_mem` 是不可能的。
 
 （已回退到 64KB，真板基线重新验证通过。）
+
+### §273 拿到了崩溃时的**全部寄存器**（不用改一行代码）
+
+关键技巧：`_vec_level1`（`port/s3/irq.S`）进陷阱时已经把 `a0~a15`、`EPC1`、`PS`
+全部存进陷阱帧了，而 `_vec_exc` 打完日志后是 `j 1b` 死循环 —— **帧一直留在内存里**。
+所以上板跑到崩溃之后，用 `tools/ocboot.sh` 起 OpenOCD，telnet 里
+`targets esp32s3.cpu0` / `halt` / `mdw 0x3fcd8ea0 24` 就能把现场全部读出来
+（帧基址就是串口打印的 `sp=`）。这次实测：
+
+```
+0x3fcd8ea0: 00000000 00000000 3fcb964d 00000000 42018686 3fcc2e4c 00000000 3fcc2e4c
+0x3fcd8ec0: 00000000 00000000 50001500 00000001 3fcb96bd 00000002 00022599 3fcb9d4d
+0x3fcd8ee0: 00000b00 000b0000 000af2b0 42018686 00060400 00000008 00000003 4201856d
+```
+
+按 irq.S 的存法（+0=a0 +4=a2 … +56=a15 +60=EPC1 +64=PS）解出来：
+
+| 项 | 值 | 说明 |
+|----|----|------|
+| EPC1 | `0x3fcb9d4d` | 出错 PC，**奇数**（指令取指地址必须对齐→cause=2） |
+| a3 | `0x3fcb964d` | = `__c99_d2` **块首** |
+| a13 | `0x3fcb96bd` | = `__c99_d2+0x70` |
+| a5 | `0x42018686` | = `os_task_start_core+346` |
+| a11 | `0x50001500` | 外设寄存器地址 |
+| PS | `0x00000b00` | |
+
+**最重要的两条**（用 `nm` 对符号、再用生成代码对偏移）：
+
+1. `0x3fcb964d` 这个符号是 `__c99_d2`，size 1876 —— 它来自
+   **`build/wifi/c99/task.c`（即 `kernel/task.c6`）**：c6 编译器给每个 .c6
+   模块生成一个 `static unsigned char __c99_d2[N]` 当它的静态数据区，所有
+   文件级 static 变量都用 `(char *)__c99_d2 + 偏移` 访问。
+2. 出错 PC `0x3fcb9d4d` = `__c99_d2 + 1792`，而 1792 在生成代码里正是
+   **`os_task_create_on()` 里那个静态计数器**：
+
+   ```c
+   __c99_r[1].i = (unsigned int)*(unsigned int *)((char *)__c99_d2 + 1792);
+   ...
+   *(unsigned int *)((char *)__c99_d2 + 1792) = __c99_r[0].i;   /* ++ */
+   ```
+
+   也就是说：**CPU 跳到了"某个 static 变量的地址"上去执行** —— 一个
+   `callx/jx` 的目标寄存器里装的是 `&变量`，而不是它的值（或是一个被写错成
+   地址的函数指针）。
+
+结合 a5 = `os_task_start_core+346`，最合理的解释是：**崩溃发生在内核建任务 /
+任务入口这条路上**（`kernel/task.c6: os_task_create_on` → `t->entry = entry`
+→ `port_task_ctx_create` / `os_task_start_core`），某个 entry 指针被写成了
+一个数据地址。下轮就从这条线查：在建任务时把 `entry` 打出来（或者用 §273 的
+JTAG 办法先读 `g_ctx[]` 里的 `entry` 字段），看是不是闭源库
+`_task_create` 传进来的 entry 本身就不对，还是我们 `port_task_ctx_create`
+的 a2/a3/a4 参数错位。
