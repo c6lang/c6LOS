@@ -94,6 +94,8 @@ void lx_proc_attach(u64 as, u64 brk)
     p->brk = brk;
     p->mmap_top = C6OS_LINUX_MMAP_BASE;
     p->fs_base = 0ull;                    /* 新镜像自己会 arch_prctl 设 TLS */
+    lx_sig_reset(p);
+    p->started = 1u;
     p->kstack_top = (u64)(&g_kstack[g_cur][0]) + LX_KSTACK_SIZE;
     port_user_set_kstack(p->kstack_top);
 }
@@ -140,6 +142,13 @@ static void switch_to_(int next)
     lx_fs_set_fdtab(p->fd);
     port_user_set_kstack(p->kstack_top);
     port_user_set_fsbase(p->fs_base);
+    if (p->started != 0u) {
+        /* 陷入帧固定在内核栈顶 128 字节（x86_syscall_entry 压的 16 个寄存器），
+         * 阻塞/让出都不会挪动它 —— p->f 只有"首次启动"时才是权威的。 */
+        lx_sig_deliver_frame(p, (LxFrame *)(p->kstack_top - (u64)sizeof(LxFrame)));
+    } else {
+        lx_sig_deliver_frame(p, &p->f);
+    }
     x86_resume_frame = (u64)(&p->f);
     if (c == (LxProc *)0) {
         return;
@@ -207,6 +216,40 @@ static void wake_(u32 pid)
     }
 }
 
+LxProc *lx_proc_find(i64 pid)
+{
+    int i;
+
+    if (pid <= 0) {
+        return (LxProc *)0;
+    }
+    for (i = 0; i < (int)LX_MAX_PROC; i++) {
+        if (g_proc[i].state != LX_P_FREE && (i64)g_proc[i].pid == pid) {
+            return &g_proc[i];
+        }
+    }
+    return (LxProc *)0;
+}
+
+void lx_proc_wake(LxProc *p)
+{
+    if (p->state == LX_P_BLOCK) {
+        p->state = LX_P_READY;
+    }
+}
+
+/* 信号导致的终止：状态字是信号号（wait4 侧按 WIFSIGNALED 解释）。 */
+void lx_proc_exit_sig(u32 sig)
+{
+    LxProc *c = cur_();
+
+    if (c == (LxProc *)0) {
+        port_panic_halt();
+    }
+    c->killed = 1u;
+    lx_proc_exit((u64)sig);
+}
+
 void lx_proc_exit(u64 code)
 {
     LxProc *c = cur_();
@@ -228,6 +271,14 @@ void lx_proc_exit(u64 code)
     }
     c->code = (i64)code;
     c->state = LX_P_ZOMBIE;
+    {
+        LxProc *par = lx_proc_find((i64)c->ppid);
+
+        if (par != (LxProc *)0) {
+            par->sig_pending |= 1ull << ((u32)LX_SIGCHLD - 1u);
+            par->sig_code[LX_SIGCHLD] = (u32)LX_SI_USER;
+        }
+    }
     wake_(c->ppid);
     next = pick_next_(g_cur);
     if (next < 0) {
@@ -295,6 +346,8 @@ u64 lx_proc_fork(LxRegs *r)
     ch->f.r.rax = 0ull;                   /* fork 在子进程里返回 0 */
     ch->f.user_rsp = pf->user_rsp;
     ch->fs_base = par->fs_base;
+    ch->started = 0u;
+    lx_sig_fork(ch, par);
     ch->state = LX_P_READY;
     {
         u64 i;
@@ -344,7 +397,9 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
             has_child = 1;
             if (c->state == LX_P_ZOMBIE) {
                 u32 cpid = c->pid;
-                u64 status = ((u64)c->code & 0xffull) << 8;
+                u64 status = (c->killed != 0u)
+                                 ? ((u64)c->code & 0x7full)
+                                 : (((u64)c->code & 0xffull) << 8);
 
                 if (ustatus != 0ull) {
                     if (port_as_user_range_ok(par->as, ustatus, 4ull,
@@ -443,6 +498,8 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     cur_()->as = as;
     cur_()->brk = brk;                    /* 新映像的堆起点，不能留旧程序的 */
     cur_()->mmap_top = C6OS_LINUX_MMAP_BASE;
+    cur_()->fs_base = 0ull;
+    lx_sig_exec(cur_());
     lx_set_as(as);
     lx_brk_set(brk);
     lx_mmap_top_set(cur_()->mmap_top);

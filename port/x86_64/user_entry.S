@@ -207,10 +207,30 @@ x86_exc_common:
     movq %rsp, %rdi
     movq %cr2, %rsi
     call x86_exc_dump
+    testq %rax, %rax                     /* 非 0：信号已投递，回用户态 */
+    jne 2f
 1:
     cli
     hlt
     jmp 1b
+2:
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp                       /* 丢掉 vec 与 err */
+    iretq
 
 .section .data
 .align 8

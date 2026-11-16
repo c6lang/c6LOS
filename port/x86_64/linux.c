@@ -1,6 +1,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
+#include "c6os/linux_proc.h"
 
 /* x86-64 特权级底座：GDT（含 DPL3 用户段）+ TSS + 系统调用门。
  *
@@ -72,11 +73,19 @@ static void dbg_dec(u64 v)
     }
 }
 
-/* 异常统一出口：栈上是 LxRegs 之后紧跟 vec/err/rip/cs/rflags/rsp/ss。 */
-void x86_exc_dump(LxRegs *r, u64 cr2)
+/* 异常统一出口：栈上是 LxRegs 之后紧跟 vec/err/rip/cs/rflags/rsp/ss。
+ * 返回 1 表示"用户态异常已转成信号，帧已改好，直接 iretq 回用户态"；
+ * 0 表示没救了（内核态异常，或者用户态连 handler 都没有）—— 调用方停机。 */
+int x86_exc_dump(LxRegs *r, u64 cr2)
 {
     u64 *p = (u64 *)r + 15ull;
 
+    /* L6：用户态踩到 #PF/#GP/#UD/#DE/#AC 时先看能不能变成信号投递出去。 */
+    if (lx_cur_proc() != (LxProc *)0 && (p[3] & 3ull) == 3ull) {
+        if (lx_sig_deliver_exc(lx_cur_proc(), r, cr2, (u32)p[0]) != 0) {
+            return 1;
+        }
+    }
     port_puts("\n!! CPU 异常 vec=");
     dbg_dec(p[0]);
     port_puts(" err=");
@@ -131,6 +140,7 @@ void x86_exc_dump(LxRegs *r, u64 cr2)
     }
     port_puts("\n");
     port_panic_halt();
+    return 0;
 }
 
 static u64 tss_desc(u64 base, u32 limit)

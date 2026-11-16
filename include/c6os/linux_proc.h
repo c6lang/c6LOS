@@ -48,6 +48,17 @@ typedef struct LxFile {
     u32 kind;                 /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
 } LxFile;
 
+/* L6：信号。内核侧 sa 的布局与 Linux 一致：{handler, flags, restorer, mask}，
+ * 因为 glibc 的 sigaction() 就是这样转给 rt_sigaction(2) 的。 */
+#define LX_NSIG 32
+
+typedef struct {
+    u64 handler;
+    u64 flags;
+    u64 restorer;
+    u64 mask;
+} LxSigAction;
+
 typedef struct LxProc {
     u32 state;
     u32 pid;
@@ -61,6 +72,15 @@ typedef struct LxProc {
     u64 brk;
     u64 mmap_top;
     u64 fs_base;              /* TLS 基址：切进程时必须跟着换（MSR_FS_BASE 是全局的） */
+    u64 sig_mask;                 /* 屏蔽字（bit sig-1） */
+    u64 sig_pending;              /* 挂起（bit sig-1） */
+    u64 alt_sp;                   /* sigaltstack */
+    u64 alt_size;
+    u32 alt_flags;
+    u32 killed;                   /* wait4 状态：0=正常退出，1=被信号杀 */
+    u32 started;                  /* 已经进过用户态：陷入帧在内核栈顶，不在 f 里 */
+    u32 sig_code[LX_NSIG];
+    LxSigAction sa[LX_NSIG];
     LxFile fd[C6OS_LINUX_MAX_FD];
 } LxProc;
 
@@ -81,6 +101,21 @@ u64      lx_proc_dup2(u64 oldfd, u64 newfd);
 u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
+void     lx_proc_exit_sig(u32 sig);
+LxProc  *lx_proc_find(i64 pid);
+void     lx_proc_wake(LxProc *p);
+
+/* L6 信号（linux/sig.c） */
+void lx_sig_reset(LxProc *p);
+void lx_sig_fork(LxProc *p, const LxProc *par);
+void lx_sig_exec(LxProc *p);
+u64  lx_sig_action(u32 sig, u64 uact, u64 uold);
+u64  lx_sig_procmask(u32 how, u64 uset, u64 uold);
+u64  lx_sig_altstack(u64 uss, u64 uoss);
+u64  lx_sig_kill(i64 pid, u32 sig);
+u64  lx_sig_return(LxRegs *r);
+void lx_sig_deliver_frame(LxProc *p, LxFrame *f);
+int  lx_sig_deliver_exc(LxProc *p, LxRegs *r, u64 cr2, u32 vec);
 
 /* 内存状态随进程切换（linux/sys.c 提供） */
 u64  lx_brk_get(void);

@@ -1,7 +1,8 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：L5 已跑通（进程模型：`fork`/`execve`/`wait4`/`pipe`/`poll`；未修改的
-> `busybox sh -c 'echo … | while read …'` 管道连通）· L6 信号、L7 线程待做· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：L6 已跑通（进程模型 + 信号：`fork`/`execve`/`wait4`/`pipe`/`poll`，
+> `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`kill`/`rt_sigreturn`，用户态
+> `SIGSEGV` 可被捕获）· L7 线程待做· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -16,7 +17,8 @@
 | L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
 | L3 initramfs + 文件语义 | **完成** | `make check-linuxabi-l3` → `PASS: linux-abi L3（initramfs + 文件语义）` |
 | L4 动态链接 + ld.so | **完成** | `make check-linuxabi-l4` → `PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）` |
-| L5 进程模型 | **完成** | 未修改的 `busybox sh -c 'echo hello-from-pipe \| while read l; …'` 跑出 `GOT:hello-from-pipe`（§0.2） |
+| L5 进程模型 | **完成** | `make check-linuxabi-l5` → 未修改的 `busybox sh` 跑出 `GOT:hello-from-pipe`（§0.2） |
+| L6 信号 | **完成** | `make check-linuxabi-l6` → `sig: SIGSEGV caught, back via siglongjmp`（§0.3） |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -210,6 +212,52 @@ rip=0x7fefffef4e8f（父进程 libc 代码段内，可执行）
 只看管道可读/可写/对端已关闭，普通 fd 一律报就绪；没有别的可运行进程时返回 0
 （协作式调度里等不到人，不能死等）。
 
+### 0.3 L6 信号：把 rt_sigframe 复刻对，两条返回路径就都通了
+
+内核侧只维护每进程的 `handler/flags/restorer/mask`、屏蔽字、挂起位和
+`sigaltstack`；投递时在用户栈上压一个 **Linux 布局** 的 `rt_sigframe`
+（`pretcode` + `ucontext`（`uc_mcontext.gregs` 按 Linux 的 23 项顺序）+ `siginfo`），
+然后把 iret 帧改成"跳进 handler、RSP 指到帧基址"。restorer 是 glibc 的
+`__restore_rt`（`sigaction` 时随 `SA_RESTORER` 传进来），它执行
+`rt_sigreturn(15)` 回到内核，我们再按同一份布局把 23 个 gregs 原样恢复。
+于是两种典型写法同时成立：
+
+- handler 正常 `return` → 走 `rt_sigreturn` → 上下文完全恢复；
+- handler 里 `siglongjmp` 跑掉 → 不再回内核，屏蔽字由 glibc 的
+  `sigsetjmp(env, 1)`/`siglongjmp` 自己恢复（和 Linux 行为一致）。
+
+异常 → 信号：`#PF`/`#GP`/`#UD`/`#DE`/`#AC` 且 `cs&3==3` 时，先把异常帧改造成
+信号帧；handler 是 `SIG_DFL` 就按信号终止（`wait4` 的状态字是信号号本身，
+`WIFSIGNALED` 成立），没装 handler 又没有默认动作的才停机。内核态异常照旧打
+`!! CPU 异常` 并停机。
+
+实测（`make check-linuxabi-l6`，未修改的动态链接程序）：
+
+```
+sig: SIGUSR1 handler ok          <- kill 自投递 + handler 正常 return
+sig: SIGUSR1 blocked ok          <- 屏蔽期间只挂起
+sig: delivered on unblock        <- sigprocmask(SIG_UNBLOCK) 立即投递
+sig: SIG_IGN ok
+[lx] 进程被信号终止 sig=11        <- 子进程 SIG_DFL
+sig: child killed by SIGSEGV     <- 父进程 wait4 拿到 WIFSIGNALED
+sig: SIGSEGV caught, back via siglongjmp
+sig: done
+```
+
+#### 踩到的坑：阻塞进程的陷入帧不在 `LxProc.f` 里
+
+第一版在 `switch_to_()` 里对所有要上 CPU 的进程都用 `&p->f` 投递信号，
+结果 L5 的管道用例立刻炸：`cs=0`（内核态）`cr2=0xfffffffffffffa80`。
+`0xfa80 = 128 + 1280` —— 正是 `sp - red_zone - sizeof(rt_sigframe)`，而 `sp` 是 0。
+
+原因：`LxProc.f` 只是"**首次启动**新子进程"用的寄存器快照
+（`setup_trampoline_`/`x86_resume_user` 那条路）。一个已经跑起来的进程在
+系统调用里阻塞时，真正的陷入帧固定在内核栈顶的 128 字节
+（`x86_syscall_entry` 压的 16 个寄存器，阻塞、让出都不会挪动它），`p->f` 是
+陈旧数据。修法：`LxProc.started` 区分两种情况 —— 没启动过的用 `&p->f`，
+启动过的用 `(LxFrame *)(kstack_top - 128)`。**任何时候要改"某个不在 CPU 上的
+进程的用户上下文"，都必须先确认那份帧到底在哪儿。**
+
 ---
 
 ## 1. 定位：personality，不是"移植 Linux"
@@ -380,7 +428,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L3** ✅ | initramfs（newc cpio）+ fd 表 + `openat`/`read`/`fstat`/`getdents64`/`lseek` | 未修改的静态 Linux 程序用 `opendir`/`readdir`/`open`/`read` 列出并读出 initramfs 里的文件 |
 | **L4** ✅ | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation 全交给 `ld.so` | 动态链接（PIE）的 `busybox` 跑起 `ls /` |
 | **L5** ✅ | 进程模型：`fork`、`execve`、`wait4`、`pipe`、`poll`、fd 继承 | 未修改的 `busybox sh` 跑通 `echo … \| while read …` 管道，三进程按序退出（§0.2） |
-| **L6** | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`longjmp` 恢复 |
+| **L6** ✅ | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`kill`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`siglongjmp` 恢复；默认动作下 `wait4` 看到 `WIFSIGNALED`（§0.3） |
 | **L7** | 线程：`clone`、futex 完整、FS base 切换、`pthread` | 静态 `pthread` 程序 4 线程计数正确 |
 
 每级验收必须在 `make check-linuxabi` 里可复现，且**上一级不退**。
@@ -403,7 +451,8 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | L4 待补 | `fcntl`(72) `poll`(7) `epoll_create1`(291) `readlink`(89) `dup`(32)（随 L5 补齐） |
 | L5 进程 ✅ | `fork`(57) `vfork`(58) `clone`(56，仅 `fork` 语义) `execve`(59) `wait4`(61) `pipe`(22) `pipe2`(293) `poll`(7) `ppoll`(271) `dup`(32) `dup2`(33) `close`(3，管道引用计数) `getppid`(110) `setpgid`(109) `getpgrp`(111) `setsid`(112) `umask`(95) `chdir`(80) `fcntl`(72，空实现) |
 | L5 待补 | `kill`(62) `select`(23) `waitid`(247) 以及抢占式调度（需 `IRQ_USER`） |
-| L6 信号 | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `rt_sigtimedwait`(128) |
+| L6 信号 ✅ | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `kill`(62) `tgkill`(234)；`#PF`/`#GP`/`#UD`/`#DE`/`#AC` → `SIGSEGV`/`SIGILL`/`SIGFPE`/`SIGBUS` |
+| L6 待补 | `rt_sigtimedwait`(128) `sigsuspend` 语义、`SA_ONSTACK` 真正切到备用栈、`SIGKILL` 的不可捕获语义（现在只拒绝改它的 handler） |
 | L7 线程 | `clone` 完整语义、`futex` 完整、`sched_yield`(24) `gettid`(186) `tgkill`(234) |
 
 原则：**未实现的 syscall 返回 `-ENOSYS` 并打一条限速日志**，绝不让用户进程

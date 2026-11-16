@@ -557,8 +557,29 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_rt_sigaction:
+        r->rax = lx_sig_action((u32)a0, a1, a2);
+        return;
+
     case LX_SYS_rt_sigprocmask:
+        r->rax = lx_sig_procmask((u32)a0, a1, a2);
+        return;
+
+    case LX_SYS_rt_sigreturn:
+        r->rax = lx_sig_return(r);
+        return;
+
     case LX_SYS_sigaltstack:
+        r->rax = lx_sig_altstack(a0, a1);
+        return;
+
+    case LX_SYS_kill:
+        r->rax = lx_sig_kill((i64)(i32)a0, (u32)a1);
+        return;
+
+    case LX_SYS_tgkill:                    /* tgkill(tgid, tid, sig) */
+        r->rax = lx_sig_kill((i64)(i32)a1, (u32)a2);
+        return;
+
     case LX_SYS_setpgid:
     case LX_SYS_setsid:
     case LX_SYS_umask:
@@ -643,6 +664,14 @@ static void lx_syscall_do(LxRegs *r)
 /* 系统调用出口：所有处理完（含阻塞返回）之后统一让出一次 CPU。 */
 void lx_syscall(LxRegs *r)
 {
+    LxProc *p = lx_cur_proc();
+
     lx_syscall_do(r);
+    /* L6：系统调用返回前投递挂起的信号（把 iret 帧改成"进 handler"）。
+     * 系统调用帧就是完整 LxFrame（LxRegs 是它的第一个成员）。 */
+    if (p != (LxProc *)0) {
+        p->started = 1u;                 /* 能进系统调用，说明已经在用户态跑过了 */
+        lx_sig_deliver_frame(p, (LxFrame *)r);
+    }
     lx_sched_tick();
 }

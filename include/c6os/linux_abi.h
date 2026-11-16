@@ -106,7 +106,48 @@
 #define LX_SYS_arch_prctl    158
 #define LX_SYS_gettid        186
 #define LX_SYS_getdents64    217
+#define LX_SYS_rt_sigreturn   15
+#define LX_SYS_kill           62
+#define LX_SYS_tgkill         234
 #define LX_SYS_futex         202
+
+/* 信号编号（x86-64 Linux 原值） */
+#define LX_SIGHUP   1
+#define LX_SIGINT   2
+#define LX_SIGQUIT  3
+#define LX_SIGILL   4
+#define LX_SIGTRAP  5
+#define LX_SIGABRT  6
+#define LX_SIGBUS   7
+#define LX_SIGFPE   8
+#define LX_SIGKILL  9
+#define LX_SIGUSR1  10
+#define LX_SIGSEGV  11
+#define LX_SIGUSR2  12
+#define LX_SIGPIPE  13
+#define LX_SIGALRM  14
+#define LX_SIGTERM  15
+#define LX_SIGCHLD  17
+#define LX_SIGCONT  18
+#define LX_SIGSTOP  19
+#define LX_SIGURG   23
+#define LX_SIGWINCH 28
+
+/* handler 的两个特殊值 + sigaction 标志（与 Linux 同值） */
+#define LX_SIG_DFL       0ull
+#define LX_SIG_IGN       1ull
+#define LX_SA_SIGINFO    4ull
+#define LX_SA_RESTORER   0x04000000ull
+#define LX_SA_NODEFER    0x40000000ull
+
+/* rt_sigprocmask 的 how */
+#define LX_SIG_BLOCK     0ull
+#define LX_SIG_UNBLOCK   1ull
+#define LX_SIG_SETMASK   2ull
+
+/* siginfo.si_code */
+#define LX_SI_USER       0
+#define LX_SI_KERNEL     (-0x80)
 #define LX_SYS_set_tid_address   218
 #define LX_SYS_exit_group    231
 #define LX_SYS_openat        257

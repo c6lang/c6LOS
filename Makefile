@@ -967,7 +967,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
-              $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/proc.o
+              $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
+              $(X86S_DIR)/obj/proc.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
@@ -978,7 +979,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
-              $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/proc.o
+              $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
+              $(X86S_DIR)/obj/proc.o
 endif
 
 x86: caps-check-x86 $(X86)/disk.img
@@ -1145,6 +1147,10 @@ $(X86S_DIR)/obj/proc.o: linux/proc.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/sig.o: linux/sig.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 x86-user: caps-check-x86
 	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
 		$(X86)/user-disk.img
@@ -1226,6 +1232,44 @@ check-linuxabi-l4: x86-dyn
 		| tr -d '\r' | grep -q "^lib64\$$" \
 	  && echo "PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）" \
 	  || { echo "FAIL: linux-abi L4"; exit 1; }
+
+# ---- L5/L6 验收载荷：都跑在动态镜像之上（initramfs 里已经有 libc/ld.so/busybox） ----
+SH_ELF  := $(X86)/shpipe.elf
+SH_IMG  := $(X86)/shpipe-disk.img
+SIG_ELF := $(X86)/sig.elf
+SIG_IMG := $(X86)/sig-disk.img
+
+$(SH_ELF): tests/linux/shpipe.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(SH_IMG): $(SH_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SH_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+$(SIG_ELF): tests/linux/sig.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(SIG_IMG): $(SIG_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SIG_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-l5: $(SH_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SH_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^GOT:hello-from-pipe" \
+	  && echo "PASS: linux-abi L5（fork/execve/pipe/wait4：busybox sh 管道）" \
+	  || { echo "FAIL: linux-abi L5"; exit 1; }
+
+check-linuxabi-l6: $(SIG_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SIG_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^sig: SIGSEGV caught, back via siglongjmp" \
+	  && echo "PASS: linux-abi L6（信号：handler/屏蔽/SIGSEGV+siglongjmp/默认动作）" \
+	  || { echo "FAIL: linux-abi L6"; exit 1; }
 
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
