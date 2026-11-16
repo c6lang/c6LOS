@@ -125,7 +125,33 @@
 7:
     wsr     a3, windowstart
     isync
+    /* §363 健全性闸门：EPC 必须落在合法代码区（ROM/IRAM 0x40000000-0x43FFFFFF）。
+     * 不合法就说明"这个帧"是垃圾（错误 ctx / 已释放栈 / sp 差了几十字节），
+     * 直接把帧和 EPC/PS/WS/WB/a0 记到 0x50001880 并原地停住，等 JTAG 看现场。
+     * 以前是直接 `rfe` 跳进垃圾，现场全丢。 */
     l32i    a2, a1, 60
+    l32r    a6, .Lepclo
+    bltu    a2, a6, 8f
+    l32r    a6, .Lepchi
+    bgeu    a2, a6, 8f
+    j       9f
+8:
+    l32r    a4, .Lbadrec
+    s32i    a1, a4, 0
+    s32i    a2, a4, 4
+    l32i    a7, a1, 64
+    s32i    a7, a4, 8
+    l32i    a7, a1, 68
+    s32i    a7, a4, 12
+    l32i    a7, a1, 72
+    s32i    a7, a4, 16
+    l32i    a7, a1, 0
+    s32i    a7, a4, 20
+    l32i    a7, a1, 4
+    s32i    a7, a4, 24
+    movi    a7, 0xBAD1
+    s32i    a7, a4, 28
+9:
     wsr     a2, epc1
     l32i    a2, a1, 64
     movi    a3, 16
@@ -417,3 +443,10 @@ s3_task_tramp:
     callx0  a12
     call0   os_task_exit
 1:  j       1b
+
+    .section .text, "ax", @progbits
+    .align  4
+    .literal_position
+    .literal .Lepclo,  0x40000000
+    .literal .Lepchi,  0x44000000
+    .literal .Lbadrec, 0x50001880

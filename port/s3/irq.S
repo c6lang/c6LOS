@@ -307,6 +307,29 @@ _vec_level1:
      *
      * 改法：切到**专用中断栈**。被打断的 sp 存进 EXCSAVE3，帧里新开一个
      * 槽位（偏移 68）保存它，退出时用它恢复 a1。 */
+    /* §364 看门狗式检查：被打断的 sp 必须落在 DRAM 栈区。不落就说明**中断发生前**
+     * 栈指针就已经是垃圾了，直接记录 (sp, epc1, ps, a0) 到 0x500018C0 并停住。 */
+    l32r    a3, .Lstklo
+    bltu    a1, a3, 11f
+    l32r    a3, .Lstkhi
+    bgeu    a1, a3, 11f
+    j       12f
+11:
+    l32r    a3, .Lsprec
+    s32i    a1, a3, 0
+    s32i    a0, a3, 4
+    rsr     a2, epc1
+    s32i    a2, a3, 8
+    rsr     a2, ps
+    s32i    a2, a3, 12
+    rsr     a2, windowbase
+    s32i    a2, a3, 16
+    rsr     a2, windowstart
+    s32i    a2, a3, 20
+    movi    a2, 0xBAD2
+    s32i    a2, a3, 24
+13: j       13b
+12:
     /* 帧放在 [sp-128, sp-60)：**必须整体低于 sp-48**，那才是 windowed ABI
      * 溢出槽（call8: [sp-32,sp-20)，call12: [sp-48,sp-20)）的下界。
      * 这样中断帧不会盖住被调用者保存 caller a0..a11 的槽。 */
@@ -417,3 +440,10 @@ port_irq_restore:
     .section .text, "ax", @progbits
     .align  4
     .literal_position
+
+    .section .text, "ax", @progbits
+    .align  4
+    .literal_position
+    .literal .Lstklo,  0x3FCA0000
+    .literal .Lstkhi,  0x3FCEF000
+    .literal .Lsprec,  0x500018C0

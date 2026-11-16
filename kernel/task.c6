@@ -294,9 +294,9 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         return -4; /* 调度锁内不允许阻塞 */
     }
     {
-        /* 诊断：记录最近 8 次阻塞的 (任务 id, kind, obj) 到 RTC 0x50000C00。
+        /* 诊断：记录最近 8 次阻塞的 (任务 id, kind, obj) 到 RTC 0x50001A00。
          * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。 */
-        volatile u32 *bd = (volatile u32 *)0x50000C00u;
+        volatile u32 *bd = (volatile u32 *)0x50001A00u;
         u32 n_ = g_dbg_blk_n;
         g_dbg_blk_n = n_ + 1;
         u32 ctxv = (u32)(void *)g_cur->ctx;
