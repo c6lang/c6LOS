@@ -400,6 +400,8 @@ int s3_win_phy_enable(void)
     }
     ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
 
+    /* §292 实验：参照工程运行时 SYSCON_WIFI_RST_EN(0x60026018) = 0x3e08，
+     * 我们一直是 0。按参照值写一次，看 MAC 块（0x6001c000 段）会不会活过来。 */
     ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x\n",
                (unsigned)*(volatile u32 *)0x6001c08cu,
                (unsigned)*(volatile u32 *)0x60008000u);

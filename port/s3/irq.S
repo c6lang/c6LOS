@@ -72,7 +72,9 @@ _win_unf4:
 _win_ovf8:
     s32e    a0, a9, -16
     l32e    a0, a1, -12
-    s32e    a1, a9, -12
+    bnez    a0, 1f                  /* §292：上一级 sp 为 0 就回退到本帧 */
+    mov     a0, a9
+1:  s32e    a1, a9, -12
     s32e    a2, a9,  -8
     s32e    a3, a9,  -4
     s32e    a4, a0, -32
@@ -85,9 +87,13 @@ _win_ovf8:
 _win_unf8:
     l32e    a0, a9, -16
     l32e    a1, a9, -12
-    l32e    a2, a9,  -8
+    bnez    a1, 1f
+    mov     a1, a9
+1:  l32e    a2, a9,  -8
     l32e    a7, a1, -12
-    l32e    a3, a9,  -4
+    bnez    a7, 2f
+    mov     a7, a9
+2:  l32e    a3, a9,  -4
     l32e    a4, a7, -32
     l32e    a5, a7, -28
     l32e    a6, a7, -24

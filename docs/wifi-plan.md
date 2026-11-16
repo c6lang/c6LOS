@@ -12193,3 +12193,67 @@ double exception（§290 的 EXCCAUSE=0x1d / EXCVADDR=0xffffffe0 就是这么来
 **下一轮真正该做的**：让 call0→windowed 的**每一帧都符合 ABI 的帧布局**
 （尤其是把上一级 sp 放在 `[fp-12]`），或者进 windowed 之前先把整个窗口组
 spill 干净、只留一个活窗口，从根上避免"深链溢出"。
+
+## §292 PHY 初始化成功的钥匙 = IDF 的二级 bootloader（本轮突破）
+
+### 做对的事
+
+1. **irq.S 的窗口溢出/下溢处理体加了"回退"**：`_win_ovf8` 里
+   `l32e a0, a1, -12`（取上一级 sp）如果拿到 0，就用本帧 `a9` 顶上；
+   `_win_unf8` 对称地也回退。这样把寄存器溢写到 `[a9-32..-20]`，
+   和恢复侧完全自洽——不再像原来那样写到 `0xffffffe0`，在 EXCM 里
+   二次异常（§290/§291）。
+2. 有了这个回退，**走 IDF 真 bootloader 启动**（`S3_APP_BASE=0x20000`
+   + `tools/flashbl.sh`）的那条路终于越过了 `T1`，一路跑到 PHY：
+
+```
+T1 call0 任务进入 windowed 主流程
+[wifimain] id=1 tick=1
+W0 phy start
+[phy] CLK_EN=ffffdfdf MAC 0x6001c08c=03fffa00     ← MAC 寄存器块"活了"
+[phy] calling register_chipv7_phy(mode=0)
+[phy] register_chipv7_phy rc=1                      ← §281 的挂死消失
+W1 bringup
+B0 osi0=... B1 slot13=... B2 cfg@...
+[lockok] t=1 pr=0 ok=1
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+[mtxnew] #1 #2 [semnew] #1 [task] 库建任务 fn=[give] t=2 sem#1
+[recv] t=2 qh=3fcc450c tk=ffffffff
+```
+
+   **结论（推翻 §287 的失败结论的根因猜测）**：ROM 路径之所以
+   `register_chipv7_phy` 卡在 `ram_iq_est_enable`，是因为 MAC/PHY
+   寄存器块（`0x6001c000` 段）根本没被点亮——JTAG 实测 ROM 路径该段
+   **全部读 0**，而 bootloader 路径读得到真实复位值 `0x03fffa00`。
+   这是"块没时钟/没供电"的典型表现，不是 libphy 参数问题。
+
+### 排除掉的假设（都做了实验）
+
+* **PHY init data 不一致**：从参照工程 `xiaozhi.elf` 里把
+  `phy_init_data`（0x3c28a507，128 字节）抠出来和我们的
+  `s3_phy_init_data` 逐字节比 —— **完全相同**。
+* **`SYSCON_WIFI_RST_EN`(0x60026018) = 0x3e08**（参照值）：写入生效，
+  MAC 仍读 0。
+* **`SYSCON_WIFI_CLK_EN`(0x60026014) = 0xffffdfdf**（参照精确值）：写入
+  生效，MAC 仍读 0。我们的 `|= 0x78078F | 0x400000` 本来就覆盖了
+  `WIFI_BT_COMMON` 和 `PHY_EN` 两组必须的位。
+* **`RTC_CNTL_DIG_PWC`**：我们置的全是 FORCE_PU（上电），没有置任何 PD。
+* **把 bootloader 路径那 6 个不同的 RTC 寄存器值抄到 ROM 路径**
+  （0x60008044/8074/8084/809c/80b4/80e8）：MAC 仍读 0 —— 说明差别不是
+  "几个寄存器的终值"，而是 bootloader 那段**时序**（BBPLL/时钟序列）。
+
+### 下一步的墙：PHY 成功之后，任务切换里二次异常
+
+* RTC 记录：`cause=3(LoadStoreError)`，`EXCVADDR=0x403816a8`（**代码地址**，
+  正好是 `ppTask`(0x403816d8) 往前 0x30），`EPC1=0x40379569`，
+  `PS=0x0006081f`（INTLEVEL=15）、`WINDOWBASE=9`、`WINDOWSTART=0x200`。
+* `EPC1` 落在 `port_task_switch+0xc1`，那一段正是
+  `rsr.windowbase` / `wsr.windowbase` / `wsr.windowstart` 的
+  "切窗口 + 重设 WINDOWSTART" 逻辑；而 INTLEVEL=15 是 `rsil a5,15`
+  造成的，**窗口异常是 level-1，被 15 屏蔽 ⇒ 直接走二次异常**
+  ⇒ 落进 `_vec_default` 而不是我们的 `s3_trap`。
+* 也就是说：**bootloader 路径下，库创建 `ppTask` 之后第一次任务切换**，
+  窗口状态和我们的 `port_task_switch` 对不上。下一步要么让切换时
+  WINDOWBASE/WINDOWSTART 的改动不触发异常（先 `rsil` 回 1），
+  要么把"库任务"整个跑在自己的窗口基址上。
