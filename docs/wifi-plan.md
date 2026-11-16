@@ -12027,3 +12027,25 @@ NRX 0x6001CC00 之间，就是 WiFi MAC）的时钟不是 SYSCON 给的，八成
    在 kernel 启动早期（进 PHY 之前）执行一次，让 `0x60008074` 与参照一致。
    这是目前证据最硬的一条。
 2. 若仍不行，再上"把 IDF `esp_phy` 整组件编进镜像"的终极方案（§286 备选）。
+
+### §288 试一下"BBPLL 上电"（IDF bootloader 的 clk_ll_bbpll_enable）—— 位本来就是 0，MAC 仍然死
+
+`clk_ll_bbpll_enable()` 就三行：清 `RTC_CNTL_OPTIONS0`（0x60008000）的
+`BB_I2C_FORCE_PD(6)` / `BBPLL_I2C_FORCE_PD(8)` / `BBPLL_FORCE_PD(10)`。
+在 `s3_win_phy_power_on()` 里补上，并在调 `register_chipv7_phy` 前把两个值打出来：
+
+```
+[phy] MAC 0x6001c08c=00000000 OPTIONS0=1c00a000
+[phy] calling register_chipv7_phy(mode=0)
+```
+
+**OPTIONS0 = 0x1c00a000，bit6/8/10 本来就是 0** —— 也就是说 BBPLL 早就没被强制关电。
+清完照样 `0x6001c08c` 恒 0，`register_chipv7_phy` 还是卡在 `ram_iq_est_enable()`。
+
+结论：**"BBPLL 没上电"这个假设不成立**。要么是 BBPLL 没被*配置*（分频/锁定，
+`clk_ll_bbpll_set_config` 那几个 regi2c 模拟写没人做过），要么 MAC 块的时钟根本不是
+从 BBPLL 来的。无论哪种，都得走 §287 定的第 1 条路：**把 IDF 的 rtc_clk 初始化整段搬过来**。
+
+顺带确认了两件事：
+- `clk_ll_bbpll_enable` 只需要一次寄存器操作，成本可忽略（已留在代码里，无害）；
+- 打印 `0x6001c08c` / `OPTIONS0` 的探针也留下了，以后每次进 PHY 都能看见。

@@ -296,6 +296,12 @@ static void s3_win_phy_power_on(void)
     *rst = *rst | 0x2A1Fu;                  /* modem 复位：assert */
     *rst = *rst & ~0x2A1Fu;                 /* modem 复位：release */
     *iso = *iso & ~(1u << 28);              /* 解除隔离 */
+    /* §288：BBPLL 上电。IDF 的二级 bootloader 在 rtc_clk_init() 里会调
+     * clk_ll_bbpll_enable()，把 RTC_CNTL_OPTIONS0 的三个 FORCE_PD 清掉：
+     *   BB_I2C_FORCE_PD = BIT(6)、BBPLL_I2C_FORCE_PD = BIT(8)、BBPLL_FORCE_PD = BIT(10)
+     * 我们镜像没有二级 bootloader，这个一直没人做 —— 而 WiFi MAC/BB 的时钟就是
+     * 从 BBPLL 分出来的（正是 §285 里恒 0 的那个计数器）。 */
+    *(volatile u32 *)0x60008000u &= ~((1u << 6) | (1u << 8) | (1u << 10));
     k = 0;
     while (k < 400u) { k = k + 1u; }
 }
@@ -394,6 +400,9 @@ int s3_win_phy_enable(void)
     }
     ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
 
+    ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x\n",
+               (unsigned)*(volatile u32 *)0x6001c08cu,
+               (unsigned)*(volatile u32 *)0x60008000u);
     ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
     /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
      *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
