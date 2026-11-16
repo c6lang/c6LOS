@@ -104,7 +104,13 @@ _win_unf8:
 _win_ovf12:
     s32e    a0,  a13, -16
     l32e    a0,  a1,  -12
-    s32e    a1,  a13, -12
+    /* §326：和 §292 给 ovf8 加的是同一件事 —— 上一级 sp 还没写进 [a1-12]
+     * 时它是 0，直接拿它当基址就会往 0-48 = 0xffffffd0 写（真板见过
+     * vaddr=0xffffffd1 的 StoreProhibited）。这里退回本帧的 sp。
+     * 补这条之前，_win_ovf12 是四个窗口向量里唯一没有兜底的一个。 */
+    bnez    a0, 1f
+    mov     a0, a13
+1:  s32e    a1,  a13, -12
     s32e    a2,  a13,  -8
     s32e    a3,  a13,  -4
     s32e    a4,  a0,  -48
@@ -121,9 +127,13 @@ _win_ovf12:
 _win_unf12:
     l32e    a0,  a13, -16
     l32e    a1,  a13, -12
-    l32e    a2,  a13,  -8
+    bnez    a1, 1f
+    mov     a1, a13
+1:  l32e    a2,  a13,  -8
     l32e    a11, a1,  -12
-    l32e    a3,  a13,  -4
+    bnez    a11, 2f
+    mov     a11, a13
+2:  l32e    a3,  a13,  -4
     l32e    a4,  a11, -48
     l32e    a5,  a11, -44
     l32e    a6,  a11, -40
