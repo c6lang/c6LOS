@@ -1,0 +1,396 @@
+/* kernel/net/udp.c6 —— UDP（M10-3）
+ *
+ * 8 个 UDP socket 槽，每个带一条 4 槽的接收队列（队列里存的是带上限的
+ * 数据报 + 来源地址）。校验和按 RFC 768 算（含 12 字节伪首部）；
+ * 结果算出 0 时按规范写 0xFFFF。
+ *
+ * 这一层只认端口，不认识 SAL；SAL 的 socket 语义在 sal_udp.c6 里包一层。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+#define UDP_HLEN        8u
+#define UDP_MAX_SOCKS   8u
+#define UDP_QDEPTH      4u
+#define UDP_MAX_PAYLOAD 512u
+
+typedef struct UdpSock {
+    UINT32 used;
+    UINT32 bound;
+    UINT16 lport;
+    UINT32 connected;
+    UINT32 rip;
+    UINT16 rport;
+    UINT32 head;                    /* 队列头 */
+    UINT32 count;
+    UINT32 rx_len[UDP_QDEPTH];
+    UINT32 rx_ip[UDP_QDEPTH];
+    UINT16 rx_port[UDP_QDEPTH];
+    UINT8  rx[UDP_QDEPTH][UDP_MAX_PAYLOAD];
+    UINT32 dropped;
+} UdpSock;
+
+static UdpSock g_udp[UDP_MAX_SOCKS] = {0};
+
+static INT32 udp_err_(INT32 e)
+{
+    return 0 - e;
+}
+
+static UdpSock *udp_get_(INT32 ud)
+{
+    if (ud < 0 || ud >= (INT32)UDP_MAX_SOCKS) {
+        return (UdpSock *)0;
+    }
+    if (g_udp[ud].used == 0u) {
+        return (UdpSock *)0;
+    }
+    return &g_udp[ud];
+}
+
+/* 找绑定了这个端口的 socket。 */
+static UdpSock *udp_by_port_(UINT16 port)
+{
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < (UINT32)UDP_MAX_SOCKS) {
+        if (g_udp[i].used != 0u && g_udp[i].bound != 0u && g_udp[i].lport == port) {
+            return &g_udp[i];
+        }
+        i++;
+    }
+    return (UdpSock *)0;
+}
+
+INT32 UdpSockOpen(VOID)
+{
+    UINT32 i = 0u;
+    INT32 ud = -1;
+
+    i = 0u;
+    while (i < (UINT32)UDP_MAX_SOCKS) {
+        if (g_udp[i].used == 0u) {
+            ud = (INT32)i;
+            i = (UINT32)UDP_MAX_SOCKS;
+        } else {
+            i++;
+        }
+    }
+    if (ud < 0) {
+        return udp_err_(24);        /* -EMFILE */
+    }
+    (void)memset((VOID *)&g_udp[ud], 0, (UINT32)sizeof(UdpSock));
+    g_udp[ud].used = 1u;
+    return ud;
+}
+
+INT32 UdpSockClose(INT32 ud)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);         /* -EBADF */
+    }
+    (void)memset((VOID *)s, 0, (UINT32)sizeof(UdpSock));
+    return 0;
+}
+
+INT32 UdpSockBind(INT32 ud, UINT16 port)
+{
+    UdpSock *s = (UdpSock *)0;
+    UdpSock *o = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (port == 0u) {
+        return udp_err_(22);
+    }
+    o = udp_by_port_(port);
+    if (o != (UdpSock *)0 && o != s) {
+        return udp_err_(98);        /* -EADDRINUSE */
+    }
+    s->lport = port;
+    s->bound = 1u;
+    return 0;
+}
+
+INT32 UdpSockConnect(INT32 ud, UINT32 ip, UINT16 port)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (ip == 0u || port == 0u) {
+        return udp_err_(22);
+    }
+    s->rip = ip;
+    s->rport = port;
+    s->connected = 1u;
+    return 0;
+}
+
+/* 真正的发送：组 8 字节头 + 载荷，交给 IpOutput。 */
+static INT32 udp_xmit_(LosNetIf *nif, UINT16 lport, UINT32 ip, UINT16 port,
+                       const VOID *buf, UINT32 len)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    const UINT8 *src = (const UINT8 *)buf;
+    UINT8 *h = (UINT8 *)0;
+    UINT32 i = 0u;
+    UINT16 c = 0u;
+
+    if (len + (UINT32)UDP_HLEN > (UINT32)(LOS_NET_BUF_SIZE - LOS_NET_HDR_ROOM - LOS_IP_HLEN)) {
+        return udp_err_(90);        /* -EMSGSIZE */
+    }
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, len + (UINT32)UDP_HLEN);
+    if (p == (LosNetBuf *)0) {
+        return udp_err_(12);
+    }
+    h = &p->data[p->off];
+    NetPut16(&h[0], lport);
+    NetPut16(&h[2], port);
+    NetPut16(&h[4], (UINT16)(len + (UINT32)UDP_HLEN));
+    NetPut16(&h[6], 0u);
+    i = 0u;
+    while (i < len) {
+        h[(UINT32)UDP_HLEN + i] = src[i];
+        i++;
+    }
+    c = NetCsumPseudo(nif->ip, ip, (UINT8)LOS_IP_PROTO_UDP, h, len + (UINT32)UDP_HLEN);
+    if (c == 0u) {
+        c = 0xFFFFu;                    /* UDP 的 0 要写成全 1 */
+    }
+    NetPut16(&h[6], c);
+    return IpOutput(nif, ip, (UINT8)LOS_IP_PROTO_UDP, p);
+}
+
+INT32 UdpSockSend(INT32 ud, const VOID *buf, UINT32 len)
+{
+    UdpSock *s = (UdpSock *)0;
+    UdpSock *t = (UdpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+    UINT32 i = 0u;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (s->connected == 0u) {
+        return udp_err_(107);       /* -ENOTCONN */
+    }
+    nif = NetIfGet(0u);
+    if (nif == (LosNetIf *)0) {
+        return udp_err_(101);
+    }
+    /* 本机自己就是目的端口：直接入队（环回） */
+    if (s->rip == nif->ip) {
+        t = udp_by_port_(s->rport);
+        if (t != (UdpSock *)0 && t->count < (UINT32)UDP_QDEPTH) {
+            UINT32 slot = (t->head + t->count) % (UINT32)UDP_QDEPTH;
+            const UINT8 *b = (const UINT8 *)buf;
+
+            if (len > (UINT32)UDP_MAX_PAYLOAD) {
+                return udp_err_(90);
+            }
+            i = 0u;
+            while (i < len) {
+                t->rx[slot][i] = b[i];
+                i++;
+            }
+            t->rx_len[slot] = len;
+            t->rx_ip[slot] = nif->ip;
+            t->rx_port[slot] = s->lport;
+            t->count = t->count + 1u;
+        }
+        return (INT32)len;
+    }
+    return udp_xmit_(nif, s->lport, s->rip, s->rport, buf, len);
+}
+
+INT32 UdpSockSendTo(INT32 ud, UINT32 ip, UINT16 port, const VOID *buf, UINT32 len)
+{
+    UdpSock *s = (UdpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    nif = NetIfGet(0u);
+    if (nif == (LosNetIf *)0) {
+        return udp_err_(101);
+    }
+    if (ip == nif->ip) {
+        UdpSock *t = udp_by_port_(port);
+        UINT32 i = 0u;
+
+        if (t == (UdpSock *)0) {
+            return udp_err_(2);
+        }
+        if (t->count >= (UINT32)UDP_QDEPTH) {
+            return udp_err_(11);
+        }
+        if (len > (UINT32)UDP_MAX_PAYLOAD) {
+            return udp_err_(90);
+        }
+        {
+            UINT32 slot = (t->head + t->count) % (UINT32)UDP_QDEPTH;
+            const UINT8 *b = (const UINT8 *)buf;
+
+            i = 0u;
+            while (i < len) {
+                t->rx[slot][i] = b[i];
+                i++;
+            }
+            t->rx_len[slot] = len;
+            t->rx_ip[slot] = nif->ip;
+            t->rx_port[slot] = s->lport;
+            t->count = t->count + 1u;
+        }
+        return (INT32)len;
+    }
+    return udp_xmit_(nif, s->lport, ip, port, buf, len);
+}
+
+static INT32 udp_dequeue_(UdpSock *s, VOID *buf, UINT32 max, UINT32 *ip, UINT16 *port)
+{
+    UINT8 *dst = (UINT8 *)buf;
+    UINT32 slot = 0u;
+    UINT32 len = 0u;
+    UINT32 i = 0u;
+
+    if (s->count == 0u) {
+        return udp_err_(11);        /* -EAGAIN */
+    }
+    slot = s->head;
+    len = s->rx_len[slot];
+    if (len > max) {
+        len = max;
+    }
+    i = 0u;
+    while (i < len) {
+        dst[i] = s->rx[slot][i];
+        i++;
+    }
+    if (ip != (UINT32 *)0) {
+        *ip = s->rx_ip[slot];
+    }
+    if (port != (UINT16 *)0) {
+        *port = s->rx_port[slot];
+    }
+    s->rx_len[slot] = 0u;
+    s->head = (s->head + 1u) % (UINT32)UDP_QDEPTH;
+    s->count = s->count - 1u;
+    return (INT32)len;
+}
+
+INT32 UdpSockRecv(INT32 ud, VOID *buf, UINT32 max)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    return udp_dequeue_(s, buf, max, (UINT32 *)0, (UINT16 *)0);
+}
+
+INT32 UdpSockRecvFrom(INT32 ud, VOID *buf, UINT32 max, UINT32 *ip, UINT16 *port)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    return udp_dequeue_(s, buf, max, ip, port);
+}
+
+INT32 UdpSockPoll(INT32 ud, UINT32 events)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (s->count != 0u) {
+        return (INT32)(events & 1u);        /* 可读 */
+    }
+    return 0;
+}
+
+/* 收到一个 UDP 段。p 里是 UDP 载荷（IP 头已被剥掉）。 */
+INT32 UdpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT16 dport = 0u;
+    UINT16 sport = 0u;
+    UINT16 ulen = 0u;
+    UdpSock *s = (UdpSock *)0;
+    UINT32 slot = 0u;
+    UINT32 i = 0u;
+    UINT32 plen = 0u;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return udp_err_(22);
+    }
+    if (p->len < (UINT32)UDP_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return udp_err_(22);
+    }
+    h = &p->data[p->off];
+    sport = NetGet16(&h[0]);
+    dport = NetGet16(&h[2]);
+    ulen = NetGet16(&h[4]);
+    if ((UINT32)ulen > p->len || (UINT32)ulen < (UINT32)UDP_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return udp_err_(22);
+    }
+    plen = (UINT32)ulen - (UINT32)UDP_HLEN;
+    if (plen > (UINT32)UDP_MAX_PAYLOAD) {
+        plen = (UINT32)UDP_MAX_PAYLOAD;
+    }
+    s = udp_by_port_(dport);
+    if (s == (UdpSock *)0) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return udp_err_(2);         /* -ENOENT：没人监听 */
+    }
+    if (s->connected != 0u) {
+        if (s->rip != src || s->rport != sport) {
+            nif->rx_dropped = nif->rx_dropped + 1u;
+            NetBufFree(p);
+            return udp_err_(22);
+        }
+    }
+    if (s->count >= (UINT32)UDP_QDEPTH) {
+        s->dropped = s->dropped + 1u;
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return udp_err_(105);       /* -ENOBUFS */
+    }
+    slot = (s->head + s->count) % (UINT32)UDP_QDEPTH;
+    i = 0u;
+    while (i < plen) {
+        s->rx[slot][i] = h[(UINT32)UDP_HLEN + i];
+        i++;
+    }
+    s->rx_len[slot] = plen;
+    s->rx_ip[slot] = src;
+    s->rx_port[slot] = sport;
+    s->count = s->count + 1u;
+    NetBufFree(p);
+    return 0;
+}

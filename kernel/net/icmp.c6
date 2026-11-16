@@ -1,0 +1,209 @@
+/* kernel/net/icmp.c6 —— echo request/reply（M10-1）
+ *
+ * 收：type 8（echo request）就回 type 0；type 0（reply）就记到应答表里。
+ * 发：IcmpPing() 招呼叫方给定的 id/seq，应答表里查到就当成功。
+ * 现在没有"等待"语义（qemu 里靠 pump 轮询，M10-2 接上 e1000 后由
+ * net_rx 任务驱动），所以 IcmpPing 是"发+查"一步到位。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+#define ICMP_ECHO_REPLY   0u
+#define ICMP_ECHO_REQUEST 8u
+#define ICMP_HLEN         8u
+#define ICMP_MAX_PINGS    8u
+
+typedef struct IcmpPing {
+    UINT32 used;
+    UINT16 id;
+    UINT16 seq;
+    UINT32 len;                     /* 应答里的载荷长度 */
+    UINT8  first;                   /* 载荷首字节，验证确实是自己的包 */
+} IcmpWait;
+
+static IcmpWait g_pings[ICMP_MAX_PINGS] = {0};
+static UINT32 g_replies = 0u;
+static UINT32 g_requests = 0u;
+
+static IcmpWait *icmp_ping_find_(UINT16 id, UINT16 seq)
+{
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < (UINT32)ICMP_MAX_PINGS) {
+        if (g_pings[i].used != 0u && g_pings[i].id == id && g_pings[i].seq == seq) {
+            return &g_pings[i];
+        }
+        i++;
+    }
+    return (IcmpWait *)0;
+}
+
+static IcmpWait *icmp_ping_slot_(UINT16 id, UINT16 seq)
+{
+    IcmpWait *e = (IcmpWait *)0;
+    UINT32 i = 0u;
+
+    e = icmp_ping_find_(id, seq);
+    if (e != (IcmpWait *)0) {
+        e->used = 0u;
+        return e;
+    }
+    i = 0u;
+    while (i < (UINT32)ICMP_MAX_PINGS) {
+        if (g_pings[i].used == 0u) {
+            e = &g_pings[i];
+            i = (UINT32)ICMP_MAX_PINGS;
+        } else {
+            i++;
+        }
+    }
+    if (e == (IcmpWait *)0) {
+        e = &g_pings[0];            /* 满了就覆盖第一项，够用 */
+    }
+    (void)memset((VOID *)e, 0, (UINT32)sizeof(*e));
+    return e;
+}
+
+INT32 IcmpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
+{
+    UINT8 *b = (UINT8 *)0;
+    UINT8 type = 0u;
+    UINT16 id = 0u;
+    UINT16 seq = 0u;
+    UINT16 csum = 0u;
+    LosNetBuf *q = (LosNetBuf *)0;
+    IcmpWait *e = (IcmpWait *)0;
+    UINT32 i = 0u;
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    if (p->len < (UINT32)ICMP_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    b = &p->data[p->off];
+    csum = NetCsum(b, p->len);
+    if (csum != 0u) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    type = b[0];
+    id = NetGet16(&b[4]);
+    seq = NetGet16(&b[6]);
+    if (type == (UINT8)ICMP_ECHO_REPLY) {
+        g_replies = g_replies + 1u;
+        e = icmp_ping_slot_(id, seq);
+        e->used = 1u;
+        e->id = id;
+        e->seq = seq;
+        e->len = p->len;
+        e->first = b[8];
+        NetBufFree(p);
+        return 0;
+    }
+    if (type != (UINT8)ICMP_ECHO_REQUEST || b[1] != 0u) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 93;
+    }
+    /* echo request：原样搬一份，type 改 0，重算校验和，发回去。 */
+    g_requests = g_requests + 1u;
+    q = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, p->len);
+    if (q == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 12;
+    }
+    i = 0u;
+    while (i < p->len) {
+        q->data[q->off + i] = b[i];
+        i++;
+    }
+    q->data[q->off] = (UINT8)ICMP_ECHO_REPLY;
+    q->data[q->off + 1u] = 0u;
+    q->data[q->off + 2u] = 0u;
+    q->data[q->off + 3u] = 0u;
+    NetPut16(&q->data[q->off + 2u], NetCsum(&q->data[q->off], q->len));
+    NetBufFree(p);
+    rc = IpOutput(nif, src, (UINT8)LOS_IP_PROTO_ICMP, q);
+    return rc;
+}
+
+INT32 IcmpPing(LosNetIf *nif, UINT32 dst, UINT16 id, UINT16 seq)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    IcmpWait *e = (IcmpWait *)0;
+    UINT8 payload[16] = {0};
+    UINT32 i = 0u;
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || dst == 0u) {
+        return 0;
+    }
+    e = icmp_ping_slot_(id, seq);
+    e->used = 0u;
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, (UINT32)(ICMP_HLEN + 16u));
+    if (p == (LosNetBuf *)0) {
+        return 0;
+    }
+    i = 0u;
+    while (i < 16u) {
+        payload[i] = (UINT8)('a' + (i % 26u));
+        i++;
+    }
+    p->data[p->off] = (UINT8)ICMP_ECHO_REQUEST;
+    p->data[p->off + 1u] = 0u;
+    p->data[p->off + 2u] = 0u;
+    p->data[p->off + 3u] = 0u;
+    NetPut16(&p->data[p->off + 4u], id);
+    NetPut16(&p->data[p->off + 6u], seq);
+    i = 0u;
+    while (i < 16u) {
+        p->data[p->off + ICMP_HLEN + i] = payload[i];
+        i++;
+    }
+    NetPut16(&p->data[p->off + 2u], NetCsum(&p->data[p->off], p->len));
+    rc = IpOutput(nif, dst, (UINT8)LOS_IP_PROTO_ICMP, p);
+    if (rc < 0) {
+        return 0;
+    }
+    e = icmp_ping_find_(id, seq);
+    if (e == (IcmpWait *)0) {
+        return 0;
+    }
+    if (e->used == 0u) {
+        return 0;
+    }
+    return 1;
+}
+
+INT32 IcmpGotReply(UINT16 id, UINT16 seq)
+{
+    IcmpWait *e = (IcmpWait *)0;
+
+    e = icmp_ping_find_(id, seq);
+    if (e == (IcmpWait *)0) {
+        return 0;
+    }
+    if (e->used == 0u) {
+        return 0;
+    }
+    return 1;
+}
+
+UINT32 IcmpReplies(VOID)
+{
+    return g_replies;
+}
+
+UINT32 IcmpRequests(VOID)
+{
+    return g_requests;
+}

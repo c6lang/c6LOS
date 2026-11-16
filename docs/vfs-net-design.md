@@ -1,6 +1,6 @@
 # 内核子系统补课：VFS/文件系统 + 网络（SAL）
 
-> 状态：**设计稿（待落地）** · 关联 [architecture.md](architecture.md) §3 ABI 规则 ·
+> 状态：**M9-0 已落地**（VFS 核心 + romfs，`make check-vfs` 绿）；M9-1..M9-4 / M10 待做 · 关联 [architecture.md](architecture.md) §3 ABI 规则 ·
 > [liteos-comparison.md](liteos-comparison.md) 功能矩阵 · [todo.md](todo.md) M9/M10 ·
 > [api.md](api.md) 错误码 · [wifi-plan.md](wifi-plan.md)（S3 闭源 WiFi，另立）
 >
@@ -274,6 +274,7 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 | 定时 | `os_timeout`/`tick`/`swtmr` | TCP 重传、`sal_select` 超时 |
 | 中断 | `hwi.c6` | 网卡中断只做"搬包 + post sem"；ATA 仍用 PIO 轮询 |
 | 错误码 | `LOS_ERRNO_*`（`api.md` §4） | VFS/SAL 出口统一翻译，内部用 errno 风格 |
+| 运行库 | `include/c6os/string.h`（`rt/c6rt.c` / `rt/x86_libc.c` 提供实现） | **一律复用** `memcpy/memset/strlen/strcmp/strncpy`，不手搓循环；见 `architecture.md` §2.1 |
 | ABI | `architecture.md` §3 | 跨 C 边界只传 `void*`/`u32`/`u64`/函数指针 |
 
 ## 5. 里程碑与验收（汇总）
@@ -313,3 +314,349 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 - 网络：IPv6、分片重组、SACK、拥塞控制高级部分、DHCP/DNS、TLS；
 - S3 闭源 WiFi 栈的改造（另见 `docs/wifi-plan.md`）；
 - 块设备 DMA、写缓存回写、日志/掉电一致性（先直写）。
+
+## 8. 施工记录
+
+### M9-0（VFS 核心 + romfs）已完成
+
+落地文件：`include/los/los_fs.h`、`include/los/los_block.h`（只有声明，实现在 M9-2）、
+`include/c6os/vfs.h`、`include/c6os/string.h`、`kernel/vfs.c6`（挂载表/路径解析/file 表）、
+`kernel/romfs.c6`（newc cpio 只读后端）、`kernel/fsapi.c6`（`LOS_Fs*` + 按 fs 类型分发）、
+`tests/t_vfs.c6`；`Makefile` 里 `C6OS_VFS` 默认 0，为 1 才编这三个 `.c6`。
+
+验收：
+
+- `make check-vfs` → `PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）`
+- `make check-vfs-zero` → `PASS: C6OS_VFS=0 时 S3 不编 VFS（零侵入）`
+- 回归：`check-linuxabi` 与 `-l2..-l8` 全绿（`-O1` 改动后复跑）
+
+施工中撞到的两件事（都影响 M9-1/M10）：
+
+1. **x86 stage2 只能装 255 扇区（≈127.5KB）**。`port/x86_64/boot16.S` 用三个 DAP
+   读 LBA 1..255（127+120+8），所以 `flat.bin` 超过 130560 字节就会被**静默截断** ——
+   现象是内核一句日志都不打就死（连 banner 都没有），非常像链接/入口问题。
+   VFS 一上来把镜像顶到 157KB 直接撞线；后来压回 117KB。M9-2 又把它推到 131KB，
+   于是**已扩过一轮**：`boot16.S` 加了 `dap4`（127 扇区 @ LBA 256 → 0x2FE00），
+   容量 255 → 382 扇区（≈191KB）。M10 网络迟早还要再扩，届时直接改循环读。
+2. **c6 产出的 IR 需要 `-O1`**。`X86IRFLAGS` 之前没有优化级，clang 按 -O0 编 IR，
+   几百行的内核文件就能吃掉 10KB+ 代码段（VFS 三个文件加了 44KB）。
+   统一加 `-O1` 后：L3 镜像 111KB→108KB、vfs 镜像 158KB→117KB。
+   S3 那条链（c6 → C99 → xtensa-gcc）不受影响。
+
+另外：`LOS_Fs*` 的错误约定是 `-errno`（POSIX 风格），与 LiteOS-M 原文的
+`LOS_ERRNO_*` 不同 —— 见 `include/los/los_fs.h` 顶部说明；函数名与参数顺序
+保持与 LiteOS-M 一致。
+
+### M9-1（ramfs 可读写）已完成
+
+`kernel/ramfs.c6`：32 节点静态池（父指针 + 兄弟链表 + 首子指针），数据走
+**内核堆**（`kernel/heap.c6` 的 `os_heap_alloc/realloc/free`）—— 一个内核里只保留
+一份堆实现，文件系统不再自造分配器。方法：create/write/read/lseek/readdir/
+unlink/mkdir/rmdir/rename（**只支持同父改名**，跨目录搬移没需求就明确拒绝）/
+truncate。`Makefile` 把 `ramfs.c6` 与 `heap.c6` 加进 `C6OS_VFS=1` 的对象列表。
+
+验收：`make check-vfs-ramfs` → `PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/
+mkdir/rmdir/unlink）`；`make check-vfs`（M9-0）与 `make check-vfs-zero`（S3 零侵入）
+同时保持绿。
+
+#### 关于用 c6 的 `interface` 做后端抽象（试过了，暂不采用）
+
+`docs/architecture.md` §12 把 `interface`（胖指针 + 编译器生成 vtable）列为惯用法，
+所以 M9 的第一版后端抽象就是按它写的：`interface LosFs { fs_open/fs_read/... }`，
+romfs/ramfs 各自实现同名方法。结论是**这个 c6 版本上跨 TU 分派不工作**：
+
+1. 编译、链接都过（两条链都试了：c6→LLVM IR→clang，以及探针里的单 TU 用例）；
+2. 但把接口值**存进结构体、在另一个 TU 里调用**时，会跳进 `.bss` 执行 →
+   `v6 #UD` 死循环（qemu `-d int` 里 RIP 落在 `__bss_start` 之后的数据区）；
+3. 单 TU 内（探针、c6 自带 `tests/interface.c6`）是好的；`tests/tu/interface.c6`
+   也只演示了"每个 TU 自己转换、自己调用"，没有演示"一个 TU 生成 vtable、另一个
+   TU 调用"。
+
+顺带两个已经落地的副产品：
+- `interface` 的转换会调编译器运行时 `__tcc_iface_init(&self, &vt, &dst)`，
+  freestanding 链接没有 libtcc1 → 已按 libtcc1 的实现补进 `rt/x86_libc.c` 与
+  `rt/c6rt.c`（与"复用编译器标准库"同一原则：缺的是库）；
+- **c6 走 LLVM IR 时 `static` 函数不是 internal linkage**：两个 TU 里同名的
+  `static` 助手（如 `find_`）在链接期会 `multiple definition`。所以内核文件里的
+  文件级辅助函数一律加本文件前缀（`romfs_find_` / `ramfs_find_`）。
+
+等 c6 的 interface 支持"跨 TU 存值 + 分派"之后再切；在那之前 FS 后端用
+`m->type` 分发（12 个方法、2 个后端，量还可控）。
+
+### M9-2（块设备层 + ATA PIO 写）已完成
+
+`kernel/blkdev.c6`：`LosDevRead/Write` 函数表 + 8 项设备注册表 + 参数校验
+（`blk + cnt` 越界、空指针、只读设备分别返回 `-EINVAL/-EROFS`）；
+`port/x86_64/ata.c` 补 `port_ata_write`（WRITE SECTORS + FLUSH CACHE）。
+
+验收：`make check-vfs-blk` → 写 8 扇区到 LBA 20480 再读回逐字节一致。
+
+两个坑：
+1. **ATA 写每扇区前必须先等空闲**（`ata_wait_idle`：BSY 清、ERR 未置）。读路径
+   不需要，写路径不等就会让后续命令被驱动器忽略 —— 现象是 `LOS_BlockWrite`
+   直接返回 -1，看起来像"写支持没做对"。
+2. 镜像尺寸又顶到了 boot16 的 255 扇区上限（见上面第 1 条记录），已扩到 382 扇区。
+
+### M9-3（FAT16/32 只读）已完成
+
+`kernel/fatfs.c6`：BPB 解析（512 字节扇区、spc 必须是 2 的幂、nfats/fatsz16/32、
+root_ents、totsec16/32）→ 首簇（FAT16 取目录项 +26 的 16 位；FAT32 拼 +20/+26
+高低字）→ 簇链 `fat_next_`（0xFFF8/0x0FFFFFF8 为结束）→ 8.3 目录项
+（跳过 0xE5、0x0F 长名、卷标 0x08）。只读后端：mount/umount/open/close/read/
+stat/readdir；写/删/改名/截断一律 `-EROFS`。
+
+镜像：`tools/mkfat.py` 生成 4MB FAT16（1 个文件 `HELLO.TXT` + 1 个子目录 `SUB`），
+`tools/mkfs.py` 在 LBA 16384 处把它嵌进 `vfs-disk.img`（磁盘 32MB）。
+`tests/t_vfs.c6` 的 M9-3 段覆盖 stat/read/readdir 与三条错误路径
+（写被拒 `-EROFS`、目录当文件打开 `-EISDIR`、不存在的名字 `-ENOENT`）。
+
+验收：`make check-vfs` → 一次 qemu 跑完 M9-0..M9-3 四条 `PASS: vfs M9-*`。
+
+四个坑：
+
+1. **后端私有表不能用挂载点下标** —— 最初每个后端靠 `&g_os_mounts[i] == m`
+   找自己的槽位，而 `/fat` 是第 3 个挂载点（下标 2），`FAT_MAX_MOUNTS`/
+   `RAMFS_MAX_MOUNTS` 只有 2 ⇒ 永远 `-ENOMEM`。改成每个后端结构体自带
+   `used` 标志、各自扫描自己的表。
+2. **设备名要在进后端之前写进挂载项** —— `OsMount.dev` 原来在 `*_mount()`
+   成功之后才拷贝，而 `fatfs_mount` 第一件事就是 `LOS_DeviceGet(m->dev)`，
+   拿到空串 ⇒ `-ENOENT`（现象：`FAIL: mount fatfs`）。
+3. **FAT16 的起始簇只在目录项 +26（16 位）** —— 照 FAT32 的 `hi << 16 | lo`
+   去读会得到 `2 << 16`，于是 `read` 被夹成 0 字节，表现成"打开成功、读到 0 字节"。
+4. **批量生成 C 源时反斜杠会多一层** —— Python 补丁里写成 `'\\0'`（两个反斜杠 + 0）
+   落进 C 就是多字符常量（不是 0），`strcmp`/收尾判断全部失效；在生成器产物里搜
+   两个反斜杠 + 0 可以一次性揪出来（本次命中 `kernel/fatfs.c6` 的 8 处）。
+
+### M9-4（接到 Linux ABI：/tmp = ramfs）已完成
+
+`linux/fs.c` 增加 `LX_FD_VFS` 一族分发：
+
+- `fs_openat`：`strip_()` 之后的路径是 `tmp` 或 `tmp/...` 就转 `LOS_FsOpen`
+  （补回前导 `/` 再交给 VFS，VFS 只认绝对路径）。
+- 文件 fd：`LxFile.node` 存 VFS fd，`g_vpath[vfd]` 记绝对路径；
+  `read/pread/write/lseek/fstat/close` 按 `kind` 分发，`LxFile.pos` 与
+  VFS 自己的游标在每次调用前用 `LOS_FsLseek` 对齐。
+- 目录 fd：ramfs 的 `open` 对目录返回 `-EISDIR`，所以目录不占 VFS 句柄，
+  只在 `g_dpath[8]` 里记路径，`node = LX_VDIR_BASE + slot`；
+  `getdents64` 的顺序是 `.`、`..`，再按 `LOS_FsReaddir` 一项一项取。
+- `linux/sys.c`：`sys_write` 对 fd ≥ 3 转 `lx_fs_write`（原来直接 EBADF）。
+- `lx_fs_init`：initramfs 解析成功后把 ramfs 挂到 `/tmp`。
+
+验收：`make check-linuxabi-m9` —— 跑一个**未修改的静态链接 Linux 程序**
+（`tests/linux/tmpfs.c`，宿主 gcc 编），它在 `/tmp` 上 create/write/lseek/read，
+再用 glibc 的 `opendir/readdir` 把它找回来，打印 `PASS: linux-abi M9-4`。
+
+四个坑：
+
+1. **`strip_()` 已经吃掉了前导 `/`** —— 前缀判断要在去掉 `/` 之后的路径上做
+   （`tmp/...`），而交给 VFS 的必须是绝对路径，得自己补回 `/`；否则
+   `vfs_owns_()` 永远返回 0，VFS 分支形同虚设（症状：open 一律 ENOENT）。
+2. **挂载点代码要放在成功返回之前** —— 第一版把 `LOS_FsMount("/tmp")` 插在
+   `lx_fs_init()` 末尾，而那个位置在"没找到 newc 尾标 → return -1"之后，
+   是死代码；内核照常启动，症状是 `/tmp/...` 一律 `-ENOENT`。
+3. **lseek 必须同步 `LxFile.pos`** —— VFS 分支只返回新位置、不写回 fd 游标的话，
+   下一次 read 还从旧位置读（症状：`lseek(0)` 返回 0，`read` 却读到 0 字节）。
+4. **目录 fd 不能走 `LOS_FsOpen`** —— ramfs 的 open 对目录返回 `-EISDIR`，
+   glibc 的 `opendir` 于是失败；目录只需要"路径 + 序号"，单独一张小表更省事。
+
+### M10-0（SAL 骨架）已完成
+
+`include/los/sal.h`（兼容面）+ `kernel/sal.c6`（分发器），`C6OS_NET=0` 时不编译。
+
+- 兼容面按 LiteOS-M 的 SAL 裁剪：`LOS_SAL_AF_INET`、`SOCK_STREAM/DGRAM`、
+  `IPPROTO_TCP/UDP`、`LOS_SAL_MAX_SOCKETS = 16`、`LOS_SAL_MAX_PROTOS = 4`、
+  `LOS_SAL_E_*`（与 Linux errno 同号，调用方直接 `-errno`）。
+- `SalProto` 是函数表：`socket/close/bind/connect/listen/accept/send/recv/
+  sendto/recvfrom/setopt/poll`，全部只吃 `VOID *` / `UINT32` / `INT32`，
+  守 ABI 规则（跨 C 边界不传结构体）。
+- 注册表 `g_protos[4]`（**按值存**）+ `g_nprotos`；`SalRegister` 查重返
+  `-EEXIST`，`SalUnregister` 把后面的项前移并清零尾巴。
+- socket 表 `g_socks[16]`：`domain/type/proto/ops/priv/last_errno`，
+  `sd` 就是槽位号（0 起），满返 `-EMFILE`。
+- 分发：每个操作先 `sal_sock_(sd)` 判 `-EBADF`，再转给 `ops`，
+  返回值统一过 `sal_ret_()`（负值记进 `last_errno` 供 `SalLastError`）。
+- `priv` 由 SAL 填**槽位号**（`(VOID *)(UINT64)sd`），协议栈自己拿它当索引；
+  协议侧不通过出参回填指针。
+
+验收：`make check-sal` —— 一个假协议栈（`tests/t_sal.c6`）跑完整 socket 面：
+注册/重复注册/未知 domain/socket 分配与 16 槽耗尽/bind/connect/send/recv/
+sendto（不需 connect）/recvfrom/setopt/listen/accept(-EAGAIN)/poll/close
+幂等/注销后不可用，打印 `PASS: sal M10-0`。
+`make check-net-zero` —— `C6OS_NET=0` 时 SAL 不参与编译。
+
+四个 c6 坑（都不是我们代码的锅，但都要绕）：
+
+1. **结构体里的函数指针字段不能静态初始化** —— `static SalProto p = { ...,
+   fake_socket, ... };` 编得过，运行时那个字段是空/garbage，一调就三级故障
+   （串口上什么都没有）。改成 `static SalProto p = {0};` + 运行时逐个
+   `p.socket = fake_socket;` 立刻正常。**协议栈的表都得这么填**（做个
+   `xxx_proto_init()`）。
+2. **函数指针字段不能判空** —— `if (s->ops->send == 0)` 在 c6 里结果不可靠
+   （明明有值却当真），第一版每个操作都做了一遍"协议栈没实现就返
+   `-EOPNOTSUPP`"，结果 `send` 一路返 95。SAL 因此**不做逐操作判空**，
+   约定注册时函数表填满。
+3. **不能通过 `const` 结构体指针调函数指针** —— `const SalProto *p` 参数 +
+   `p->socket(...)` 直接崩；把 `const` 去掉（LiteOS 原型的 `sal_register`
+   本来也是非 const）就好了。分发时还顺手改成"注册表按值存 + `g_protos[i]
+   .fn(...)`"，和 `blkdev` 的表同一写法（那套是验证过能用的）。
+4. **`VOID **` 出参回调不可靠** —— `socket(VOID **priv)` 里 `*priv = ...`
+   写不出去（读回来是 0），换成 `UINT64 *` 出参则连调用都崩。最后干脆取消
+   出参：`socket` 只返 0/负错误码，`priv` 由 SAL 自己发槽位号。
+
+### M10-1（ARP + IPv4 + ICMP echo + loopback）已完成
+
+`include/los/net.h` + `kernel/net/{netbuf,netif,arp,ip,icmp}.c6`，`C6OS_NET=0` 时不编译。
+
+- `NetBuf`：16 个 512 字节的静态缓冲池，`off` 前后挪动来加头/去头，不搬数据；
+  `NetBufAlloc(hdr_room, len)` 预留头空间，池空返 0。
+- `NetIf`：4 张网卡；MAC/IP/掩码/网关 + `linkoutput`（驱动运行时挂）+
+  `link` 标志位（**不拿函数指针和 0 比**，见 M10-0 的坑 2）+ rx/tx/丢包计数。
+  `NetIfOutput` 补源 MAC 后交给驱动，`NetIfInput` 看以太类型分给 ARP/IP，
+  所有权约定"输入处理函数吃掉 buf"。
+- `arp.c6`：8 项表（LRU 替换），收到任何 ARP 先学发送方再决定回应；
+  `ArpResolve` 未命中就发请求并返回 0（上层丢包重试，语义简单可靠）。
+- `ip.c6`：20 字节头、`NetCsum`（RFC 1071 反码和）、TTL 64、不分片不转发；
+  **环回在 IP 头造好之后判断**，`dst == nif->ip` 就直接 `IpInput`。
+- `icmp.c6`：echo request → 原样搬一份改 type 0 回；reply 记进 8 项应答表，
+  `IcmpPing()` = 发 + 查（同步线下一发一收当场就回来），`IcmpGotReply()` 供
+  异步场景轮询。
+
+验收：`make check-ip` —— 测试里用"同步线"把两张网卡对接（一块的 `linkoutput`
+就是另一块的 `NetIfInput`），**对端因此也是一套完整协议栈**，自己会回 ARP、
+自己会回 echo，不用在测试里手搓包。覆盖：缓冲池耗尽/归还、网卡表上限、
+`NetIfSetIp` 参数校验、`NetIfUp` 之前的 `-ENODEV`、ARP 未命中→学习→命中
+（MAC 逐字节比对）、ping 对端（抓到的帧按以太头/IP 头/ICMP 校验和逐字段验）、
+ping 本机走环回、ping 不可达地址的 `-EHOSTUNREACH` 与丢包计数、坏包
+（截断/未知以太类型）计 `rx_dropped`、收尾缓冲池回零（不泄漏）。
+`make check-net-zero` —— `C6OS_NET=0` 时 SAL 和 `kernel/net/` 都不进构建。
+
+两个坑：
+
+1. **环回必须在 IP 头造好之后判断** —— 第一版在 `IpOutput` 开头看到
+   `dst == nif->ip` 就直接 `IpInput(p)`，而那时缓冲里还只有 ICMP 载荷，
+   `IpInput` 把载荷当 IP 头解析 → 一律丢包（症状：ping 本机返回 0，
+   对端 ping 却全过）。顺序改成"先造头 → 再判环回 → 再 ARP → 再上线"。
+2. **测试自己别把缓冲池占满** —— 验收脚本里有一节"池子有多大"，
+   第一版把 16 个缓冲全 alloc 出来不还，后面的 ARP/ping 全都拿不到缓冲，
+   连着报了一串不相干的失败（ARP 学不到、帧长 0）。池子测试要留句柄数组，
+   测完逐个 `NetBufFree`，并用 `NetBufInUse() == 0` 收尾。
+
+### M10-2（e1000 驱动 + 真网络）已完成
+
+`port/x86_64/e1000.c`（82540EM/82541/82574）+ `kernel/net/netif_x86.c6`（桥）。
+
+- PCI：`0xCF8/0xCFC` 枚举 0~3 号总线，按 vendor `0x8086` + device
+  `0x100E/0x100F/0x10D3` 找网卡，打开命令寄存器的 IOSpace|MemSpace|BusMaster，
+  取 BAR0（MMIO，qemu 上是 `0xfebc0000`），BAR1（IO 窗口）留作回退。
+- MMIO 访问路径：`port_phys_map(bar) = DMAP_BASE + bar`。原来的直接映射窗口
+  只覆盖物理 0..1GB，而 PCI 空洞在 3~4GB，所以 mmu.c 的 `build_dmap()` 扩到
+  **0..4GB**：0..1GB 仍是普通 RAM（cache 开），1..4GB 用 2MB 页按 UC
+  （PCD|PWT）映射，专门给设备寄存器用。
+- 收发包：RX/TX 各 16 个描述符 + 16 个 2048 字节缓冲，全部 `port_phys_alloc()`
+  拿物理帧、`port_phys_map()` 拿虚拟地址；RX 用 DD 位轮询，TX 等槽位 DD
+  再填，`mfence` 保证描述符写在门铃之前。
+- **纯轮询**，不注册中断：协议栈在任务上下文跑（就是设计里那条"IRQ 里只搬
+  数据"的简化版）。`NetIfPollX86()` 把网卡里的帧搬进 NetBuf 喂给
+  `NetIfInput`；`netif_x86_link()` 是 `linkoutput`，直接 `port_net_send`。
+- qemu 侧：`-nic user,model=e1000`；客户机 10.0.2.15/24、网关 10.0.2.2。
+
+验收：`make check-ping` —— qemu 真跑：驱动初始化（MAC = `52:54:00:12:34:56`
+来自 RAR0）→ 配地址 → 轮询等链路 up → ARP 网关（学到 `52:55:0a:00:02:02`）
+→ **ping 10.0.2.2 收到应答** → ARP 解析 10.0.2.3，打印
+`PASS: net M10-2（e1000：ARP + ping 10.0.2.2）`。
+
+三个坑：
+
+1. **测试里要先 `port_mmu_init()`** —— 那个函数不只建页表，还初始化物理页
+   管理（`port_phys_alloc` 靠它）；M9 的测试都手动调了，新的 ping 测试一开始
+   漏了，症状是 `port_phys_alloc()` 全返回 0（报"没找到 e1000"），更早一版
+   还会在第一次 MMIO 读的时候直接三级故障——因为连直接映射窗口都还没建。
+2. **PCI 命令寄存器要开 IOSpace（bit0）** —— 只开 MemSpace|BusMaster 时，
+   IO 窗口读回来的全是 0（当时看到 MAC 全 0、STATUS 没有 link 位）。
+3. **`port_puts(&buf[i])` 打印数字会拖出一整段** —— 收尾统计一开始打成
+   `tx=118136` 变 `111511051100511200511`：把"数字转字符串"写成
+   `port_puts(&b[n])`，它从第 n 个字符一直打到 NUL。逐字符 `port_putc(b[n])`
+   才对（`tests/t_ping.c6`、`t_net.c6` 都改了）。
+
+### M10-3（UDP + SAL socket 面）已完成
+
+`kernel/net/udp.c6` + `kernel/net/sal_udp.c6`，`C6OS_NET=0` 时不编译。
+
+- `udp.c6`：8 个 socket 槽，每槽一条 4 深的数据报队列（存载荷 + 来源）；
+  `UdpSockOpen/Close/Bind/Connect/Send/SendTo/Recv/RecvFrom/Poll`；
+  校验和按 RFC 768 算伪首部，结果为 0 时按规范写 `0xFFFF`；
+  `UdpInput()` 按目的端口投递，端口没人监听就丢并计 `rx_dropped`；
+  目的 IP 是自己时直接进对端队列（环回），不发到网线上。
+- `sal_udp.c6`：把上面这套包成 `SalProto`（domain=AF_INET、type=SOCK_DGRAM、
+  proto=IPPROTO_UDP），`SalUdpInit()` 注册；`listen/accept` 返
+  `-EOPNOTSUPP`（UDP 没有这两个动作）；`recvfrom` 回填 `LosSockAddr`。
+- `ip.c6`：`IPPROTO_UDP` 分派到 `UdpInput`。
+- **SAL 的 `priv` 语义改了**：原来是"槽位号"，现在是**协议侧句柄**
+  （`socket()` 的返回值）。这样协议栈不需要再维护一张"SAL 槽 → 自己的句柄"
+  的映射表，`priv` 转成 `UINT64` 就是自己的下标；`(VOID *)0` 也是合法句柄。
+
+验收：`make check-udp` —— qemu 真跑两段：
+1. 环回：两个 SAL socket 绑 7777/7778，`sendto` → `poll` → `recvfrom`，
+   验端口占用 `-EADDRINUSE`、`listen/accept` 的 `-EOPNOTSUPP`、
+   `recvfrom` 空队列 `-EAGAIN`、`from` 的端口/IP 回填、close 幂等；
+2. 真网络：向 10.0.2.3:53（slirp 的 DNS）发 `example.com` 的 A 记录查询，
+   轮询收包，验事务 ID `0xABCD`、QR 位、ancount>0，打印
+   `PASS: net M10-3（UDP + SAL socket 面，slirp DNS 往返）`。
+
+两个坑：
+
+1. **`SalSend` 成功返回 0，不是字节数** —— 底层 `IpOutput` 成功就是 0（包已
+   交给协议栈/驱动），我一开始按"返回长度"去断言，白等了好几万次重发。
+   要"发出去多少"就得自己返回 `len`，但那样 `IpOutput` 的错误码就没地方放了。
+2. **第一个 UDP 包会撞上 ARP 未解析** —— `IpOutput` 在 ARP 表里查不到下一跳时
+   返回 `-EHOSTUNREACH` 并丢包（这是设计好的：不排队等 ARP）。测试里要么先
+   `ArpResolve` 预热，要么看到 `-113` 就 poll 一下重发。
+
+### M10-4 TCP 最小子集（已完成）
+
+**做了什么**：`kernel/net/tcp.c6` + `kernel/net/sal_tcp.c6` + `tests/t_tcp.c6`，
+目标只有一个——在 qemu 里对宿主 HTTP 服务发 `GET / HTTP/1.0` 并读到 `200 OK`。
+
+- `tcp.c6`：4 个连接槽。状态机 `CLOSED/LISTEN/SYN_SENT/SYN_RCVD/ESTAB/
+  FIN_WAIT1/FIN_WAIT2/CLOSE_WAIT/TIME_WAIT`；**停止-等待**式发送（一次一个
+  未确认段，窗口固定 1KB），超时由 `TcpTick()` 驱动重发（`TCP_RTO` 个 tick、
+  最多 8 次），累计确认，FIN 拆分关闭，RST 直接把连接打回 `CLOSED`。
+  不做：滑窗/拥塞控制/选项(MSS/时间戳)/乱序重组（只接 `seq == rcv_nxt`
+  的段，其余回重复 ACK）。
+- 主动与被动打开都实现了：`TcpSockConnect()` 发 SYN 进 `SYN_SENT`；
+  监听者收到 SYN 就 `tcp_alloc_()` 建一条子连接（`parent` 指向监听槽）
+  回 `SYN|ACK`，`TcpSockAccept()` 扫 `parent == sd && accepted == 0` 的
+  `ESTAB` 连接。
+- 环回：目的 IP 是自己时 `IpOutput` 直接把包喂回 `IpInput`，所以 `TcpInput`
+  是**同步递归**进来的（`g_recursion` 保护，深度上限 4）。测试因此可以让
+  客户机连自己：`listen 8080` + `connect 10.0.2.15:8080` 在本机内跑完
+  三次握手/双向收发/FIN，不依赖宿主，每一步都能确定性断言。
+- `sal_tcp.c6`：`SalProto`（AF_INET/SOCK_STREAM/IPPROTO_TCP）；`sendto` 返
+  `-EOPNOTSUPP`；`poll` 事件位 1=可读、2=可写（`ESTAB` 即可写）。
+- **`SalAccept` 现在会给新连接分配一个 sd**：协议侧 `accept` 返回子句柄，
+  SAL 找一个空槽、照抄监听者的 domain/type/ops、`priv = 子句柄`。之前
+  `SalAccept` 直接把协议句柄返回给用户，用户拿它当 fd 用会串到别的 socket。
+- `ip.c6`：`IPPROTO_TCP` 分派到 `TcpInput`。
+
+验收：`make check-tcp` —— qemu `-nic user,model=e1000`，宿主先起
+`python3 -m http.server 8000`（`build/x86/http/`），客户机经 slirp 的
+`10.0.2.2:8000` 发请求，读到 `HTTP/1.0 200 OK` 打印
+`PASS: net M10-4（TCP + GET / HTTP/1.0 拿到 200）`。
+
+**这一轮挖出两个大坑（都不是 TCP 自己的问题）**：
+
+1. **内核 .bss 压在引导页表上，而且没人清 .bss** —— 老布局里 `.bss` 一路
+   长到 `0x70000~0x73000`，正好是 `stage1.S` 放的 PML4/PDPT/PD；`stage1`
+   还在 `stack2`（也在 .bss 里）压过东西。镜像小的时候砸不到人，M10-4
+   多加 1KB 代码后 `g_found`/`g_mmio` 就落在页表那三个页里，
+   `g_mmio` 读出 `0x10800083` 这种"半个页表项"，e1000 一读 MMIO 就 #PF
+   → 三级故障，串口一个字都没有。修法两件：`stage1.S` 把页表挪到
+   `0x200000`（内核 `.bss` 现在到 `0x72684`，中间留足 1.5MB），
+   `stage2.S` 的 `_start64` 在设栈之前 `rep stosb` 清 `__bss_start..__bss_end`。
+   **教训**：x86 镜像"变大就崩、串口全哑"先怀疑 .bss 与固定地址的引导结构重叠，
+   别在驱动里找。
+2. **`NetCsumPseudo` 的"算出 0 写全 1"是发送侧的事** —— RFC 768 只要求 UDP
+   *发送*时把 0 写成 `0xFFFF`，我把这条塞进了公共函数，于是 TCP 接收侧
+   "校验和正确 ⇒ 补码为 0" 的包被改写成 `0xFFFF` 判成坏包，SYN 进了
+   `TcpInput` 又被自己丢掉（现象：`connect` 的 `xmit rc=-22`、`TcpInput`
+   一行日志都没有）。现在 `NetCsumPseudo` 只管算，`udp_xmit_` 自己做 0→全 1。

@@ -1,0 +1,240 @@
+/* tests/t_udp.c6 —— M10-3：UDP + SAL socket 面（qemu slirp 真跑）
+ *
+ * 两段验收：
+ *   1. 环回：两个 SAL socket 绑不同端口，sendto/recvfrom 走本地队列，
+ *      验 bind/端口占用/sendto/recvfrom/poll/close 这套语义；
+ *   2. 真网络：向 10.0.2.3:53（slirp 的 DNS）发一个 A 记录查询，
+ *      轮询收包，验事务 ID 与 QR 位——这就是一次真的 UDP 往返。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+#include "los/net.h"
+
+static UINT32 g_bad = 0u;
+
+static const UINT32 IP_ME = 0x0A00020Fu;     /* 10.0.2.15 */
+static const UINT32 IP_GW = 0x0A000202u;     /* 10.0.2.2 */
+static const UINT32 IP_DNS = 0x0A000203u;    /* 10.0.2.3 */
+static const UINT32 IP_MASK = 0xFFFFFF00u;
+
+static void put_u32(UINT32 v)
+{
+    CHAR b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((INT32)'0');
+        return;
+    }
+    i = 0u;
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got == want) {
+        return;
+    }
+    g_bad = g_bad + 1u;
+    port_puts("FAIL: net ");
+    port_puts(what);
+    port_puts(" got=");
+    put_u32((UINT32)got);
+    port_puts(" want=");
+    put_u32((UINT32)want);
+    port_puts("\n");
+}
+
+/* 造一个最小的 DNS A 查询（example.com），返回长度。 */
+static UINT32 build_dns_query(UINT8 *q)
+{
+    const char *name = "\007example\003com";
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    q[0] = 0xABu;                             /* 事务 ID */
+    q[1] = 0xCDu;
+    q[2] = 0x01u;                             /* flags: 标准查询, RD */
+    q[3] = 0x00u;
+    q[4] = 0x00u;                             /* qdcount = 1 */
+    q[5] = 0x01u;
+    q[6] = 0x00u;
+    q[7] = 0x00u;
+    q[8] = 0x00u;
+    q[9] = 0x00u;
+    q[10] = 0x00u;
+    q[11] = 0x00u;
+    i = 0u;
+    while (name[i] != (const char)0) {
+        q[12u + i] = (UINT8)name[i];
+        i++;
+    }
+    n = 12u + i;
+    q[n] = 0x00u;                             /* 名字结束 */
+    q[n + 1u] = 0x00u;                        /* type = A */
+    q[n + 2u] = 0x01u;
+    q[n + 3u] = 0x00u;                        /* class = IN */
+    q[n + 4u] = 0x01u;
+    return n + 5u;
+}
+
+void os_main(void)
+{
+    LosNetIf *nif = (LosNetIf *)0;
+    LosSockAddr a = {0};
+    LosSockAddr from = {0};
+    UINT8 q[64] = {0};
+    UINT8 buf[64] = {0};
+    UINT32 qlen = 0u;
+    UINT32 i = 0u;
+    INT32 sd0 = -1;
+    INT32 sd1 = -1;
+    INT32 sd2 = -1;
+    INT32 rc = 0;
+    INT32 ok = 0;
+
+    port_mmu_init();
+    nif = NetIfAttachX86();
+    if (nif == (LosNetIf *)0) {
+        port_puts("FAIL: net M10-3 没找到 e1000\n");
+        return;
+    }
+    chk("setip", NetIfSetIp(nif, IP_ME, IP_MASK, IP_GW), 0);
+    chk("up", NetIfUp(nif), 0);
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        if (port_net_link_up() == 1) {
+            break;
+        }
+        i++;
+    }
+    chk("link up", port_net_link_up(), 1);
+
+    /* ---- SAL 注册 ---- */
+    chk("sal udp init", SalUdpInit(), 0);
+    chk("proto count", (INT32)SalProtoCount(), 1);
+    chk("proto name", (SalProtoGet(0u) != (SalProto *)0) ? (INT32)SalProtoGet(0u)->proto : -1,
+        (INT32)LOS_SAL_IPPROTO_UDP);
+
+    /* ---- 环回：两个 socket 走本地队列 ---- */
+    sd0 = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_DGRAM,
+                    (INT32)LOS_SAL_IPPROTO_UDP);
+    chk("sd0", sd0, 0);
+    sd1 = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_DGRAM,
+                    (INT32)LOS_SAL_IPPROTO_UDP);
+    chk("sd1", sd1, 1);
+    a.family = (UINT16)LOS_SAL_AF_INET;
+    a.port = 7777u;
+    a.addr = IP_ME;
+    chk("bind sd0", SalBind(sd0, &a), 0);
+    a.port = 7778u;
+    chk("bind sd1", SalBind(sd1, &a), 0);
+    a.port = 7777u;
+    chk("bind busy", SalBind(sd1, &a), 0 - 98);          /* -EADDRINUSE */
+    chk("listen n/a", SalListen(sd1, 4), 0 - LOS_SAL_E_OPNOTSUPP);
+    chk("accept n/a", SalAccept(sd1, &from), 0 - LOS_SAL_E_OPNOTSUPP);
+
+    chk("loopback sendto",
+        SalSendTo(sd1, (const VOID *)"hi", 2u, &a), 2);
+    chk("loopback poll", SalPoll(sd0, 1u), 1);
+    chk("loopback recvfrom", SalRecvFrom(sd0, (VOID *)&buf[0], 8u, &from), 2);
+    chk("loopback byte0", (INT32)buf[0], (INT32)'h');
+    chk("loopback byte1", (INT32)buf[1], (INT32)'i');
+    chk("loopback from port", (INT32)from.port, 7778);
+    chk("loopback from ip", (INT32)from.addr, (INT32)IP_ME);
+    chk("recv empty", SalRecvFrom(sd0, (VOID *)&buf[0], 8u, &from),
+        0 - LOS_SAL_E_AGAIN);
+
+    /* 先让 ARP 把 DNS 的 MAC 学到（第一个包不该因为 ARP 未解析被丢掉） */
+    {
+        UINT8 dm[LOS_ETH_ALEN] = {0};
+
+        ok = 0;
+        i = 0u;
+        while (i < 2000000u) {
+            (void)NetIfPollX86(nif);
+            if (ArpResolve(nif, IP_DNS, (UINT8 *)&dm[0]) == 1) {
+                ok = 1;
+                break;
+            }
+            i++;
+        }
+        chk("arp dns", ok, 1);
+    }
+
+    /* ---- 真网络：向 slirp 的 DNS 发查询 ---- */
+    sd2 = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_DGRAM,
+                    (INT32)LOS_SAL_IPPROTO_UDP);
+    chk("sd2", sd2, 2);
+    a.port = 50000u;
+    a.addr = 0u;
+    chk("bind sd2", SalBind(sd2, &a), 0);
+    a.port = 53u;
+    a.addr = IP_DNS;
+    chk("connect dns", SalConnect(sd2, &a), 0);
+    qlen = build_dns_query((UINT8 *)&q[0]);
+    chk("dns query len", (INT32)qlen, 29);
+    rc = 0 - 113;
+    i = 0u;
+    while (i < 2000u) {                       /* 头几个包可能撞上 ARP 还没回 */
+        rc = SalSend(sd2, (const VOID *)&q[0], qlen);
+        if (rc == 0) {                        /* 0 = 已交给 IP 层（排队/发出） */
+            break;
+        }
+        (void)NetIfPollX86(nif);
+        i++;
+    }
+    chk("dns send", rc, 0);
+
+    ok = 0;
+    rc = 0;
+    i = 0u;
+    while (i < 4000000u) {
+        (void)NetIfPollX86(nif);
+        if (SalPoll(sd2, 1u) == 1) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("dns reply arrived", ok, 1);
+    if (ok == 1) {
+        rc = SalRecv(sd2, (VOID *)&buf[0], 64u);
+        chk("dns reply len>0", (rc > 12) ? 1 : 0, 1);
+        chk("dns tid hi", (INT32)buf[0], 0xAB);
+        chk("dns tid lo", (INT32)buf[1], 0xCD);
+        chk("dns is reply", ((INT32)buf[2] & 0x80) ? 1 : 0, 1);
+        chk("dns ancount>0", ((INT32)buf[6] != 0 || (INT32)buf[7] != 0) ? 1 : 0, 1);
+        port_puts("udp: dns reply bytes=");
+        put_u32((UINT32)rc);
+        port_puts("\n");
+    }
+
+    /* ---- close ---- */
+    chk("close sd0", SalClose(sd0), 0);
+    chk("close sd0 twice", SalClose(sd0), 0 - LOS_SAL_E_BADF);
+    chk("close sd1", SalClose(sd1), 0);
+    chk("close sd2", SalClose(sd2), 0);
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: net M10-3 failures=");
+        put_u32(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: net M10-3（UDP + SAL socket 面，slirp DNS 往返）\n");
+}

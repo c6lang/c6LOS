@@ -1,0 +1,362 @@
+/* kernel/sal.c6 —— SAL 骨架（M10-0）
+ *
+ * 只做三件事：
+ *   1. 协议栈注册表：按 (domain, type, proto) 三元组查表，最多 4 套；
+ *   2. socket 表：16 个槽，sd 就是槽位号（>= 0），失败返回 -errno；
+ *   3. 把每个操作原样转给协议栈的函数表，并记下最后一次错误码。
+ * 收发包、协议状态机都在协议栈里（kernel/net/*.c6），这一层不认识以太网。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+
+typedef struct SalSock {
+    UINT32 used;
+    INT32 domain;
+    INT32 type;
+    INT32 proto;
+    SalProto *ops;
+    VOID *priv;
+    INT32 last_errno;
+} SalSock;
+
+static SalProto g_protos[LOS_SAL_MAX_PROTOS] = {0};
+static UINT32 g_nprotos = 0u;
+static SalSock g_socks[LOS_SAL_MAX_SOCKETS] = {0};
+
+static INT32 sal_err_(INT32 e)
+{
+    return 0 - e;
+}
+
+/* 返回注册表下标，< 0 表示没找到。 */
+static INT32 sal_find_(INT32 domain, INT32 type, INT32 proto)
+{
+    UINT32 i = 0u;
+
+    while (i < g_nprotos) {
+        if (g_protos[i].domain == domain && g_protos[i].type == type &&
+            g_protos[i].proto == proto) {
+            return (INT32)i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+static SalSock *sal_sock_(INT32 sd)
+{
+    if (sd < 0 || sd >= (INT32)LOS_SAL_MAX_SOCKETS) {
+        return (SalSock *)0;
+    }
+    if (g_socks[sd].used == 0u) {
+        return (SalSock *)0;
+    }
+    return &g_socks[sd];
+}
+
+/* 找一个空槽，< 0 表示满了。 */
+static INT32 sal_slot_(VOID)
+{
+    UINT32 i = 0u;
+
+    while (i < (UINT32)LOS_SAL_MAX_SOCKETS) {
+        if (g_socks[i].used == 0u) {
+            return (INT32)i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+static INT32 sal_ret_(SalSock *s, INT32 rc)
+{
+    if (rc < 0) {
+        s->last_errno = 0 - rc;
+    }
+    return rc;
+}
+
+/* ---- 注册表 ---- */
+
+INT32 SalRegister(SalProto *p)
+{
+    UINT32 i = 0u;
+
+    /* 注意：c6 里"函数指针字段 == 0"的比较不可靠，所以这里不校验
+     * p->socket —— 协议栈注册时 socket 是必填项（约定见 los/sal.h）。 */
+    if (p == (SalProto *)0) {
+        return sal_err_(LOS_SAL_E_INVAL);
+    }
+    if (sal_find_(p->domain, p->type, p->proto) >= 0) {
+        return sal_err_(LOS_SAL_E_EXIST);
+    }
+    if (g_nprotos >= (UINT32)LOS_SAL_MAX_PROTOS) {
+        return sal_err_(LOS_SAL_E_NOMEM);
+    }
+    (void)memcpy((VOID *)&g_protos[g_nprotos], (const VOID *)p,
+                 (UINT32)sizeof(SalProto));
+    g_nprotos = g_nprotos + 1u;
+    return 0;
+}
+
+INT32 SalUnregister(INT32 domain, INT32 type, INT32 proto)
+{
+    UINT32 i = 0u;
+    UINT32 k = 0u;
+
+    while (i < g_nprotos) {
+        if (g_protos[i].domain == domain && g_protos[i].type == type &&
+            g_protos[i].proto == proto) {
+            k = i;
+            while (k + 1u < g_nprotos) {
+                (void)memcpy((VOID *)&g_protos[k], (const VOID *)&g_protos[k + 1u],
+                             (UINT32)sizeof(SalProto));
+                k++;
+            }
+            g_nprotos = g_nprotos - 1u;
+            (void)memset((VOID *)&g_protos[g_nprotos], 0,
+                         (UINT32)sizeof(SalProto));
+            return 0;
+        }
+        i++;
+    }
+    return sal_err_(LOS_SAL_E_NOENT);
+}
+
+UINT32 SalProtoCount(VOID)
+{
+    return g_nprotos;
+}
+
+SalProto *SalProtoGet(UINT32 i)
+{
+    if (i >= g_nprotos) {
+        return (SalProto *)0;
+    }
+    return &g_protos[i];
+}
+
+/* ---- socket 面 ---- */
+
+INT32 SalSocket(INT32 domain, INT32 type, INT32 proto)
+{
+    SalProto *p = (SalProto *)0;
+    INT32 pi = -1;
+    INT32 rc = 0;
+    INT32 sd = -1;
+    UINT32 i = 0u;
+
+    pi = sal_find_(domain, type, proto);
+    if (pi < 0) {
+        return sal_err_(LOS_SAL_E_AFNOSUPPORT);
+    }
+    p = &g_protos[pi];
+    rc = g_protos[pi].socket();
+    if (rc < 0) {
+        return rc;
+    }
+    i = 0u;
+    while (i < (UINT32)LOS_SAL_MAX_SOCKETS) {
+        if (g_socks[i].used == 0u) {
+            sd = (INT32)i;
+            i = (UINT32)LOS_SAL_MAX_SOCKETS;
+        } else {
+            i++;
+        }
+    }
+    if (sd < 0) {
+        (void)p->close((VOID *)(UINT64)rc);
+        return sal_err_(LOS_SAL_E_MFILE);
+    }
+    g_socks[sd].used = 1u;
+    g_socks[sd].domain = domain;
+    g_socks[sd].type = type;
+    g_socks[sd].proto = proto;
+    g_socks[sd].ops = p;
+    g_socks[sd].priv = (VOID *)(UINT64)rc;   /* 协议侧句柄 */
+    g_socks[sd].last_errno = 0;
+    return sd;
+}
+
+INT32 SalClose(INT32 sd)
+{
+    SalSock *s = sal_sock_(sd);
+    INT32 rc = 0;
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    if (s->ops->close != 0) {
+        rc = s->ops->close(s->priv);
+    }
+    (void)memset((VOID *)s, 0, (UINT32)sizeof(*s));
+    return rc;
+}
+
+INT32 SalBind(INT32 sd, const LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->bind(s->priv, a));
+}
+
+INT32 SalConnect(INT32 sd, const LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->connect(s->priv, a));
+}
+
+INT32 SalListen(INT32 sd, INT32 backlog)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->listen(s->priv, backlog));
+}
+
+INT32 SalAccept(INT32 sd, LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+    INT32 child = 0;
+    INT32 nsd = -1;
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    child = s->ops->accept(s->priv, (VOID **)0, a);
+    if (child < 0) {
+        return sal_ret_(s, child);
+    }
+    /* 新连接要有自己的 sd：槽位照抄监听者的协议/domain/type，
+     * priv 用协议侧给的子句柄。 */
+    nsd = sal_slot_();
+    if (nsd < 0) {
+        (void)s->ops->close((VOID *)(UINT64)child);
+        return sal_err_(LOS_SAL_E_MFILE);
+    }
+    g_socks[nsd].used = 1u;
+    g_socks[nsd].domain = s->domain;
+    g_socks[nsd].type = s->type;
+    g_socks[nsd].proto = s->proto;
+    g_socks[nsd].ops = s->ops;
+    g_socks[nsd].priv = (VOID *)(UINT64)child;
+    g_socks[nsd].last_errno = 0;
+    return nsd;
+}
+
+INT32 SalSend(INT32 sd, const VOID *buf, UINT32 len)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->send(s->priv, buf, len));
+}
+
+INT32 SalRecv(INT32 sd, VOID *buf, UINT32 len)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->recv(s->priv, buf, len));
+}
+
+INT32 SalSendTo(INT32 sd, const VOID *buf, UINT32 len, const LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->sendto(s->priv, buf, len, a));
+}
+
+INT32 SalRecvFrom(INT32 sd, VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->recvfrom(s->priv, buf, len, a));
+}
+
+INT32 SalSetSockOpt(INT32 sd, INT32 opt, const VOID *val, UINT32 len)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->setopt(s->priv, opt, val, len));
+}
+
+INT32 SalPoll(INT32 sd, UINT32 events)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    return sal_ret_(s, s->ops->poll(s->priv, events));
+}
+
+/* ---- 查询 ---- */
+
+INT32 SalLastError(INT32 sd)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return LOS_SAL_E_BADF;
+    }
+    return s->last_errno;
+}
+
+UINT32 SalSocketCount(VOID)
+{
+    UINT32 n = 0u;
+    UINT32 i = 0u;
+
+    while (i < (UINT32)LOS_SAL_MAX_SOCKETS) {
+        if (g_socks[i].used != 0u) {
+            n++;
+        }
+        i++;
+    }
+    return n;
+}
+
+SalProto *SalSockProto(INT32 sd)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return (SalProto *)0;
+    }
+    return s->ops;
+}
+
+VOID *SalSockPriv(INT32 sd)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return (VOID *)0;
+    }
+    return s->priv;
+}

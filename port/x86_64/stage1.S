@@ -17,18 +17,20 @@ _start:
     cli
     movl $0x80000, %esp
 
-    /* PML4 @0x70000, PDPT @0x71000, PD @0x72000 */
-    movl $0x70000, %edi
+    /* PML4 @0x200000, PDPT @0x201000, PD @0x202000
+     * 别放 0x70000：内核 .bss 随镜像长大，0x70000~0x73000 迟早被全局变量
+     * 压上来（曾经把 g_mmio 写成 0x10800083 这种鬼值）。 */
+    movl $0x200000, %edi
     xorl %eax, %eax
     movl $(0x4000 / 4), %ecx
     rep stosl
 
-    movl $0x71003, 0x70000
-    movl $0, 0x70004
-    movl $0x72003, 0x71000
-    movl $0, 0x71004
+    movl $0x201003, 0x200000
+    movl $0, 0x200004
+    movl $0x202003, 0x201000
+    movl $0, 0x201004
 
-    movl $0x72000, %edi
+    movl $0x202000, %edi
     movl $0x83, %eax
     movl $512, %ecx
 1:
@@ -38,7 +40,7 @@ _start:
     addl $8, %edi
     loop 1b
 
-    movl $0x70000, %eax
+    movl $0x200000, %eax
     movl %eax, %cr3
 
     movl %cr4, %eax

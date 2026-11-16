@@ -1,0 +1,358 @@
+/* kernel/romfs.c6 — 只读文件系统：把 newc cpio 流当成一棵静态目录树（M9-0）
+ *
+ * 不拷贝数据：节点只记 "名字 + 偏移"，read 直接指到镜像里（镜像必须在挂载
+ * 期间保持有效）。名字一律转成"相对挂载点"的形式（根为 ""，其余如
+ * "bin/busybox"），这样换挂载点不用改节点表。
+ */
+#include "c6os/types.h"
+#include "c6os/vfs.h"
+#include "los/los_fs.h"
+#include "c6os/string.h"
+
+#define ROMFS_MAX_NODES 24
+#define ROMFS_NAME_MAX  44
+#define ROMFS_HDR_SIZE  110u
+
+typedef struct {
+    char name[ROMFS_NAME_MAX];
+    u32 size;
+    u32 dir;
+    const u8 *data;
+} RomfsNode;
+
+typedef struct {
+    u32 used;
+    u32 nodes;
+    RomfsNode n[ROMFS_MAX_NODES];
+} RomfsPriv;
+
+/* 只留 2 个只读挂载点：x86 的 stage2 只能装 255 扇区（≈127.5KB），
+ * 这份静态表每多一个挂载点就多吃 ~2KB 的 .bss（.bss 在 .data 前面，
+ * objcopy -O binary 会把空洞一起写进 flat.bin）。 */
+#define ROMFS_MAX_MOUNTS 2
+
+static RomfsPriv g_romfs[ROMFS_MAX_MOUNTS] = {0};
+
+static u32 hex8_(const u8 *p)
+{
+    u32 v = 0u;
+    u32 i = 0u;
+
+    while (i < 8u) {
+        u32 c = (u32)p[i];
+
+        v = v << 4;
+        if (c >= (u32)'0' && c <= (u32)'9') {
+            v = v + (c - (u32)'0');
+        } else if (c >= (u32)'a' && c <= (u32)'f') {
+            v = v + (c - (u32)'a') + 10u;
+        } else if (c >= (u32)'A' && c <= (u32)'F') {
+            v = v + (c - (u32)'A') + 10u;
+        }
+        i++;
+    }
+    return v;
+}
+
+static int magic_ok_(const u8 *h)
+{
+    return (h[0] == (u8)'0' && h[1] == (u8)'7' && h[2] == (u8)'0' &&
+            h[3] == (u8)'7' && h[4] == (u8)'0' && h[5] == (u8)'1') ? 1 : 0;
+}
+
+/* "bin/busybox" 保持；"./bin" 去掉前导 "./"；"/bin" 去掉前导 '/'；"/" → "" */
+static void norm_name_(char *dst, u32 dstmax, const char *src, u32 srclen)
+{
+    u32 i = 0u;
+    u32 o = 0u;
+
+    if (srclen >= 2u && src[0] == '.' && src[1] == '/') {
+        i = 2u;
+    } else if (srclen >= 1u && src[0] == '/') {
+        i = 1u;
+    }
+    while (i < srclen && src[i] != '\0' && o + 1u < dstmax) {
+        o++;
+        i++;
+    }
+    if (o > 0u) {
+        (void)memcpy((void *)dst, (const void *)&src[i - o], (size_t)o);
+    }
+    dst[o] = '\0';
+    if (os_str_eq(dst, ".") == 1) {
+        dst[0] = '\0';
+    }
+}
+
+static int parse_(RomfsPriv *pv, const u8 *img, u32 len)
+{
+    u32 off = 0u;
+    u32 cnt = 0u;
+
+    (void)memset((void *)pv, 0, sizeof(*pv));
+    /* 0 号固定是根 */
+    pv->n[0].name[0] = '\0';
+    pv->n[0].size = 0u;
+    pv->n[0].dir = 1u;
+    pv->n[0].data = (const u8 *)0;
+    pv->nodes = 1u;
+
+    while (off + ROMFS_HDR_SIZE <= len) {
+        const u8 *h = img + off;
+        u32 filesize = 0u;
+        u32 namesize = 0u;
+        u32 mode = 0u;
+        u32 noff = 0u;
+        u32 doff = 0u;
+        u32 i = 0u;
+        u32 dup = 0u;
+        char nm[ROMFS_NAME_MAX] = {0};
+
+        if (magic_ok_(h) == 0) {
+            return 0 - OS_E_INVAL;
+        }
+        mode = hex8_(h + 14u);              /* 6 + 8*1 */
+        filesize = hex8_(h + 54u);          /* 6 + 8*6 */
+        namesize = hex8_(h + 94u);          /* 6 + 8*11 */
+        if (namesize == 0u || namesize > 512u) {
+            return 0 - OS_E_INVAL;
+        }
+        noff = off + ROMFS_HDR_SIZE;
+        if (noff + namesize > len) {
+            return 0 - OS_E_INVAL;
+        }
+        if (namesize > 10u && img[noff] == (u8)'T' && img[noff + 1u] == (u8)'R' &&
+            img[noff + 2u] == (u8)'A' && img[noff + 3u] == (u8)'I') {
+            return 0;                        /* TRAILER!!! */
+        }
+        norm_name_(nm, (u32)ROMFS_NAME_MAX, (const char *)(img + noff), namesize);
+        doff = (noff + namesize + 3u) & ~3u;
+        if (filesize > 0u && doff + filesize > len) {
+            return 0 - OS_E_INVAL;
+        }
+        /* 规范化后为空（cpio 里的 "." 条目）或名字重复：跳过 */
+        dup = 0u;
+        i = 0u;
+        while (i < pv->nodes) {
+            if (os_str_eq(pv->n[i].name, nm) == 1) {
+                dup = 1u;
+            }
+            i++;
+        }
+        if (nm[0] != '\0' && dup == 0u) {
+            if (pv->nodes < (u32)ROMFS_MAX_NODES) {
+                u32 k = pv->nodes;
+
+                os_str_cpy(pv->n[k].name, nm, (u32)ROMFS_NAME_MAX);
+                pv->n[k].size = filesize;
+                pv->n[k].dir = ((mode & 0040000u) != 0u && filesize == 0u) ? 1u : 0u;
+                pv->n[k].data = img + doff;
+                pv->nodes = k + 1u;
+            }
+        }
+        cnt++;
+        off = (doff + filesize + 3u) & ~3u;
+    }
+    return 0;
+}
+
+int romfs_mount(OsMount *m, void *data)
+{
+    OsFsImage *im = (OsFsImage *)data;
+    RomfsPriv *pv = (RomfsPriv *)0;
+    u32 slot = 0xffffffffu;
+    u32 i = 0u;
+    int rc = 0;
+
+    if (im == (OsFsImage *)0 || im->buf == (void *)0 || im->len == 0u) {
+        return 0 - OS_E_INVAL;
+    }
+    while (i < (u32)ROMFS_MAX_MOUNTS) {
+        if (g_romfs[i].used == 0u) {
+            slot = i;
+            i = (u32)ROMFS_MAX_MOUNTS;
+        } else {
+            i++;
+        }
+    }
+    if (slot == 0xffffffffu) {
+        return 0 - OS_E_NOMEM;
+    }
+    pv = &g_romfs[slot];
+    rc = parse_(pv, (const u8 *)im->buf, im->len);
+    if (rc != 0) {
+        return rc;
+    }
+    m->priv = pv;
+    return 0;
+}
+
+int romfs_umount(OsMount *m)
+{
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+
+    if (pv != (RomfsPriv *)0) {
+        pv->used = 0u;
+    }
+    m->priv = (void *)0;
+    return 0;
+}
+
+static int find_(RomfsPriv *pv, const char *rel)
+{
+    u32 i = 1u;
+
+    if (rel[0] == '\0') {
+        return 0;
+    }
+    while (i < pv->nodes) {
+        if (os_str_eq(pv->n[i].name, rel) == 1) {
+            return (int)i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+/* node 是不是 rel 的直接子项；是的话把末段名写进 out */
+static int child_(const char *node, const char *rel, char *out, u32 outmax)
+{
+    u32 rl = os_str_len(rel);
+    const char *p = node;
+    u32 i = 0u;
+
+    if (rl != 0u) {
+        if (os_str_prefix(node, rel) == 0) {
+            return 0;
+        }
+        if (node[rl] != '/') {
+            return 0;
+        }
+        p = node + rl + 1u;
+    }
+    if (p[0] == '\0') {
+        return 0;
+    }
+    while (p[i] != '\0') {
+        if (p[i] == '/') {
+            return 0;                        /* 不是直接子项 */
+        }
+        i++;
+    }
+    os_str_cpy(out, p, outmax);
+    return 1;
+}
+
+int romfs_stat(OsMount *m, const char *rel, LosFsStat *st)
+{
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+    int idx = 0;
+    u32 i = 0u;
+    char nm[ROMFS_NAME_MAX] = {0};
+
+    if (pv == (RomfsPriv *)0 || st == (LosFsStat *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    idx = find_(pv, rel);
+    if (idx >= 0) {
+        st->size = pv->n[idx].size;
+        st->type = (pv->n[idx].dir != 0u) ? (UINT32)LOS_FS_TYPE_DIR
+                                          : (UINT32)LOS_FS_TYPE_FILE;
+        st->mode = 0u;
+        st->mtime = 0u;
+        return 0;
+    }
+    /* 没有显式条目、但有子项 → 当成目录 */
+    i = 1u;
+    while (i < pv->nodes) {
+        if (child_(pv->n[i].name, rel, nm, (u32)ROMFS_NAME_MAX) == 1) {
+            st->size = 0u;
+            st->type = (UINT32)LOS_FS_TYPE_DIR;
+            st->mode = 0u;
+            st->mtime = 0u;
+            return 0;
+        }
+        i++;
+    }
+    return 0 - OS_E_NOENT;
+}
+
+int romfs_open(OsMount *m, const char *rel, u32 flags, void **fh)
+{
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+    int idx = 0;
+
+    if (pv == (RomfsPriv *)0 || fh == (void **)0) {
+        return 0 - OS_E_INVAL;
+    }
+    if ((flags & ((u32)LOS_O_WRONLY | (u32)LOS_O_RDWR | (u32)LOS_O_CREAT |
+                  (u32)LOS_O_TRUNC)) != 0u) {
+        return 0 - OS_E_ROFS;                /* 只读文件系统 */
+    }
+    idx = find_(pv, rel);
+    if (idx < 0) {
+        return 0 - OS_E_NOENT;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    /* 句柄就是节点号 + 1（避免 0 被当成"没有句柄"） */
+    *fh = (void *)(u64)((u32)idx + 1u);
+    return 0;
+}
+
+int romfs_close(OsMount *m, void *fh)
+{
+    (void)m;
+    (void)fh;
+    return 0;
+}
+
+int romfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
+{
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+    u32 idx = (u32)(u64)fh - 1u;
+    u32 n = 0u;
+
+    if (pv == (RomfsPriv *)0 || fh == (void *)0 || idx >= pv->nodes) {
+        return 0 - OS_E_BADF;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    if (pos >= pv->n[idx].size) {
+        return 0;                            /* EOF */
+    }
+    n = pv->n[idx].size - pos;
+    if (n > len) {
+        n = len;
+    }
+    (void)memcpy(buf, (const void *)(pv->n[idx].data + pos), (size_t)n);
+    return (int)n;
+}
+
+int romfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
+{
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+    u32 i = 1u;
+    u32 seen = 0u;
+    char nm[ROMFS_NAME_MAX] = {0};
+
+    if (pv == (RomfsPriv *)0 || de == (LosFsDirent *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    while (i < pv->nodes) {
+        if (child_(pv->n[i].name, rel, nm, (u32)ROMFS_NAME_MAX) == 1) {
+            if (seen == idx) {
+                os_str_cpy((char *)de->name, nm, (u32)LOS_FS_NAME_MAX);
+                de->type = (pv->n[i].dir != 0u) ? (UINT32)LOS_FS_TYPE_DIR
+                                                : (UINT32)LOS_FS_TYPE_FILE;
+                de->size = pv->n[i].size;
+                return 0;
+            }
+            seen++;
+        }
+        i++;
+    }
+    return 0 - OS_E_NOENT;
+}

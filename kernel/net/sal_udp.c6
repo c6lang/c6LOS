@@ -1,0 +1,131 @@
+/* kernel/net/sal_udp.c6 —— 把 UDP 包成 SAL 协议栈（M10-3）
+ *
+ * 注册到 SAL 后，Linux ABI 侧（或 shell）拿到的 socket 语义就是
+ * bind/connect/send/recv/sendto/recvfrom/poll 这一套。
+ * priv 是 SAL 存下的**协议侧句柄**（UdpSockOpen 的返回值），这里原样转回整数。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+#include "los/net.h"
+
+static SalProto g_sal_udp = {0};
+
+static INT32 salu_ud_(VOID *priv)
+{
+    return (INT32)(UINT64)priv;
+}
+
+static INT32 salu_socket(VOID)
+{
+    return UdpSockOpen();
+}
+
+static INT32 salu_close(VOID *priv)
+{
+    return UdpSockClose(salu_ud_(priv));
+}
+
+static INT32 salu_bind(VOID *priv, const LosSockAddr *a)
+{
+    if (a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return UdpSockBind(salu_ud_(priv), a->port);
+}
+
+static INT32 salu_connect(VOID *priv, const LosSockAddr *a)
+{
+    if (a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return UdpSockConnect(salu_ud_(priv), a->addr, a->port);
+}
+
+static INT32 salu_listen(VOID *priv, INT32 backlog)
+{
+    (void)priv;
+    (void)backlog;
+    return 0 - LOS_SAL_E_OPNOTSUPP;      /* UDP 没有 listen */
+}
+
+static INT32 salu_accept(VOID *priv, VOID **child, LosSockAddr *a)
+{
+    (void)priv;
+    (void)child;
+    (void)a;
+    return 0 - LOS_SAL_E_OPNOTSUPP;
+}
+
+static INT32 salu_send(VOID *priv, const VOID *buf, UINT32 len)
+{
+    return UdpSockSend(salu_ud_(priv), buf, len);
+}
+
+static INT32 salu_recv(VOID *priv, VOID *buf, UINT32 len)
+{
+    return UdpSockRecv(salu_ud_(priv), buf, len);
+}
+
+static INT32 salu_sendto(VOID *priv, const VOID *buf, UINT32 len,
+                         const LosSockAddr *a)
+{
+    if (a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return UdpSockSendTo(salu_ud_(priv), a->addr, a->port, buf, len);
+}
+
+static INT32 salu_recvfrom(VOID *priv, VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    UINT32 ip = 0u;
+    UINT16 port = 0u;
+    INT32 rc = 0;
+
+    rc = UdpSockRecvFrom(salu_ud_(priv), buf, len, (UINT32 *)&ip, (UINT16 *)&port);
+    if (rc < 0) {
+        return rc;
+    }
+    if (a != (LosSockAddr *)0) {
+        a->family = (UINT16)LOS_SAL_AF_INET;
+        a->port = port;
+        a->addr = ip;
+    }
+    return rc;
+}
+
+static INT32 salu_setopt(VOID *priv, INT32 opt, const VOID *val, UINT32 len)
+{
+    (void)priv;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 0;
+}
+
+static INT32 salu_poll(VOID *priv, UINT32 events)
+{
+    return UdpSockPoll(salu_ud_(priv), events);
+}
+
+INT32 SalUdpInit(VOID)
+{
+    g_sal_udp.name = "udp";
+    g_sal_udp.domain = (INT32)LOS_SAL_AF_INET;
+    g_sal_udp.type = (INT32)LOS_SAL_SOCK_DGRAM;
+    g_sal_udp.proto = (INT32)LOS_SAL_IPPROTO_UDP;
+    g_sal_udp.socket = salu_socket;
+    g_sal_udp.close = salu_close;
+    g_sal_udp.bind = salu_bind;
+    g_sal_udp.connect = salu_connect;
+    g_sal_udp.listen = salu_listen;
+    g_sal_udp.accept = salu_accept;
+    g_sal_udp.send = salu_send;
+    g_sal_udp.recv = salu_recv;
+    g_sal_udp.sendto = salu_sendto;
+    g_sal_udp.recvfrom = salu_recvfrom;
+    g_sal_udp.setopt = salu_setopt;
+    g_sal_udp.poll = salu_poll;
+    return SalRegister(&g_sal_udp);
+}

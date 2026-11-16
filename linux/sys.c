@@ -165,7 +165,7 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     u64 i;
 
     if (fd != 1ull && fd != 2ull) {
-        return neg(LX_EBADF);
+        return lx_fs_write(fd, buf, len);        /* /tmp 等 VFS 文件（M9-4） */
     }
     if (lx_user_ok(buf, len, C6OS_PROT_R) == 0) {
         return neg(LX_EFAULT);

@@ -1,0 +1,353 @@
+/* kernel/fsapi.c6 — `LOS_Fs*` 兼容面（M9-0）
+ *
+ * 只做三件事：
+ *   1. 路径 → (挂载点, 相对路径)，最长前缀匹配在 vfs.c6 里；
+ *   2. 按 m->type 分发到后端（现在只有 romfs；M9-1 加 ramfs）；
+ *   3. fd → OsFile 的位姿（pos/size）维护。
+ * 错误一律以 -errno 透出，见 include/los/los_fs.h 顶部的说明。
+ */
+#include "c6os/types.h"
+#include "c6os/vfs.h"
+#include "los/los_fs.h"
+
+static int open_(OsMount *m, const char *rel, u32 flags, void **fh)
+{
+    if (os_str_eq(m->type, "romfs") == 1) {
+        return romfs_open(m, rel, flags, fh);
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_open(m, rel, flags, fh);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_open(m, rel, flags, fh);
+    }
+    return 0 - OS_E_INVAL;
+}
+
+static int close_(OsMount *m, void *fh)
+{
+    if (os_str_eq(m->type, "romfs") == 1) {
+        return romfs_close(m, fh);
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_close(m, fh);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_close(m, fh);
+    }
+    return 0 - OS_E_INVAL;
+}
+
+static int read_(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
+{
+    if (os_str_eq(m->type, "romfs") == 1) {
+        return romfs_read(m, fh, pos, buf, len);
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_read(m, fh, pos, buf, len);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_read(m, fh, pos, buf, len);
+    }
+    return 0 - OS_E_INVAL;
+}
+
+static int stat_(OsMount *m, const char *rel, LosFsStat *st)
+{
+    if (os_str_eq(m->type, "romfs") == 1) {
+        return romfs_stat(m, rel, st);
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_stat(m, rel, st);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_stat(m, rel, st);
+    }
+    return 0 - OS_E_INVAL;
+}
+
+static int readdir_(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
+{
+    if (os_str_eq(m->type, "romfs") == 1) {
+        return romfs_readdir(m, rel, idx, de);
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_readdir(m, rel, idx, de);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_readdir(m, rel, idx, de);
+    }
+    return 0 - OS_E_INVAL;
+}
+
+INT32 LOS_FsMount(const CHAR *dev, const CHAR *path, const CHAR *fsType,
+                  VOID *data)
+{
+    return (INT32)os_vfs_mount((const char *)dev, (const char *)path,
+                               (const char *)fsType, data);
+}
+
+INT32 LOS_FsUmount(const CHAR *path)
+{
+    return (INT32)os_vfs_umount((const char *)path);
+}
+
+INT32 LOS_FsOpen(const CHAR *path, UINT32 flags)
+{
+    u32 mnt = 0u;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    OsMount *m = (OsMount *)0;
+    void *fh = (void *)0;
+    LosFsStat st = {0};
+    int rc = 0;
+    int fd = 0;
+
+    rel[0] = '\0';
+    rc = os_vfs_lookup((const char *)path, &mnt, rel, (u32)sizeof(rel));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    m = &g_os_mounts[mnt];
+    rc = open_(m, rel, (u32)flags, &fh);
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    fd = os_vfs_file_alloc(mnt, (u32)flags, fh);
+    if (fd < 0) {
+        (void)close_(m, fh);
+        return (INT32)fd;
+    }
+    st.size = 0u;
+    st.type = 0u;
+    st.mode = 0u;
+    st.mtime = 0u;
+    if (stat_(m, rel, &st) == 0) {
+        g_os_files[fd].size = st.size;
+    }
+    return (INT32)fd;
+}
+
+INT32 LOS_FsClose(INT32 fd)
+{
+    OsFile *f = os_vfs_file_get((int)fd);
+    int rc = 0;
+
+    if (f == (OsFile *)0) {
+        return 0 - OS_E_BADF;
+    }
+    rc = close_(&g_os_mounts[f->mnt], f->fh);
+    os_vfs_file_free((int)fd);
+    return (INT32)rc;
+}
+
+INT32 LOS_FsRead(INT32 fd, VOID *buf, UINT32 len)
+{
+    OsFile *f = os_vfs_file_get((int)fd);
+    int rc = 0;
+
+    if (f == (OsFile *)0 || buf == (VOID *)0) {
+        return 0 - OS_E_BADF;
+    }
+    /* 各后端不一定知道文件大小（fat 的句柄就是簇号），统一在这里夹紧 */
+    if (f->pos >= f->size) {
+        return 0;
+    }
+    if (len > f->size - f->pos) {
+        len = f->size - f->pos;
+    }
+    rc = read_(&g_os_mounts[f->mnt], f->fh, f->pos, buf, (u32)len);
+    if (rc > 0) {
+        f->pos = f->pos + (u32)rc;
+    }
+    return (INT32)rc;
+}
+
+INT32 LOS_FsWrite(INT32 fd, const VOID *buf, UINT32 len)
+{
+    OsFile *f = os_vfs_file_get((int)fd);
+    OsMount *m = (OsMount *)0;
+    int rc = 0;
+
+    if (f == (OsFile *)0 || buf == (VOID *)0) {
+        return 0 - OS_E_BADF;
+    }
+    m = &g_os_mounts[f->mnt];
+    if (os_str_eq(m->type, "ramfs") != 1) {
+        return 0 - OS_E_ROFS;              /* romfs 只读 */
+    }
+    rc = ramfs_write(m, f->fh, f->pos, buf, (u32)len);
+    if (rc > 0) {
+        f->pos = f->pos + (u32)rc;
+        if (f->pos > f->size) {
+            f->size = f->pos;
+        }
+    }
+    return (INT32)rc;
+}
+
+INT32 LOS_FsLseek(INT32 fd, INT32 off, UINT32 whence)
+{
+    OsFile *f = os_vfs_file_get((int)fd);
+    i32 npos = 0;
+
+    if (f == (OsFile *)0) {
+        return 0 - OS_E_BADF;
+    }
+    if (whence == (UINT32)LOS_SEEK_SET) {
+        npos = (i32)off;
+    } else if (whence == (UINT32)LOS_SEEK_CUR) {
+        npos = (i32)f->pos + (i32)off;
+    } else if (whence == (UINT32)LOS_SEEK_END) {
+        npos = (i32)f->size + (i32)off;
+    } else {
+        return 0 - OS_E_INVAL;
+    }
+    if (npos < 0) {
+        return 0 - OS_E_INVAL;
+    }
+    f->pos = (u32)npos;
+    return (INT32)f->pos;
+}
+
+INT32 LOS_FsStat(const CHAR *path, LosFsStat *st)
+{
+    u32 mnt = 0u;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = 0;
+
+    rel[0] = '\0';
+    if (st == (LosFsStat *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    rc = os_vfs_lookup((const char *)path, &mnt, rel, (u32)sizeof(rel));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    return (INT32)stat_(&g_os_mounts[mnt], rel, st);
+}
+
+INT32 LOS_FsReaddir(const CHAR *path, UINT32 idx, LosFsDirent *de)
+{
+    u32 mnt = 0u;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = 0;
+
+    rel[0] = '\0';
+    if (de == (LosFsDirent *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    rc = os_vfs_lookup((const char *)path, &mnt, rel, (u32)sizeof(rel));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    return (INT32)readdir_(&g_os_mounts[mnt], rel, (u32)idx, de);
+}
+
+/* 写侧元数据操作：路径 → 挂载点，再按 fs 类型分发。 */
+static int mount_of_(const CHAR *path, OsMount **out, char *rel, u32 relsz)
+{
+    u32 mnt = 0u;
+    int rc = 0;
+
+    rc = os_vfs_lookup((const char *)path, &mnt, rel, relsz);
+    if (rc != 0) {
+        return rc;
+    }
+    *out = &g_os_mounts[mnt];
+    return 0;
+}
+
+INT32 LOS_FsUnlink(const CHAR *path)
+{
+    OsMount *m = (OsMount *)0;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = mount_of_(path, &m, rel, (u32)sizeof(rel));
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return (INT32)ramfs_unlink(m, rel);
+    }
+    return 0 - OS_E_ROFS;
+}
+
+INT32 LOS_FsMkdir(const CHAR *path)
+{
+    OsMount *m = (OsMount *)0;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = mount_of_(path, &m, rel, (u32)sizeof(rel));
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return (INT32)ramfs_mkdir(m, rel);
+    }
+    return 0 - OS_E_ROFS;
+}
+
+INT32 LOS_FsRmdir(const CHAR *path)
+{
+    OsMount *m = (OsMount *)0;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = mount_of_(path, &m, rel, (u32)sizeof(rel));
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return (INT32)ramfs_rmdir(m, rel);
+    }
+    return 0 - OS_E_ROFS;
+}
+
+INT32 LOS_FsRename(const CHAR *from, const CHAR *to)
+{
+    OsMount *m1 = (OsMount *)0;
+    OsMount *m2 = (OsMount *)0;
+    char r1[LOS_FS_PATH_MAX] = {0};
+    char r2[LOS_FS_PATH_MAX] = {0};
+    int rc = 0;
+
+    rc = mount_of_(from, &m1, r1, (u32)sizeof(r1));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    rc = mount_of_(to, &m2, r2, (u32)sizeof(r2));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (m1 != m2) {
+        return 0 - OS_E_INVAL;
+    }
+    if (os_str_eq(m1->type, "ramfs") == 1) {
+        return (INT32)ramfs_rename(m1, r1, r2);
+    }
+    return 0 - OS_E_ROFS;
+}
+
+INT32 LOS_FsTruncate(const CHAR *path, UINT32 size)
+{
+    OsMount *m = (OsMount *)0;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = mount_of_(path, &m, rel, (u32)sizeof(rel));
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return (INT32)ramfs_truncate(m, rel, (u32)size);
+    }
+    return 0 - OS_E_ROFS;
+}
+
+INT32 LOS_FsSync(INT32 fd)
+{
+    OsFile *f = os_vfs_file_get((int)fd);
+
+    if (f == (OsFile *)0) {
+        return 0 - OS_E_BADF;
+    }
+    return 0;
+}

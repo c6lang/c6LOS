@@ -57,6 +57,12 @@ e820_done:
     int $0x13
     jc 1f
 
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap4, %si
+    int $0x13
+    jc 1f
+
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -91,6 +97,11 @@ dap3:
     .word 8
     .word 0x0000, 0x2EE0
     .quad 248
+dap4:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x2FE0
+    .quad 256
 
 .align 8
 gdt:

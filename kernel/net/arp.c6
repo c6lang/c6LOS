@@ -1,0 +1,204 @@
+/* kernel/net/arp.c6 —— ARP 表 + 请求/应答（M10-1）
+ *
+ * 表很小（8 项，覆盖 qemu slirp 的网关 + 几个邻居足够），LRU 式线性替换。
+ * 收到任何 ARP 包都先"学"发送方（免费更新），再决定要不要回应。
+ *
+ * ARP 载荷 28 字节：htype/ptype/hlen/plen/op/sha/spa/tha/tpa。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+#define ARP_OP_REQUEST 1u
+#define ARP_OP_REPLY   2u
+#define ARP_PLEN       28u
+
+typedef struct ArpEntry {
+    UINT32 used;
+    UINT32 ip;
+    UINT8  mac[LOS_ETH_ALEN];
+    UINT32 stamp;
+} ArpEntry;
+
+static ArpEntry g_arp[LOS_ARP_MAX] = {0};
+static UINT32 g_arp_stamp = 0u;
+
+static const UINT8 g_bcast[LOS_ETH_ALEN] = {0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu, 0xFFu};
+
+static ArpEntry *arp_find_(UINT32 ip)
+{
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < (UINT32)LOS_ARP_MAX) {
+        if (g_arp[i].used != 0u && g_arp[i].ip == ip) {
+            return &g_arp[i];
+        }
+        i++;
+    }
+    return (ArpEntry *)0;
+}
+
+static VOID arp_learn_(UINT32 ip, const UINT8 *mac)
+{
+    ArpEntry *e = (ArpEntry *)0;
+    UINT32 i = 0u;
+    UINT32 k = 0u;
+
+    if (ip == 0u) {
+        return;
+    }
+    e = arp_find_(ip);
+    if (e == (ArpEntry *)0) {
+        /* 先找空槽，没有就替换 stamp 最小的。 */
+        i = 0u;
+        while (i < (UINT32)LOS_ARP_MAX) {
+            if (g_arp[i].used == 0u) {
+                e = &g_arp[i];
+                i = (UINT32)LOS_ARP_MAX;
+            } else {
+                i++;
+            }
+        }
+        if (e == (ArpEntry *)0) {
+            e = &g_arp[0];
+            k = 1u;
+            while (k < (UINT32)LOS_ARP_MAX) {
+                if (g_arp[k].stamp < e->stamp) {
+                    e = &g_arp[k];
+                }
+                k++;
+            }
+        }
+    }
+    g_arp_stamp = g_arp_stamp + 1u;
+    e->used = 1u;
+    e->ip = ip;
+    e->stamp = g_arp_stamp;
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        e->mac[i] = mac[i];
+        i++;
+    }
+}
+
+/* 组一个 28 字节 ARP 载荷（op 由调用方给）。 */
+static VOID arp_fill_(UINT8 *b, UINT16 op, const UINT8 *sha, UINT32 spa,
+                      const UINT8 *tha, UINT32 tpa)
+{
+    UINT32 i = 0u;
+
+    NetPut16(&b[0], 1u);                 /* htype = 以太 */
+    NetPut16(&b[2], (UINT16)LOS_ETH_P_IP);
+    b[4] = (UINT8)LOS_ETH_ALEN;
+    b[5] = 4u;                           /* plen = IPv4 */
+    NetPut16(&b[6], op);
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        b[8u + i] = sha[i];
+        b[18u + i] = tha[i];
+        i++;
+    }
+    NetPut32(&b[14], spa);
+    NetPut32(&b[24], tpa);
+}
+
+INT32 ArpRequest(LosNetIf *nif, UINT32 ip)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    UINT8 z[LOS_ETH_ALEN] = {0};
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || ip == 0u) {
+        return 0 - 22;
+    }
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, (UINT32)ARP_PLEN);
+    if (p == (LosNetBuf *)0) {
+        return 0 - 12;
+    }
+    arp_fill_(&p->data[p->off], (UINT16)ARP_OP_REQUEST, nif->mac, nif->ip,
+              (const UINT8 *)&z[0], ip);
+    rc = NetEthPush(p, (const UINT8 *)&g_bcast[0], (UINT16)LOS_ETH_P_ARP);
+    if (rc < 0) {
+        NetBufFree(p);
+        return rc;
+    }
+    return NetIfOutput(nif, p);
+}
+
+INT32 ArpInput(LosNetIf *nif, LosNetBuf *p)
+{
+    UINT8 *b = (UINT8 *)0;
+    UINT16 op = 0u;
+    UINT32 spa = 0u;
+    UINT32 tpa = 0u;
+    LosNetBuf *q = (LosNetBuf *)0;
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    if (p->len < (UINT32)ARP_PLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    b = &p->data[p->off];
+    op = NetGet16(&b[6]);
+    spa = NetGet32(&b[14]);
+    tpa = NetGet32(&b[24]);
+    arp_learn_(spa, &b[8]);
+    if (op == (UINT16)ARP_OP_REQUEST && tpa == nif->ip) {
+        q = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, (UINT32)ARP_PLEN);
+        if (q != (LosNetBuf *)0) {
+            arp_fill_(&q->data[q->off], (UINT16)ARP_OP_REPLY, nif->mac, nif->ip,
+                      &b[8], spa);
+            rc = NetEthPush(q, &b[8], (UINT16)LOS_ETH_P_ARP);
+            if (rc < 0) {
+                NetBufFree(q);
+            } else {
+                (void)NetIfOutput(nif, q);
+            }
+        }
+    }
+    NetBufFree(p);
+    return 0;
+}
+
+INT32 ArpResolve(LosNetIf *nif, UINT32 ip, UINT8 *mac_out)
+{
+    ArpEntry *e = (ArpEntry *)0;
+    UINT32 i = 0u;
+
+    if (nif == (LosNetIf *)0 || mac_out == (UINT8 *)0) {
+        return 0;
+    }
+    e = arp_find_(ip);
+    if (e == (ArpEntry *)0) {
+        (void)ArpRequest(nif, ip);
+        return 0;
+    }
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        mac_out[i] = e->mac[i];
+        i++;
+    }
+    return 1;
+}
+
+UINT32 ArpCacheCount(VOID)
+{
+    UINT32 n = 0u;
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < (UINT32)LOS_ARP_MAX) {
+        if (g_arp[i].used != 0u) {
+            n = n + 1u;
+        }
+        i++;
+    }
+    return n;
+}

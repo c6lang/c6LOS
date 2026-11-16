@@ -1,0 +1,150 @@
+/* kernel/net/ip.c6 —— IPv4 收发（M10-1）
+ *
+ * 只做最小子集：20 字节头、不分片、不转发、不认选项。
+ * 目的地址是自己是"环回"：直接喂回 IpInput（ping 本机 IP 就靠这条路径）。
+ * 下一跳：同网段直连，否则走网关；先查 ARP，查不到就发 ARP 请求并把这个包丢掉
+ * （上层重发即可，TCP/UDP 有自己的重传/超时）。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+static UINT16 g_ip_id = 0u;
+
+static UINT32 ip_next_hop_(LosNetIf *nif, UINT32 dst)
+{
+    if (nif->mask != 0u) {
+        if ((dst & nif->mask) == (nif->ip & nif->mask)) {
+            return dst;
+        }
+    }
+    if (nif->gw != 0u) {
+        return nif->gw;
+    }
+    return dst;
+}
+
+INT32 IpOutput(LosNetIf *nif, UINT32 dst, UINT8 proto, LosNetBuf *p)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT8 mac[LOS_ETH_ALEN] = {0};
+    UINT32 hop = 0u;
+    UINT32 total = 0u;
+    UINT16 csum = 0u;
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    if (nif->ip == 0u) {
+        nif->tx_dropped = nif->tx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 101;             /* -ENETUNREACH：还没配地址 */
+    }
+    if (p->off < (UINT32)LOS_IP_HLEN) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    total = p->len + (UINT32)LOS_IP_HLEN;
+    p->off = p->off - (UINT32)LOS_IP_HLEN;
+    p->len = total;
+    h = &p->data[p->off];
+    h[0] = 0x45u;                   /* version 4 + IHL 5 */
+    h[1] = 0u;
+    NetPut16(&h[2], (UINT16)total);
+    g_ip_id = (UINT16)(g_ip_id + 1u);
+    NetPut16(&h[4], g_ip_id);
+    NetPut16(&h[6], 0u);            /* flags + frag offset：不分片 */
+    h[8] = (UINT8)LOS_IP_TTL;
+    h[9] = proto;
+    NetPut16(&h[10], 0u);
+    NetPut32(&h[12], nif->ip);
+    NetPut32(&h[16], dst);
+    csum = NetCsum(h, (UINT32)LOS_IP_HLEN);
+    NetPut16(&h[10], csum);
+    /* 环回：目的就是本机 → 头造好了直接进自己的输入路径（不出网线）。 */
+    if (dst == nif->ip) {
+        return IpInput(nif, p);
+    }
+    hop = ip_next_hop_(nif, dst);
+    if (ArpResolve(nif, hop, (UINT8 *)&mac[0]) == 0) {
+        nif->tx_dropped = nif->tx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 113;             /* -EHOSTUNREACH：ARP 还没解析出来 */
+    }
+    rc = NetEthPush(p, (const UINT8 *)&mac[0], (UINT16)LOS_ETH_P_IP);
+    if (rc < 0) {
+        NetBufFree(p);
+        return rc;
+    }
+    return NetIfOutput(nif, p);
+}
+
+INT32 IpInput(LosNetIf *nif, LosNetBuf *p)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT32 total = 0u;
+    UINT32 src = 0u;
+    UINT32 dst = 0u;
+    UINT32 hlen = 0u;
+    UINT16 csum = 0u;
+    UINT8 proto = 0u;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    if (p->len < (UINT32)LOS_IP_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    h = &p->data[p->off];
+    if ((h[0] >> 4) != 4u) {                 /* 只看 IPv4 */
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 93;
+    }
+    hlen = ((UINT32)h[0] & 0x0Fu) * 4u;
+    if (hlen != (UINT32)LOS_IP_HLEN) {       /* 不认 IP 选项 */
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 93;
+    }
+    total = (UINT32)NetGet16(&h[2]);
+    if (total < hlen || total > p->len) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    csum = NetCsum(h, hlen);
+    if (csum != 0u) {                        /* 含校验和字段一起算应为 0 */
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    dst = NetGet32(&h[16]);
+    if (dst != nif->ip) {                    /* 不转发 */
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    src = NetGet32(&h[12]);
+    proto = h[9];
+    p->off = p->off + hlen;
+    p->len = total - hlen;
+    if (proto == (UINT8)LOS_IP_PROTO_ICMP) {
+        return IcmpInput(nif, p, src);
+    }
+    if (proto == (UINT8)LOS_IP_PROTO_UDP) {
+        return UdpInput(nif, p, src);
+    }
+    if (proto == (UINT8)LOS_IP_PROTO_TCP) {
+        return TcpInput(nif, p, src);
+    }
+    nif->rx_dropped = nif->rx_dropped + 1u;
+    NetBufFree(p);
+    return 0 - 93;                  /* 其它协议不认 */
+}

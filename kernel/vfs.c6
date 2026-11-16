@@ -1,0 +1,241 @@
+/* kernel/vfs.c6 — VFS 核心（M9-0）
+ *
+ * 只做四件事：字符串小工具、路径校验、挂载表（最长前缀匹配）、fd 表。
+ * 具体文件系统在 romfs.c6（只读 cpio）/ ramfs.c6（M9-1）里，按 m->type 分发
+ * 放在 fsapi.c6 —— 这里不认识任何文件系统。
+ *
+ * 并发：调用者来自任务上下文（不是中断），临界区用"关中断 + 短临界段"，
+ * 因为 M9 的挂载/fd 操作都是几行代码，不值得引入 mutex；等 ramfs 需要阻塞式
+ * 写放大以后再换。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "los/los_fs.h"
+#include "c6os/string.h"
+
+OsMount g_os_mounts[OS_MAX_MOUNTS] = {0};
+OsFile  g_os_files[OS_MAX_FILES] = {0};
+
+/* 下面四个只是标准库的薄封装：留着是为了让调用点读起来是"路径/名字"语义，
+ * 实现一律走 strlen/strcmp/strncmp/strncpy，不手搓循环。 */
+int os_str_eq(const char *a, const char *b)
+{
+    return (strcmp(a, b) == 0) ? 1 : 0;
+}
+
+u32 os_str_len(const char *s)
+{
+    return (u32)strlen(s);
+}
+
+void os_str_cpy(char *dst, const char *src, u32 max)
+{
+    if (max == 0u) {
+        return;
+    }
+    (void)strncpy(dst, src, (size_t)(max - 1u));
+    dst[max - 1u] = '\0';
+}
+
+int os_str_prefix(const char *s, const char *p)
+{
+    return (strncmp(s, p, strlen(p)) == 0) ? 1 : 0;
+}
+
+/* 路径必须是绝对路径、不超长、且不允许 ".." 段（M9 不做符号链接/回退）。 */
+int os_vfs_path_check(const char *path)
+{
+    u32 n = 0u;
+    u32 i = 0u;
+
+    if (path == (const char *)0 || path[0] != '/') {
+        return 0 - OS_E_INVAL;
+    }
+    n = os_str_len(path);
+    if (n == 0u || n >= (u32)LOS_FS_PATH_MAX) {
+        return 0 - OS_E_INVAL;
+    }
+    while (i + 2u < n) {
+        if (path[i] == '/' && path[i + 1u] == '.' && path[i + 2u] == '.') {
+            /* ".." 必须独立成段 */
+            if (i + 3u == n || path[i + 3u] == '/') {
+                return 0 - OS_E_INVAL;
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* 最长前缀匹配。挂载点 "/" 匹配一切，所以从最长的路径开始试。 */
+int os_vfs_lookup(const char *path, u32 *mnt, char *rel, u32 relsz)
+{
+    u32 i = 0u;
+    u32 best = 0xffffffffu;
+    u32 bestlen = 0u;
+    u32 plen = 0u;
+    int rc = 0;
+
+    rc = os_vfs_path_check(path);
+    if (rc != 0) {
+        return rc;
+    }
+    plen = os_str_len(path);
+    i = 0u;
+    while (i < (u32)OS_MAX_MOUNTS) {
+        if (g_os_mounts[i].used != 0u) {
+            u32 ml = os_str_len(g_os_mounts[i].path);
+
+            if (os_str_prefix(path, g_os_mounts[i].path)) {
+                /* 前缀还必须落在段边界上："/tmp" 不能匹配 "/tmpx" */
+                int ok = 0;
+
+                if (plen == ml) {
+                    ok = 1;
+                } else if (g_os_mounts[i].path[ml - 1u] == '/') {
+                    ok = 1;                       /* 挂载点是根 "/" */
+                } else if (path[ml] == '/') {
+                    ok = 1;
+                }
+                if (ok == 1 && ml > bestlen) {
+                    best = i;
+                    bestlen = ml;
+                }
+            }
+        }
+        i++;
+    }
+    if (best == 0xffffffffu) {
+        return 0 - OS_E_NOENT;
+    }
+    /* rel：去掉挂载点，再吃掉一个 '/' */
+    {
+        const char *r = path + bestlen;
+        const char *mp = g_os_mounts[best].path;
+
+        if (mp[bestlen - 1u] != '/' && *r == '/') {
+            r++;
+        }
+        if (bestlen == 1u && *r == '/') {         /* 挂载点是 "/" */
+            r++;
+        }
+        os_str_cpy(rel, r, relsz);
+    }
+    *mnt = best;
+    return 0;
+}
+
+int os_vfs_mount(const char *dev, const char *path, const char *type, void *data)
+{
+    u32 i = 0u;
+    int slot = -1;
+    int rc = 0;
+
+    rc = os_vfs_path_check(path);
+    if (rc != 0) {
+        return rc;
+    }
+    i = 0u;
+    while (i < (u32)OS_MAX_MOUNTS) {
+        if (g_os_mounts[i].used != 0u) {
+            if (os_str_eq(g_os_mounts[i].path, path) == 1) {
+                return 0 - OS_E_EXIST;
+            }
+        } else if (slot < 0) {
+            slot = (int)i;
+        }
+        i++;
+    }
+    if (slot < 0) {
+        return 0 - OS_E_NOMEM;
+    }
+
+    os_str_cpy(g_os_mounts[slot].path, path, (u32)LOS_FS_PATH_MAX);
+    os_str_cpy(g_os_mounts[slot].type, type, (u32)OS_FS_TYPE_MAX);
+    g_os_mounts[slot].priv = (void *)0;
+    if (dev != (const char *)0) {
+        (void)strncpy(g_os_mounts[slot].dev, dev, (size_t)(LOS_DEV_NAME_MAX - 1));
+        g_os_mounts[slot].dev[LOS_DEV_NAME_MAX - 1] = '\0';
+    }
+
+    if (os_str_eq(type, "romfs") == 1) {
+        rc = romfs_mount(&g_os_mounts[slot], data);
+    } else if (os_str_eq(type, "ramfs") == 1) {
+        rc = ramfs_mount(&g_os_mounts[slot], data);
+    } else if (os_str_eq(type, "fatfs") == 1) {
+        rc = fatfs_mount(&g_os_mounts[slot], data);
+    } else {
+        rc = 0 - OS_E_INVAL;
+    }
+    if (rc != 0) {
+        g_os_mounts[slot].used = 0u;
+        return rc;
+    }
+    g_os_mounts[slot].used = 1u;
+    return 0;
+}
+
+int os_vfs_umount(const char *path)
+{
+    u32 i = 0u;
+
+    i = 0u;
+    while (i < (u32)OS_MAX_MOUNTS) {
+        if (g_os_mounts[i].used != 0u && os_str_eq(g_os_mounts[i].path, path) == 1) {
+            if (os_str_eq(g_os_mounts[i].type, "romfs") == 1) {
+                (void)romfs_umount(&g_os_mounts[i]);
+            } else if (os_str_eq(g_os_mounts[i].type, "ramfs") == 1) {
+                (void)ramfs_umount(&g_os_mounts[i]);
+            } else if (os_str_eq(g_os_mounts[i].type, "fatfs") == 1) {
+                (void)fatfs_umount(&g_os_mounts[i]);
+            }
+            g_os_mounts[i].used = 0u;
+            g_os_mounts[i].priv = (void *)0;
+            return 0;
+        }
+        i++;
+    }
+    return 0 - OS_E_NOENT;
+}
+
+int os_vfs_file_alloc(u32 mnt, u32 flags, void *fh)
+{
+    u32 i = 0u;
+
+    i = 0u;
+    while (i < (u32)OS_MAX_FILES) {
+        if (g_os_files[i].used == 0u) {
+            g_os_files[i].used = 1u;
+            g_os_files[i].refs = 1u;
+            g_os_files[i].mnt = mnt;
+            g_os_files[i].flags = flags;
+            g_os_files[i].pos = 0u;
+            g_os_files[i].fh = fh;
+            return (int)i;
+        }
+        i++;
+    }
+    return 0 - OS_E_NOMEM;
+}
+
+OsFile *os_vfs_file_get(int fd)
+{
+    if (fd < 0 || fd >= (int)OS_MAX_FILES) {
+        return (OsFile *)0;
+    }
+    if (g_os_files[fd].used == 0u) {
+        return (OsFile *)0;
+    }
+    return &g_os_files[fd];
+}
+
+void os_vfs_file_free(int fd)
+{
+    if (fd < 0 || fd >= (int)OS_MAX_FILES) {
+        return;
+    }
+    g_os_files[fd].used = 0u;
+    g_os_files[fd].refs = 0u;
+    g_os_files[fd].fh = (void *)0;
+}

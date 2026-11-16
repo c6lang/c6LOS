@@ -65,6 +65,33 @@ rt/         c6rt：mem*、软除法、err 状态、pthread 8 入口   C
 
 ---
 
+### 2.1 运行库：复用**编译器/工具链的标准库**，不要自己实现
+
+**规则**：`memcpy` / `memset` / `memmove` / `memcmp` / `strlen` / `strnlen` / `strcmp` /
+`strncmp` / `strcpy` / `strncpy` 这些标准库函数，调用点**一律直接用标准名字**；
+不许在模块里再写一遍逐字节循环，也不许起 `c6_memcpy` 这种别名。
+
+**为什么**：它们属于"编译器/工具链的标准库"，不是某个模块的私有工具。谁自己实现
+一份，边界条件（长度 0、重叠、非对齐）就和别处不一致了 —— 这种 bug 最难查。
+
+**各目标链的真实情况**（写清楚，免得再踩）：
+
+| 目标链 | 标准库从哪来 | 我们怎么用 |
+|---|---|---|
+| S3（c6 → C99 → xtensa-gcc） | **工具链自带 newlib**：`xtensa-esp32s3-elf-gcc -print-file-name=libc.a` → `.../lib/esp32s3/libc.a` | 当前链接是 `-nostdlib`（不要 newlib 的 init/errno/syscall 桩），所以 `rt/c6rt.c` 提供**同一组符号的 freestanding 替身**，并用 `Makefile` 的 `S3_LIBC_RENAME`（`-Dmemset=c6_memset …`）把引用重定向过去。调用点只写标准名字；将来若改成 `-lc`，只需删掉 `rt/c6rt.c` 里重叠的符号，**调用点一行不用改** |
+| x86-64 裸机（clang `--target=x86_64-elf -ffreestanding`） | clang 只给 freestanding 头（`stddef.h`/`stdarg.h`…），没有 libc | 同一组符号由 `rt/x86_libc.c` 提供（与 `rt/c6rt.c` 同一组名字） |
+| host / sim | 宿主 libc | 直接用 |
+
+- 头文件：c6 自带 `include/`（`stddef.h`/`stdarg.h`/`stdatomic.h`/`float.h`…，
+  **没有** `string.h`）。所以 `include/c6os/string.h` 只是一层**声明**
+  （用 `<stddef.h>` 的 `size_t`），实现在上面那张表里；别在每个模块里再抄一遍原型。
+- **例外**：4~16 字节量级的定长转换（如 `put_hex` 的半字节展开）可以直接写循环，
+  但要在注释里写清"为什么不复用"。
+
+**踩过的坑**：M9 加 VFS 时一上来就因 `strcmp/strlen/strncpy` 未定义而链接失败 ——
+x86 的 freestanding 库当时只补了 `memcpy/memset/memmove`。正确的补法是补**库**
+（`rt/x86_libc.c`，与 `rt/c6rt.c` 保持同一组符号），而不是在每个新模块里再写一遍循环。
+
 ## 3. ABI 模型：c6 是 LP64 前端，S3 是 ILP32
 
 c6 前端的类型模型固定为 LP64（`long`/`size_t`/指针按 8 字节算偏移），Xtensa 与 rv32 都是

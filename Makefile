@@ -20,6 +20,12 @@ S3_SHIM_ABI ?= windowed
 # ---- Linux ELF 二进制兼容层（personality，见 docs/linux-abi.md）----------
 # 默认关闭：kernel/linux/ 不参与任何目标的编译，镜像尺寸零影响。
 LINUX_ABI ?= 0
+
+# ---- M9：VFS/文件系统（见 docs/vfs-net-design.md）-------------------------
+# 默认关闭：C6OS_VFS=0 时 kernel/vfs.c6 等完全不参与编译，镜像尺寸零影响。
+C6OS_VFS ?= 0
+# M10：网络子系统（SAL + 协议栈 + e1000），默认 0 = S3 等最小构建零侵入。
+C6OS_NET ?= 0
 # 各 port 的能力位（include/c6os/caps.h）：MMU|USER|IRQ_USER = 7
 CAPS_X86  := 7
 CAPS_S3   := 0
@@ -954,8 +960,11 @@ toolchain-info:
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
-              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI)
-X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS)
+# c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
+# 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
+# （≈127.5KB），M9 的 VFS 一加就爆。这里统一开 -O1。
+X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2 -O1
 X86S_NAME  ?= sched
 X86S_MAIN  ?= tests/t_x86_sched.c6
 X86S_DIR   := $(X86)/$(X86S_NAME)
@@ -964,9 +973,34 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
+
+# M9：VFS 子系统只在完整内核目标上编（Linux ABI 侧的对接在 M9-4）。
+ifeq ($(C6OS_VFS),1)
+ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
+$(error C6OS_VFS=1 暂不接在 user/elf/fs/dyn 上（Linux ABI 侧的对接在 M9-4）
+endif
+X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
+                  kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
+# vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
+# 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
+X86S_OBJ_EXTRA :=
+else
+X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
+endif
+endif
+# M10：SAL/协议栈只在 C6OS_NET=1 时编（默认 0 时对象列表完全不变）。
+ifeq ($(C6OS_NET),1)
+X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
+                  kernel/net/arp.c6 kernel/net/ip.c6 kernel/net/icmp.c6 \
+                  kernel/net/udp.c6 kernel/net/sal_udp.c6 \
+                  kernel/net/tcp.c6 kernel/net/sal_tcp.c6 \
+                  kernel/net/netif_x86.c6
+endif
+
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
@@ -987,7 +1021,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -997,6 +1031,12 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o
 endif
+
+ifeq ($(C6OS_NET),1)
+X86S_OBJ   += $(X86S_DIR)/obj/e1000.o
+endif
+
+X86S_OBJ += $(X86S_OBJ_EXTRA)
 
 x86: caps-check-x86 $(X86)/disk.img
 
@@ -1146,6 +1186,10 @@ $(X86S_DIR)/obj/ata.o: port/x86_64/ata.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/e1000.o: port/x86_64/e1000.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 $(X86S_DIR)/obj/sys.o: linux/sys.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
@@ -1208,6 +1252,14 @@ $(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
 	printf 'hello from the c6LOS initramfs\n' > $(FSROOT)/hello.txt
 	cp $(LS_ELF) $(FSROOT)/bin/ls
 	python3 tools/mk-initramfs.py $@ $(FSROOT)
+
+# ---- M9-4：/tmp 挂 ramfs，用户态 write/read/getdents64 ----
+M9_SRC := tests/linux/tmpfs.c
+M9_ELF := $(X86)/tmpfs.elf
+
+$(M9_ELF): $(M9_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
 
 # ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
 DYN_ELF := $(X86)/busybox
@@ -1300,6 +1352,168 @@ $(PRE_IMG): $(PRE_ELF) $(X86)/dyn-disk.img
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(PRE_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
+x86-vfs: caps-check-x86
+	$(MAKE) X86S_NAME=vfs X86S_MAIN=tests/t_vfs.c6 C6OS_VFS=1 \
+		$(X86)/vfs-disk.img
+
+run-x86-vfs: x86-vfs
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+check-vfs: x86-vfs
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $(X86)/vfs.log; \
+	  for m in M9-0 M9-1 M9-2 M9-3; do \
+	    grep -q "^PASS: vfs $$m" $(X86)/vfs.log || { echo "FAIL: vfs $$m"; exit 1; }; \
+	  done; \
+	  grep -E "^PASS: vfs M9-" $(X86)/vfs.log
+
+# 零侵入：C6OS_VFS=0 时 S3 的对象列表里不该出现任何 VFS 源文件
+check-vfs-ramfs: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-1" \
+	  && echo "PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）" \
+	  || { echo "FAIL: vfs M9-1"; exit 1; }
+
+FAT_IMG := $(X86)/fat.img
+
+$(FAT_IMG): tools/mkfat.py
+	@mkdir -p $(X86)
+	python3 tools/mkfat.py $@ 4096
+
+check-vfs-fat: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-3" \
+	  && echo "PASS: vfs M9-3（FAT16 只读：mount + stat + read HELLO.TXT + readdir）" \
+	  || { echo "FAIL: vfs M9-3"; exit 1; }
+
+check-vfs-blk: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-2" \
+	  && echo "PASS: vfs M9-2（块设备层 + ATA PIO 写：写 8 扇区读回逐字节一致）" \
+	  || { echo "FAIL: vfs M9-2"; exit 1; }
+
+check-vfs-zero:
+	@n=$$(make -n s3 2>/dev/null | grep -c "kernel/vfs.c6"); \
+	 test "$$n" = "0" \
+	  && echo "PASS: C6OS_VFS=0 时 S3 不编 VFS（零侵入）" \
+	  || { echo "FAIL: VFS 漏进 S3 对象列表"; exit 1; }
+
+# ---- M10-0：SAL 骨架（协议栈注册表 + socket 表 + 函数表分发） ----
+x86-net: caps-check-x86
+	$(MAKE) X86S_NAME=net X86S_MAIN=tests/t_sal.c6 C6OS_NET=1 \
+		$(X86)/net-disk.img
+
+run-x86-net: x86-net
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/net-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+check-sal: x86-net
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/net-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: sal M10-0" \
+	  && echo "PASS: sal M10-0（协议栈注册表 + 16 槽 socket 表 + 函数表分发）" \
+	  || { echo "FAIL: sal M10-0"; exit 1; }
+
+# ---- M10-1：ARP + IPv4 + ICMP echo + loopback ----
+x86-ip: caps-check-x86
+	$(MAKE) X86S_NAME=ip X86S_MAIN=tests/t_net.c6 C6OS_NET=1 \
+		$(X86)/ip-disk.img
+
+run-x86-ip: x86-ip
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/ip-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+check-ip: x86-ip
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/ip-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: net M10-1" \
+	  && echo "PASS: net M10-1（ARP + IPv4 + ICMP echo + loopback）" \
+	  || { echo "FAIL: net M10-1"; exit 1; }
+
+# ---- M10-2：e1000 驱动 + 真网络（qemu slirp） ----
+QEMU_NIC := -nic user,model=e1000
+
+x86-ping: caps-check-x86
+	$(MAKE) X86S_NAME=ping X86S_MAIN=tests/t_ping.c6 C6OS_NET=1 \
+		$(X86)/ping-disk.img
+
+run-x86-ping: x86-ping
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/ping-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
+
+check-ping: x86-ping
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/ping-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-ping.log | grep -q "^PASS: net M10-2" \
+	  && echo "PASS: net M10-2（e1000：ARP + ping 10.0.2.2）" \
+	  || { echo "FAIL: net M10-2"; tail -20 /tmp/check-ping.log; exit 1; }
+
+# ---- M10-3：UDP + SAL socket 面（slirp DNS 往返） ----
+x86-udp: caps-check-x86
+	$(MAKE) X86S_NAME=udp X86S_MAIN=tests/t_udp.c6 C6OS_NET=1 \
+		$(X86)/udp-disk.img
+
+run-x86-udp: x86-udp
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/udp-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
+
+check-udp: x86-udp
+	@timeout 90 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/udp-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-udp.log | grep -q "^PASS: net M10-3" \
+	  && echo "PASS: net M10-3（UDP + SAL socket 面，slirp DNS 往返）" \
+	  || { echo "FAIL: net M10-3"; tail -20 /tmp/check-udp.log; exit 1; }
+
+# ---- M10-4：TCP 最小子集 + GET / HTTP/1.0 ----
+HTTP_DIR := $(X86)/http
+
+$(HTTP_DIR)/index.html:
+	@mkdir -p $(HTTP_DIR)
+	@printf 'c6LOS M10-4\n' > $@
+
+x86-tcp: caps-check-x86
+	$(MAKE) X86S_NAME=tcp X86S_MAIN=tests/t_tcp.c6 C6OS_NET=1 \
+		$(X86)/tcp-disk.img
+
+run-x86-tcp: x86-tcp $(HTTP_DIR)/index.html
+	@(cd $(HTTP_DIR) && python3 -m http.server 8000 >/dev/null 2>&1 & echo $$! > $(X86)/httpd.pid)
+	@sleep 1
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/tcp-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
+	@kill $$(cat $(X86)/httpd.pid) 2>/dev/null || true
+
+# 宿主起一个 http.server，客户机（slirp 的 10.0.2.2:8000）去 GET /
+check-tcp: x86-tcp $(HTTP_DIR)/index.html
+	@(cd $(HTTP_DIR) && python3 -m http.server 8000 >/dev/null 2>&1 & echo $$! > $(X86)/httpd.pid) ; \
+	 sleep 1 ; \
+	 timeout 180 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/tcp-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-tcp.log | grep -q "^PASS: net M10-4" ; \
+	 rc=$$? ; kill $$(cat $(X86)/httpd.pid) 2>/dev/null || true ; \
+	 if [ $$rc = 0 ]; then echo "PASS: net M10-4（TCP + GET / HTTP/1.0 拿到 200）"; \
+	 else echo "FAIL: net M10-4"; tail -25 /tmp/check-tcp.log; exit 1; fi
+
+# 零侵入：C6OS_NET=0 时 S3 的对象列表里不该出现 SAL/协议栈源文件
+check-net-zero:
+	@n=$$(make -n s3 2>/dev/null | grep -cE "kernel/sal.c6|kernel/net/"); \
+	 test "$$n" = "0" \
+	  && echo "PASS: C6OS_NET=0 时 S3 不编 SAL/协议栈（零侵入）" \
+	  || { echo "FAIL: SAL 漏进 S3 对象列表"; exit 1; }
+
 check-linuxabi-l8: $(PRE_IMG)
 	@timeout 20 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(PRE_IMG),if=ide \
@@ -1325,6 +1539,23 @@ check-linuxabi-l6: $(SIG_IMG)
 		| tr -d '\r' | grep -q "^sig: SIGSEGV caught, back via siglongjmp" \
 	  && echo "PASS: linux-abi L6（信号：handler/屏蔽/SIGSEGV+siglongjmp/默认动作）" \
 	  || { echo "FAIL: linux-abi L6"; exit 1; }
+
+x86-m9: caps-check-x86
+	$(MAKE) X86S_NAME=m9 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m9-disk.img
+
+run-x86-m9: x86-m9
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/m9-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# M9-4 验收：用户态在 /tmp（ramfs）上 create/write/lseek/read/getdents64
+check-linuxabi-m9: x86-m9
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m9-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: linux-abi M9-4" \
+	  && echo "PASS: linux-abi M9-4（/tmp = ramfs：open/write/lseek/read/getdents64）" \
+	  || { echo "FAIL: linux-abi M9-4"; exit 1; }
 
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
@@ -1390,6 +1621,36 @@ DISK_DEPS  := $(LS_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(LS_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),vfs)
+DISK_DEPS  := $(FS_IMG) $(FAT_IMG)
+DISK_MB    := 32
+DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none; \
+             dd if=$(FAT_IMG) of=$@ bs=512 seek=16384 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m9)
+DISK_DEPS  := $(M9_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M9_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),net)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),ip)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),ping)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),udp)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),tcp)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
 else ifeq ($(X86S_NAME),dyn)
 DISK_DEPS  := $(DYN_ELF) $(DYNFS)
 DISK_MB    := 16

@@ -1,0 +1,302 @@
+/* kernel/net/netif.c6 —— 网卡抽象 + 以太网收发（M10-1）
+ *
+ * 这一层不认识 IP/ARP：只看以太类型，把包分给 arp.c6 / ip.c6。
+ * 驱动（M10-2 的 e1000）通过 NetIfSetLink() 把自己的发送函数挂到
+ * nif->linkoutput 上；**函数指针字段一律运行时赋值**（c6 不支持结构体
+ * 里的函数指针静态初始化，见 docs/vfs-net-design.md §8 M10-0）。
+ *
+ * 所有权约定：NetIfInput 及其下游的 input 处理函数**吃掉**传进来的 buf，
+ * 要么转发要么 NetBufFree，调用方不要再碰。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+static LosNetIf g_nifs[LOS_NET_MAX_IF] = {0};
+static UINT32 g_nif_count = 0u;
+
+/* ---- 字节序 ---- */
+
+VOID NetPut16(UINT8 *p, UINT16 v)
+{
+    p[0] = (UINT8)((v >> 8) & 0xFFu);
+    p[1] = (UINT8)(v & 0xFFu);
+}
+
+VOID NetPut32(UINT8 *p, UINT32 v)
+{
+    p[0] = (UINT8)((v >> 24) & 0xFFu);
+    p[1] = (UINT8)((v >> 16) & 0xFFu);
+    p[2] = (UINT8)((v >> 8) & 0xFFu);
+    p[3] = (UINT8)(v & 0xFFu);
+}
+
+UINT16 NetGet16(const UINT8 *p)
+{
+    return (UINT16)((((UINT16)p[0]) << 8) | (UINT16)p[1]);
+}
+
+UINT32 NetGet32(const UINT8 *p)
+{
+    return (((UINT32)p[0]) << 24) | (((UINT32)p[1]) << 16) |
+           (((UINT32)p[2]) << 8) | ((UINT32)p[3]);
+}
+
+/* 反码和（RFC 1071）：校验和字段自己填 0 后算，结果取反。 */
+UINT16 NetCsum(const UINT8 *data, UINT32 len)
+{
+    UINT32 sum = 0u;
+    UINT32 i = 0u;
+
+    while (i + 1u < len) {
+        sum = sum + ((((UINT32)data[i]) << 8) | ((UINT32)data[i + 1u]));
+        i = i + 2u;
+    }
+    if (i < len) {
+        sum = sum + (((UINT32)data[i]) << 8);
+    }
+    while ((sum >> 16) != 0u) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    return (UINT16)((~sum) & 0xFFFFu);
+}
+
+/* 带伪首部的校验和（UDP/TCP 用）：src/dst 各 4 字节 + 0 + proto + 段长度。 */
+UINT16 NetCsumPseudo(UINT32 src, UINT32 dst, UINT8 proto, const UINT8 *seg, UINT32 len)
+{
+    UINT32 sum = 0u;
+    UINT32 i = 0u;
+    UINT16 c = 0u;
+
+    sum = sum + (((src >> 16) & 0xFFFFu)) + (src & 0xFFFFu);
+    sum = sum + (((dst >> 16) & 0xFFFFu)) + (dst & 0xFFFFu);
+    sum = sum + (UINT32)proto;
+    sum = sum + len;
+    i = 0u;
+    while (i + 1u < len) {
+        sum = sum + ((((UINT32)seg[i]) << 8) | ((UINT32)seg[i + 1u]));
+        i = i + 2u;
+    }
+    if (i < len) {
+        sum = sum + (((UINT32)seg[i]) << 8);
+    }
+    while ((sum >> 16) != 0u) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    /* 纯补码返回：发送方拿去填，接收方算出来应当是 0。
+     * UDP 要求"算出来是 0 就写全 1"，那是 udp_xmit_ 自己的事。 */
+    return (UINT16)((~sum) & 0xFFFFu);
+}
+
+/* ---- 以太网头 ---- */
+
+/* 在 p 前面压 14 字节以太头（要求 p->off >= 14）。 */
+INT32 NetEthPush(LosNetBuf *p, const UINT8 *dst, UINT16 ethertype)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT32 i = 0u;
+
+    if (p == (LosNetBuf *)0 || dst == (const UINT8 *)0) {
+        return 0 - 22;
+    }
+    if (p->off < (UINT32)LOS_ETH_HLEN) {
+        return 0 - 22;
+    }
+    p->off = p->off - (UINT32)LOS_ETH_HLEN;
+    p->len = p->len + (UINT32)LOS_ETH_HLEN;
+    h = &p->data[p->off];
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        h[i] = dst[i];
+        i++;
+    }
+    /* 源 MAC 由 NetIfOutput 填（这一层不知道是哪个网卡）。 */
+    NetPut16(&h[12], ethertype);
+    return 0;
+}
+
+/* 剥掉以太头：ethertype_out 可传 0。 */
+INT32 NetEthPop(LosNetBuf *p, UINT16 *ethertype_out)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT16 et = 0u;
+
+    if (p == (LosNetBuf *)0) {
+        return 0 - 22;
+    }
+    if (p->len < (UINT32)LOS_ETH_HLEN) {
+        return 0 - 22;
+    }
+    h = &p->data[p->off];
+    et = NetGet16(&h[12]);
+    p->off = p->off + (UINT32)LOS_ETH_HLEN;
+    p->len = p->len - (UINT32)LOS_ETH_HLEN;
+    if (ethertype_out != (UINT16 *)0) {
+        *ethertype_out = et;
+    }
+    return (INT32)et;
+}
+
+/* ---- 网卡表 ---- */
+
+LosNetIf *NetIfAlloc(const CHAR *name)
+{
+    LosNetIf *nif = (LosNetIf *)0;
+    UINT32 i = 0u;
+    UINT32 j = 0u;
+
+    i = 0u;
+    while (i < (UINT32)LOS_NET_MAX_IF) {
+        if (g_nifs[i].used == 0u) {
+            nif = &g_nifs[i];
+            i = (UINT32)LOS_NET_MAX_IF;
+        } else {
+            i++;
+        }
+    }
+    if (nif == (LosNetIf *)0) {
+        return (LosNetIf *)0;
+    }
+    (void)memset((VOID *)nif, 0, (UINT32)sizeof(*nif));
+    nif->used = 1u;
+    j = 0u;
+    if (name != (const CHAR *)0) {
+        while (name[j] != (CHAR)0 && j + 1u < (UINT32)sizeof(nif->name)) {
+            nif->name[j] = name[j];
+            j++;
+        }
+    }
+    nif->name[j] = (CHAR)0;
+    /* 本地管理地址 02:00:00:00:00:xx，够 qemu 用。 */
+    nif->mac[0] = 0x02u;
+    nif->mac[5] = (UINT8)(g_nif_count + 1u);
+    g_nif_count = g_nif_count + 1u;
+    return nif;
+}
+
+VOID NetIfSetMac(LosNetIf *nif, const UINT8 *mac)
+{
+    UINT32 i = 0u;
+
+    if (nif == (LosNetIf *)0 || mac == (const UINT8 *)0) {
+        return;
+    }
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        nif->mac[i] = mac[i];
+        i++;
+    }
+}
+
+INT32 NetIfSetIp(LosNetIf *nif, UINT32 ip, UINT32 mask, UINT32 gw)
+{
+    if (nif == (LosNetIf *)0) {
+        return 0 - 22;
+    }
+    if (ip == 0u) {
+        return 0 - 22;
+    }
+    nif->ip = ip;
+    nif->mask = mask;
+    nif->gw = gw;
+    return 0;
+}
+
+VOID NetIfSetLink(LosNetIf *nif, INT32 (*fn)(LosNetIf *, LosNetBuf *))
+{
+    if (nif == (LosNetIf *)0) {
+        return;
+    }
+    nif->linkoutput = fn;
+    nif->link = 1u;
+}
+
+INT32 NetIfUp(LosNetIf *nif)
+{
+    if (nif == (LosNetIf *)0) {
+        return 0 - 22;
+    }
+    if (nif->link == 0u) {
+        return 0 - 19;              /* -ENODEV：没挂驱动 */
+    }
+    nif->up = 1u;
+    return 0;
+}
+
+UINT32 NetIfCount(VOID)
+{
+    return g_nif_count;
+}
+
+LosNetIf *NetIfGet(UINT32 i)
+{
+    if (i >= (UINT32)LOS_NET_MAX_IF) {
+        return (LosNetIf *)0;
+    }
+    if (g_nifs[i].used == 0u) {
+        return (LosNetIf *)0;
+    }
+    return &g_nifs[i];
+}
+
+/* 交给驱动；驱动不在/网卡没 up 就丢弃并计数。 */
+INT32 NetIfOutput(LosNetIf *nif, LosNetBuf *p)
+{
+    INT32 rc = 0;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        return 0 - 22;
+    }
+    if (nif->up == 0u) {
+        nif->tx_dropped = nif->tx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 100;             /* -ENETDOWN */
+    }
+    /* 源 MAC 在这里补齐（上层只填目的 MAC）。 */
+    p->data[p->off + 6u] = nif->mac[0];
+    p->data[p->off + 7u] = nif->mac[1];
+    p->data[p->off + 8u] = nif->mac[2];
+    p->data[p->off + 9u] = nif->mac[3];
+    p->data[p->off + 10u] = nif->mac[4];
+    p->data[p->off + 11u] = nif->mac[5];
+    rc = nif->linkoutput(nif, p);
+    if (rc < 0) {
+        nif->tx_dropped = nif->tx_dropped + 1u;
+        NetBufFree(p);
+        return rc;
+    }
+    nif->tx_packets = nif->tx_packets + 1u;
+    return 0;
+}
+
+INT32 NetIfInput(LosNetIf *nif, LosNetBuf *p)
+{
+    INT32 et = 0;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    if (p->len < (UINT32)LOS_ETH_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return 0 - 22;
+    }
+    nif->rx_packets = nif->rx_packets + 1u;
+    et = NetEthPop(p, (UINT16 *)0);
+    if (et < 0) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return et;
+    }
+    if ((UINT32)et == (UINT32)LOS_ETH_P_ARP) {
+        return ArpInput(nif, p);
+    }
+    if ((UINT32)et == (UINT32)LOS_ETH_P_IP) {
+        return IpInput(nif, p);
+    }
+    nif->rx_dropped = nif->rx_dropped + 1u;
+    NetBufFree(p);
+    return 0 - 93;                  /* -EPROTONOSUPPORT */
+}

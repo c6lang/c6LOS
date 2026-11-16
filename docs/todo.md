@@ -211,13 +211,16 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M9-0 门禁与 VFS 核心 | `include/los/los_fs.h` + `los_block.h`；`kernel/vfs.c6`（挂载表/路径解析/file 表/ops 分发）+ `kernel/romfs.c6`（把现有 newc cpio 包成只读 fs）+ `kernel/fsapi.c6`（errno ↔ LOS 错误码） | `make check-vfs`：`LOS_FsMount("/","romfs")` 成功、`open("/bin/busybox")` 成功、`read` 前 4 字节 `\x7fELF`；关闭开关时 `make -n s3` 不含新增对象 |
-| M9-1 ramfs 可读写 | 32 节点静态池（文件名/父/兄弟/首子），数据按需 alloc；create/write/read/lseek/readdir/unlink/mkdir/rmdir/rename/truncate | 写 1KB 读回逐字节一致；readdir 看到该文件；unlink 后 open 失败 |
-| M9-2 块设备层 + ATA 写 | `LOS_DeviceRegister/BlockRead/BlockWrite`（8 项注册表）；`port_ata_write`（PIO + flush 0xE7）；直通、不做页缓存 | 写 8 扇区到 LBA 4096 再读回逐字节一致（qemu） |
-| M9-3 FAT16/32 只读 | BPB → FAT → 簇链 → 8.3 目录项；<8MB 镜像；不做长名/写/格式化 | `mkfs.vfat` 造的镜像挂上后 readdir 看到文件、read 内容一致 |
-| M9-4 接到 Linux ABI | `LxFile.kind = LX_FD_VFS`；openat/read/write/lseek/fstat/newfstatat/getdents64/close 按 kind 分派；`/tmp` 挂 ramfs、`/` 仍是 romfs | `busybox sh -c 'echo hi > /tmp/x; cat /tmp/x'` 输出 `hi` |
+| ✅ M9-0 门禁与 VFS 核心 | `include/los/los_fs.h` + `los_block.h`；`kernel/vfs.c6`（挂载表/路径解析/file 表）+ `kernel/romfs.c6`（把现有 newc cpio 包成只读 fs）+ `kernel/fsapi.c6`（`LOS_Fs*` + 按 fs 类型分发） | **完成**：`make check-vfs` → `PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）`；`make check-vfs-zero` → S3 零侵入；施工记录见 `docs/vfs-net-design.md` §8 |
+| ✅ M9-1 ramfs 可读写 | 32 节点静态池（文件名/父/兄弟/首子），数据按需 `os_heap_alloc/realloc`（复用内核堆，不另写分配器）；支持 create/write/read/lseek/readdir/unlink/mkdir/rmdir/rename(同父)/truncate | **完成**：`make check-vfs-ramfs` → `PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）` |
+| ✅ M9-2 块设备层 + ATA 写 | `include/los/los_block.h` + `kernel/blkdev.c6`（8 项注册表 + 函数表 + 参数校验）；`port_ata_write`（PIO + 每扇区先等空闲 + FLUSH CACHE）；直通、不做页缓存 | **完成**：`make check-vfs-blk` → 写 8 扇区到 LBA 20480 再读回逐字节一致 |
+| ✅ M9-3 FAT16/32 只读 | BPB → FAT → 簇链 → 8.3 目录项；<8MB 镜像；不做长名/写/格式化 | `mkfs.vfat` 造的镜像挂上后 readdir 看到文件、read 内容一致 |
+| ✅ M9-4 接到 Linux ABI | `LxFile.kind = LX_FD_VFS`；openat/read/write/lseek/fstat/newfstatat/getdents64/close 按 kind 分派；`/tmp` 挂 ramfs、`/` 仍是 romfs | `busybox sh -c 'echo hi > /tmp/x; cat /tmp/x'` 输出 `hi` |
 
-**M9 验收**：M9-0..M9-4 全过；`C6OS_VFS=0` 时 S3 对象列表与尺寸零变化。
+**M9 验收**：M9-0..M9-4 全过。可复现的验收命令：
+`make check-vfs`（一次 qemu 跑完 M9-0..M9-3 四条 PASS）、
+`make check-linuxabi-m9`（M9-4，真跑用户态 glibc 程序）、
+`make check-vfs-zero`（`C6OS_VFS=0` 时 S3 对象列表与尺寸零变化）。
 
 ## M10 网络（SAL + 最小协议栈 + e1000）
 
@@ -225,13 +228,26 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 槽 + `SalProto` 函数表分发）；先用假协议栈单测 | `make check-sal`：注册→socket→close→反注册全通，未注册/参数错返回 -1 |
-| M10-1 ARP+IPv4+ICMP | `kernel/net/{netif,arp,ip,icmp}.c6`；loopback + 静态 IP/MAC | qemu 里 `ping 10.0.2.2`（slirp 网关）有回包 |
-| M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO 寄存器、描述符环；先轮询收包再上中断 | 收发包计数增长；ARP 有应答 |
-| M10-3 UDP + socket 面 | `udp.c6` + `sal_bind/sendto/recvfrom/close` | 与宿主 `nc -u` 互发成功（qemu hostfwd 或 slirp） |
-| M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
+| ✅ M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 的表 + 函数表分发；`priv` = 槽位号） | `make check-sal`、`make check-net-zero` |
+| ✅ M10-1 ARP+IPv4+ICMP | `kernel/net/{netbuf,netif,arp,ip,icmp}.c6` + `include/los/net.h`；16 个静态缓冲、4 张网卡、8 项 ARP 表、20 字节头不分片、环回、echo；同步线对端也是一套完整协议栈 | `make check-ip`、`make check-net-zero` |
+| ✅ M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO（直接映射窗口扩到 0..4GB，1..4GB 按 UC）、RX/TX 各 16 个描述符、纯轮询；`kernel/net/netif_x86.c6` 把驱动挂到 NetIf | `make check-ping`（qemu 真跑 ping 10.0.2.2） |
+| ✅ M10-3 UDP + socket 面 | `kernel/net/udp.c6`（8 槽 + 4 深队列 + RFC768 校验和 + 环回）+ `sal_udp.c6`（注册成 SalProto；SAL 的 priv 改为协议侧句柄） | `make check-udp`（环回语义 + slirp DNS 真往返） |
+| ✅ M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
 
-**M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。
+**M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。可复现的验收命令：
+
+- `make check-sal` —— M10-0：假协议栈跑完整个 socket 面（注册表/16 槽/
+  函数表分发/错误码透传），打印 `PASS: sal M10-0`；
+- `make check-ip` —— M10-1：同步线对接两张网卡，验 ARP 学习/命中、ping 对端
+  （帧逐字段校验）、ping 本机环回、不可达丢包、坏包计数、缓冲不泄漏；
+- `make check-ping` —— M10-2：qemu `-nic user,model=e1000` 真跑，ARP 网关 +
+  ping 10.0.2.2（slirp）拿到应答；
+- `make check-udp` —— M10-3：SAL socket 语义（bind/sendto/recvfrom/poll/close）
+  + 向 10.0.2.3:53 发 DNS 查询收到应答；
+- `make check-tcp` —— M10-4：TCP 握手/收发/FIN（客户机连自己，环回完成）
+  + 经 slirp 向宿主的 `python3 -m http.server 8000` 发 `GET / HTTP/1.0`
+  拿到 `200 OK`；
+- `make check-net-zero` —— `C6OS_NET=0` 时 SAL 与协议栈不进构建。
 
 ## 风险与依赖
 

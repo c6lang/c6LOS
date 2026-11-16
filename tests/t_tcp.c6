@@ -1,0 +1,262 @@
+/* tests/t_tcp.c6 —— M10-4：TCP 最小子集
+ *
+ * 两段验收：
+ *   1. 环回：自己 listen 8080，再 connect 自己的 10.0.2.15:8080——三次握手、
+ *      accept、双向收发、FIN 关闭全在本机内完成（不依赖宿主），
+ *      这样握手的每一步都能确定性地验到；
+ *   2. 真网络：连宿主的 HTTP 服务（slirp 的 10.0.2.2 就是宿主 loopback），
+ *      发 `GET / HTTP/1.0`，读回 `HTTP/1.0 200 OK`。
+ *
+ * 轮询驱动：每圈 TcpTick()（超时重传）+ NetIfPollX86()（收包）。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+#include "los/net.h"
+
+static UINT32 g_bad = 0u;
+
+static const UINT32 IP_ME = 0x0A00020Fu;     /* 10.0.2.15 */
+static const UINT32 IP_GW = 0x0A000202u;     /* 10.0.2.2 = 宿主 */
+static const UINT32 IP_MASK = 0xFFFFFF00u;
+
+static void put_u32(UINT32 v)
+{
+    CHAR b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((INT32)'0');
+        return;
+    }
+    i = 0u;
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got == want) {
+        return;
+    }
+    g_bad = g_bad + 1u;
+    port_puts("FAIL: net ");
+    port_puts(what);
+    port_puts(" got=");
+    put_u32((UINT32)got);
+    port_puts(" want=");
+    put_u32((UINT32)want);
+    port_puts("\n");
+}
+
+/* 在 hay 里找 needle（不做 KMP，够用）。 */
+static INT32 has_word(const UINT8 *hay, UINT32 hlen, const char *needle)
+{
+    UINT32 n = 0u;
+    UINT32 i = 0u;
+    UINT32 j = 0u;
+
+    while (needle[n] != (char)0) {
+        n++;
+    }
+    if (hlen < n) {
+        return 0;
+    }
+    i = 0u;
+    while (i + n <= hlen) {
+        j = 0u;
+        while (j < n) {
+            if ((INT32)hay[i + j] != (INT32)needle[j]) {
+                j = n + 1u;
+            } else {
+                j++;
+            }
+        }
+        if (j == n) {
+            return 1;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* 一轮轮询：跑超时重传 + 收包。 */
+static VOID pump(LosNetIf *nif, UINT32 rounds)
+{
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < rounds) {
+        TcpTick();
+        (void)NetIfPollX86(nif);
+        i++;
+    }
+}
+
+void os_main(void)
+{
+    LosNetIf *nif = (LosNetIf *)0;
+    LosSockAddr a = {0};
+    LosSockAddr from = {0};
+    UINT8 buf[256] = {0};
+    UINT8 dm[LOS_ETH_ALEN] = {0};
+    UINT32 i = 0u;
+    INT32 lsd = -1;
+    INT32 csd = -1;
+    INT32 acc = -1;
+    INT32 hsd = -1;
+    INT32 rc = 0;
+    INT32 ok = 0;
+    UINT32 got = 0u;
+
+    port_mmu_init();
+    nif = NetIfAttachX86();
+    if (nif == (LosNetIf *)0) {
+        port_puts("FAIL: net M10-4 没找到 e1000\n");
+        return;
+    }
+    chk("setip", NetIfSetIp(nif, IP_ME, IP_MASK, IP_GW), 0);
+    chk("up", NetIfUp(nif), 0);
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        if (port_net_link_up() == 1) {
+            break;
+        }
+        i++;
+    }
+    chk("link up", port_net_link_up(), 1);
+
+    chk("sal tcp init", SalTcpInit(), 0);
+    chk("proto count", (INT32)SalProtoCount(), 1);
+
+    /* ---- 1. 环回：listen + connect 自己 ---- */
+    lsd = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_STREAM,
+                    (INT32)LOS_SAL_IPPROTO_TCP);
+    chk("lsd", lsd, 0);
+    a.family = (UINT16)LOS_SAL_AF_INET;
+    a.port = 8080u;
+    a.addr = IP_ME;
+    chk("bind listen", SalBind(lsd, &a), 0);
+    chk("listen", SalListen(lsd, 4), 0);
+
+    csd = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_STREAM,
+                    (INT32)LOS_SAL_IPPROTO_TCP);
+    chk("csd", csd, 1);
+    a.port = 8080u;
+    a.addr = IP_ME;
+    chk("connect loopback", SalConnect(csd, &a), 0);
+    chk("client established", (INT32)TcpState(csd), 4);      /* TS_ESTAB */
+
+    acc = SalAccept(lsd, &from);
+    chk("accept", (acc >= 0) ? 1 : 0, 1);
+    chk("server established", (acc >= 0) ? (INT32)TcpState(acc) : -1, 4);
+    chk("accept again", SalAccept(lsd, &from), 0 - LOS_SAL_E_AGAIN);
+
+    chk("send hello", SalSend(csd, (const VOID *)"hello", 5u), 5);
+    chk("recv hello", SalRecv(acc, (VOID *)&buf[0], 16u), 5);
+    chk("byte0", (INT32)buf[0], (INT32)'h');
+    chk("byte4", (INT32)buf[4], (INT32)'o');
+    chk("send back", SalSend(acc, (const VOID *)"world", 5u), 5);
+    chk("recv back", SalRecv(csd, (VOID *)&buf[0], 16u), 5);
+    chk("back byte0", (INT32)buf[0], (INT32)'w');
+
+    /* FIN：客户端关，服务端应看到 fin_recv 并进 CLOSE_WAIT */
+    chk("close client", SalClose(csd), 0);
+    pump(nif, 1u);
+    chk("server fin", (INT32)TcpFinRecv(acc), 1);
+    chk("close server", SalClose(acc), 0);
+    chk("close listen", SalClose(lsd), 0);
+
+    /* ---- 2. 真网络：向宿主 HTTP 服务发 GET ---- */
+    ok = 0;
+    i = 0u;
+    while (i < 2000000u) {                    /* ARP 预热 */
+        (void)NetIfPollX86(nif);
+        if (ArpResolve(nif, IP_GW, (UINT8 *)&dm[0]) == 1) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("arp gw", ok, 1);
+
+    hsd = SalSocket((INT32)LOS_SAL_AF_INET, (INT32)LOS_SAL_SOCK_STREAM,
+                    (INT32)LOS_SAL_IPPROTO_TCP);
+    chk("hsd", hsd, 0);
+    a.port = 8000u;
+    a.addr = IP_GW;
+    rc = 0 - 1;
+    i = 0u;
+    while (i < 2000u) {                       /* 首个 SYN 可能撞 ARP */
+        rc = SalConnect(hsd, &a);
+        if (rc == 0) {
+            break;
+        }
+        (void)NetIfPollX86(nif);
+        i++;
+    }
+    chk("connect http", rc, 0);
+
+    ok = 0;
+    i = 0u;
+    while (i < 200000u) {                     /* 等三次握手完成 */
+        pump(nif, 1u);
+        if (SalPoll(hsd, 2u) == 2) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("http established", ok, 1);
+
+    rc = SalSend(hsd, (const VOID *)"GET / HTTP/1.0\r\n\r\n", 18u);
+    chk("http send", rc, 18);
+
+    /* 收响应：可能分几段，攒够 200 就停 */
+    got = 0u;
+    ok = 0;
+    i = 0u;
+    while (i < 400000u && got < 200u) {
+        pump(nif, 1u);
+        rc = SalRecv(hsd, (VOID *)&buf[got], 64u);
+        if (rc > 0) {
+            got = got + (UINT32)rc;
+            if (has_word((const UINT8 *)&buf[0], got, "200 OK") == 1) {
+                ok = 1;
+                break;
+            }
+        }
+        i++;
+    }
+    chk("http got 200", ok, 1);
+    port_puts("tcp: http response bytes=");
+    put_u32(got);
+    port_puts(" first line: ");
+    i = 0u;
+    while (i < got && buf[i] != (UINT8)'\r' && buf[i] != (UINT8)'\n' && i < 40u) {
+        port_putc((INT32)buf[i]);
+        i++;
+    }
+    port_puts("\n");
+    (void)SalClose(hsd);
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: net M10-4 failures=");
+        put_u32(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: net M10-4（TCP：listen/accept/connect/send/recv + GET / HTTP/1.0 拿到 200）\n");
+}

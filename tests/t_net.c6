@@ -1,0 +1,232 @@
+/* tests/t_net.c6 —— M10-1：ARP + IPv4 + ICMP echo + loopback
+ *
+ * 不接真网卡也能验收协议栈：两张网卡（"eth0" 和 "peer0"）用一个**同步线**
+ * 直连——一块网卡的 linkoutput 就是另一块网卡的 NetIfInput。于是对端也是
+ * 一套完整协议栈：它会自己回 ARP、自己回 echo，不需要在测试里手搓包。
+ *
+ * 覆盖：
+ *   - 缓冲池耗尽/归还、网卡表上限、SetIp 参数校验、Up 之前的 -ENODEV
+ *   - ARP 请求 → 学习 → 命中缓存（含 MAC 逐字节比对）
+ *   - ping 对端（含以太头/IP 头/ICMP 校验和的逐字段检查）
+ *   - ping 本机 IP 走环回、ping 不可达地址的 -EHOSTUNREACH 与丢包计数
+ *   - 坏包（截断/未知以太类型）计 rx_dropped，收尾缓冲池回零（不泄漏）
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+static UINT32 g_bad = 0u;
+static UINT32 g_wire_depth = 0u;
+static UINT8 g_cap[64] = {0};            /* 最近一次 eth0 发出的帧（前 64 字节） */
+static UINT32 g_cap_len = 0u;
+
+static LosNetIf *g_eth = (LosNetIf *)0;
+static LosNetIf *g_peer = (LosNetIf *)0;
+
+static const UINT32 IP_ME = 0x0A00020Fu;     /* 10.0.2.15 */
+static const UINT32 IP_PEER = 0x0A000202u;   /* 10.0.2.2（qemu slirp 网关） */
+static const UINT32 IP_MASK = 0xFFFFFF00u;
+static const UINT32 IP_NOWHERE = 0x0A000263u; /* 10.0.2.99：没人应答 */
+
+static void put_u32(UINT32 v)
+{
+    CHAR b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_puts("0");
+        return;
+    }
+    i = 0u;
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got == want) {
+        return;
+    }
+    g_bad = g_bad + 1u;
+    port_puts("FAIL: net ");
+    port_puts(what);
+    port_puts(" got=");
+    put_u32((UINT32)got);
+    port_puts(" want=");
+    put_u32((UINT32)want);
+    port_puts("\n");
+}
+
+/* 同步线：eth0 发出的帧直接进 peer0，反之亦然。 */
+static INT32 wire_eth_tx(LosNetIf *nif, LosNetBuf *p)
+{
+    UINT32 i = 0u;
+
+    if (g_wire_depth > 8u) {
+        NetBufFree(p);
+        return 0 - 1;
+    }
+    if (nif == g_eth && p->len > 0u) {
+        g_cap_len = p->len;
+        if (g_cap_len > 64u) {
+            g_cap_len = 64u;
+        }
+        i = 0u;
+        while (i < g_cap_len) {
+            g_cap[i] = p->data[p->off + i];
+            i++;
+        }
+    }
+    g_wire_depth = g_wire_depth + 1u;
+    (void)NetIfInput(nif == g_eth ? g_peer : g_eth, p);
+    g_wire_depth = g_wire_depth - 1u;
+    return 0;
+}
+
+void os_main(void)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    LosNetBuf *pb[LOS_NET_MAX_BUFS] = {0};
+    LosNetIf *nif = (LosNetIf *)0;
+    UINT8 peer_mac[LOS_ETH_ALEN] = {0x02u, 0x00u, 0x00u, 0x00u, 0x00u, 0x99u};
+    UINT8 mac[LOS_ETH_ALEN] = {0};
+    UINT8 *h = (UINT8 *)0;
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+    INT32 rc = 0;
+
+    /* ---- 缓冲池 ---- */
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, 8u);
+    chk("buf alloc", (p != (LosNetBuf *)0) ? 1 : 0, 1);
+    chk("buf in use", (INT32)NetBufInUse(), 1);
+    NetBufFree(p);
+    chk("buf freed", (INT32)NetBufInUse(), 0);
+    chk("buf too big", (NetBufAlloc(0u, (UINT32)LOS_NET_BUF_SIZE + 1u) == (LosNetBuf *)0) ? 1 : 0, 1);
+    i = 0u;
+    n = 0u;
+    while (i < (UINT32)LOS_NET_MAX_BUFS) {
+        pb[i] = NetBufAlloc(0u, 8u);
+        if (pb[i] != (LosNetBuf *)0) {
+            n = n + 1u;
+        }
+        i++;
+    }
+    chk("buf pool size", (INT32)n, (INT32)LOS_NET_MAX_BUFS);
+    chk("buf pool dry", (NetBufAlloc(0u, 8u) == (LosNetBuf *)0) ? 1 : 0, 1);
+    i = 0u;
+    while (i < (UINT32)LOS_NET_MAX_BUFS) {
+        NetBufFree(pb[i]);
+        i++;
+    }
+    chk("buf freed all", (INT32)NetBufInUse(), 0);
+
+    /* ---- 网卡表 ---- */
+    g_eth = NetIfAlloc("eth0");
+    g_peer = NetIfAlloc("peer0");
+    chk("if alloc", (g_eth != (LosNetIf *)0 && g_peer != (LosNetIf *)0) ? 1 : 0, 1);
+    nif = NetIfAlloc("dummy1");
+    nif = NetIfAlloc("dummy2");
+    chk("if table full", (NetIfAlloc("dummy3") == (LosNetIf *)0) ? 1 : 0, 1);
+    chk("if count", (INT32)NetIfCount(), (INT32)LOS_NET_MAX_IF);
+    chk("if get 0", (NetIfGet(0u) != (LosNetIf *)0) ? 1 : 0, 1);
+    chk("if get far", (NetIfGet((UINT32)LOS_NET_MAX_IF) == (LosNetIf *)0) ? 1 : 0, 1);
+
+    /* ---- 配置 ---- */
+    NetIfSetMac(g_peer, (const UINT8 *)&peer_mac[0]);
+    chk("setip ok", NetIfSetIp(g_eth, IP_ME, IP_MASK, IP_PEER), 0);
+    chk("setip ok peer", NetIfSetIp(g_peer, IP_PEER, IP_MASK, IP_ME), 0);
+    chk("setip zero", NetIfSetIp(g_eth, 0u, IP_MASK, IP_PEER), 0 - 22);
+    chk("up without link", NetIfUp(g_eth), 0 - 19);
+    NetIfSetLink(g_eth, wire_eth_tx);
+    NetIfSetLink(g_peer, wire_eth_tx);
+    chk("up", NetIfUp(g_eth), 0);
+    chk("up peer", NetIfUp(g_peer), 0);
+
+    /* ---- ARP：先未命中，随后学到 ---- */
+    chk("arp miss", ArpResolve(g_eth, IP_PEER, (UINT8 *)&mac[0]), 0);
+    chk("arp hit", ArpResolve(g_eth, IP_PEER, (UINT8 *)&mac[0]), 1);
+    chk("arp entry count", (ArpCacheCount() >= 1u) ? 1 : 0, 1);
+    n = 0u;
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        if (mac[i] != peer_mac[i]) {
+            n = n + 1u;
+        }
+        i++;
+    }
+    chk("arp mac bytes", (INT32)n, 0);
+
+    /* ---- ping 对端（同步线：请求发出去，应答当场就回来了） ---- */
+    g_cap_len = 0u;
+    chk("ping peer", IcmpPing(g_eth, IP_PEER, 0x1234u, 1u), 1);
+    chk("ping reply recorded", IcmpGotReply(0x1234u, 1u), 1);
+    chk("ping replies", (INT32)IcmpReplies(), 1);
+
+    /* 抓到的帧：以太类型 + IP 头 + ICMP 校验和全部逐字段验一遍 */
+    chk("cap len", (g_cap_len >= (UINT32)(LOS_ETH_HLEN + LOS_IP_HLEN + 8u)) ? 1 : 0, 1);
+    h = (UINT8 *)&g_cap[0];
+    chk("eth dst hi", (INT32)h[0], 0x02);
+    chk("eth dst lo", (INT32)h[5], 0x99);
+    chk("eth src lo", (INT32)h[11], (INT32)g_eth->mac[5]);
+    chk("eth type", (INT32)NetGet16(&h[12]), (INT32)LOS_ETH_P_IP);
+    chk("ip ver/ihl", (INT32)h[14], 0x45);
+    chk("ip ttl", (INT32)h[14 + 8], (INT32)LOS_IP_TTL);
+    chk("ip proto", (INT32)h[14 + 9], (INT32)LOS_IP_PROTO_ICMP);
+    chk("ip src", (INT32)NetGet32(&h[14 + 12]), (INT32)IP_ME);
+    chk("ip dst", (INT32)NetGet32(&h[14 + 16]), (INT32)IP_PEER);
+    chk("ip hdr csum", (INT32)NetCsum(&h[14], (UINT32)LOS_IP_HLEN), 0);
+    chk("icmp type", (INT32)h[14 + 20], 8);
+    chk("icmp id", (INT32)NetGet16(&h[14 + 20 + 4]), 0x1234);
+    chk("icmp seq", (INT32)NetGet16(&h[14 + 20 + 6]), 1);
+    n = (UINT32)NetGet16(&h[14 + 2]);        /* IP total length */
+    chk("icmp csum", (INT32)NetCsum(&h[14 + 20], n - (UINT32)LOS_IP_HLEN), 0);
+
+    /* ---- ping 本机：走环回，不经过网线 ---- */
+    chk("ping loopback", IcmpPing(g_eth, IP_ME, 0x1234u, 2u), 1);
+    chk("loopback reply", IcmpGotReply(0x1234u, 2u), 1);
+    chk("icmp requests seen", (IcmpRequests() >= 1u) ? 1 : 0, 1);
+
+    /* ---- 不可达：ARP 解析不出来 → -EHOSTUNREACH + 丢包计数 ---- */
+    n = g_eth->tx_dropped;
+    chk("ping nowhere", IcmpPing(g_eth, IP_NOWHERE, 0x55u, 3u), 0);
+    chk("nowhere dropped", (g_eth->tx_dropped > n) ? 1 : 0, 1);
+
+    /* ---- 坏包 ---- */
+    n = g_eth->rx_dropped;
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, 4u);
+    chk("short frame", NetIfInput(g_eth, p), 0 - 22);
+    chk("short counted", (g_eth->rx_dropped > n) ? 1 : 0, 1);
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, 20u);
+    h = (UINT8 *)&p->data[p->off];
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_HLEN) {
+        h[i] = 0x00u;
+        i++;
+    }
+    NetPut16(&h[12], 0x86DDu);               /* IPv6：不认 */
+    chk("odd ethertype", NetIfInput(g_eth, p), 0 - 93);
+
+    /* ---- 收包计数 & 无泄漏 ---- */
+    chk("rx packets", (g_eth->rx_packets >= 2u) ? 1 : 0, 1);
+    chk("tx packets", (g_eth->tx_packets >= 2u) ? 1 : 0, 1);
+    chk("no buf leak", (INT32)NetBufInUse(), 0);
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: net M10-1 failures=");
+        put_u32(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: net M10-1（ARP + IPv4 + ICMP echo + loopback）\n");
+}

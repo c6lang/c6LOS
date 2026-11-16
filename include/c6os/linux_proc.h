@@ -32,6 +32,7 @@
 #define LX_FD_FILE    0u
 #define LX_FD_PIPE_R  1u
 #define LX_FD_PIPE_W  2u
+#define LX_FD_VFS     3u   /* /tmp 等走内核 VFS（M9-4） */
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，

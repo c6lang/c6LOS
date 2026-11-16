@@ -251,6 +251,7 @@ u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
 u64  lx_fs_fstat(u64 fd, u64 ustat);
 u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags);
 u64  lx_fs_access(u64 upath, u64 mode);
+u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);
 u64  lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off);

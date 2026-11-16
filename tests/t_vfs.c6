@@ -1,0 +1,429 @@
+/* M9-0 验收：VFS 核心 + romfs（newc cpio 只读后端）。
+ *
+ * 磁盘布局：LBA 4096 起 = 8 字节长度前缀 + cpio 流（就是 L3 用的那个 initramfs）。
+ * 只用内核 API（LOS_Fs*），不经过 Linux ABI —— 两侧的对接是 M9-4。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "los/los_fs.h"
+#include "los/los_block.h"
+#include "c6os/string.h"
+
+#define FS_PA 0x06000000u          /* 96MB：initramfs 映像 */
+
+/* c6 要求局部变量必须带初值；结构体/数组一律做成文件作用域静态量，
+ * 既满足这条规则，也省得在栈上放几个几十字节的结构。 */
+static OsFsImage   g_img = {0};
+static LosFsStat   g_st = {0};
+static LosFsDirent g_de = {0};
+static char        g_buf[8] = {0};
+static char        g_buf2[24] = {0};
+static u8          g_blk_src[8u * 512u] = {0};
+static OsFsPart    g_part = {0};
+
+#define FAT_LBA 16384u               /* FAT 镜像放在 8MB 处（Makefile 里 dd 进去的） */
+
+/* M9-2 的临时缓冲放在 3MB：低端恒等映射区里 VA == PA，ATA 驱动可以直接用 */
+#define BLK_SCRATCH  0x00300000u
+#define BLK_TEST_LBA 20480u          /* 10MB 处，不和 initramfs（LBA 4096）抢 */
+
+/* M9-1：ramfs 可读写（写 → 读回 → 截断 → 改名 → 建/删目录 → 删除） */
+static int ramfs_case(void)
+{
+    int rc = 0;
+    int fd = 0;
+    u32 n = 0u;
+
+    rc = (int)LOS_FsMount("", "/tmp", "ramfs", (void *)0);
+    if (rc != 0) {
+        port_puts("FAIL: mount ramfs\n");
+        return -1;
+    }
+    fd = (int)LOS_FsOpen("/tmp/a", (UINT32)(LOS_O_RDWR | LOS_O_CREAT));
+    if (fd < 0) {
+        port_puts("FAIL: create /tmp/a\n");
+        return -1;
+    }
+    rc = (int)LOS_FsWrite(fd, "hello ramfs", 11u);
+    if (rc != 11) {
+        port_puts("FAIL: write /tmp/a\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    fd = (int)LOS_FsOpen("/tmp/a", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: reopen /tmp/a\n");
+        return -1;
+    }
+    n = 0u;
+    while (n < 24u) {
+        g_buf2[n] = 0;
+        n++;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 11u);
+    if (rc != 11 || g_buf2[0] != 'h' || g_buf2[4] != 'o' || g_buf2[10] != 's') {
+        port_puts("FAIL: readback /tmp/a\n");
+        return -1;
+    }
+    /* lseek 回开头再读 5 字节 */
+    rc = (int)LOS_FsLseek(fd, 0, (UINT32)LOS_SEEK_SET);
+    if (rc != 0) {
+        port_puts("FAIL: lseek\n");
+        return -1;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 5u);
+    if (rc != 5 || g_buf2[0] != 'h' || g_buf2[4] != 'o') {
+        port_puts("FAIL: reread after lseek\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) != 0 || g_st.size != 11u) {
+        port_puts("FAIL: stat /tmp/a size\n");
+        return -1;
+    }
+    g_de.name[0] = '\0';
+    if ((int)LOS_FsReaddir("/tmp", 0u, &g_de) != 0) {
+        port_puts("FAIL: readdir /tmp\n");
+        return -1;
+    }
+    if (g_de.name[0] != 'a' || g_de.name[1] != '\0') {
+        port_puts("FAIL: readdir /tmp 里不是 a\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsTruncate("/tmp/a", 5u) != 0) {
+        port_puts("FAIL: truncate\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) != 0 || g_st.size != 5u) {
+        port_puts("FAIL: truncate 后 size\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsRename("/tmp/a", "/tmp/b") != 0) {
+        port_puts("FAIL: rename\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) >= 0) {
+        port_puts("FAIL: rename 后旧名字还在\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/b", &g_st) != 0) {
+        port_puts("FAIL: rename 后新名字不在\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsMkdir("/tmp/d") != 0) {
+        port_puts("FAIL: mkdir\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    g_st.type = 0u;
+    if ((int)LOS_FsStat("/tmp/d", &g_st) != 0 ||
+        g_st.type != (UINT32)LOS_FS_TYPE_DIR) {
+        port_puts("FAIL: stat /tmp/d\n");
+        return -1;
+    }
+    if ((int)LOS_FsRmdir("/tmp/d") != 0) {
+        port_puts("FAIL: rmdir\n");
+        return -1;
+    }
+    if ((int)LOS_FsUnlink("/tmp/b") != 0) {
+        port_puts("FAIL: unlink\n");
+        return -1;
+    }
+    if ((int)LOS_FsOpen("/tmp/b", (UINT32)LOS_O_RDONLY) >= 0) {
+        port_puts("FAIL: unlink 后还能打开\n");
+        return -1;
+    }
+    port_puts("vfs: ramfs 写-读回-lseek-截断-改名-mkdir/rmdir-unlink 全通\n");
+    return 0;
+}
+
+
+/* M9-2：块设备层 + ATA PIO 写（写 8 扇区 → 破坏缓冲 → 读回逐字节比对） */
+static int blk_rd_cb(u32 d, u32 blk, u32 cnt, void *buf)
+{
+    (void)d;
+    return (int)port_ata_read(blk, cnt, (u64)buf);
+}
+
+static int blk_wr_cb(u32 d, u32 blk, u32 cnt, const void *buf)
+{
+    (void)d;
+    return (int)port_ata_write(blk, cnt, (u64)buf);
+}
+
+static int blk_case(void)
+{
+    u8 *p = 0;
+    int dev = 0;
+    int rc = 0;
+    u32 i = 0u;
+
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        g_blk_src[i] = (u8)((i * 7u + 3u) & 0xFFu);
+        i++;
+    }
+    p = (u8 *)port_phys_map(BLK_SCRATCH);
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        p[i] = g_blk_src[i];
+        i++;
+    }
+
+    dev = (int)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
+    if (dev < 0) {
+        port_puts("FAIL: LOS_DeviceRegister\n");
+        return -1;
+    }
+    if ((int)LOS_DeviceCount() != 1 || (int)LOS_DeviceGet("ata0") != dev) {
+        port_puts("FAIL: 设备表\n");
+        return -1;
+    }
+    if (LOS_BlockSize((UINT32)dev) != 512u ||
+        LOS_BlockCount((UINT32)dev) != 32768u) {
+        port_puts("FAIL: 块大小/块数\n");
+        return -1;
+    }
+    rc = (int)LOS_BlockWrite((UINT32)dev, BLK_TEST_LBA, 8u, (void *)p);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_BlockWrite\n");
+        return -1;
+    }
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        p[i] = 0;
+        i++;
+    }
+    rc = (int)LOS_BlockRead((UINT32)dev, BLK_TEST_LBA, 8u, (void *)p);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_BlockRead\n");
+        return -1;
+    }
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        if (p[i] != g_blk_src[i]) {
+            port_puts("FAIL: 块设备读回不一致\n");
+            return -1;
+        }
+        i++;
+    }
+    if ((int)LOS_DeviceUnregister("ata0") != 0 || (int)LOS_DeviceCount() != 0) {
+        port_puts("FAIL: 反注册\n");
+        return -1;
+    }
+    port_puts("vfs: 块设备 写-读回 8 扇区逐字节一致\n");
+    return 0;
+}
+
+
+/* M9-3：FAT16 只读（镜像由 tools/mkfat.py 生成：根目录一个 HELLO.TXT） */
+static int fat_case(void)
+{
+    int dev = 0;
+    int rc = 0;
+    int fd = 0;
+    u32 n = 0u;
+
+    if ((int)LOS_DeviceGet("ata0") < 0) {
+        dev = (int)LOS_DeviceRegister("ata0", 512u, 65536u, blk_rd_cb, blk_wr_cb);
+        if (dev < 0) {
+            port_puts("FAIL: fat 重新注册设备\n");
+            return -1;
+        }
+    }
+    g_part.lba = FAT_LBA;
+    rc = (int)LOS_FsMount("ata0", "/fat", "fatfs", &g_part);
+    if (rc != 0) {
+        port_puts("FAIL: mount fatfs\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    g_st.type = 0u;
+    if ((int)LOS_FsStat("/fat/HELLO.TXT", &g_st) != 0 ||
+        g_st.size != 10u || g_st.type != (UINT32)LOS_FS_TYPE_FILE) {
+        port_puts("FAIL: fat stat HELLO.TXT\n");
+        return -1;
+    }
+    fd = (int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: fat open HELLO.TXT\n");
+        return -1;
+    }
+    n = 0u;
+    while (n < 24u) {
+        g_buf2[n] = 0;
+        n++;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 16u);
+    if (rc != 10 || memcmp((const void *)g_buf2, (const void *)"hello fat\n", 10u) != 0) {
+        port_puts("FAIL: fat read HELLO.TXT\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    g_de.name[0] = '\0';
+    if ((int)LOS_FsReaddir("/fat", 0u, &g_de) != 0) {
+        port_puts("FAIL: fat readdir\n");
+        return -1;
+    }
+    if (g_de.name[0] != 'H' || g_de.name[5] != '.' || g_de.name[6] != 'T') {
+        port_puts("FAIL: fat 目录项名字\n");
+        return -1;
+    }
+    if ((int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDWR) >= 0) {
+        port_puts("FAIL: fat 是只读的\n");
+        return -1;
+    }
+    port_puts("vfs: FAT16 只读 mount/stat/read/readdir 全通\n");
+    return 0;
+}
+
+void os_main(void)
+{
+    u8 *p = 0;
+    u64 i = 0u;
+    u64 fsz = 0u;
+    u64 fsec = 0u;
+    u64 off = 0u;
+    u64 chunk = 0u;
+    int rc = 0;
+    int fd = 0;
+    u32 n = 0u;
+
+    port_init();
+    port_puts("c6os vfs M9-0: VFS 核心 + romfs\n");
+    port_mmu_init();
+    port_phys_reserve(FS_PA, 0x00400000u);
+
+    /* ---- 把 initramfs 读进内存（与 L3 的装载方式一致） ---- */
+    if (port_ata_read(4096u, 1u, FS_PA) != 0) {
+        port_puts("FAIL: 读 initramfs 头部\n");
+        return;
+    }
+    p = (u8 *)port_phys_map(FS_PA);
+    i = 0u;
+    while (i < 8u) {
+        fsz |= (u64)p[i] << (u8)(8u * i);
+        i++;
+    }
+    if (fsz == 0u || fsz > 0x00300000u) {
+        port_puts("FAIL: initramfs 长度不合理\n");
+        return;
+    }
+    fsec = (fsz + 511u) / 512u;
+    off = 0u;
+    while (off < fsec) {
+        chunk = fsec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read(4097u + (u32)off, (u32)chunk, FS_PA + off * 512u) != 0) {
+            port_puts("FAIL: 读 initramfs 正文\n");
+            return;
+        }
+        off += chunk;
+    }
+    port_puts("vfs: initramfs 已读入\n");
+
+    /* ---- 挂载 ---- */
+    g_img.buf = (void *)port_phys_map(FS_PA);
+    g_img.len = (u32)fsz;
+    rc = (int)LOS_FsMount("", "/", "romfs", &g_img);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_FsMount\n");
+        return;
+    }
+    port_puts("vfs: romfs 已挂载到 /\n");
+
+    /* ---- stat ---- */
+    g_st.size = 0u;
+    g_st.type = 0u;
+    g_st.mode = 0u;
+    g_st.mtime = 0u;
+    rc = (int)LOS_FsStat("/bin/ls", &g_st);
+    if (rc != 0 || g_st.type != (UINT32)LOS_FS_TYPE_FILE || g_st.size < 4u) {
+        port_puts("FAIL: LOS_FsStat /bin/ls\n");
+        return;
+    }
+    port_puts("vfs: stat /bin/ls ok\n");
+
+    /* ---- open + read 前 4 字节应当是 ELF magic ---- */
+    fd = (int)LOS_FsOpen("/bin/ls", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: LOS_FsOpen\n");
+        return;
+    }
+    n = 0u;
+    while (n < 8u) {
+        g_buf[n] = 0;
+        n++;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf, 4u);
+    if (rc != 4 || g_buf[0] != (char)0x7f || g_buf[1] != 'E' || g_buf[2] != 'L' ||
+        g_buf[3] != 'F') {
+        port_puts("FAIL: LOS_FsRead 前 4 字节不是 ELF magic\n");
+        return;
+    }
+    rc = (int)LOS_FsClose(fd);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_FsClose\n");
+        return;
+    }
+    port_puts("vfs: read /bin/ls 前 4 字节 = 7f ELF\n");
+
+    /* ---- readdir 根目录 ---- */
+    g_de.name[0] = '\0';
+    g_de.type = 0u;
+    g_de.size = 0u;
+    rc = (int)LOS_FsReaddir("/", 0u, &g_de);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_FsReaddir /\n");
+        return;
+    }
+    port_puts("vfs: readdir / -> ");
+    port_puts((const char *)g_de.name);
+    port_puts("\n");
+
+    /* ---- 错误路径 ---- */
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/no/such/file", &g_st) >= 0) {
+        port_puts("FAIL: 不存在的路径不该 stat 成功\n");
+        return;
+    }
+    if ((int)LOS_FsOpen("/bin/ls", (UINT32)LOS_O_RDWR) >= 0) {
+        port_puts("FAIL: 只读 fs 不该允许写打开\n");
+        return;
+    }
+    if ((int)LOS_FsOpen("/bin", (UINT32)LOS_O_RDONLY) >= 0) {
+        port_puts("FAIL: 目录不该能当文件打开\n");
+        return;
+    }
+    port_puts("vfs: 错误路径（不存在/只读/是目录）都按预期报错\n");
+
+    port_puts("PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）\n");
+
+    if (ramfs_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）\n");
+
+    if (blk_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-2（块设备层 + ATA 写：8 扇区写-读回一致）\n");
+
+    if (fat_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-3（FAT16 只读：mount/stat/read/readdir）\n");
+}
