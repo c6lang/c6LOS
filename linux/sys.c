@@ -193,10 +193,61 @@ void lx_syscall(LxRegs *r)
 
     switch (nr) {
     case LX_SYS_write:
+        if (a0 > 2ull) {
+            r->rax = neg(LX_EBADF);        /* 只读 initramfs：写路径留给 L5 */
+            return;
+        }
         r->rax = sys_write(a0, a1, a2);
         return;
     case LX_SYS_read:
-        r->rax = 0ull;                     /* L2 没有 stdin，读 EOF */
+        if (a0 > 2ull) {
+            r->rax = lx_fs_read(a0, a1, a2);
+            return;
+        }
+        r->rax = 0ull;                     /* stdin 还没接键盘：EOF */
+        return;
+
+    case LX_SYS_open:
+    case LX_SYS_openat:
+        r->rax = lx_fs_openat(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_close:
+        r->rax = lx_fs_close(a0);
+        return;
+
+    case LX_SYS_lseek:
+        r->rax = lx_fs_lseek(a0, a1, a2);
+        return;
+
+    case LX_SYS_fstat:
+        r->rax = lx_fs_fstat(a0, a1);
+        return;
+
+    case LX_SYS_newfstatat:
+        r->rax = lx_fs_statat(a0, a1, a2);
+        return;
+
+    case LX_SYS_getdents64:
+        r->rax = lx_fs_getdents64(a0, a1, a2);
+        return;
+
+    case LX_SYS_access:
+        r->rax = lx_fs_access(a0, a1);
+        return;
+
+    case LX_SYS_getcwd:
+        if (a1 < 2ull) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (lx_user_ok(a0, 2ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        *(u8 *)a0 = '/';
+        *(u8 *)(a0 + 1ull) = 0;
+        r->rax = 1ull;
         return;
 
     case LX_SYS_exit:

@@ -25,6 +25,7 @@
 #define LX_SYS_brk            12
 #define LX_SYS_ioctl          16
 #define LX_SYS_pread64        17
+#define LX_SYS_access         21
 #define LX_SYS_exit           60
 #define LX_SYS_getpid         39
 #define LX_SYS_clone          56
@@ -35,10 +36,12 @@
 #define LX_SYS_chdir          80
 #define LX_SYS_arch_prctl    158
 #define LX_SYS_gettid        186
+#define LX_SYS_getdents64    217
 #define LX_SYS_futex         202
 #define LX_SYS_set_tid_address   218
 #define LX_SYS_exit_group    231
 #define LX_SYS_openat        257
+#define LX_SYS_newfstatat    262
 #define LX_SYS_readlinkat    267
 #define LX_SYS_set_robust_list   273
 #define LX_SYS_prlimit64     302
@@ -94,6 +97,22 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
 /* 登记当前进程（系统调用层用）。 */
 void lx_proc_init(u64 as, u64 brk_start);
 u64  lx_proc_brk(void);
+
+/* 只读 initramfs（newc cpio）+ fd 表 + 文件类系统调用。 */
+int  lx_fs_init(u64 pa, u64 len);
+void lx_fs_fd_reset(void);
+u32  lx_fs_nodes(void);
+u64  lx_fs_node_size(u32 i);
+u64  lx_fs_node_data_pa(u32 i);
+u32  lx_fs_node_mode(u32 i);
+u64  lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode);
+u64  lx_fs_read(u64 fd, u64 ubuf, u64 len);
+u64  lx_fs_close(u64 fd);
+u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
+u64  lx_fs_fstat(u64 fd, u64 ustat);
+u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat);
+u64  lx_fs_access(u64 upath, u64 mode);
+u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 
 /* 系统调用分发（从汇编进来，可改写 r->rax 作为返回值）。 */
 void lx_syscall(LxRegs *r);

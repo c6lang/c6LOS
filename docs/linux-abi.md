@@ -1,6 +1,6 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：L2 已跑通（未修改的静态 Linux ELF 在 ring3 运行）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：L3 已跑通（initramfs + 文件语义；未修改的静态 Linux ELF 用 opendir/read 读真实文件）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -13,6 +13,7 @@
 | L0 门禁 / 能力模型 | **完成** | `make LINUX_ABI=1 s3` → 明确拒绝（`tools/chk-caps.sh`） |
 | L1 ring3 通路 | **完成** | `make check-linuxabi` → `PASS: linux-abi L1（ring3 + int 0x80）` |
 | L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
+| L3 initramfs + 文件语义 | **完成** | `make check-linuxabi-l3` → `PASS: linux-abi L3（initramfs + 文件语义）` |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -45,6 +46,35 @@ elf: stack ready, entering userland
 
 [lx] exit(0) —— 用户进程正常结束
 ```
+
+L3 实测输出（`build/x86/fs-disk.img`）。同一个用户态程序（`tests/linux/ls.c`，
+宿主 `gcc -static`）用 `opendir("/")` + `readdir` + `open`/`read` 读内核提供的
+**initramfs**（标准 newc cpio，和 Linux 的 initramfs 同格式）：
+
+```
+c6os linux-abi L3: initramfs + 文件语义
+elf: 映像已就位
+fs: initramfs 已挂载
+elf: 段与栈就绪，进入用户态
+[ls] 根目录:
+  .
+  ..
+  bin
+  etc
+  hello.txt
+[ls] /etc/version:
+c6os 1.0
+[ls] /hello.txt:
+hello from the c6LOS initramfs
+[ls] 完成
+
+[lx] exit(0) —— 用户进程正常结束
+```
+
+磁盘布局：LBA 1024 = 用户 ELF，LBA 4096 = 8 字节长度前缀 + cpio 流（LBA 4097
+起）。**两者必须留够间距**：静态 glibc 程序 650KB 左右，从 LBA 1024 起会占到
+1.16MB；initramfs 若放 LBA 2048 就会把 ELF 尾部覆盖掉，症状是用户态在 glibc
+启动阶段就 #GP、一条系统调用都没发（这个坑实际踩过）。
 
 它的系统调用序列与同一二进制在宿主上的 `strace -f` **逐条一致**：
 `brk brk arch_prctl set_tid_address set_robust_list rseq(→ENOSYS) prlimit64
@@ -252,8 +282,8 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L0** ✅ | 配置门禁、能力模型、`port_caps()`、本文档 | `C6OS_LINUX_ABI=0` 全目标不受影响；`=1` 在 S3 上 make 明确拒绝 |
 | **L1** ✅ | GDT/TSS/IDT、ring3、PMM、4 级页表、`int 0x80`、首次返回用户态 | 用户态打印 `hello from ring3` 并 `exit(0)`，内核收到状态 0 |
 | **L2** ✅ | `syscall` 通道、最小 syscall 集、`copy_from_user`、ELF64 静态加载器 | 加载**未修改的 Linux 静态 ELF**，它自己打印的那行字出现在串口上，并以 `exit_group(0)` 结束 |
-| **L3** | 静态 `busybox`（sh + echo + ls）：open/read/write/brk/mmap/futex/ioctl | `busybox sh -c 'echo hi'` 通过 |
-| **L4** | VFS + romfs/initramfs、`ld.so` 所需 syscall、`mmap` 文件映射 | 动态链接 glibc `printf` 程序跑通 |
+| **L3** ✅ | initramfs（newc cpio）+ fd 表 + `openat`/`read`/`fstat`/`getdents64`/`lseek` | 未修改的静态 Linux 程序用 `opendir`/`readdir`/`open`/`read` 列出并读出 initramfs 里的文件 |
+| **L4** | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation | 动态链接（PIE）的 `busybox` 跑起 `busybox ls /` |
 | **L5** | 进程模型：`fork`(CoW)、`execve`、`wait4`、`pipe`、fd 继承 | `sh -c 'a | b'` 管道通，`fork` 子进程退出码正确 |
 | **L6** | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`longjmp` 恢复 |
 | **L7** | 线程：`clone`、futex 完整、FS base 切换、`pthread` | 静态 `pthread` 程序 4 线程计数正确 |
@@ -272,7 +302,8 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | 归属 | syscall |
 |---|---|
 | L2 最小集 ✅ | `read`(0) `write`(1) `exit`(60) `exit_group`(231) `brk`(12) `mmap`(9) `munmap`(11) `mprotect`(10) `arch_prctl`(158) `set_tid_address`(218) `set_robust_list`(273) `getrandom`(318) `rseq`(334，返回 ENOSYS) `prlimit64`(302) `readlinkat`(267) `uname`(63) `getpid`(39) `gettid`(186) `futex`(202，单线程空实现) |
-| L3 文件 | `openat`(257) `close`(3) `fstat`(5) `newfstatat`(262) `lseek`(8) `getdents64`(217) `ioctl`(16) `readlink`(89) `getuid`(102) 等 |
+| L3 文件 ✅ | `openat`(257) `open`(2) `close`(3) `read`(0) `fstat`(5) `newfstatat`(262) `lseek`(8) `getdents64`(217) `access`(21) `getcwd`(79) |
+| L3 待补 | `ioctl`(16) `readlink`(89) `getuid`(102) `dup`(32) `pipe2`(293)（随 L4/L5 补齐） |
 | L4 动态 | `pread64`(17) `fcntl`(72) `poll`(7) `epoll_create1`(291)、`ld.so` 的重定位与 `mmap` 文件映射 |
 | L5 进程 | `clone`(56) `fork`(57) `vfork`(58) `execve`(59) `wait4`(61) `pipe2`(293) `dup2`(33) `getppid`(110) `chdir`(80) `getcwd`(79) `kill`(62) |
 | L6 信号 | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `rt_sigtimedwait`(128) |
