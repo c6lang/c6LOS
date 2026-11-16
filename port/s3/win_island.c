@@ -889,21 +889,49 @@ u32 s3_win_stress(u32 depth, u32 rounds)
 __attribute__((section(".flash.text")))
 void s3_win_stress_task(void *arg)
 {
+    extern int s3_wifi_test_recv(u32 rounds);
     volatile u32 *d = (volatile u32 *)0x50001300u;
-    u32 n = 0u;
 
     (void)arg;
-    d[0] = 0xC0DE1234u;               /* 已进入 windowed 任务 */
-    /* 先做一次"库调 _queue_recv"路径的最小复现（d[3] 写结果） */
-    {
-        extern int s3_wifi_test_recv(u32 rounds);
+    d[0] = 0xC0DE1234u;              /* 已进入 windowed 任务 */
+    d[3] = (u32)s3_wifi_test_recv(1u);   /* 库→_queue_recv 最小复现 */
+    d[4] = 0xC0DE5678u;              /* 那条路径没崩 */
 
-        d[3] = (u32)s3_wifi_test_recv(1u);
-        d[4] = 0xC0DE5678u;           /* 走到这里说明那条路径没崩 */
+    /* 阶段 1：只 delay（浅 windowed 链 + 真的切走再回来） */
+    {
+        u32 i;
+        for (i = 0u; i < 3u; i++) {
+            s3_w2c_task_delay(1u);
+            d[5] = d[5] + 1u;
+        }
     }
+    d[8] = 0xAAAA0001u;
+
+    /* 阶段 2：只跑递归深链（不切换，纯窗口溢出/欠载） */
+    {
+        u32 v = s3_win_deep12_entry(8u);   /* 期望 74 */
+        u32 w = s3_win_deep(16u);          /* 期望 17 */
+
+        d[6] = v * 1000u + w;
+    }
+    d[8] = 0xAAAA0002u;
+
+    /* 阶段 3：递归深链 + 切换。逐级加深度，d[9] 记下最后一次尝试的深度，
+     * 卡住时读 d[9] 就知道多深的链 + 切换会坏。 */
+    {
+        u32 dep;
+
+        for (dep = 1u; dep < 6u; dep++) {
+            d[9] = dep;
+            d[7] = d[7] + s3_win_stress(dep, dep);
+            d[9] = 0x100u + dep;      /* 这一级过了 */
+        }
+    }
+    d[8] = 0xAAAA0003u;
+
     for (;;) {
-        n = s3_win_stress(3u, n);
-        d[1] = n;                     /* 完成的轮数 */
+        d[1] = d[1] + 1u;
+        s3_w2c_task_delay(1u);
     }
 }
 
