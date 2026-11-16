@@ -11076,3 +11076,40 @@ ld: region `IRAM' overflowed by 4224 bytes
 
 ⇒ `-O0` 不可行（我们的 IRAM 只剩约 7KB 余量）。开关留在 Makefile 里备用。
 要治 §252 只能走"壳存全寄存器"或"整镜像 windowed"这两条路（§252 已列）。
+
+### §256 这一轮的实测定位：卡在 `[lock]` 之后、库内部，且是**陷阱**不是死等
+
+加了 `[lockok]`（mutex pend 的返回值）和 `[delay]`（`osi_task_delay`）两处追踪后：
+
+```
+u1[semnew] #2 p=3fcc4b2c max=1 init=0 t=1
+[lock]   t=1 m#3336896514 p=3fcc3f2c
+[lockok] t=1 pr=0 ok=1          ← 互斥量拿到手了
+（之后再没有任何 OSI 回调，也没有 'b' 阻塞标记）
+```
+
+JTAG 一停就看清了：**CPU 不在 port_idle，而在 `_vec_default` 里转圈**，
+`cause=0`、`EPC1=0x4037bb9a`、`a0=0x8037bb7a`。
+`a0` 的低 30 位正是 0x4037bb7a（合法代码地址）、高 2 位是 CALLINC=2 —— 说明这个
+返回地址**本身是对的**，但 PC 跑到了它 +0x20 的**字面量池**里（取指到数据 ⇒
+IllegalInstruction）。典型的"`retw` 弹出的窗口数/窗口基址与预期差一格"。
+
+至此可以确认：剩下的问题**全部**是 §252 那条 windowed↔call0 边界的窗口簿记，
+不是业务逻辑问题。真板统计（同一份代码）大致 1/5～1/3 的运行能侥幸过这一段。
+
+**试过并排除的**：
+- `-O0` 编 windowed 胶水（想逼 GCC 显式恢复 a0）：IRAM 溢出 4224 字节（§255）；
+- `S3_W2C_SAVEALL`（壳存全寄存器）：壳自己有 bug，最小用例 `t_win1` 就炸；
+- `S3_NO_WIN_SPILL`：更早炸（`osi_semphr_take` 的 `retw.n`）；
+- `S3_NO_PREEMPT`（协作调度）：没有改善；
+- 关掉 `g_dbg_sync`：反而走得更短（§254）。
+
+**下一步（下轮直接照着做）**：按 FreeRTOS 的 Xtensa windowed 端口的做法，
+**在切换点把所有活着的窗口都 spill 到任务栈、并把 WINDOWBASE 归一到 0**
+（而不是现在的"归一化 WINDOWSTART 到 1<<当前base"）。这条路要求：
+1. `port_task_switch` 里先 `call8 xthal_window_spill` 等价的手写 spill（`w2c.S`
+   里已有能用的 `WIN_SPILL`，壳里验证过）；注意它会写到每个窗口调用者 sp 下方
+   16 字节，所以**必须在任务自己的栈上做**（现在 port_task_switch 就跑在任务栈上，
+   §200 当年的失败是因为在中断栈上做）；
+2. spill 完之后 `wsr windowbase 0` + `wsr windowstart 1`，再保存 a0..a15；
+3. 恢复时同样先归一化再装寄存器（现在的 `RESTORE_FRAME` 只差第 1 步）。

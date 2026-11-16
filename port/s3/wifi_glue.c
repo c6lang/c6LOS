@@ -418,8 +418,14 @@ static int osi_mutex_lock(void *p)
     {
         int ok;
         B_IN(4u);
-        ok = (s3_w2c_mutex_pend((void *)&m->m, 0u) == 0) ? 1 : 0;
+        int pr = s3_w2c_mutex_pend((void *)&m->m, 0u);
+
+        ok = (pr == 0) ? 1 : 0;
         B_OUT(4u);
+        if (g_dbg_sync != 0u) {
+            ets_printf("[lockok] t=%u pr=%d ok=%d\n", (unsigned)s3_w2c_current_task(),
+                       pr, ok);
+        }
         return ok;
     }
 }
