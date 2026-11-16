@@ -1563,9 +1563,25 @@ int s3_wifi_wait_connected(int ms)
 }
 #endif
 
+#ifdef S3_WIFI_ASSOC_GATE
+/* 调试闸门（docs/wifi-plan.md §265）（docs/wifi-plan.md §265）。为什么需要它：
+ * 这块板子的 USB-Serial-JTAG 和串口是同一个 USB —— esptool 一复位，OpenOCD 的
+ * 连接就断，所以"先下断点再复位"走不通；而 OpenOCD 自己的 reset 起不来我们的
+ * app（只到 port_idle）。唯一可行的是：esptool 真复位 → 立刻起 OpenOCD →
+ * halt → 写 ibreaka0/ibreakenable → resume。但 OpenOCD 起来要 3~4 秒，等我们
+ * 架好断点，app 早就跑过 associate 崩掉了。
+ * 所以加一个**只在调试构建里存在**的闸门：app 在这里自旋等 JTAG 把
+ * g_s3_dbg_gate 写 1。默认不编译（没有 S3_WIFI_ASSOC_GATE 时这段完全不存在，
+ * 不会影响时序 —— 要知道这条路径对时序极其敏感，见 §259）。 */
+volatile u32 g_s3_dbg_gate = 0u;
+#endif
+
 u32 s3_wifi_bringup(void)
 {
     u32 i = 0u;
+#ifdef S3_WIFI_ASSOC_GATE
+    { extern volatile u32 g_s3_dbg_gate; while (g_s3_dbg_gate == 0u) { } }
+#endif
     /* 库的 wifi_log 先看它自己的 g_log_level，默认级别会把错误信息过滤掉，
      * 调高之后 init 失败的原因才会通过 _log_writev 送到串口。 */
     { extern int g_log_level; g_log_level = 4; }

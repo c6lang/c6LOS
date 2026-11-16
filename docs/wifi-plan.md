@@ -11365,3 +11365,35 @@ IDF 的 `SPILL_ALL_WINDOWS`（xt_asm_utils.h）转完一圈就结束，**不动 
   `a0=0`；且只在"走 ieee80211_ioctl 的库调用"上出现（叶函数 set_storage 永远没事）。
   纯静态反汇编译不可靠（`.flash.text` 里指令和字面量池混排，objdump 线性扫描会跑偏），
   下一轮要用 JTAG 在崩住时**读 WINDOWSTART + 扫栈上的返回地址链**，而不是继续猜。
+
+### §265 真板调试设施（这一轮把"能不能单步"这件事查清楚了）
+
+**重要更正**：真正的 `esp_wifi_set_mode` 在 **0x4203d2b0**（`esp_wifi_set_storage`
+= 0x4203eb28，`esp_wifi_set_config` = 0x4203dc14）。§261 里被当成 set_mode 反汇编的
+**0x4203d594 其实是别的函数**，那一节的静态结论要打折，别当成定论。
+
+这一轮试出来 / 试死掉的东西，逐条记下来免得下轮重试：
+
+| 手段 | 结果 |
+| --- | --- |
+| gdb `continue` / `stepi` | ✗ 永远报 "Cannot execute this command while the target is running"；即使 `set ESP_ONLYCPU 1` 只留 cpu0、`targets` 明确显示 halted 也一样 |
+| gdb `hbreak` | 能用（能在寄存器里看到 `ibreaka0` 被写成目标地址），但后续 continue 就死 |
+| telnet 手工写 `ibreaka0` + `ibreakenable` | 写得进去（读回正确），**但不会触发** —— Xtensa 的 IBRK 要生效还得配 debug 模块的 `DCRA`，gdb 的 hbreak 会顺带配，手工写没有 |
+| OpenOCD 自己的 `reset run` / `reset halt`+`resume` | ✗ 起不来我们的 app：停在 `port_idle`，`g_lwip_stage` 全 0（内核活着，WiFi 任务没跑起来） |
+| 先 `hbreak` 再让 esptool 复位 | ✗ 不行：这块板子的 USB-Serial-JTAG 和串口是**同一个 USB**，esptool 一复位 OpenOCD 就 "Target disconnected" |
+| 新增 `tools/ocboot.sh` / `tools/ocstep.py` | ✓ 可用：telnet 驱动（halt / reg / mdw / stepi）。`stepi` 本身是好用的，缺的只是"怎么停下来" |
+| 新增调试闸门 `g_s3_dbg_gate`（`S3_WIFI_ASSOC_GATE`） | ✓ **有效**：`flashmon` 真复位后 app 停在 `s3_wifi_bringup` 入口自旋，等 JTAG `mww` 写 1 再往下走（实测 halt 在 0x4037d33e = 闸门循环里） |
+
+闸门的用法（**只在调试构建里编**，默认完全不存在，不影响 §259 的时序敏感性）：
+
+```sh
+# 让 ifdef 生效需要传给 port C 的编译（S3_C6FLAGS 只作用于 .c6，不够）
+make C6_ROOT=/home/winger/c6 S3_CDEFS="-DS3_WIFI_ASSOC_GATE" ... https
+./tools/flashmon.sh build/wifi/c6os.bin 2      # 真复位，app 会停在闸门
+./tools/ocboot.sh                              # 起 OpenOCD（只暴露 cpu0）
+# 然后 halt → 下断点 → mww 0x<gate> 1 → resume
+```
+
+**下一轮的目标很明确**：闸门已经能保证"app 一定在断点架好之前不动"，所以只要解决
+"IBRK 怎么才触发"这一件事 —— 首选 `gdb hbreak`（它配 DCRA）+ **telnet 发 `resume`**
+（绕开 gdb 的 continue bug），闸门开着、断点架好后再放行。
