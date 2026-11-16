@@ -10644,3 +10644,31 @@ f[16]=PS|WOE`，然后 `ctx.S` 的 `RESTORE_FRAME` 恢复并 `rfe` 进 `s3_task_
    切回来时 `RESTORE_FRAME` 归一化 WINDOWSTART 后 `rfe` 回到壳里的 `addi a1,a1,64`，
    接着 `l32i a0` + `retw` —— 这里 `retw` 需要"当前窗口的 a0 帧槽还在"，
    而归一化 + 欠载 fill 的顺序如果错了，`retw` 就会用错 a0（正是我们看到的症状）。
+
+### §240 "按任务恢复 WINDOWSTART"实测更糟（已回退）
+
+在最小两任务用例上对比三种组合：
+
+| 组合 | 结果 |
+| --- | --- |
+| `RESTORE_FRAME` 归一化成 `1<<WINDOWBASE` + 壳里 spill（默认） | 两个任务都能启动、各自打印 hello，随后 TRAP |
+| 按任务恢复保存的 WINDOWSTART + 壳里 spill | **只有第一个任务启动**（第二个压根没跑）——更糟 |
+| 归一化 + 不 spill（`S3_NO_WIN_SPILL=1`） | 和默认一样（两个启动，随后 TRAP） |
+
+所以维持默认（归一化 + spill）。分析上剩下的关键问题是：
+**WINDOWBASE 是全局的**，两个任务共用同一组物理窗口；切走时任务 A 的基线是 B_A，
+切回来时"归一化成 1<<当前base"用的是当时的 base（可能就是别的任务的），
+刚恢复的 a0..a15 会落到错的物理窗口。
+
+要真正解决，需要按"切走前把 A 的全部活窗口 spill 到 A 的栈上 + 记录 A 的 base；
+切回来时先把 base 恢复成 B_A、再由欠载向量按 a1 链 fill"这一套完整语义来做，
+而且**框架必须是 FreeRTOS 那种"只在统一调度点切换"**（我们的 `port_task_switch`
+会被任意深度的内核调用链调到，这本身就很难保证窗口语义）。
+
+务实的两条路（下一轮选一条推进）：
+
+1. **把切换点收敛**：所有内核阻塞/让出都改成"回到统一调度点再切"（类似
+   FreeRTOS 的 `_xt_context_save` 只在 dispatch 里跑）——工作量中等，但一劳永逸；
+2. **绕开 windowed 任务**：让 kernel 里只跑 call0 任务，闭源库需要的"任务"用
+   **同一个 windowed 任务**（ppTask）+ 我们只做"被动回调"（不再自己建 windowed
+   任务）。若库只需要一个 windowed 任务，则根本不需要在两个 windowed 任务之间切换。
