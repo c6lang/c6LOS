@@ -2,7 +2,13 @@
 # 用法：make C6_ROOT=/path/to/c6 s3
 
 C6_ROOT ?= $(HOME)/superc
-C6CC    := $(C6_ROOT)/tcc/c6
+# c6 编译器：默认用 c6 自己那份（$(C6_ROOT)/tcc/c6）。
+# 注意：新项目 c6c（/home/winger/c6/c6c/build/c6c）**不能**用来做这套构建 ——
+# 它只出 native ELF/汇编，没有"输出 C99 源码"的模式，而我们的流程是
+# c6→C99→xtensa-gcc。2026-11-16 老 c6 的可执行文件丢过一次，用
+#   make -C /home/winger/c6/tcc -j8 c6
+# 重新编出来即可。
+C6CC    ?= $(C6_ROOT)/tcc/c6
 XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
 XTGCC   := $(XTP)gcc
 # Xtensa 的两种 ABI：call0（本项目原来的选择）/ windowed（IDF 的闭源 WiFi·PHY

@@ -10843,3 +10843,28 @@ w2c 壳 → call0 内核）时，`retw` 的窗口簿记出错（`retw.n` 直接 
    （硬件要求：写 WOE 之后要先经过一次 `rsync`，且 WINDOWSTART 的位要与
    `windowbase` 配套），以及 `_vec_exc`（level-1 异常入口）在 windowed 上下文里
    有没有把 `windowstart`/`windowbase` 存进陷阱帧。
+
+### §247 c6 编译器一度消失 + 新 c6c 不能用于本构建
+
+2026-11-16 中午发现 `/home/winger/c6/tcc/c6` 不见了（目录只剩源码），构建直接
+报"没有那个文件或目录"。查了一下：
+
+- 新项目 `/home/winger/c6/c6c/build/c6c` 是**另一套编译器**：`-c` 出的是 native
+  ELF（x86-64/aarch64），**没有"输出 C99 源码"的模式**，而我们的流程是
+  `c6 → C99 → xtensa-gcc`，所以用它跑不通（试过：`-c -o` 出来的是 ET_REL 目标文件，
+  下一步 gcc 编 C 就失败了）；
+- 老 c6 的源码还在，`make -C /home/winger/c6/tcc -j8 c6` 一分钟就重新编出来了。
+
+已在 Makefile 里把 `C6CC` 改成 `?=`（可覆盖）并写清上面这些。**结论：继续用
+`/home/winger/c6/tcc/c6`；c6c 不适合这套交叉编译流程。**
+
+### §248 关掉同步点追踪（减少 windowed 里的 printf）：故障仍在同一处
+
+把 `g_dbg_sync` 置 0（`[take]/[give]/[recv]/[lock]` 全不打），ppTask 仍能进
+`_queue_recv` 循环，随后仍在同一位置 TRAP。说明**不是 printf 把窗口用光**，
+问题是 windowed 调用链本身的 `retw` 簿记（§246 的结论不变）。
+
+另外确认：把 `RESTORE_FRAME` 在"纯归一化"和"新任务归一化/老任务原值"两种策略间
+切换，**故障签名完全一样**（`ws=0x06, sp=0x3fcbebb0, pc=0x4037c284, a0=0x3fcbebe0`），
+所以目前的故障点**不经过任务切换**（是两个 windowed 上下文交替时寄存器文件被
+互相覆盖，归一化策略救不了）。

@@ -1616,7 +1616,7 @@ u32 s3_wifi_bringup(void)
     wcfg(140u, 0u);             /* dump_hesigb_enable     default n           */
     wcfg(144u, 0x1F2F3F4Fu);    /* magic = WIFI_INIT_CONFIG_MAGIC             */
 
-    g_dbg_sync = 1u;               /* 打开同步点追踪（§229） */
+    g_dbg_sync = 0u;               /* 同步点追踪关掉（§248：减少 windowed 里的 printf 压力） */
     s3_wifi_osi_init();
     ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
                (u32)(void *)g_wifi_osi_funcs._semphr_create,
