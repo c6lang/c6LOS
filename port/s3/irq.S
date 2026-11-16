@@ -37,8 +37,7 @@ _vecbase:
     .org 0x300
     j   _vec_level1             /* kernel exception / level-1 中断 */
     .org 0x340
-    movi a3, 0x0D               /* §290 标记：向量 13 = user exception */
-    j   _vec_default
+    j   _vec_user               /* 用户异常：Alloca / Syscall / 其它 */
     .org 0x380
     movi a3, 0x0E               /* §290 标记：向量 14 */
     j   _vec_default            /* double exception */
@@ -202,6 +201,46 @@ _vec_lvl_common:
 
     .section .text, "ax", @progbits
     .align 4
+/* §342：用户异常向量。
+ *
+ * 以前这里直接 `j _vec_default`（记现场 + 死循环）。但 windowed ABI 下编译器
+ * 会用 `movsp` 做动态栈分配，硬件抛 **Alloca 异常(cause=5)** —— 不处理就等于
+ * 让被中断的 `movsp` 永远不完成，而且异常入口已经 `rotw -1` 过，
+ * **WINDOWBASE 会停在奇数（真板实测 9）**，之后所有 `retw`/`entry` 全部错位
+ * （表现就是 `[give]` 之后 a0 变成 PS 值、`retw.n` cause=0）。
+ *
+ * 处理体照抄 IDF 的 `_xt_alloca_exc`（components/xtensa/xtensa_vectors.S）：
+ * 用 PS.OWB 修正窗口基址，再按原 a0 的 CALLINC 位跳到对应的欠载向量，
+ * 由那条 `rfwu` 回到被打断的 `movsp` 上重试。 */
+_vec_user:
+    wsr     a0, excsave1        /* 硬件不会自动存 a0，alloca 处理体要用 */
+    rsr     a0, exccause
+    bnei    a0, 5, 1f
+    j       _xt_alloca_exc
+1:
+    movi    a3, 0x0D            /* 其余异常：保持老的现场记录 + 停机 */
+    j       _vec_default
+
+    .align 4
+_xt_alloca_exc:
+    rsr     a0, windowbase
+    rotw    -1                  /* 原 a0(WINDOWBASE) 落到 a4，a0-a3 变成草稿 */
+    rsr     a2, ps
+    extui   a3, a2, 8, 4        /* PS.OWB */
+    xor     a3, a3, a4          /* 新旧基址的差异位 */
+    rsr     a4, excsave1        /* 取回被打断的 a0（现在在 a4） */
+    slli    a3, a3, 8
+    xor     a2, a2, a3          /* 把 PS.OWB 改成新基址 */
+    wsr     a2, ps
+    rsync
+    bbsi.l  a4, 31, 2f          /* 按 CALLINC 选欠载向量（分支够不着，用 j） */
+    j       _win_unf4
+2:  rotw    -1
+    bbsi.l  a8, 30, 3f
+    j       _win_unf8
+3:  rotw    -1
+    j       _win_unf12
+
 _vec_exc:
 #ifdef __XTENSA_CALL0_ABI__
     mov     a2, a1

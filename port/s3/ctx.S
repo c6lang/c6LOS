@@ -109,10 +109,20 @@
      * 直接跳过 wsr 会把**别的任务**留下的 WINDOWSTART（真板：0x8000，base=15）
      * 留在硬件里，恢复出来的 a0..a15 就落在错的窗口，rfe 之后落到 ROM 里
      * 的非法地址（cause=0，a0=PS 值）。 */
-    rsr     a3, windowbase
-    movi    a4, 1
-    ssl     a3
-    sll     a3, a4
+    /* §341：**新任务一律从窗口 0 开始**。不这么做的话，新任务继承的是上一个
+     * 任务留下的 WINDOWBASE（真板读到过 9 —— 不是 4 的倍数，本身就是非法值），
+     * 闭源库的第一次 call8/retw 就和窗口账目对不上，表现为 ROM 打印里 a0
+     * 变成 PS 值（0x00060900）、`retw.n` 直接 cause=0。
+     * `wsr windowbase` 会把虚拟寄存器一起重映射（包括 a1），所以先用全局
+     * g_ctx_tmp_sp 把帧指针藏起来，换完基址再取回来。 */
+    l32r    a4, .Ltmpsp
+    s32i    a1, a4, 0
+    movi    a3, 0
+    wsr     a3, windowbase
+    isync
+    l32r    a4, .Ltmpsp
+    l32i    a1, a4, 0
+    movi    a3, 1
 7:
     wsr     a3, windowstart
     isync

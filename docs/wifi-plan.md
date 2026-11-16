@@ -13247,3 +13247,47 @@ windowbase=0x9   windowstart=0xaaaa   槽位=0x0f(双重异常)
 硬件才没有搬 WB。如果哪天写进去的是别的值，`l32i a2, a1, 60` 就会读到错的地址。
 下一轮的探针就打在 `RESTORE_FRAME` 里：记录进入时的 a1、写入的 WS、
 `wsr` 之后的 WB、以及随后读出来的 EPC/PS/a0。
+
+## §340 RTC 诊断环在开机时清零（否则会读到上一轮的记录）
+
+真板上踩过：把上一轮留下的 switch 记录当成这一轮的，误判成"`RESTORE_FRAME`
+没跑"。RTC 慢速内存在**复位后不会丢**，而 `flashbl.sh` 只是复位芯片。
+现在 `start.S` 在清完 `.bss` 后把 `0x50000200..0x500007FF` 全部清 0
+（`0x50000000..0x500000FF` 留给开机标记）。清零之后所有 RTC 记录都是**本轮**的，
+诊断结论才可信。
+
+## §341 新任务一律从**窗口 0** 开始 —— 崩溃（TRAP）消失了
+
+`RESTORE_FRAME` 给新任务只做了 `WINDOWSTART = 1 << WINDOWBASE`，
+但 `WINDOWBASE` 是**上一个任务**留下的（真板读到过 **9** —— 不是 4 的倍数，
+本身就是非法值，硬件只有在 `rotw` 奇数步进时才会到那种值）。
+于是新任务（闭源库的 `ppTask`）第一次 `call8/retw` 窗口账目就是错的，
+表现就是 `[give]` 之后 `retw.n` cause=0、a0 变成 PS 值。
+
+改成：新任务（帧里 WS==0）**把 `wsr windowbase` 强制归零、WS=1**，从干净的
+窗口 0 起跑。`wsr windowbase` 会重映射虚拟寄存器（含 a1），所以先用全局
+`g_ctx_tmp_sp` 把帧指针藏起来再换。
+
+真板结果：**`*** TRAP` 不再出现** ✓（原来是 trap，现在是"卡住"）。
+
+## §342 补上 Alloca 异常处理（0x340 用户异常向量）
+
+顺带发现 0x340（用户异常向量）以前是 `j _vec_default`（只记现场 + 死循环）。
+windowed ABI 下编译器用 `movsp` 做动态栈分配，硬件抛 **Alloca 异常(cause=5)**，
+不处理的话被中断的 `movsp` 永远不完成，而且异常入口已经 `rotw -1`，
+**WINDOWBASE 会停在奇数**（真板实测 9、WS=0x200）—— 正是 §341 里那个非法值。
+已照抄 IDF 的 `_xt_alloca_exc` 补上（用 PS.OWB 修正基址，再按 CALLINC
+跳对应欠载向量由 `rfwu` 回到 `movsp` 重试）。
+
+补完之后仍然卡住（不再是 trap），现场是**双重异常**：
+
+```
+_vec_default: cause=1d(StoreProhibited) vaddr=182d49f8 epc1=4201855a
+              a0=182d4a28 a1=50000b00 windowbase=9 windowstart=0x200 slot=0x0f
+```
+
+`epc1=4201855a` 落在 `os_task_start_core`（flash），`a1=0x50000b00` 是
+**RTC 内存**——内核代码带着一个假的栈指针在跑。⇒ 下一个要查的是：
+这条 `os_task_start` 调用链（OSI `_task_create` → `os_task_start` →
+`os_task_start_core`）里，a1 是在哪一步被换掉的（`port_task_ctx_create`
+分配失败？还是窗口恢复时 a1 被错误覆盖？）。

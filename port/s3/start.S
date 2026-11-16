@@ -233,6 +233,18 @@ _start:
     l32r    a2, .Lmarks
     l32r    a3, .Lm1
     s32i    a3, a2, 0            /* DRAM 标记 [0] = 0xA1：清 bss 完成（可靠） */
+    /* §340：清掉 RTC 里的诊断环（0x50000200..0x500007FF）。RTC 慢速内存在
+     * 复位后**不会丢**，不清的话上一轮留下的记录会和这一轮混在一起 —— 已经
+     * 踩过一次（把上一轮的 switch 记录当成这一轮的，误判成"RESTORE_FRAME
+     * 没跑"）。0x50000000..0x500000FF 留给 start.S/console.c 的开机标记。 */
+    movi    a2, 0x50000200
+    movi    a3, 0x50000800
+    movi    a4, 0
+.Lrtcclr1:
+    s32i    a4, a2, 0
+    addi    a2, a2, 4
+    bltu    a2, a3, .Lrtcclr1
+
 #ifdef __XTENSA_CALL0_ABI__
     call0   port_init
     call0   os_main
