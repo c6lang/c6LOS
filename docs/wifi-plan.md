@@ -13291,3 +13291,68 @@ _vec_default: cause=1d(StoreProhibited) vaddr=182d49f8 epc1=4201855a
 这条 `os_task_start` 调用链（OSI `_task_create` → `os_task_start` →
 `os_task_start_core`）里，a1 是在哪一步被换掉的（`port_task_ctx_create`
 分配失败？还是窗口恢复时 a1 被错误覆盖？）。
+
+## §343 内核模式下的 Alloca 异常必须从 **0x300** 分流
+
+`0x340`（用户异常向量）只在 `PS.UM=1` 时用；我们全程内核模式，所以
+`movsp` 抛出的 Alloca 异常(cause=5)是走 **0x300** 的。已在 `_vec_level1`
+最前面分流：`wsr a3, excsave2` 暂存 → 读 exccause → 是 5 就
+`wsr a0, excsave1` 后跳 `_xt_alloca_exc`（照抄 IDF）。其余原因不受影响。
+
+## §344 定时器中断里的 WINDOWBASE 采样探针
+
+`s3_timer_irq` 里第一次发现 `windowbase` 不是 4 的倍数就记到 `0x50000900`
+（`0xBAD2 | wb | 被打断的 epc1 | windowstart`）。**一直没触发** —— 说明
+窗口基址在中断采样的时刻都是合法的。
+
+## §345 新任务的"干净窗口"必须三件套一致（WB / WS / PS.OWB）
+
+- 初始 PS 里清掉 **OWB(bit8-11)**（`port_task_ctx_create`）；
+- `RESTORE_FRAME` 对新任务（帧里 WS==0）用 `wsr windowbase 0` + `WS=1`；
+- `wsr windowbase` 会重映射虚拟寄存器（含 a1），所以先用全局 `g_ctx_tmp_sp`
+  把帧指针藏起来再换。
+
+`rfe` 会把帧里的 PS 整个装回去，PS.OWB 决定返回后的 WINDOWBASE ——
+所以这三者必须一致，否则返回后 WS 与 WB 对不上，寄存器映射整体错位。
+
+## §346 **重大更正：0x50000300 那批"WS/WB"记录是假的**
+
+`wifi_glue.c:560` 里有 `*(volatile u32 *)0x50000310u = (u32)q;`（记队列句柄），
+`0x50000320/0x340/0x350/0x360/0x370/0x3C0` 也都被 wifi_glue 的诊断占了 ——
+**正好压在 switch 记录的 `+0x10`(WS) / `+0x14`(WB) 上**。
+之前所有"WINDOWBASE=9 是非法值"的推断都建立在这些被覆盖的数据上，**作废**。
+
+已把切换点记录搬到 **`0x50000500`**（32×4 字节，确认无人使用；
+`0x50000C00` 也是 console.c 在用的，别再往那儿搬）。搬完重读，WS=`0x200`、
+WB=`9` —— 两者**互相自洽**，而且 Xtensa 的 WINDOWBASE 就是"窗口序号"，
+9 是合法值。所以 **WB=9 从来就不是 bug**。
+
+## §347 现在的真实故障：调度器主循环恢复后 a1 变成了一个常量
+
+`_vec_default` 现场（`0x50000100`）：
+`cause=1d(StoreProhibited) epc1=4201855a` —— 落在 `os_task_start_core`
+（调度器主循环，`kernel/task.c6:603`），`a1=0x50000b00`。
+
+而 `0x50000B00` 正是这个函数自己代码里的常量：
+`volatile u32 *sd = (volatile u32 *)0x50000B00u;`（§诊断用）。
+反汇编也印证：`l32i.n a10, a1, 40` 取的局部变量就是它。
+
+⇒ **a1 拿到了本该在 a10 里的值，等于寄存器窗口整体错位了一格**，
+发生在 `port_task_switch()` 返回之后。也就是说：任务从 windowed 调用链里
+阻塞切走、再切回调度器循环时，**恢复出来的窗口映射是错的**。
+
+下一轮从这里下手，两个候选：
+1. 把调度器主循环本身也当成一个"任务"（有自己的 ctx/帧），所有切入切出
+   都走同一套 save/restore，不再有"从 windowed 链里返回到 call0 主循环"这种混合路径；
+2. 或者查 `RESTORE_FRAME` 恢复 `PS.CALLINC` 的方式：`rfe` 装回 PS 后
+   CALLINC 与 WINDOWBASE 必须配套，否则下一条 `retw` 会退错一格。
+
+## §348 全部改动落地状态
+
+- `port/s3/irq.S`：0x300 分流 Alloca；`0x340` 用户向量的 Alloca 处理体；
+  §290 标记保留。
+- `port/s3/ctx.S`：新任务干净窗口（WB=0/WS=1，用 `g_ctx_tmp_sp` 藏帧指针）；
+  switch 记录搬到 `0x50000500`。
+- `port/s3/ctx.c`：初始帧清 20 字；初始 PS 清 OWB。
+- `port/s3/start.S`：开机清 RTC 诊断环 `0x50000200..0x500007FF`。
+- 真板现状：**`*** TRAP` 消失**，卡在 `[give] t=2 sem#1` + `b` 之后。

@@ -265,6 +265,26 @@ void *s3_timer_irq(u32 frame_sp)
         }
         if ((pc_n & 0xFFu) == 0u) { pd[2] = pc_n; }
     }
+    /* §344：**第一次**发现 WINDOWBASE 不是 4 的倍数时记现场。
+     * 合法的窗口基址只能是 0/4/8/.../60；出现 9（真板实测）说明某处
+     * `rotw` 奇数步进后没归位 —— 之后所有虚拟寄存器（包括 a1）全部映射错。 */
+    {
+        u32 wb = 0;
+        volatile u32 *q = (volatile u32 *)0x50000900u;
+
+        __asm__ __volatile__("rsr %0, windowbase" : "=r"(wb));
+        if ((wb & 3u) != 0u && q[0] == 0u) {
+            u32 ip = 0;
+            u32 ws = 0;
+
+            __asm__ __volatile__("rsr %0, epc1" : "=r"(ip));
+            __asm__ __volatile__("rsr %0, windowstart" : "=r"(ws));
+            q[0] = 0xBAD2u;
+            q[1] = wb;
+            q[2] = ip;
+            q[3] = ws;
+        }
+    }
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();

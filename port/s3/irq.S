@@ -284,6 +284,19 @@ _vec_default:
 
     .align 4
 _vec_level1:
+    /* §343：内核模式下 Alloca 异常(cause=5)也走**这个**向量（0x340 只在
+     * PS.UM=1 时用），所以必须在这里就把它分出去 —— 否则 `movsp` 永远完不成，
+     * 而且异常入口的 `rotw -1` 会把 WINDOWBASE 停在奇数（真板实测 9），
+     * 之后所有寄存器都映射错（a1 取到别的物理寄存器、retw 全乱）。
+     * 处理体要的是**没被动过**的寄存器现场，所以这里只借 EXCSAVE2 暂存 a3。 */
+    wsr     a3, excsave2
+    rsr     a3, exccause
+    bnei    a3, 5, 1f
+    rsr     a3, excsave2
+    wsr     a0, excsave1        /* alloca 处理体从这里取回被打断的 a0 */
+    j       _xt_alloca_exc
+1:
+    rsr     a3, excsave2
     addi    a1, a1, -80
     s32i    a0, a1, 0
     s32i    a2, a1, 4

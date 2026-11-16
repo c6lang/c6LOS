@@ -131,7 +131,11 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
      * 它的 call/retw 依赖窗口溢出/下溢向量来处理寄存器窗口轮转；
      * WOE=0 时这些向量不生效，第一次窗口轮转就会取到错位的返回地址
      * （真板表现：a0 带着 CALLINC 标记被当指令地址取、cause=0x14）。 */
-    f[16] = (port_ps_get() & ~0x1Fu) | 0x40000u;
+    /* §345：初始 PS 里**清掉 OWB(bit8-11)**，让新任务一律从窗口 0 起跑。
+     * OWB 决定 `rfe` 返回后的 WINDOWBASE，继承别人的 OWB 会让新任务
+     * （闭源库的 ppTask）落到一个非法/别人的窗口基址上。
+     * 清 0 之后 RESTORE_FRAME 会写 WS=1、rfe 装回 OWB=0 ⇒ 干净起步。 */
+    f[16] = (port_ps_get() & ~0x1Fu & ~0xF00u) | 0x40000u;
     c->sp = top;
     *(volatile u32 *)c->stack = 0xC6C0DEADu;
     return c;
