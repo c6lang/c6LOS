@@ -1,0 +1,192 @@
+/* tests/t_iso_rootfs.c6 —— M11-1：ISO 里带的只读根文件系统
+ *
+ * 引导块 cd0 把两段载荷从光盘搬进内存：内核（0x10000）和 rootfs.cpio
+ * （0x00800000，走 unreal mode）。这块的活儿是：
+ *   1. 从引导信息块（0x7000）拿到 rootfs 的物理地址与长度；
+ *   2. 把这段内存从 PMM 里挖掉（不然堆/页分配会把它当空闲帧用掉）；
+ *   3. 用 LiteOS 面把 romfs 挂到 "/"，然后 readdir / stat / open / read 走一圈。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "los/los_typedef.h"
+#include "los/los_fs.h"
+
+#define BOOTINFO_PA 0x7000u
+#define BOOTINFO_MAGIC 0x53493643u
+
+static OsFsImage g_img = {0};
+static LosFsStat g_st = {0};
+static LosFsDirent g_de = {0};
+static char g_buf[64] = {0};
+
+static void put_hex(u32 v)
+{
+    int i = 0;
+
+    port_puts("0x");
+    i = 28;
+    while (i >= 0) {
+        u32 d = (v >> (u32)i) & 0xFu;
+
+        port_putc((int)(d < 10u ? ('0' + (int)d) : ('a' + (int)(d - 10u))));
+        i = i - 4;
+    }
+}
+
+static void put_u32(u32 v)
+{
+    char b[12] = {0};
+    u32 i = 0u;
+    u32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((int)'0');
+        return;
+    }
+    while (v > 0u && i < 10u) {
+        b[i] = (char)('0' + (char)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((int)b[n]);
+    }
+}
+
+void os_main(void)
+{
+    volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
+    u32 magic = 0u;
+    u32 flags = 0u;
+    u32 rpa = 0u;
+    u32 rlen = 0u;
+    int rc = 0;
+    int fd = 0;
+    u32 i = 0u;
+    u32 n = 0u;
+    const u8 *base = (const u8 *)0;
+    u64 fsz = 0u;
+
+    port_init();
+    port_puts("c6os iso M11-1: ISO 内嵌 rootfs\n");
+
+    magic = bi[0];
+    flags = bi[2];
+    rpa = bi[5];
+    rlen = bi[6];
+    port_puts("  bootinfo magic=");
+    put_hex(magic);
+    port_puts(" flags=");
+    put_u32(flags);
+    port_puts(" rootfs pa=");
+    put_hex(rpa);
+    port_puts(" len=");
+    put_u32(rlen);
+    port_puts("\n");
+    if (magic != BOOTINFO_MAGIC || flags != 1u) {
+        port_puts("FAIL: iso M11-1（引导信息块不对）\n");
+        return;
+    }
+    if (rpa == 0u || rlen < 512u) {
+        port_puts("FAIL: iso M11-1（rootfs 载荷没装进来）\n");
+        return;
+    }
+
+    port_mmu_init();
+    port_phys_reserve((u64)rpa, (u64)rlen);        /* 别让 PMM 把这段当空闲帧 */
+    port_puts("  pmm reserved, free_kb=");
+    put_u32((u32)port_phys_free_kb());
+    port_puts("\n");
+
+    /* mk-initramfs.py 的格式：8 字节小端长度 + 504 字节 0，然后才是 cpio 本体
+     * （和 L3 的 initramfs 镜像一致，t_vfs 也是这么解的）。 */
+    base = (const u8 *)port_phys_map((u64)rpa);
+    fsz = 0u;
+    i = 0u;
+    while (i < 8u) {
+        fsz = fsz | ((u64)base[i] << (u64)(8u * i));
+        i++;
+    }
+    if (fsz < 64u || fsz > 0x00200000u || (u64)fsz > (u64)rlen) {
+        port_puts("FAIL: iso M11-1（rootfs 长度前缀不合理）\n");
+        return;
+    }
+    port_puts("  cpio body=");
+    put_u32((u32)fsz);
+    port_puts(" head=");
+    base = base + 512;
+    i = 0u;
+    while (i < 6u) {
+        port_putc((int)base[i]);
+        i++;
+    }
+    port_puts("\n");
+    g_img.buf = (void *)base;
+    g_img.len = (u32)fsz;
+    rc = (int)LOS_FsMount("", "/", "romfs", &g_img);
+    if (rc != 0) {
+        port_puts("FAIL: iso M11-1（LOS_FsMount romfs 失败 rc=");
+        put_u32((u32)(0 - rc));
+        port_puts("）\n");
+        return;
+    }
+    port_puts("  romfs 挂到 /（LOS_FsMount）\n");
+
+    /* readdir 走一圈，把根目录内容打出来 */
+    i = 0u;
+    while (i < 16u) {
+        (void)memset((void *)&g_de, 0, (u32)sizeof(g_de));
+        rc = (int)LOS_FsReaddir("/", i, &g_de);
+        if (rc != 0) {
+            break;
+        }
+        port_puts("  /");
+        port_puts((const char *)&g_de.name[0]);
+        port_puts(g_de.type == (u32)LOS_FS_TYPE_DIR ? "  <dir>" : "  size=");
+        if (g_de.type != (u32)LOS_FS_TYPE_DIR) {
+            put_u32(g_de.size);
+        }
+        port_puts("\n");
+        i++;
+    }
+    if (i == 0u) {
+        port_puts("FAIL: iso M11-1（根目录是空的）\n");
+        return;
+    }
+
+    /* stat + open + read 一个文件 */
+    (void)memset((void *)&g_st, 0, (u32)sizeof(g_st));
+    rc = (int)LOS_FsStat("/hello.txt", &g_st);
+    if (rc != 0 || g_st.type != (u32)LOS_FS_TYPE_FILE || g_st.size < 4u) {
+        port_puts("FAIL: iso M11-1（stat /hello.txt）\n");
+        return;
+    }
+    port_puts("  stat /hello.txt size=");
+    put_u32(g_st.size);
+    port_puts("\n");
+    fd = (int)LOS_FsOpen("/hello.txt", (u32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: iso M11-1（open /hello.txt）\n");
+        return;
+    }
+    n = (u32)LOS_FsRead(fd, (void *)&g_buf[0], 32u);
+    if (n < 4u) {
+        port_puts("FAIL: iso M11-1（read /hello.txt）\n");
+        return;
+    }
+    g_buf[32] = (char)0;
+    port_puts("  read: ");
+    i = 0u;
+    while (i < n && g_buf[i] != (char)0 && g_buf[i] != '\n' && i < 32u) {
+        port_putc((int)g_buf[i]);
+        i++;
+    }
+    port_puts("\n");
+    (void)LOS_FsClose(fd);
+
+    port_puts("PASS: iso M11-1（ISO 里的 rootfs 挂到 /：readdir/stat/open/read 全通）\n");
+}

@@ -1,0 +1,178 @@
+/* tests/t_fat_write.c6 —— M11-2：/data 可读写（FAT16，走 LiteOS 面）
+ *
+ * 磁盘布局（Makefile 的 fatw 变体）：LBA 16384 起是 tools/mkfat.py 生成的
+ * FAT16 镜像（根目录一个 HELLO.TXT），测试把它挂到 /data 上，然后：
+ *   建文件 → 写 → 读回 → 追加（lseek END）→ 截断 → 建目录 → 子目录里写
+ *   → readdir → 删除 → 确认目录不空时不让删。
+ * 全部只用 LOS_Fs*（Linux ABI 那边是薄封装，先保证 LiteOS 面自身可用）。
+ * 宿主侧再由 make check-fat-write 把数据盘抠出来用 7z 看一眼，证明写真的落盘了。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "c6os/errno.h"
+#include "los/los_typedef.h"
+#include "los/los_fs.h"
+
+#define FAT_LBA 16384u
+
+static OsFsPart g_part = {0};
+
+/* 块设备回调：直接落到 ATA PIO（M9-2 的 port_ata_read/write） */
+static INT32 blk_rd_cb(UINT32 d, UINT32 blk, UINT32 cnt, VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_read(blk, cnt, (u64)buf);
+}
+
+static INT32 blk_wr_cb(UINT32 d, UINT32 blk, UINT32 cnt, const VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_write(blk, cnt, (u64)buf);
+}
+static LosFsStat g_st = {0};
+static LosFsDirent g_de = {0};
+static char g_buf[64] = {0};
+static UINT32 g_bad = 0u;
+
+static void put_u32(UINT32 v)
+{
+    char b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((INT32)'0');
+        return;
+    }
+    i = 0u;
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got == want) {
+        return;
+    }
+    g_bad = g_bad + 1u;
+    port_puts("FAIL: fat ");
+    port_puts(what);
+    port_puts(" got=");
+    put_u32((UINT32)got);
+    port_puts(" want=");
+    put_u32((UINT32)want);
+    port_puts("\n");
+}
+
+static INT32 st_size(const char *path)
+{
+    (void)memset((VOID *)&g_st, 0, (UINT32)sizeof(g_st));
+    if ((INT32)LOS_FsStat(path, &g_st) != 0) {
+        return -1;
+    }
+    return (INT32)g_st.size;
+}
+
+void os_main(void)
+{
+    INT32 fd = -1;
+    INT32 rc = 0;
+    INT32 n = 0;
+    UINT32 i = 0u;
+
+    port_init();
+    port_mmu_init();
+    port_puts("c6os fat M11-2: /data 可读写（FAT16）\n");
+
+    rc = (INT32)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
+    chk("reg ata0", (rc >= 0) ? 1 : 0, 1);
+    chk("dev count", (INT32)LOS_DeviceCount(), 1);
+    g_part.lba = FAT_LBA;
+    chk("mount", (INT32)LOS_FsMount("ata0", "/data", "fatfs", &g_part), 0);
+
+    /* 1. 建 + 写 */
+    fd = (INT32)LOS_FsOpen("/data/NEW.TXT", (UINT32)(LOS_O_CREAT | LOS_O_RDWR));
+    chk("open create", (fd >= 0) ? 1 : 0, 1);
+    if (fd < 0) {
+        port_puts("FAIL: fat M11-2（建不了文件，后面不用测了）\n");
+        return;
+    }
+    chk("write", (INT32)LOS_FsWrite(fd, (const VOID *)"hello fat", 9u), 9);
+    chk("close", (INT32)LOS_FsClose(fd), 0);
+    chk("stat size", st_size("/data/NEW.TXT"), 9);
+
+    /* 2. 读回 */
+    fd = (INT32)LOS_FsOpen("/data/NEW.TXT", (UINT32)LOS_O_RDONLY);
+    chk("reopen", (fd >= 0) ? 1 : 0, 1);
+    n = (INT32)LOS_FsRead(fd, (VOID *)&g_buf[0], 16u);
+    chk("read len", n, 9);
+    chk("read[0]", (INT32)g_buf[0], (INT32)'h');
+    chk("read[8]", (INT32)g_buf[8], (INT32)'t');
+    chk("close2", (INT32)LOS_FsClose(fd), 0);
+
+    /* 3. 追加（重开后 lseek 到末尾） */
+    fd = (INT32)LOS_FsOpen("/data/NEW.TXT", (UINT32)LOS_O_RDWR);
+    chk("reopen rw", (fd >= 0) ? 1 : 0, 1);
+    chk("seek end", (INT32)LOS_FsLseek(fd, 0, (UINT32)LOS_SEEK_END), 9);
+    chk("append", (INT32)LOS_FsWrite(fd, (const VOID *)"!!", 2u), 2);
+    chk("close3", (INT32)LOS_FsClose(fd), 0);
+    chk("stat append", st_size("/data/NEW.TXT"), 11);
+
+    /* 4. 截断 */
+    chk("truncate", (INT32)LOS_FsTruncate("/data/NEW.TXT", 4u), 0);
+    chk("stat trunc", st_size("/data/NEW.TXT"), 4);
+
+    /* 5. 目录 + 子目录里写 */
+    chk("mkdir", (INT32)LOS_FsMkdir("/data/D1"), 0);
+    (void)memset((VOID *)&g_st, 0, (UINT32)sizeof(g_st));
+    rc = (INT32)LOS_FsStat("/data/D1", &g_st);
+    chk("stat dir", (rc == 0) ? (INT32)g_st.type : -1, (INT32)LOS_FS_TYPE_DIR);
+    fd = (INT32)LOS_FsOpen("/data/D1/A.TXT", (UINT32)(LOS_O_CREAT | LOS_O_RDWR));
+    chk("open sub", (fd >= 0) ? 1 : 0, 1);
+    if (fd >= 0) {
+        chk("write sub", (INT32)LOS_FsWrite(fd, (const VOID *)"in subdir", 9u), 9);
+        chk("close sub", (INT32)LOS_FsClose(fd), 0);
+        chk("stat sub", st_size("/data/D1/A.TXT"), 9);
+    }
+
+    /* 6. readdir /data：NEW.TXT 和 D1 都得在 */
+    port_puts("  /data: ");
+    i = 0u;
+    while (i < 16u) {
+        (void)memset((VOID *)&g_de, 0, (UINT32)sizeof(g_de));
+        if ((INT32)LOS_FsReaddir("/data", i, &g_de) != 0) {
+            break;
+        }
+        port_puts((const char *)&g_de.name[0]);
+        port_puts(g_de.type == (UINT32)LOS_FS_TYPE_DIR ? "/ " : " ");
+        i++;
+    }
+    port_puts("\n");
+    chk("readdir count", (INT32)i >= 2 ? 1 : 0, 1);
+
+    /* 7. 目录不空时不让删 */
+    chk("rmdir non-empty", (INT32)LOS_FsRmdir("/data/D1"), 0 - OS_E_NOTEMPTY);
+
+    /* 8. 删除文件 */
+    chk("unlink", (INT32)LOS_FsUnlink("/data/NEW.TXT"), 0);
+    (void)memset((VOID *)&g_st, 0, (UINT32)sizeof(g_st));
+    chk("stat gone", (INT32)LOS_FsStat("/data/NEW.TXT", &g_st), 0 - OS_E_NOENT);
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: fat M11-2 failures=");
+        put_u32(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: fat M11-2（/data 可读写：创建/写/读回/追加/截断/目录/删除）\n");
+}

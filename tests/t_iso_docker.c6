@@ -1,0 +1,219 @@
+/* tests/t_iso_docker.c6 —— M11-3：docker 镜像 → ISO → 跑起来
+ *
+ * 这里扮演"容器的 init"：
+ *   1. 引导信息块拿到 rootfs（镜像的根文件系统）→ romfs 挂 "/"；
+ *   2. 注册 ATA 块设备 → FAT16 数据盘挂 "/data"（可写）；
+ *   3. 读镜像里的 /etc/c6os.cmd（ENTRYPOINT/CMD 元数据）并打印；
+ *   4. 把 /bin/app（镜像里的静态 ELF）读进内存，建地址空间、装段与栈、进 ring3。
+ * 之后 PASS/FAIL 由镜像里的程序自己打印——它写完 /data/out.txt 会回读一次。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "c6os/linux_abi.h"
+#include "los/los_typedef.h"
+#include "los/los_fs.h"
+#include "los/los_block.h"
+
+#define BOOTINFO_PA   0x7000u
+#define BOOTINFO_MAGIC 0x53493643u
+#define APP_PA        0x04000000u      /* 64MB：把 /bin/app 读到这里再 exec */
+#define FAT_LBA       0u               /* 数据盘整块就是 FAT16 卷（mkfat.py 从 0 开始） */
+
+static OsFsImage g_img = {0};
+static OsFsPart g_part = {0};
+static LosFsStat g_st = {0};
+static char g_cmd[128] = {0};
+
+static INT32 blk_rd_cb(UINT32 d, UINT32 blk, UINT32 cnt, VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_read(blk, cnt, (u64)buf);
+}
+
+static INT32 blk_wr_cb(UINT32 d, UINT32 blk, UINT32 cnt, const VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_write(blk, cnt, (u64)buf);
+}
+
+static void put_u32(UINT32 v)
+{
+    char b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((INT32)'0');
+        return;
+    }
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+/* 把 romfs 里的一个文件整块读进物理地址 pa（返回读到的字节数，负 = 错） */
+static INT32 load_file(const char *path, u64 pa)
+{
+    INT32 fd = 0;
+    INT32 n = 0;
+    INT32 total = 0;
+    u8 *dst = (u8 *)port_phys_map(pa);
+
+    fd = (INT32)LOS_FsOpen(path, (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    for (;;) {
+        n = (INT32)LOS_FsRead(fd, (VOID *)(dst + total), 4096u);
+        if (n <= 0) {
+            break;
+        }
+        total = total + n;
+        if (total > 0x00200000) {
+            break;
+        }
+    }
+    (void)LOS_FsClose(fd);
+    return total;
+}
+
+void os_main(void)
+{
+    volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
+    u64 as = 0u;
+    u32 magic = 0u;
+    u32 rpa = 0u;
+    u32 rlen = 0u;
+    u64 fsz = 0u;
+    const u8 *base = (const u8 *)0;
+    INT32 rc = 0;
+    INT32 n = 0;
+    UINT32 i = 0u;
+
+    port_init();
+    port_mmu_init();
+    port_puts("c6os docker M11-3: 从 ISO 起一套镜像\n");
+
+    magic = bi[0];
+    rpa = bi[5];
+    rlen = bi[6];
+    if (magic != BOOTINFO_MAGIC || rpa == 0u || rlen < 512u) {
+        port_puts("FAIL: docker M11-3（引导信息块/rootfs 不对）\n");
+        return;
+    }
+    port_phys_reserve((u64)rpa, (u64)rlen);
+
+    /* 1. 镜像的根文件系统 → "/" */
+    base = (const u8 *)port_phys_map((u64)rpa);
+    fsz = 0u;
+    i = 0u;
+    while (i < 8u) {
+        fsz = fsz | ((u64)base[i] << (u64)(8u * i));
+        i++;
+    }
+    port_puts("  rootfs: pa=");
+    put_u32(rpa);
+    port_puts(" len=");
+    put_u32((u32)fsz);
+    port_puts(" cpio=");
+    i = 0u;
+    while (i < 6u) {
+        port_putc((INT32)base[512u + i]);      /* 应该是 newc 的 "070701" */
+        i++;
+    }
+    port_puts("\n");
+    if (fsz < 64u || (u64)fsz > (u64)rlen) {
+        port_puts("FAIL: docker M11-3（rootfs 长度前缀不对）\n");
+        return;
+    }
+    g_img.buf = (void *)(base + 512);
+    g_img.len = (u32)fsz;
+    rc = (INT32)LOS_FsMount("", "/", "romfs", &g_img);
+    if (rc != 0) {
+        port_puts("FAIL: docker M11-3（romfs 挂 /）\n");
+        return;
+    }
+
+    /* 2. 可写数据盘 → "/data" */
+    rc = (INT32)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
+    if (rc < 0) {
+        port_puts("FAIL: docker M11-3（注册 ata0 rc=");
+        put_u32((u32)(0 - rc));
+        port_puts("）\n");
+        return;
+    }
+    g_part.lba = FAT_LBA;
+    rc = (INT32)LOS_FsMount("ata0", "/data", "fatfs", &g_part);
+    if (rc != 0) {
+        port_puts("FAIL: docker M11-3（/data 挂载 rc=");
+        put_u32((u32)(0 - rc));
+        port_puts(" devs=");
+        put_u32((u32)LOS_DeviceCount());
+        port_puts("）\n");
+        return;
+    }
+    port_puts("  / = 镜像 rootfs（romfs），/data = FAT16 数据盘\n");
+    /* 自检：VFS 面能不能在 /data 上建文件（用户态那条路要靠它） */
+    rc = (INT32)LOS_FsOpen("/data/probe.txt", (UINT32)(LOS_O_CREAT | LOS_O_RDWR));
+    port_puts("  probe /data/probe.txt rc=");
+    put_u32((u32)((rc < 0) ? (0 - rc) : rc));
+    port_puts("\n");
+    if (rc >= 0) {
+        (void)LOS_FsClose(rc);
+    }
+
+    /* 3. 镜像的 ENTRYPOINT 元数据 */
+    (void)memset((VOID *)&g_cmd[0], 0, (UINT32)sizeof(g_cmd));
+    rc = (INT32)LOS_FsStat("/etc/c6os.cmd", &g_st);
+    if (rc == 0 && g_st.size > 0u && g_st.size < (UINT32)sizeof(g_cmd)) {
+        INT32 fd = (INT32)LOS_FsOpen("/etc/c6os.cmd", (UINT32)LOS_O_RDONLY);
+
+        if (fd >= 0) {
+            n = (INT32)LOS_FsRead(fd, (VOID *)&g_cmd[0], (UINT32)sizeof(g_cmd) - 1u);
+            (void)LOS_FsClose(fd);
+            if (n > 0) {
+                port_puts("  /etc/c6os.cmd: ");
+                port_puts((const char *)&g_cmd[0]);
+            }
+        }
+    }
+
+    /* 4. 装载镜像里的程序并进 ring3 */
+    port_linux_arch_init();
+    (void)memset((VOID *)&g_st, 0, (UINT32)sizeof(g_st));
+    rc = (INT32)LOS_FsStat("/bin/app", &g_st);
+    if (rc != 0 || g_st.size < 64u) {
+        port_puts("FAIL: docker M11-3（镜像里没有 /bin/app）\n");
+        return;
+    }
+    port_puts("  /bin/app size=");
+    put_u32(g_st.size);
+    port_puts("\n");
+    port_phys_reserve((u64)APP_PA, (u64)g_st.size + 4096u);
+    n = load_file("/bin/app", (u64)APP_PA);
+    if (n <= 0) {
+        port_puts("FAIL: docker M11-3（读 /bin/app）\n");
+        return;
+    }
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: docker M11-3（port_as_create）\n");
+        return;
+    }
+    if (lx_exec_prepare(as, (u64)APP_PA, (u64)n, "/bin/app") != 0) {
+        port_puts("FAIL: docker M11-3（lx_exec_prepare）\n");
+        return;
+    }
+    port_puts("  elf 就绪，进用户态（镜像程序开始跑）\n");
+    port_user_enter(as, lx_exec_entry(), lx_exec_rsp(), 0u);
+    port_puts("FAIL: docker M11-3（从用户态返回，不应发生）\n");
+}

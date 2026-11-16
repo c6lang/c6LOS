@@ -1,8 +1,9 @@
-/* kernel/fatfs.c6 — FAT16/FAT32 只读（M9-3）
+/* kernel/fatfs.c6 — FAT16/FAT32 读写（M9-3 只读，M11-2 加写）
  *
- * 只做"能读真实镜像"的最小集：BPB → FAT 表 → 簇链 → 8.3 目录项。
- * 不支持长文件名（LFN）、写、格式化、exFAT —— 这些都不在 M9 的目标里
- * （docs/vfs-net-design.md §2.5）。
+ * M9-3 只做"能读真实镜像"：BPB → FAT 表 → 簇链 → 8.3 目录项。
+ * M11-2 补写路径：建文件/建目录/写/截断/删除/同步。写的顺序固定为
+ * **先数据、再 FAT、最后目录项**，掉电最多丢数据不毁结构。
+ * 仍然不支持：长文件名（LFN）、exFAT、重命名（rename 返回 -EOPNOTSUPP）。
  *
  * 数据源是**块设备**（include/los/los_block.h），所以 x86 上是 ATA PIO 读，
  * 换 S3 只是换设备驱动，不动这个文件。
@@ -24,6 +25,17 @@
 #define FAT_ATTR_VOL   0x08u
 #define FAT_ATTR_LFN   0x0Fu
 
+#define FAT_MAX_FILES 8
+
+/* 打开的文件：fh 里放 (下标+1)，写回时要靠它找目录项改大小/首簇 */
+typedef struct {
+    u32 used;
+    u32 dir_clus;     /* 目录项所在目录（FAT_ROOT_FIXED = 根） */
+    u32 slot;         /* 目录项在目录里的序号 */
+    u32 clus;         /* 首簇 */
+    u32 size;         /* 当前大小 */
+} FatFile;
+
 typedef struct {
     u32 used;
     u32 dev;          /* 块设备号 */
@@ -40,6 +52,7 @@ typedef struct {
     u32 bits;         /* 16 / 32 */
     u32 root_clus;    /* FAT32 根目录起始簇 */
     u8  sec[FAT_SEC_SIZE];
+    FatFile files[FAT_MAX_FILES];
 } FatVol;
 
 static FatVol g_fat[FAT_MAX_MOUNTS] = {0};
@@ -293,6 +306,542 @@ static int fat_walk_(FatVol *v, const char *rel, u32 *out_ent_clus,
     }
 }
 
+/* ---- 写路径（M11-2）----------------------------------------------------- */
+/*
+ * 写盘的顺序固定为：**先数据簇、再 FAT、最后目录项**。掉电最坏是数据少一截，
+ * 不会出现"目录项指着一个没写过的簇"这种结构性损坏。
+ * FAT16 是写穿（write-through）：每改一个扇区立刻 LOS_BlockWrite，没有缓存，
+ * 所以 LOS_FsSync 对 FAT 后端就是空操作。
+ */
+
+static int fat_write_(FatVol *v, u32 sec, const u8 *buf)
+{
+    if (LOS_BlockWrite(v->dev, v->lba + sec, 1u, (const VOID *)buf) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    return 0;
+}
+
+/* 原始 FAT 项：0 = 空闲，>= 0xFFF8/0x0FFFFFF8 = 链尾 */
+static u32 fat_get_(FatVol *v, u32 clus)
+{
+    u32 off = clus * (v->bits / 8u);
+    u32 sec = v->reserved + off / FAT_SEC_SIZE;
+    u32 idx = off % FAT_SEC_SIZE;
+
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0xFFFFFFFFu;
+    }
+    if (v->bits == 16u) {
+        return fat_u16_(v->sec + idx);
+    }
+    return fat_u32_(v->sec + idx) & 0x0FFFFFFFu;
+}
+
+/* 写 FAT 项：所有 FAT 副本都写一遍 */
+static int fat_set_(FatVol *v, u32 clus, u32 val)
+{
+    u32 off = clus * (v->bits / 8u);
+    u32 sec = v->reserved + off / FAT_SEC_SIZE;
+    u32 idx = off % FAT_SEC_SIZE;
+    u32 f = 0u;
+
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (v->bits == 16u) {
+        v->sec[idx] = (u8)(val & 0xFFu);
+        v->sec[idx + 1u] = (u8)((val >> 8) & 0xFFu);
+    } else {
+        u32 old = fat_u32_(v->sec + idx);
+
+        old = (old & 0xF0000000u) | (val & 0x0FFFFFFFu);
+        v->sec[idx] = (u8)(old & 0xFFu);
+        v->sec[idx + 1u] = (u8)((old >> 8) & 0xFFu);
+        v->sec[idx + 2u] = (u8)((old >> 16) & 0xFFu);
+        v->sec[idx + 3u] = (u8)((old >> 24) & 0xFFu);
+    }
+    f = 0u;
+    while (f < v->nfats) {
+        if (fat_write_(v, sec + f * v->fat_secs, v->sec) != 0) {
+            return 0 - OS_E_INVAL;
+        }
+        f++;
+    }
+    return 0;
+}
+
+static int fat_zero_clus_(FatVol *v, u32 clus)
+{
+    u32 s = 0u;
+
+    (void)memset((void *)v->sec, 0, (size_t)FAT_SEC_SIZE);
+    s = 0u;
+    while (s < v->spc) {
+        if (fat_write_(v, fat_sec_of_clus_(v, clus) + s, v->sec) != 0) {
+            return 0 - OS_E_INVAL;
+        }
+        s++;
+    }
+    return 0;
+}
+
+/* first-fit 找一个空闲簇：标链尾、清 0，prev 非 0 就接到链上 */
+static u32 fat_alloc_(FatVol *v, u32 prev)
+{
+    u32 c = 2u;
+    u32 got = 0u;
+    u32 eoc = 0u;
+
+    eoc = (v->bits == 16u) ? 0xFFFFu : 0x0FFFFFFFu;
+    while (c < v->max_clus) {
+        if (fat_get_(v, c) == 0u) {
+            got = c;
+            break;
+        }
+        c++;
+    }
+    if (got == 0u) {
+        return 0u;
+    }
+    if (fat_set_(v, got, eoc) != 0) {
+        return 0u;
+    }
+    if (fat_zero_clus_(v, got) != 0) {
+        return 0u;
+    }
+    if (prev != 0u && fat_set_(v, prev, got) != 0) {
+        return 0u;
+    }
+    return got;
+}
+
+/* 归还整条簇链 */
+static int fat_free_chain_(FatVol *v, u32 clus)
+{
+    u32 c = clus;
+    u32 n = 0u;
+
+    while (c >= 2u && c < v->max_clus && n < 0x100000u) {
+        u32 next = fat_get_(v, c);
+
+        if (fat_set_(v, c, 0u) != 0) {
+            return 0 - OS_E_INVAL;
+        }
+        if (next < 2u || next >= v->max_clus) {
+            break;
+        }
+        c = next;
+        n++;
+    }
+    return 0;
+}
+
+/* 第 n 个目录项落在哪个扇区/偏移：0 = ok，1 = 到头，负 = 错 */
+static int fat_dent_sec_(FatVol *v, u32 dir_clus, u32 n, u32 *o_sec, u32 *o_idx)
+{
+    u32 per_clus = 0u;
+
+    if (dir_clus == FAT_ROOT_FIXED) {
+        if (n >= v->root_ents) {
+            return 1;
+        }
+        *o_sec = v->root_start + n / FAT_ENT_PER_SEC;
+        *o_idx = n % FAT_ENT_PER_SEC;
+        return 0;
+    }
+    per_clus = v->spc * FAT_ENT_PER_SEC;
+    {
+        u32 ci = n / per_clus;
+        u32 rem = n % per_clus;
+        u32 c = fat_chain_nth_(v, dir_clus, ci);
+
+        if (c == 0u) {
+            return 1;
+        }
+        *o_sec = fat_sec_of_clus_(v, c) + rem / FAT_ENT_PER_SEC;
+        *o_idx = rem % FAT_ENT_PER_SEC;
+    }
+    return 0;
+}
+
+static int fat_dent_put_(FatVol *v, u32 dir_clus, u32 n, const u8 *ent)
+{
+    u32 sec = 0u;
+    u32 idx = 0u;
+    int rc = fat_dent_sec_(v, dir_clus, n, &sec, &idx);
+
+    if (rc > 0) {
+        return 0 - OS_E_NOSPC;
+    }
+    if (rc < 0) {
+        return rc;
+    }
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    (void)memcpy((void *)(v->sec + idx * 32u), (const void *)ent, 32u);
+    if (fat_write_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    return 0;
+}
+
+/* 改目录项的首簇/大小（写完数据最后一步） */
+static int fat_dent_update_(FatVol *v, u32 dir_clus, u32 slot, u32 clus, u32 size)
+{
+    u32 sec = 0u;
+    u32 idx = 0u;
+    u8 *e = (u8 *)0;
+    int rc = fat_dent_sec_(v, dir_clus, slot, &sec, &idx);
+
+    if (rc > 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (rc < 0) {
+        return rc;
+    }
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    e = v->sec + idx * 32u;
+    e[26] = (u8)(clus & 0xFFu);
+    e[27] = (u8)((clus >> 8) & 0xFFu);
+    if (v->bits == 32u) {
+        e[20] = (u8)((clus >> 16) & 0xFFu);
+        e[21] = (u8)((clus >> 24) & 0xFFu);
+    }
+    e[28] = (u8)(size & 0xFFu);
+    e[29] = (u8)((size >> 8) & 0xFFu);
+    e[30] = (u8)((size >> 16) & 0xFFu);
+    e[31] = (u8)((size >> 24) & 0xFFu);
+    if (fat_write_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    return 0;
+}
+
+/* 目录里第一个空槽（0x00 或 0xE5）；子目录满了就扩一簇，固定根目录返回 -ENOSPC */
+static int fat_dir_slot_(FatVol *v, u32 dir_clus, u32 *o_n)
+{
+    u32 n = 0u;
+    u8 ent[32] = {0};
+
+    while (n < 0x10000u) {
+        int rc = fat_dent_at_(v, dir_clus, n, (u8 *)&ent[0]);
+
+        if (rc < 0) {
+            return rc;
+        }
+        if (rc == 1) {
+            break;
+        }
+        if (ent[0] == 0x00u || ent[0] == 0xE5u) {
+            *o_n = n;
+            return 0;
+        }
+        n++;
+    }
+    if (dir_clus != FAT_ROOT_FIXED) {
+        u32 c = dir_clus;
+        u32 nx = fat_get_(v, c);
+
+        while (nx >= 2u && nx < v->max_clus) {
+            c = nx;
+            nx = fat_get_(v, c);
+        }
+        if (fat_alloc_(v, c) != 0u) {
+            *o_n = n;
+            return 0;
+        }
+    }
+    return 0 - OS_E_NOSPC;
+}
+
+/* 找已有目录项的槽号 */
+static int fat_slot_of_(FatVol *v, u32 dir_clus, const char *leaf, u32 *o_n)
+{
+    u8 want[11] = {0};
+    u8 ent[32] = {0};
+    u32 n = 0u;
+
+    fat_name11_(leaf, (u8 *)&want[0]);
+    for (;;) {
+        int rc = fat_dent_at_(v, dir_clus, n, (u8 *)&ent[0]);
+
+        if (rc < 0) {
+            return rc;
+        }
+        if (rc == 1 || ent[0] == 0x00u) {
+            return 0 - OS_E_NOENT;
+        }
+        if (ent[0] != 0xE5u && (ent[11] & FAT_ATTR_LFN) != FAT_ATTR_LFN &&
+            memcmp((const void *)&ent[0], (const void *)&want[0], 11u) == 0) {
+            *o_n = n;
+            return 0;
+        }
+        n++;
+    }
+}
+
+/* 填一个 32 字节目录项（没有 RTC，时间戳写死 2025-01-01 00:00） */
+static void fat_dent_fill_(u8 *ent, const char *leaf, u32 attr, u32 clus, u32 size)
+{
+    u8 name[11] = {0};
+
+    if (leaf[0] == '.' && leaf[1] == '\0') {
+        (void)memset((void *)&name[0], (int)' ', 11u);
+        name[0] = (u8)'.';
+    } else if (leaf[0] == '.' && leaf[1] == '.' && leaf[2] == '\0') {
+        (void)memset((void *)&name[0], (int)' ', 11u);
+        name[0] = (u8)'.';
+        name[1] = (u8)'.';
+    } else {
+        fat_name11_(leaf, (u8 *)&name[0]);
+    }
+    (void)memset((void *)ent, 0, 32u);
+    (void)memcpy((void *)ent, (const void *)&name[0], 11u);
+    ent[11] = (u8)attr;
+    ent[16] = 0x21u;                       /* 创建日期 2025-01-01 */
+    ent[17] = 0x5Au;
+    ent[18] = 0x21u;                       /* 访问日期 */
+    ent[19] = 0x5Au;
+    ent[24] = 0x21u;                       /* 写日期 */
+    ent[25] = 0x5Au;
+    ent[26] = (u8)(clus & 0xFFu);
+    ent[27] = (u8)((clus >> 8) & 0xFFu);
+    if (leaf[0] != '.') {
+        ent[28] = (u8)(size & 0xFFu);
+        ent[29] = (u8)((size >> 8) & 0xFFu);
+        ent[30] = (u8)((size >> 16) & 0xFFu);
+        ent[31] = (u8)((size >> 24) & 0xFFu);
+    }
+}
+
+/* rel → 父目录路径 + 最后一段名字（parent 至少 2 字节） */
+static int fat_split_(const char *rel, char *parent, u32 psz, char *leaf, u32 lsz)
+{
+    u32 i = 0u;
+    u32 last = 0u;
+    u32 start = 0u;
+    u32 n = 0u;
+
+    while (rel[i] != '\0') {
+        if (rel[i] == '/') {
+            last = i;
+        }
+        i++;
+    }
+    if (i == 0u || (i == 1u && rel[0] == '/')) {
+        return 0 - OS_E_INVAL;             /* 根目录本身没有"最后一段" */
+    }
+    parent[0] = '/';
+    parent[1] = '\0';
+    if (last > 0u) {
+        if (last + 1u > psz) {
+            return 0 - OS_E_INVAL;
+        }
+        (void)memcpy((void *)parent, (const void *)rel, (size_t)last);
+        parent[last] = '\0';
+    }
+    start = (last == 0u) ? ((rel[0] == '/') ? 1u : 0u) : (last + 1u);
+    n = i - start;
+    if (n == 0u || n + 1u > lsz) {
+        return 0 - OS_E_INVAL;
+    }
+    (void)memcpy((void *)leaf, (const void *)(rel + start), (size_t)n);
+    leaf[n] = '\0';
+    return 0;
+}
+
+static int fat_dir_of_(FatVol *v, const char *parent, u32 *o_dir)
+{
+    u32 ent = 0u;
+    u32 size = 0u;
+    u32 attr = 0u;
+    u32 dir = 0u;
+    int rc = fat_walk_(v, parent, &ent, &size, &attr, &dir);
+
+    if (rc != 0) {
+        return rc;
+    }
+    if (ent == FAT_ROOT_FIXED) {
+        *o_dir = FAT_ROOT_FIXED;
+        return 0;
+    }
+    if ((attr & FAT_ATTR_DIR) == 0u) {
+        return 0 - OS_E_NOTDIR;
+    }
+    *o_dir = ent;
+    return 0;
+}
+
+/* 新建目录项（普通文件或目录）；目录会顺带写 "." 和 ".." */
+static int fat_add_dent_(FatVol *v, const char *rel, u32 attr, u32 *o_clus,
+                         u32 *o_dclus, u32 *o_slot)
+{
+    char parent[LOS_FS_PATH_MAX] = {0};
+    char leaf[LOS_FS_NAME_MAX] = {0};
+    u32 dir = 0u;
+    u32 slot = 0u;
+    u32 clus = 0u;
+    u32 size = 0u;
+    u32 at = 0u;
+    u8 ent[32] = {0};
+    int rc = 0;
+
+    rc = fat_split_(rel, (char *)&parent[0], (u32)sizeof(parent),
+                    (char *)&leaf[0], (u32)sizeof(leaf));
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dir_of_(v, (const char *)&parent[0], &dir);
+    if (rc != 0) {
+        return rc;
+    }
+    if (fat_lookup_(v, dir, (const char *)&leaf[0], &clus, &size, &at) == 0) {
+        return 0 - OS_E_EXIST;
+    }
+    rc = fat_dir_slot_(v, dir, &slot);
+    if (rc != 0) {
+        return rc;
+    }
+    clus = 0u;
+    if ((attr & FAT_ATTR_DIR) != 0u) {
+        clus = fat_alloc_(v, 0u);
+        if (clus == 0u) {
+            return 0 - OS_E_NOSPC;
+        }
+    }
+    fat_dent_fill_((u8 *)&ent[0], (const char *)&leaf[0], attr, clus, 0u);
+    rc = fat_dent_put_(v, dir, slot, (const u8 *)&ent[0]);
+    if (rc != 0) {
+        if (clus != 0u) {
+            (void)fat_free_chain_(v, clus);
+        }
+        return rc;
+    }
+    if ((attr & FAT_ATTR_DIR) != 0u) {
+        u8 dot[32] = {0};
+        u8 dotdot[32] = {0};
+        u32 pclus = (dir == FAT_ROOT_FIXED) ? 0u : dir;
+
+        fat_dent_fill_((u8 *)&dot[0], ".", FAT_ATTR_DIR, clus, 0u);
+        (void)fat_dent_put_(v, clus, 0u, (const u8 *)&dot[0]);
+        fat_dent_fill_((u8 *)&dotdot[0], "..", FAT_ATTR_DIR, pclus, 0u);
+        (void)fat_dent_put_(v, clus, 1u, (const u8 *)&dotdot[0]);
+    }
+    *o_clus = clus;
+    *o_dclus = dir;
+    *o_slot = slot;
+    return 0;
+}
+
+/* 把簇链拉到 need 个簇（返回新的首簇；失败返回 0） */
+static u32 fat_chain_grow_(FatVol *v, u32 first, u32 have, u32 need)
+{
+    u32 c = first;
+    u32 i = have;
+
+    while (i < need) {
+        if (c < 2u) {
+            c = fat_alloc_(v, 0u);
+            if (c == 0u) {
+                return 0u;
+            }
+        } else {
+            u32 last = c;
+            u32 nx = fat_get_(v, last);
+
+            while (nx >= 2u && nx < v->max_clus) {
+                last = nx;
+                nx = fat_get_(v, last);
+            }
+            if (fat_alloc_(v, last) == 0u) {
+                return 0u;
+            }
+        }
+        i++;
+    }
+    return (c < 2u) ? 0u : c;
+}
+
+/* 截断/增长到 want 字节；首簇可能变（0 → 新分配），返回新的首簇 */
+static u32 fat_chain_trim_(FatVol *v, u32 first, u32 cur, u32 want)
+{
+    u32 per = v->spc * FAT_SEC_SIZE;
+    u32 have = (cur + per - 1u) / per;
+    u32 need = (want + per - 1u) / per;
+    u32 c = first;
+    u32 prev = 0u;
+    u32 i = 0u;
+
+    if (need == 0u) {
+        if (c >= 2u) {
+            (void)fat_free_chain_(v, c);
+        }
+        return 0u;
+    }
+    c = fat_chain_grow_(v, first, have, need);
+    if (c < 2u) {
+        return 0u;
+    }
+    /* 收缩：走到第 need 个簇，把它当链尾，后面的全还回去 */
+    prev = 0u;
+    i = 0u;
+    while (i < need && c >= 2u) {
+        prev = c;
+        if (i + 1u < need) {
+            u32 nx = fat_get_(v, c);
+
+            c = (nx >= 2u && nx < v->max_clus) ? nx : 0u;
+        }
+        i++;
+    }
+    if (prev >= 2u) {
+        u32 nx = fat_get_(v, prev);
+
+        if (nx >= 2u && nx < v->max_clus) {
+            u32 eoc = (v->bits == 16u) ? 0xFFFFu : 0x0FFFFFFFu;
+
+            (void)fat_free_chain_(v, nx);
+            (void)fat_set_(v, prev, eoc);
+        }
+    }
+    return first;
+}
+
+static FatFile *fat_file_(FatVol *v, void *fh)
+{
+    u32 idx = (u32)(u64)fh;
+
+    if (idx == 0u || idx > (u32)FAT_MAX_FILES) {
+        return (FatFile *)0;
+    }
+    if (v->files[idx - 1u].used == 0u) {
+        return (FatFile *)0;
+    }
+    return &v->files[idx - 1u];
+}
+
+static void *fat_file_new_(FatVol *v, u32 dclus, u32 slot, u32 clus, u32 size)
+{
+    u32 i = 0u;
+
+    while (i < (u32)FAT_MAX_FILES) {
+        if (v->files[i].used == 0u) {
+            v->files[i].used = 1u;
+            v->files[i].dir_clus = dclus;
+            v->files[i].slot = slot;
+            v->files[i].clus = clus;
+            v->files[i].size = size;
+            return (void *)(u64)(i + 1u);
+        }
+        i++;
+    }
+    return (void *)0;
+}
+
 /* ---- 后端接口 ----------------------------------------------------------- */
 
 int fatfs_mount(OsMount *m, void *data)
@@ -385,42 +934,89 @@ int fatfs_umount(OsMount *m)
 
 int fatfs_open(OsMount *m, const char *rel, u32 flags, void **fh)
 {
-    FatVol *v = (FatVol *)m->priv;
-    u32 ent_clus = 0u;
+    FatVol *v = (FatVol *)0;
+    char parent[LOS_FS_PATH_MAX] = {0};
+    char leaf[LOS_FS_NAME_MAX] = {0};
+    u32 dir = 0u;
+    u32 slot = 0u;
+    u32 clus = 0u;
     u32 size = 0u;
     u32 attr = 0u;
-    u32 dir = 0u;
+    void *h = (void *)0;
     int rc = 0;
 
-    if (v == (FatVol *)0 || fh == (void **)0) {
+    if (m == (OsMount *)0 || fh == (void **)0) {
         return 0 - OS_E_INVAL;
     }
-    if ((flags & ((u32)LOS_O_WRONLY | (u32)LOS_O_RDWR | (u32)LOS_O_CREAT |
-                  (u32)LOS_O_TRUNC)) != 0u) {
-        return 0 - OS_E_ROFS;
+    v = (FatVol *)m->priv;
+    if (v == (FatVol *)0) {
+        return 0 - OS_E_INVAL;
     }
-    rc = fat_walk_(v, rel, &ent_clus, &size, &attr, &dir);
+    rc = fat_split_(rel, (char *)&parent[0], (u32)sizeof(parent),
+                    (char *)&leaf[0], (u32)sizeof(leaf));
     if (rc != 0) {
         return rc;
     }
-    if ((attr & FAT_ATTR_DIR) != 0u || ent_clus == FAT_ROOT_FIXED) {
-        return 0 - OS_E_ISDIR;
+    rc = fat_dir_of_(v, (const char *)&parent[0], &dir);
+    if (rc != 0) {
+        return rc;
     }
-    *fh = (void *)(u64)(ent_clus + 1u);
+    rc = fat_lookup_(v, dir, (const char *)&leaf[0], &clus, &size, &attr);
+    if (rc == 0) {
+        if ((flags & (u32)LOS_O_CREAT) != 0u && (flags & (u32)LOS_O_EXCL) != 0u) {
+            return 0 - OS_E_EXIST;
+        }
+        if ((attr & FAT_ATTR_DIR) != 0u) {
+            return 0 - OS_E_ISDIR;
+        }
+        rc = fat_slot_of_(v, dir, (const char *)&leaf[0], &slot);
+        if (rc != 0) {
+            return rc;
+        }
+    } else {
+        if (rc != (0 - OS_E_NOENT) || (flags & (u32)LOS_O_CREAT) == 0u) {
+            return rc;
+        }
+        rc = fat_add_dent_(v, rel, 0u, &clus, &dir, &slot);
+        if (rc != 0) {
+            return rc;
+        }
+        size = 0u;
+    }
+    if ((flags & (u32)LOS_O_TRUNC) != 0u && size > 0u) {
+        clus = fat_chain_trim_(v, clus, size, 0u);
+        size = 0u;
+        (void)fat_dent_update_(v, dir, slot, clus, size);
+    }
+    h = fat_file_new_(v, dir, slot, clus, size);
+    if (h == (void *)0) {
+        return 0 - OS_E_NOMEM;
+    }
+    *fh = h;
     return 0;
 }
 
 int fatfs_close(OsMount *m, void *fh)
 {
-    (void)m;
-    (void)fh;
+    FatVol *v = (FatVol *)0;
+    FatFile *f = (FatFile *)0;
+
+    if (m == (OsMount *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    f = fat_file_(v, fh);
+    if (f == (FatFile *)0) {
+        return 0 - OS_E_BADF;
+    }
+    (void)memset((void *)f, 0, (size_t)sizeof(FatFile));
     return 0;
 }
 
 int fatfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
 {
-    FatVol *v = (FatVol *)m->priv;
-    u32 clus = (u32)(u64)fh - 1u;
+    FatVol *v = (FatVol *)0;
+    FatFile *f = (FatFile *)0;
     u32 per = 0u;
     u32 ci = 0u;
     u32 off = 0u;
@@ -428,14 +1024,24 @@ int fatfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
     u32 n = 0u;
     u8 *out = (u8 *)buf;
 
-    if (v == (FatVol *)0 || fh == (void *)0) {
+    if (m == (OsMount *)0 || buf == (void *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    f = fat_file_(v, fh);
+    if (f == (FatFile *)0) {
         return 0 - OS_E_BADF;
     }
-    /* 长度已经由 LOS_FsRead 用 open 时记下的 size 夹过，这里按簇链读完即可 */
+    if (pos >= f->size || len == 0u) {
+        return 0;
+    }
+    if (len > f->size - pos) {
+        len = f->size - pos;
+    }
     per = v->spc * FAT_SEC_SIZE;
     ci = pos / per;
     off = pos % per;
-    c = fat_chain_nth_(v, clus, ci);
+    c = (f->clus >= 2u) ? fat_chain_nth_(v, f->clus, ci) : 0u;
     while (n < len && c >= 2u && c < v->max_clus) {
         u32 sec = fat_sec_of_clus_(v, c) + off / FAT_SEC_SIZE;
         u32 bo = off % FAT_SEC_SIZE;
@@ -575,39 +1181,268 @@ int fatfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
     }
 }
 
-/* 只读后端：写侧一律 -EROFS */
+/* ---- 写侧（M11-2）：先数据 → 再 FAT → 最后目录项 ---- */
+
 int fatfs_write(OsMount *m, void *fh, u32 pos, const void *buf, u32 len)
 {
-    (void)m; (void)fh; (void)pos; (void)buf; (void)len;
-    return 0 - OS_E_ROFS;
-}
+    FatVol *v = (FatVol *)0;
+    FatFile *f = (FatFile *)0;
+    u32 per = 0u;
+    u32 need = 0u;
+    u32 have = 0u;
+    u32 ci = 0u;
+    u32 off = 0u;
+    u32 c = 0u;
+    u32 n = 0u;
+    const u8 *src = (const u8 *)buf;
+    int rc = 0;
 
-int fatfs_unlink(OsMount *m, const char *rel)
-{
-    (void)m; (void)rel;
-    return 0 - OS_E_ROFS;
-}
+    if (m == (OsMount *)0 || buf == (void *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    f = fat_file_(v, fh);
+    if (f == (FatFile *)0) {
+        return 0 - OS_E_BADF;
+    }
+    if (len == 0u) {
+        return 0;
+    }
+    per = v->spc * FAT_SEC_SIZE;
+    need = (pos + len + per - 1u) / per;
+    have = (f->size + per - 1u) / per;
+    if (need > have) {
+        u32 first = fat_chain_grow_(v, f->clus, have, need);
 
-int fatfs_mkdir(OsMount *m, const char *rel)
-{
-    (void)m; (void)rel;
-    return 0 - OS_E_ROFS;
-}
+        if (first < 2u) {
+            return 0 - OS_E_NOSPC;
+        }
+        f->clus = first;
+    }
+    ci = pos / per;
+    off = pos % per;
+    c = (f->clus >= 2u) ? fat_chain_nth_(v, f->clus, ci) : 0u;
+    while (n < len && c >= 2u && c < v->max_clus) {
+        u32 sec = fat_sec_of_clus_(v, c) + off / FAT_SEC_SIZE;
+        u32 bo = off % FAT_SEC_SIZE;
+        u32 take = FAT_SEC_SIZE - bo;
 
-int fatfs_rmdir(OsMount *m, const char *rel)
-{
-    (void)m; (void)rel;
-    return 0 - OS_E_ROFS;
-}
-
-int fatfs_rename(OsMount *m, const char *from, const char *to)
-{
-    (void)m; (void)from; (void)to;
-    return 0 - OS_E_ROFS;
+        if (take > len - n) {
+            take = len - n;
+        }
+        if (fat_read_(v, sec, v->sec) != 0) {
+            return 0 - OS_E_INVAL;
+        }
+        (void)memcpy((void *)(v->sec + bo), (const void *)(src + n), (size_t)take);
+        if (fat_write_(v, sec, v->sec) != 0) {
+            return 0 - OS_E_INVAL;
+        }
+        n += take;
+        off += take;
+        if (off >= per) {
+            off = 0u;
+            c = fat_next_(v, c);
+        }
+    }
+    if (pos + n > f->size) {
+        f->size = pos + n;
+    }
+    rc = fat_dent_update_(v, f->dir_clus, f->slot, f->clus, f->size);
+    if (rc != 0) {
+        return rc;
+    }
+    return (int)n;
 }
 
 int fatfs_truncate(OsMount *m, const char *rel, u32 size)
 {
-    (void)m; (void)rel; (void)size;
-    return 0 - OS_E_ROFS;
+    FatVol *v = (FatVol *)0;
+    char parent[LOS_FS_PATH_MAX] = {0};
+    char leaf[LOS_FS_NAME_MAX] = {0};
+    u32 dir = 0u;
+    u32 slot = 0u;
+    u32 clus = 0u;
+    u32 cur = 0u;
+    u32 attr = 0u;
+    u32 first = 0u;
+    int rc = 0;
+
+    if (m == (OsMount *)0 || rel == (const char *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    rc = fat_split_(rel, (char *)&parent[0], (u32)sizeof(parent),
+                    (char *)&leaf[0], (u32)sizeof(leaf));
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dir_of_(v, (const char *)&parent[0], &dir);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_lookup_(v, dir, (const char *)&leaf[0], &clus, &cur, &attr);
+    if (rc != 0) {
+        return rc;
+    }
+    if ((attr & FAT_ATTR_DIR) != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    rc = fat_slot_of_(v, dir, (const char *)&leaf[0], &slot);
+    if (rc != 0) {
+        return rc;
+    }
+    first = fat_chain_trim_(v, clus, cur, size);
+    if (size > 0u && first < 2u) {
+        return 0 - OS_E_NOSPC;
+    }
+    return fat_dent_update_(v, dir, slot, first, size);
+}
+
+int fatfs_unlink(OsMount *m, const char *rel)
+{
+    FatVol *v = (FatVol *)0;
+    char parent[LOS_FS_PATH_MAX] = {0};
+    char leaf[LOS_FS_NAME_MAX] = {0};
+    u32 dir = 0u;
+    u32 slot = 0u;
+    u32 clus = 0u;
+    u32 size = 0u;
+    u32 attr = 0u;
+    u32 sec = 0u;
+    u32 idx = 0u;
+    int rc = 0;
+
+    if (m == (OsMount *)0 || rel == (const char *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    rc = fat_split_(rel, (char *)&parent[0], (u32)sizeof(parent),
+                    (char *)&leaf[0], (u32)sizeof(leaf));
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dir_of_(v, (const char *)&parent[0], &dir);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_lookup_(v, dir, (const char *)&leaf[0], &clus, &size, &attr);
+    if (rc != 0) {
+        return rc;
+    }
+    if ((attr & FAT_ATTR_DIR) != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    rc = fat_slot_of_(v, dir, (const char *)&leaf[0], &slot);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dent_sec_(v, dir, slot, &sec, &idx);
+    if (rc != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    v->sec[idx * 32u] = 0xE5u;             /* 先删目录项，再还簇链 */
+    if (fat_write_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (clus >= 2u && clus < v->max_clus) {
+        (void)fat_free_chain_(v, clus);
+    }
+    return 0;
+}
+
+int fatfs_mkdir(OsMount *m, const char *rel)
+{
+    FatVol *v = (FatVol *)0;
+    u32 clus = 0u;
+    u32 dir = 0u;
+    u32 slot = 0u;
+
+    if (m == (OsMount *)0 || rel == (const char *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    return fat_add_dent_(v, rel, (u32)FAT_ATTR_DIR, &clus, &dir, &slot);
+}
+
+int fatfs_rmdir(OsMount *m, const char *rel)
+{
+    FatVol *v = (FatVol *)0;
+    char parent[LOS_FS_PATH_MAX] = {0};
+    char leaf[LOS_FS_NAME_MAX] = {0};
+    u32 dir = 0u;
+    u32 slot = 0u;
+    u32 clus = 0u;
+    u32 size = 0u;
+    u32 attr = 0u;
+    u32 sec = 0u;
+    u32 idx = 0u;
+    u32 n = 2u;
+    int rc = 0;
+
+    if (m == (OsMount *)0 || rel == (const char *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    rc = fat_split_(rel, (char *)&parent[0], (u32)sizeof(parent),
+                    (char *)&leaf[0], (u32)sizeof(leaf));
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dir_of_(v, (char *)&parent[0], &dir);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_lookup_(v, dir, (const char *)&leaf[0], &clus, &size, &attr);
+    if (rc != 0) {
+        return rc;
+    }
+    if ((attr & FAT_ATTR_DIR) == 0u) {
+        return 0 - OS_E_NOTDIR;
+    }
+    /* 目录里除了 "." ".." 还有东西就不让删 */
+    while (n < 0x10000u) {
+        u8 ent[32] = {0};
+
+        rc = fat_dent_at_(v, clus, n, (u8 *)&ent[0]);
+        if (rc < 0) {
+            return rc;
+        }
+        if (rc == 1 || ent[0] == 0x00u) {
+            break;
+        }
+        if (ent[0] != 0xE5u && (ent[11] & FAT_ATTR_LFN) != FAT_ATTR_LFN) {
+            return 0 - OS_E_NOTEMPTY;
+        }
+        n++;
+    }
+    rc = fat_slot_of_(v, dir, (const char *)&leaf[0], &slot);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fat_dent_sec_(v, dir, slot, &sec, &idx);
+    if (rc != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (fat_read_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    v->sec[idx * 32u] = 0xE5u;
+    if (fat_write_(v, sec, v->sec) != 0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (clus >= 2u && clus < v->max_clus) {
+        (void)fat_free_chain_(v, clus);
+    }
+    return 0;
+}
+
+int fatfs_rename(OsMount *m, const char *from, const char *to)
+{
+    (void)m;
+    (void)from;
+    (void)to;
+    return 0 - OS_E_OPNOTSUPP;             /* 8.3 改名会牵扯目录项/簇链搬迁，不做 */
 }

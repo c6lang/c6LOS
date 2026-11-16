@@ -28,6 +28,8 @@ M7 屏/仪表盘进行中。施工前先读：
 | [docs/testing.md](docs/testing.md) | 四层验证矩阵、确定性测试、验收门禁 |
 | [docs/todo.md](docs/todo.md) | 任务板（M0–M8、依赖、验收、状态） |
 | [docs/board-s3.md](docs/board-s3.md) | 真板烧写/串口/中断/故障排查（实测流程） |
+| [docs/vfs-net-design.md](docs/vfs-net-design.md) | M9/M10 设计与施工记录：VFS/romfs/ramfs/FAT、SAL/ARP/IPv4/UDP/TCP/e1000 |
+| [docs/m11-docker-iso-design.md](docs/m11-docker-iso-design.md) | M11：docker 镜像 → 可引导 ISO → 虚拟机运行（可读写数据盘、LiteOS 接口优先） |
 
 ## 已知硬件（实测）
 

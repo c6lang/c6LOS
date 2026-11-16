@@ -12,5 +12,9 @@
 #define OS_E_ISDIR  21
 #define OS_E_INVAL  22
 #define OS_E_ROFS   30
+#define OS_E_NOSPC  28
+#define OS_E_NOTDIR 20
+#define OS_E_NOTEMPTY 39
+#define OS_E_OPNOTSUPP 95
 
 #endif

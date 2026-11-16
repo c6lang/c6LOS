@@ -249,6 +249,28 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   拿到 `200 OK`；
 - `make check-net-zero` —— `C6OS_NET=0` 时 SAL 与协议栈不进构建。
 
+## M11 docker 镜像 → ISO → 虚拟机运行（可读写硬盘）
+
+设计见 `docs/m11-docker-iso-design.md`。目标：把 `docker export/save` 出来的 rootfs 打成
+一张可引导 ISO，qemu `-cdrom` 直接起机，镜像里的程序能跑，并且能往一块 FAT16 数据盘上写；
+新增能力一律先走 LiteOS-M 兼容面（`LOS_Block*`/`LOS_Fs*`），Linux ABI 只做薄封装。
+开关沿用 `C6OS_VFS`；ISO 变体额外带 Linux ABI（`LINUX_ABI=1`）。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| ✅ M11-0 ISO 启动链 | `port/x86_64/cd0.S`：El Torito no-emulation 引导块，`int 13h` AH=42h 每块 2048 B 读 32 块到 0x20000 暂存，unreal mode + `rep movsb` 搬到目标物理地址；`tools/mkiso.py` 生成最小 ISO9660 + El Torito（LBA 布局确定）；`tests/t_iso.c6`；`iso` 变体 | `make check-iso` → `PASS: iso M11-0` |
+| ✅ M11-1 ISO 内嵌只读 rootfs | `cd0` 第二段载荷把 `rootfs.cpio` 搬到 `0x00800000`；引导信息块（`0x7000`，魔数 `C6IS`）；`port_phys_reserve()` 从 PMM 里挖掉这段；内核从内存挂 romfs 到 `/`；`LOS_FsReaddir/Stat/Open/Read` 能看见镜像里的文件 | `make check-iso-rootfs` → `PASS: iso M11-1` |
+| ✅ M11-2 可写硬盘（FAT16 写） | `fatfs.c6` 的 create/write/append/truncate/unlink/mkdir/rmdir + first-fit 簇分配与簇链伸缩；`fsapi.c6` 的写类操作接上 fatfs 分支。**偏差**：设计里的「ops 分发表」重构没做，仍按 FS 名字分支（理由见设计文档 §9 M11-2），ops 表留在 M11-4 之后 |
+| ✅ M11-3 docker 镜像 → ISO | `tools/mkdockeriso.py`：`docker save` tar / rootfs 目录 → 去 whiteout 扁平化 → newc cpio → `tools/mkiso.py` 打 ISO + `tools/mkfat.py` 造数据盘 + 从镜像 config 取 Entrypoint/Cmd 写 `/etc/c6os.cmd`；ISO 里按 ENTRYPOINT 跑镜像程序，写 `/data`，宿主校验 | `make check-docker-iso` → `PASS: docker M11-3` |
+| M11-4（延伸，未做） | ramfs 去 32 节点/8KB arena；Linux ABI 的 socket 面（`socket/bind/connect/listen/accept`）；ATAPI 只读 CD 块设备；动态 musl 镜像 | 各自 `check-*` |
+
+**M11 验收**：M11-0..M11-3 全过。可复现的验收命令：
+
+- `make check-iso` —— M11-0：`-cdrom` 起机到内核并打印 banner；
+- `make check-iso-rootfs` —— M11-1：ISO 里的 rootfs 挂到 `/`，能列目录/读文件；
+- `make check-fat-write` —— M11-2：`/data`（FAT16）建/写/删/同步，宿主挂载后内容一致；
+- `make check-docker-iso` —— M11-3：docker 镜像 → ISO，起机跑镜像 ENTRYPOINT，往 `/data` 写，宿主校验。
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |
