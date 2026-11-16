@@ -703,8 +703,14 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     /* 关键诊断：在**阻塞发生的那一刻**记下是谁、收哪个队列、等多久。
      * RTC 环在真板上会互相覆盖、read-mem 又会先复位，只有这里直接打印
      * 才可靠（一次启动只有两三次）。 */
-    ets_printf("[recv] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
-               (unsigned)(void *)qh, (unsigned)ticks);
+    {
+        static u32 recv_n_;
+        if (recv_n_ < 3u) {
+            recv_n_ = recv_n_ + 1u;
+            ets_printf("[recv] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
+                       (unsigned)(void *)qh, (unsigned)ticks);
+        }
+    }
     if (ticks == 0u) {
         r = s3_w2c_queue_try_get((void *)&q->q, item);
     } else {

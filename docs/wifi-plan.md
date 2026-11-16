@@ -12698,3 +12698,74 @@ ppTask 这类库任务固定跑在一次 `s3_win_call_wifi_main` 的长调用里
 2. 找出"在 INTLEVEL=15 的临界区里、且已经处于异常上下文"的那条路径
    —— 最可疑的是 `RESTORE_FRAME` 开头的 `rsil a5,15` 之后紧接着的
    窗口状态操作，以及 `port_enter_critical` 包住的 `ets_printf`。
+
+## §309~§311 真正的元凶找到了：W2C 壳里的 **PS.CALLINC** 被破坏
+
+### §309 先把"阻塞"从等式里去掉
+
+临时让 `osi_queue_recv` 在 `ticks` 很大时只 try 一次、**不进内核阻塞**。
+结果：库不再一上来就死，而是**连续调了几百次 recv 在轮询**，
+最后崩溃点换了地方：
+
+```
+*** TRAP sp=3fcc04e0 cause=0 pc=4037d062 ps=00060f10 callinc=2 a0=00060f00
+```
+
+`pc=0x4037d062` 落在**我们自己的 `osi_queue_recv_body+0x1b2`**，反汇编一看
+那条指令是 **`retw.n`**。`retw.n` 只有在
+`CALLINC==0`、`EXCM==1`、`WOE==0`、或"返回步数 m≠n"时才非法。
+现场 `PS=0x00060f00`：`WOE=1`、`EXCM=0`、但 **`CALLINC=2`（call12）**，
+而这条函数是被 `callx8` 调进来的 —— **m≠n ⇒ 非法指令**。
+
+### §310 修法：壳里把 PS 存下来，`callx0` 进内核之后再写回
+
+`W2C` 壳的结构是"windowed（`entry`/`retw`）→ `callx0` 调 call0 内核"。
+内核那边 `call0`/`ret` 不会维护 `PS.CALLINC`，于是回到 windowed 侧时
+`CALLINC` 已经不是调用者那一档，壳末尾的 `retw` 就非法。
+
+在 `port/s3/w2c.S` 的壳里加上：
+
+```
+    entry   a1, 128
+    s32i    a0, a1, 16
+    rsr     a8, ps
+    s32i    a8, a1, 20        /* 注意：必须用 a8（caller-saved），
+                               * 用 a6 会踩掉第 4 个参数 —— 实测会让
+                               * register_chipv7_phy 当场失败 */
+    ...
+    l32r    a8, 9b
+    callx0  a8
+    l32i    a8, a1, 20
+    wsr     a8, ps
+    rsync
+    l32i    a0, a1, 16
+    retw
+```
+
+效果立竿见影：**`retw.n` 非法指令这一类崩溃消失了**，
+库的初始化一路跑通（`[pp]`/`[net80211]`/`[mtxnew]`/`[semnew]`/`[task]`）。
+
+### §311 恢复"写回任务自己的 WINDOWSTART"（§296 的结论仍然成立）
+
+§307 试过切换时完全不碰窗口状态，仍崩；把 §296 的
+`frame[68] → WINDOWSTART` 写回加回来后，崩溃彻底消失：
+
+```
+[recv] t=2 qh=3fcc4530 tk=ffffffff
+b
+```
+
+板子进入**稳定空闲**：库建的任务（id=2）在队列上等消息，
+主流程在 ROM 里等它，两边都不动，**没有异常、没有跑飞**。
+这是本项目第一次达到"闭源 WiFi 库整套初始化跑完且不崩"的状态。
+
+### 现状与下一步
+
+* 两个上下文（JTAG 读 `g_ctx@0x3fcc2e50`）：
+  * ctx0（主流程）：`sp=3fcbeb00 stack=3fcbce50 size=2000`，
+    帧里 `EPC=0x4004883b`、`PS=00060900`、`WB=0` —— 停在 ROM 里；
+  * ctx1（库任务）：`sp=3fcc0340 stack=3fcbee50 size=1800`，
+    帧里 `EPC=0x420176e8`、`WB=0xf`、`WINDOWSTART=0x8000` —— 在队列上等。
+* 下一步就是**让它别等**：查清 ROM 那个"主流程等待"是在等哪个标志/队列，
+  把 `esp_wifi_start` + `connect` 推下去；或者直接把主流程改成
+  "init 不等待、异步继续"。

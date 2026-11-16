@@ -153,6 +153,14 @@
 #else
     entry   a1, 128
     s32i    a0, a1, 16           /* 存下带窗口标签的返回地址 */
+    /* §310：**把 PS 存下来、callx0 之后再写回**。
+     * 内核是 call0 ABI，闭源库是 windowed；两者混用时 PS.CALLINC（bit17:16）
+     * 是 `retw` 判断"要回退几个窗口"的唯一依据。真板实测：从壳里 callx0
+     * 进内核再回来，CALLINC 可能已经不是调用者那一档（抓到 CALLINC=2
+     * 而实际是 call8 进来），壳末尾的 `retw.n` 就成了**非法指令**
+     * （cause=0、pc 正好落在我们 osi_queue_recv_body 的 retw.n 上）。 */
+    rsr     a8, ps
+    s32i    a8, a1, 20
     l32r    a8, 12b
     l32i    a9, a8, 0
     beqz    a9, .Lno_spill\@
@@ -165,6 +173,9 @@
     callx0  a8
     addi    a1, a1, 64            /* addi 的立即数只到 127，128 要拆成两半 */
     addi    a1, a1, 64
+    l32i    a8, a1, 20
+    wsr     a8, ps               /* §310：恢复 CALLINC/WOE 等 PS 位（a8 是 caller-saved，安全）*/
+    rsync
     l32i    a0, a1, 16
     retw
 #endif
