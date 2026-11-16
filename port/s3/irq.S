@@ -85,17 +85,6 @@ _win_ovf8:
 
     .align 4
 _win_unf8:
-    /* §299 诊断：**进入处理体时**的 a9 就是那个窗口的 sp。如果高字节是 0
-     * （0x00000000~0x00FFFFFF，不可能是 DRAM/flash），说明窗口里的 a1 本身
-     * 被写成了小整数。记进 RTC 0x50000160 再继续跑（a2/a3 马上会被 l32e
-     * 重新装载，这里借用不影响恢复）。 */
-    extui   a2, a9, 24, 8
-    bnez    a2, 4f
-    movi    a3, 0x50
-    slli    a3, a3, 24
-    s32i    a9, a3, 0x160
-    s32i    a2, a3, 0x164
-4:
     l32e    a0, a9, -16
     l32e    a1, a9, -12
     bnez    a1, 1f
@@ -204,27 +193,6 @@ _vec_lvl_common:
     .section .text, "ax", @progbits
     .align 4
 _vec_exc:
-    /* §297：**先**把 level-1 异常的现场存进 RTC 0x50000140。
-     * 因为 s3_trap 自己要用 ets_printf 打印，打印过程中若再出异常（二次异常），
-     * 0x50000100 的记录会被第二次覆盖，第一次的线索就丢了。 */
-    movi    a2, 0x50
-    slli    a2, a2, 24
-    addi    a2, a2, 0x140
-    rsr     a3, exccause
-    s32i    a3, a2, 0
-    rsr     a3, excvaddr
-    s32i    a3, a2, 4
-    rsr     a3, epc1
-    s32i    a3, a2, 8
-    rsr     a3, ps
-    s32i    a3, a2, 12
-    s32i    a1, a2, 16
-    l32i    a3, a1, 0
-    s32i    a3, a2, 20
-    rsr     a3, windowbase
-    s32i    a3, a2, 24
-    rsr     a3, windowstart
-    s32i    a3, a2, 28
 #ifdef __XTENSA_CALL0_ABI__
     mov     a2, a1
     call0   s3_trap

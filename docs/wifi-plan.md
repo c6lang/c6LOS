@@ -12477,3 +12477,39 @@ EXCVADDR 语义），真正的信息只有：
 其它 init 改写过），确认窗口向量到底是谁在处理。若确实是 ROM 的向量，
 那 §292/§296/§298 的改动只是在"我们这套向量"上生效，真正跑的是 ROM 的，
 需要把 `_win_*` 装到正确地址或者直接采用 ROM 的语义。
+
+## §301 重要教训：这一带的"改动 = 换布局"，诊断代码会把进展顶掉
+
+本轮踩了一个很值钱的坑：在拿到 **PHY 初始化成功 + 库初始化跑到 `[recv]`**
+这个已知良好状态之后，我又往 `irq.S` 里加了 §297（`_vec_exc` 里存 RTC）、
+§298/§299（`_win_unf8` 入口记录）、§300（`_vec_default` 里记 VECBASE）。
+结果**同一份逻辑、只是布局变了**，表现就变成：
+
+* 加 §299 之后：`register_chipv7_phy` 里 `pc=0x4205291e` 非法指令（PHY 都过不去）；
+* 把 §298/§299/§300 全部回退（`git checkout ddfe0eb -- port/s3/irq.S`）后：
+  `[phy] register_chipv7_phy rc=1` → `W1 bringup` → … → `[recv]` → `b` ✓ 复现。
+
+⇒ **`port/s3/irq.S` 的字节布局对这条路径极度敏感**（和 §271 一个性质）。
+以后所有实验：
+1. 只改 `win_island.c` 或 `.c` 文件，**不要**在 `irq.S` 里加诊断；
+2. 每次拿到新进展，立刻把镜像和 elf 存到 `/tmp/c6good/` 并 commit；
+3. 要加诊断就加在 C 侧、或者用现成的 RTC 区写（不新增代码体积）。
+
+**当前锁定的已知良好状态**（`/tmp/c6good/c6os_bl_recv.bin`，build/wifi/c6os.bin）：
+
+```
+[phy] MAC 0x6001c08c=03fffa00 OPTIONS0=1c00a000
+[phy] calling register_chipv7_phy(mode=0)
+[phy] register_chipv7_phy rc=1              ← 射频初始化成功
+W1 bringup
+B0/B1/B2 OSI 表校验通过（magic=deadbeaf ver=00000008）
+[lockok] t=1 pr=0 ok=1
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+[mtxnew] #1 #2  [semnew] #1
+[task] 库建任务 fn=40381760 [give] t=2 sem#1
+[recv] t=2 qh=3fcc452c tk=ffffffff
+b                                            ← 之后停住（下一个要攻的墙）
+```
+
+`fn=40381760` 是库自己创建的任务入口（IRAM），`[recv]` 是它第一次去队列上阻塞。
