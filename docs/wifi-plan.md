@@ -12890,3 +12890,33 @@ frame=3fcbee00 EPC=40379761 PS=00060800 WS=0 WB=0
    全系统统一 ABI，`W2C` 壳与那些兜底全部删掉。改动大但一次到位。
 2. **打补丁**：在 `call8/call12` 进壳和 `retw` 出壳的两端，显式校正
    `PS.CALLINC`（§310 已经在做一半），并把 `_win_*` 兜底改成"写回正确帧链"。
+
+## §319 JTAG 硬件断点可用（新工具），以及它给出的两条硬事实
+
+这一轮摸清了 OpenOCD 对 S3 的能力边界，后面排查可以直接用：
+
+| 能力 | 结论 |
+|------|------|
+| `bp <addr> 2` | ✗ ROM 不可写：`address 0x40048c6e not writable` |
+| **`bp <addr> 2 hw`** | ✓ **硬件断点可用**，`breakpoint set at 0x40048c6e` |
+| `reg` | ✓ 能读 **ar0..ar63 全部物理寄存器** |
+| `reg ps` / `reg windowstart` | ✗ 特殊寄存器读不到（只有 OCR 那批 trax_/pm_/ocd_ 返回 0） |
+| `step` | ✗ `Stepping doesn't seem to change PC!`，**无法单步越过断点** |
+| `resume` 在断点上 | ✗ 原地不动（不会自动略过断点） |
+
+在 `0x40048c6e`（ROM 那个 `retw.n`）上命中断点时读到的物理寄存器：
+
+```
+pc=40048c6e  ar0=00000000  ar1=3fceb710  ar2=0000cdcd  ar3=0000abab
+ar4=60000000 ar5=00000380 ar6=00000045 ar7=6000001c  ar8=3fcef130 ar9=60038004
+```
+
+说明这条 `retw.n` 在**启动早期（`ar1` 还是 boot 栈 `0x3fceb710`）就会被正常执行到**，
+`ar2/ar3` 还是 `0xcdcd/0xabab` 这种未初始化填充值 —— 所以"断在 0x40048c6e"本身
+**不等于**撞上崩溃点，不能只凭这一条下结论。另外 `ar4=0x60000000`、`ar7=0x6000001c`
+正是 `0x40048c10` 那个 UART FIFO 轮询函数算出来的基址/状态地址，
+可以确认 `0x40048c30` 这一族 ROM 函数是 **UART 输出（ets_printf 底层）**。
+
+顺带确认：`S3_ABI ?= call0`（`https` 目标没有覆盖它），所以
+`irq.S` 里 level-1 定时器 handler 走的是 `call0 s3_timer_irq` 分支
+**不轮转窗口** —— "中断里轮转窗口导致溢出" 这条假设可以排除。
