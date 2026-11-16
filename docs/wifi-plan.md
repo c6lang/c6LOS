@@ -13160,3 +13160,36 @@ f[0](a0)=00060900   f[16](帧里的PS)=00060f00   f[15](EPC)=40048c6e
 ⇒ **凡是要改 `S3_ABI` / `S3_SHIM_ABI` / `S3_ONE_ABI` / ABI 相关 `-D`，
 先 `rm -rf build/wifi` 再编。** 同理，§333 那个"全 windowed 构建死在
 `start.S`"的结论是在脏目录下得到的，**不可信，需要重做**。
+
+## §335 全 windowed 构建的干净复测 + 现场：窗口账目彻底乱了
+
+清空 `build/wifi` 重编（§334 的教训），`S3_ABI=windowed -DS3_ONE_ABI` 依然
+一进 `_start` 就没输出。用 JTAG 读 `_vec_default` 的现场记录（`0x50000100`）：
+
+```
+marker=0000bad0  cause=0000001d(StoreProhibited)  vaddr=fe1f80e0
+epc1=4004e4c3(ROM)  ps=00060710  a0=fe1f8100  a1=3fcd9000
+windowbase=0x9   windowstart=0xaaaa   槽位=0x0f(双重异常)
+```
+
+`a1` 是我们的栈顶 ✓（说明 `_start` 已经跑起来，RTC/DRAM 标记 `A1` 也写了），
+但 **`windowbase=9`（不是 4 的倍数）、`windowstart=0xaaaa`（根本不是合法掩码）**
+—— 窗口状态从一开始就是乱的。切 windowed ABI 之后，`start.S` 里那套
+"4 层嵌套 call8 预热窗口"（`call8 .Lprime1..4`）不再成立。
+
+## §336 决定：直接借用 IDF/FreeRTOS 的 Xtensa 端口汇编当底座
+
+手写窗口向量 + 上下文切换一共试了 60 多轮，混合 ABI 和全 windowed 两条路都卡在
+同一件事上：**跨任务保存/恢复整个寄存器窗口链**。这件事 IDF 已经写好了，
+而且源码就在本机：
+
+| 文件 | 行数 | 作用 |
+|---|---|---|
+| `components/xtensa/xtensa_vectors.S` | — | 完整向量表：4/8/12 溢出/欠载、level-2..7、双重异常、窗口 spill |
+| `components/xtensa/xtensa_context.S` | — | `xthal_*` 上下文保存/恢复 |
+| `components/freertos/.../portable/xtensa/portasm.S` | 753 | FreeRTOS 的任务切换（`_frxt_dispatch` 等） |
+| `components/freertos/.../portable/xtensa/port.c` | 686 | 同上（C 侧） |
+
+下一步：把这套**已被无数产品验证过**的窗口/向量/切换代码移植进来，替换
+`port/s3/irq.S` 的手写向量和 `ctx.S` 的 `port_task_switch`/`RESTORE_FRAME`，
+我们的调度器 API 保持不动。这条路比继续抠手写汇编靠谱得多。
