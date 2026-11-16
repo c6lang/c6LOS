@@ -54,6 +54,14 @@ static void gate(int n, void (*fn)(void))
     g_idt[n].zero = 0;
 }
 
+/* 给 personality 用：安装指定 DPL 的门（int 0x80 需要 DPL3）。
+ * type 字节的 bit6..5 是 DPL；0x8E 是"64 位中断门、P=1、DPL0"。 */
+void x86_idt_set(int n, void (*fn)(void), u8 dpl)
+{
+    gate(n, fn);
+    g_idt[n].type = (u8)(0x8Eu | (u8)((dpl & 3u) << 5));
+}
+
 static void pic_remap(void)
 {
     outb(0x20u, 0x11u);

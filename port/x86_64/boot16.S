@@ -13,6 +13,32 @@ _boot:
     orb $0x02, %al
     outb %al, $0x92
 
+    /* ---- E820：物理内存表，给内核的物理帧分配器用 ----
+     * count @0x5000（u32），条目 @0x5010（24B：base u64 / len u64 / type u32 / attr u32）。
+     * 位置在引导扇区（0x7C00）与栈之下，安全。 */
+    movl $0, 0x5000
+    movw $0x5010, %di
+    xorl %ebx, %ebx
+e820_loop:
+    movl $0xE820, %eax
+    movl $0x534D4150, %edx
+    movl $24, %ecx
+    int $0x15
+    jc e820_done
+    cmpl $0x534D4150, %eax
+    jne e820_done
+    cmpl $0, 16(%di)              /* type（偏移 16；20 是 ACPI 属性位，别弄混） */
+    je e820_skip
+    incw 0x5000
+    addw $24, %di
+    cmpw $(0x5010 + 24 * 32), %di
+    jae e820_done
+e820_skip:
+    testl %ebx, %ebx              /* ebx == 0 表示枚举结束 */
+    jz e820_done
+    jmp e820_loop
+e820_done:
+
     movb $0x42, %ah
     movb $0x80, %dl
     movw $dap1, %si

@@ -17,6 +17,19 @@ S3_CDEFS ?=
 # idf_shim.c 的 ABI：默认 windowed（要和闭源库一致）；做对照实验时可设 call0
 S3_SHIM_ABI ?= windowed
 
+# ---- Linux ELF 二进制兼容层（personality，见 docs/linux-abi.md）----------
+# 默认关闭：kernel/linux/ 不参与任何目标的编译，镜像尺寸零影响。
+LINUX_ABI ?= 0
+# 各 port 的能力位（include/c6os/caps.h）：MMU|USER|IRQ_USER = 7
+CAPS_X86  := 7
+CAPS_S3   := 0
+CAPS_RV32 := 0
+
+# 构建期门禁：配置与硬件能力矛盾时立刻失败，不产出半成品镜像。
+caps-check-%:
+	@eval "CAPS=\$$CAPS_$$(echo '$*' | tr 'a-z' 'A-Z')"; \
+	 tools/chk-caps.sh '$*' "$${CAPS:-0}" '$(LINUX_ABI)'
+
 # 我们自己的代码是 call0，闭源库是 windowed：两边不能共用同一个 memset。
 # 库的 memset/memcpy/... 由 port/s3/wifi_glue.c（-mabi=windowed）提供；
 # 我们自己的单元统一把这些名字重定向到 c6_*（rt/c6rt.c 里的 call0 实现）。
@@ -84,7 +97,7 @@ endif
 
 all: s3
 
-s3: $(BUILD)/c6os.bin
+s3: caps-check-s3 $(BUILD)/c6os.bin
 
 S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 
@@ -925,13 +938,20 @@ toolchain-info:
 
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
-X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1
+X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI)
 X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
 X86S_NAME  ?= sched
 X86S_MAIN  ?= tests/t_x86_sched.c6
 X86S_DIR   := $(X86)/$(X86S_NAME)
 X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
               kernel/timer.c6 kernel/log.c6 kernel/panic.c6 kernel/timeout.c6
+
+# L1 的 ring3 bring-up 只验证 port 层（MMU/特权级/陷入），不链接调度器，
+# 免得带入 port_cur_ctx 之类的调度钩子。
+ifeq ($(X86S_NAME),user)
+X86S_C6    := $(X86S_MAIN)
+endif
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
@@ -939,7 +959,16 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/kprintf.o \
               $(X86S_DIR)/obj/libc.o
 
-x86: $(X86)/disk.img
+# Linux ABI personality 的宿主只要 port 层 + MMU/特权级单元（不含调度器）。
+ifeq ($(X86S_NAME),user)
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
+              $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
+              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o
+endif
+
+x86: caps-check-x86 $(X86)/disk.img
 
 run-x86: x86
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/disk.img,if=ide \
@@ -1065,6 +1094,40 @@ $(X86S_DIR)/obj/kprintf.o: rt/kprintf.c
 $(X86S_DIR)/obj/libc.o: rt/x86_libc.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+# ---- Linux ABI personality（x86-64 宿主，L1）----------------------------
+$(X86S_DIR)/obj/mmu.o: port/x86_64/mmu.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/linux.o: port/x86_64/linux.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/user_entry.o: port/x86_64/user_entry.S
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -c -o $@ $<
+
+$(X86S_DIR)/obj/userblob.o: port/x86_64/userblob.S
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -c -o $@ $<
+
+x86-user: caps-check-x86
+	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
+		$(X86)/user-disk.img
+
+run-x86-user: x86-user
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/user-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L1 验收：真跑一遍"进 ring3 → int 0x80 → 退出"通路，按输出判定。
+check-linuxabi: x86-user
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/user-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| grep -q "hello from ring3" \
+	  && echo "PASS: linux-abi L1（ring3 + int 0x80）" \
+	  || { echo "FAIL: linux-abi L1"; exit 1; }
 
 $(X86S_DIR)/stage2.elf: $(X86)/stage2.o $(X86S_OBJ) port/x86_64/stage2.ld
 	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ \
