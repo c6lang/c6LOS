@@ -11352,3 +11352,16 @@ IDF 的 `SPILL_ALL_WINDOWS`（xt_asm_utils.h）转完一圈就结束，**不动 
   —— 又一次证明这一段是**时序敏感**的，实验必须只用 DRAM/RTC 信标，不能加打印。
 - 现状（每次可复现）：`set_storage` 成功 → **下一个走 ioctl 的库调用必崩**
   （`cause=2`、PC 跳栈地址 0x3fcb9d45、`a0=0`、`ws=0`），且崩溃现场 OSI 计数不变。
+
+### §264 AMPDU 对照组也是阴性；并且"ws=0"是误读
+
+- 把 `ampdu_rx_enable/ampdu_tx_enable/rx_ba_win` 全关掉重跑：**崩点一模一样**
+  （`cause=2 pc=3fcb9d45`）⇒ 不是 AMPDU/BA 初始化的问题。已回退。
+- **重要更正**：`s3_trap` 里那句 `ws=` 打的其实是 `(ps>>16)&0xF`，即 **PS.CALLINC**，
+  而且 `rsr ps` 取到的是**异常处理器自己的 PS**（EXCM=1、CALLINC 恒为 0）
+  ⇒ 之前把日志里的 `ws=0` 当成"WINDOWSTART 被清零"是**误判**，别再据此推窗口。
+  已把标签改成 `callinc=`，真要看窗口状态必须用 JTAG 读 WINDOWSTART。
+- 剩下的硬事实只有三条：`cause=2`（取指失败）、PC 跳进**任务栈地址** 0x3fcb9d45、
+  `a0=0`；且只在"走 ieee80211_ioctl 的库调用"上出现（叶函数 set_storage 永远没事）。
+  纯静态反汇编译不可靠（`.flash.text` 里指令和字面量池混排，objdump 线性扫描会跑偏），
+  下一轮要用 JTAG 在崩住时**读 WINDOWSTART + 扫栈上的返回地址链**，而不是继续猜。

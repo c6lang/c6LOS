@@ -155,8 +155,12 @@ void s3_trap(u32 frame_sp)
         __asm__ __volatile__("rsr %0, excvaddr" : "=r"(va));
         port_puts(" vaddr=");
         trap_hex(va);
-        port_puts(" ws=");
-        trap_hex((ps >> 16) & 0xFu);
+        /* 注意：这里原来是 " ws="，但 (ps>>16)&0xF 打的是 **PS.CALLINC**，
+         * 不是 WINDOWSTART（而且 rsr ps 拿到的是异常处理器的 PS，EXCM=1、
+         * CALLINC 恒为 0），之前把这个 0 当成"WINDOWSTART 被清零"误判过。
+         * 真正要看窗口状态请用 JTAG 读 WINDOWSTART。 */
+        port_puts(" callinc=");
+        trap_hex((ps >> 16) & 0x3u);
         port_puts(" a0=");
         trap_hex(((u32 *)frame_sp)[0]);
     }
