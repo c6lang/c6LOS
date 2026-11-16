@@ -13675,3 +13675,18 @@ caller-saved 随手改**。
 > `libusb_get_string_descriptor_ascii() failed`），**需要物理插拔/断电重插**
 > 才能继续烧写和串口验证。§367 的修复已经编好（`build/wifi/c6os.bin`），
 > 等设备回来就能直接验证。
+
+## §369 同类漏洞补齐：`osi_queue_recv` 专用壳也没有存 a14/a15
+
+`port/s3/w2c.S` 里手写的那条 `osi_queue_recv` 壳（ppTask 真正阻塞的地方）
+只存了 a12/a13，同样漏了 **a14/a15 = 调用者的 a6/a7**（callee-saved）。
+已补 `s32i a14, a1, 28` / `s32i a15, a1, 32` 与对应恢复。
+
+顺带把 `w2c.S` 里所有 `callx0/callx8` 点过了一遍：
+133 行（`S3_W2C_SAVEALL` 版，存了全部 16 个）、
+153 行（`S3_W2C_MIN` 极简版，仅排查用、默认不开）、
+190 行（默认壳，§367 已修）、
+233 行（`W2C_TRACE`，§367 已修）、
+`osi_queue_recv`（本条）。
+⇒ **默认构建里所有 windowed→call0 的入口现在都满足 windowed ABI 的
+callee-saved 约定**。

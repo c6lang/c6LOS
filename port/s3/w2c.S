@@ -335,6 +335,8 @@ osi_queue_recv:
     entry   a1, 128
     s32i    a12, a1, 20
     s32i    a13, a1, 24
+    s32i    a14, a1, 28           /* §367：调用者的 a6/a7 也是 callee-saved */
+    s32i    a15, a1, 32
     /* 按调用序号把库侧返回地址存进 4 个槽（0x50000F08+4*i） */
     l32r    a8, 10b
     l32i    a9, a8, 0
@@ -367,6 +369,8 @@ osi_queue_recv:
     l32i    a0,  a1, 16
     l32i    a12, a1, 20
     l32i    a13, a1, 24
+    l32i    a14, a1, 28
+    l32i    a15, a1, 32
     retw
 
 
