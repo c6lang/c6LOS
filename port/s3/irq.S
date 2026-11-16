@@ -209,6 +209,16 @@ _vec_default:
     s32i    a3, a2, 8
     rsr     a3, epc1
     s32i    a3, a2, 12
+    /* §257 加的现场：陷阱时的 PS / a0（高 2 位是 CALLINC）/ a1 / WINDOWBASE /
+     * WINDOWSTART。定位 windowed 的 retw 非法指令必须看这几个值。 */
+    rsr     a3, ps
+    s32i    a3, a2, 16
+    s32i    a0, a2, 20
+    s32i    a1, a2, 24
+    rsr     a3, windowbase
+    s32i    a3, a2, 28
+    rsr     a3, windowstart
+    s32i    a3, a2, 32
 1:
     j       1b
 

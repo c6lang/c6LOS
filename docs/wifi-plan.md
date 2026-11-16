@@ -11113,3 +11113,57 @@ IllegalInstruction）。典型的"`retw` 弹出的窗口数/窗口基址与预�
    §200 当年的失败是因为在中断栈上做）；
 2. spill 完之后 `wsr windowbase 0` + `wsr windowstart 1`，再保存 a0..a15；
 3. 恢复时同样先归一化再装寄存器（现在的 `RESTORE_FRAME` 只差第 1 步）。
+
+### §257 决定性现场：非法指令来自 **`retw` 的窗口配套规则**，不是业务逻辑
+
+扩展了 `_vec_default` 的 RTC 转储（0x50000100 起：标记/cause/vaddr/EPC1/PS/a0/a1/
+WINDOWBASE/WINDOWSTART），真板抓到完整现场：
+
+```
+0x50000100: 0x0000bad0 0x00000000 0x00000000 0x4037bc0e   ← cause=0(IllegalInstruction)
+0x50000110: 0x0004033c 0x8037bbee 0x3fcbec20 0x0000000b   ← PS  a0  a1  WINDOWBASE=11
+0x50000120: 0x00000800                                     ← WINDOWSTART = 1<<11
+```
+
+对照 ELF 反汇编：**EPC1 = 0x4037bc0e 正是 `osi_wifi_int_disable` 的 `retw.n`**，
+`a0 = 0x8037bbee` 的低 30 位是合法返回地址、高 2 位 = `10` ⇒ **CALLINC(n)=2**，
+而 `WINDOWSTART = 1<<11` ⇒ 当前窗口处只有 1 个活窗口（**m=1**）。
+
+Xtensa ISA 对 RETW/RETW.N 的非法条件（官方文档伪码）：
+
+```
+n = a0[31:30]                      进入本函数用的调用指令
+m = WindowStart 在 WindowBase 处的活窗口数编码
+n == 0 || (m != 0 && m != n) || PS.WOE == 0 || PS.EXCM == 1  => IllegalInstruction
+```
+
+现场正好是 `m=1, n=2`。**三处状态来源都指向同一个动作：把 WINDOWSTART 归一化成
+`1<<WINDOWBASE`**
+
+1. `port/s3/w2c.S` 的 `WIN_SPILL` 结尾（每条壳进来 spill 完就归一化 ⇒ 壳自己返回时
+   面对 m=1、而它是被 `call8` 调进来的 n=2）；
+2. `port/s3/ctx.S` 的 `RESTORE_FRAME`（任务切换恢复现场时归一化）；
+3. `port/s3/irq.S` `_vec_level1` 的返回路径（抢占切换后 WINDOWSTART 保持别人的值）。
+
+**试过并否掉的三个改法**（都留了记录，别再重复踩）：
+
+| 改法 | 结果 |
+| --- | --- |
+| `WIN_SPILL` 结尾改成"写回入口的 WINDOWSTART"（IDF `SPILL_ALL_WINDOWS` 的做法） | 更早崩：`pc=4037bf96`、`a0=0x3fcbecf0`（栈地址）⇒ **溢出向量清掉 live 位之后，物理窗口里的内容并不可靠**，把 live 位写回去是错的 |
+| 壳退出前写回入口的 WINDOWSTART | 同上，更早崩 |
+| `RESTORE_FRAME` / 中断返回按帧里 a0 的 CALLINC 算 `WS=((1<<n)-1)<<(WB+1-n)` | 抢占路径上更早崩（`pc=40048849` 在 ROM 里） |
+
+⇒ 现有"归一化"虽然与 ISA 的 m/n 规则冲突，但**实测能跑通大部分调用**（因为我们
+spill 过，下溢向量能把祖先窗口补回来），所以暂时保持不动。
+
+**下一轮的两个具体方向**（按性价比排序）：
+
+1. **验证 spill 槽地址与下溢填充约定是否一致**：我们的 `WIN_SPILL` 靠 `rotw` 触发
+   溢出向量，向量按官方 HAL 把窗口内容写到 `[a1-16..-4]`；而下溢填充读的是
+   `l32e a0, a5, -16`（a5 由硬件给出）。如果两边的基准差 16/32 字节，就会出现
+   "retw 看似合法但补回来的是垃圾"—— 用一个受控实验（写已知图案到 spill 区、
+   再强制一次下溢）就能确认；
+2. **让壳的阻塞调用不在 windowed 帧里做**：壳进入内核前先把自己这一帧"封账"
+   （把 a0/a1 存到自己的栈槽、把 WINDOWSTART 设为与 n 配套），返回后再恢复 ——
+   等价于把"跨任务切换的窗口状态"从 4 个物理窗口解耦。这条如果做通，就再也不怕
+   在 windowed 调用中间被切走。
