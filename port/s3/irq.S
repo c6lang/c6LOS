@@ -32,14 +32,18 @@ _vecbase:
     .org 0x280
     j   _vec_lvl6
     .org 0x2C0
-    j   _vec_default            /* level-7 / NMI */
+    movi a3, 0x07               /* §290 标记：向量 11 = level-7/NMI */
+    j   _vec_default
     .org 0x300
     j   _vec_level1             /* kernel exception / level-1 中断 */
     .org 0x340
-    j   _vec_default            /* user exception */
+    movi a3, 0x0D               /* §290 标记：向量 13 = user exception */
+    j   _vec_default
     .org 0x380
+    movi a3, 0x0E               /* §290 标记：向量 14 */
     j   _vec_default            /* double exception */
     .org 0x3C0
+    movi a3, 0x0F               /* §290 标记：向量 15 = double exception */
     j   _vec_default
 
 
@@ -201,6 +205,7 @@ _vec_default:
      * 注意别往 DRAM 写（原来写的 0x3FCF0004 已经超出 DRAM 末端 0x3FCEF000，
      * 一写就是二次异常，什么线索都留不下来）。 */
     movi    a2, 0x50000100
+    s32i    a3, a2, 36          /* §290 +0x124：进的是哪个 default 槽位 */
     movi    a3, 0x0000BAD0
     s32i    a3, a2, 0
     rsr     a3, exccause

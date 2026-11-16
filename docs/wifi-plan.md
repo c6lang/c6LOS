@@ -12114,3 +12114,49 @@ PS=00060e10 (EXCM=1, INTLEVEL=6)  a0=0  a1=3fcbeda0  WINDOWBASE=0
 
 **目前默认仍是老路径**（`S3_APP_BASE=0x0`，已验证行为不变，板子上跑的就是它）。
 新路径随时可用 `S3_APP_BASE=0x20000 + tools/flashbl.sh` 复现。
+
+### §290 bootloader 路径上 T1 后就死：**寄存器窗口溢出把寄存器 spill 到坏的 a5 (−16) → double exception**
+
+§289 发现"走 IDF 二级 bootloader 时 windowed 任务在 `T1` 之后立刻死"，本轮把它查清了。
+
+**手段**：向量表的 4 个 default 槽位各自先 `movi a3, <向量号>` 再 `j _vec_default`，
+`_vec_default` 入口第一件事把 a3 存到 RTC `+0x124`（第 10 个字）。JTAG 读 `0x50000100`：
+
+```
+0000bad0 0000001d ffffffe0 400442a7 00060e10 00000000 3fcbeda0 00000000
+00005555 0000000f
+                        ↑ +0x124 = 0x0F → 向量 15 = double exception
+```
+
+现场含义：
+- **`0x0F` = double exception**（CPU 在 `PS.EXCM=1` 的异常上下文里又吃了一次异常）；
+- `EXCVADDR = 0xffffffe0`（**−32**）、`EXCCAUSE = 0x1d`；
+- `PS = 0x00060e10` → **`PS.INTLEVEL = 6`、`PS.EXCM = 1`**。
+
+对照 xtos 的窗口溢出处理体 `_WindowOverflow4`：`s32e a0, a5, -16` ——
+**访问地址 = a5 − 16**。`a5 = −16` 时正好 = `0xffffffe0`，和 EXCVADDR 完全对上。
+也就是说：**窗口溢出处理体被触发时，a5（下一个窗口的栈指针）是个垃圾值 −16**，
+spill 到 `0xffffffe0` 又一次异常，而处理体本身跑在 `PS.EXCM=1` 里 → 直接 double exception。
+
+即 §202 那个老问题的变种：**ROM/IDF bootloader 留下的窗口里 a1 不是合法栈指针**。
+我们 `_start` 里虽然有"窗口预热"（§236），但 IDF bootloader 的调用链会再轮转出
+新的窗口状态，预热过的那几个窗口不够用。
+
+**顺带排除**：`INTERRUPT_CORE0` 状态里确实挂着 WiFi/BT 的源
+（`INTR_STATUS_0(0x60010000) = 0x000000f2` → 源 1/4/5/6/7 挂起，即
+WIFI_MAC_NMI / BT_MAC / BT_BB / BT_BB_NMI / RWBT），一度怀疑是 level-6 中断引起的；
+在 `_start` 里 `rsr/wsr intenable` 屏蔽这 5 个源之后**现场一字不差**
+（`+0x124` 仍是 `0x0F`，EXCVADDR 仍是 `0xffffffe0`），所以**跟中断无关**，
+排除掉。
+
+**下一轮的两条候选修法**
+1. `_win_ovf4/8/12`、`_win_unf4/8/12` 入口先做**栈指针合法性检查**：a5（或 a9/a13）
+   落在我们 DRAM 窗口 `0x3FCA0000..0x3FCEEFFF`、并且 4 字节对齐、且
+   `a5-64 >= 0x3FCA0000` 才 spill；否则把现场（a5/窗口号/EPC1）写 RTC 后直接停住，
+   这样至少能看清是谁在用坏窗口，而不是变成 double exception 什么都留不下。
+2. 干脆在 `s3_win_call_wifi_main` 这个跳板进入 windowed 之前，**把 4 个窗口的
+   a1 全部重设成我们自己分配好的栈顶**（比 §236 的预热更强：不只是"合法"，
+   而是"我们自己的、后面还会用到的"），把 ROM/bootloader 的窗口状态彻底切断。
+
+**默认路径没动**：`S3_APP_BASE=0x0`（ROM 直接引导）行为与之前完全一致
+（板子上现在跑的就是它，`[phy] calling register_chipv7_phy(mode=0)` 停住）。

@@ -73,6 +73,21 @@ _start:
     wsr     a2, ps
     rsync
 
+    /* ★ §290：屏蔽 WiFi/BT 的 MAC 级中断源（源 1 = WIFI_MAC_NMI，源 4..7 = BT/RWBT）。
+     *
+     * 走 IDF 二级 bootloader 引导时（§289）这几个源是**挂起**状态
+     * （实测 INTR_STATUS_0(0x60010000) = 0x000000f2，正好 bit1/4/5/6/7），
+     * 矩阵里它们被使能成 level-6：一进任务就来中断，落进 _vec_lvl6 的闪灯死循环，
+     * 再被 ROM 里的代码二次异常打成 double exception（§290 现场：PS.INTLEVEL=6、
+     * EXCM=1、EPC1 在 ROM、RTC 0x50000124 标记 0x0F = double exception 向量）。
+     * 我们还没有任何 WiFi/BT 中断服务程序，先全局屏蔽；将来闭源库要用时
+     * 它会自己把这些源重新打开。 */
+    rsr     a2, intenable
+    movi    a3, -499                /* ~0x1F2：清掉源 1,4,5,6,7 */
+    and     a2, a2, a3
+    wsr     a2, intenable
+    rsync
+
     /* ★ 无条件做一遍窗口状态归一（call0 构建也要做！§202）。
      *
      * ROM 跳到我们这里时留下的 WINDOWSTART 是**有空洞**的活动窗口集合

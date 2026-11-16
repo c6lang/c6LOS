@@ -9,7 +9,7 @@ set -e
 BIN=${1:?用法: flashbl.sh <c6os.bin> [秒数]}
 SECS=${2:-15}
 REF=/media/winger/inst_26/esp/xiaozhi/build
-D=$(ls /dev/ttyACM* 2>/dev/null | head -1)
+D=$(ls -t /dev/ttyACM* 2>/dev/null | head -1)
 [ -n "$D" ] || { echo "没有 /dev/ttyACM*，板子掉了吧？"; exit 1; }
 echo "== 写 bootloader + 分区表 + 应用 @0x20000 =="
 sudo -n esptool --chip esp32s3 -p "$D" --before default-reset --after watchdog-reset \
