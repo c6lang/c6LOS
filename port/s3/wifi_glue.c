@@ -298,6 +298,9 @@ static void sem_trace(u32 op, u32 obj, u32 ticks, u32 r)
 static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
+
+    ets_printf("[take] t=%u sem=%x tk=%x\n",
+               (unsigned)s3_w2c_current_task(), (unsigned)(void *)sem, (unsigned)ticks);
     int ok;
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
@@ -435,6 +438,10 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
                                      u32 ticks)
 {
     WEvt *e = (WEvt *)g;
+
+    ets_printf("[evwait] t=%u g=%x bits=%x all=%d tk=%x\n",
+               (unsigned)s3_w2c_current_task(), (unsigned)(void *)g,
+               (unsigned)bits, wait_all, (unsigned)ticks);
     u32 got;
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
@@ -732,6 +739,8 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
         td[4] = s3_w2c_current_task();
         td[5] = prio;
     }
+    ets_printf("[task] 库建任务 fn=%08x id=%d stack=%u prio=%u(->%u)\n",
+               (unsigned)(u32)fn, id, (unsigned)stack, (unsigned)prio, (unsigned)p);
     if (id < 0) { return 0; }
     /* 句柄用稳定的表下标，和 _task_get_current_task() 同一口径 */
     if (handle != 0) { *(u32 *)handle = s3_w2c_slot_of_id((u32)id); }
@@ -1532,7 +1541,11 @@ u32 s3_wifi_bringup(void)
         u32 k = 0u;
 
         for (k = 0u; k < 11u; k++) {
-            wcfg(4u + k, tab[k]);
+            /* wcfg 收的是**字节偏移**，所以每项要 +4（之前写成 4u+k，把整张表
+             * 挤进了 4..14 这 11 个字节里，库读到 size=0/version=0，
+             * 直接返回 ESP_ERR_INVALID_ARG(258) —— 真板日志：
+             *   wpa crypto funcs expected size=0 version=0, actual size=0 version=0 */
+            wcfg(4u + k * 4u, tab[k]);
         }
     }
     wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */

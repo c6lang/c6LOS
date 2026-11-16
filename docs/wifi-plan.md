@@ -10214,3 +10214,62 @@ sys_arch 自测通过（失败 0 项）
 | lwIP 线程层（sys_arch + tcpip 邮箱/信号量/超时） | `make lwipcheck` | ✅ |
 | 内核原语（sem/mutex/queue/task/tick） | 内核自带测试 + 基线构建 | ✅ |
 | **WiFi PHY / 关联 / DHCP（闭源库）** | **必须真板** | ⛔ |
+
+## §228 真板恢复供电后的第一轮实测（2026-11-16）
+
+板子重新上电后（之前是没接电源），USB 枚举一开始失败（`dmesg`: `device descriptor
+read/64, error -71` / `unable to enumerate`），按住 BOOT 再复位进下载模式后正常
+（`303a:1001`，SerialNumber `CC:8D:A2:EC:99:C4`）。**以后刷机前先确认能枚举。**
+
+### 一、这一轮修掉的三个真 bug
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | 只打印 `c6os s3 boot` 就没了，USB 也跟着消失 | `os_main` 里先调 `os_wdt_start(8)` 再 `os_icache_enable()`，装完自愈狗就卡死 | 调换顺序：先 cache + flash 诊断，再装自愈狗；加 `-DS3_NO_WDT` 开关 |
+| 2 | `[wifimain] id=1` 之后立刻 `TRAP cause=0 pc=0x8037a7e9`（a0 带窗口标签） | windowed 岛（`s3_win_wifi_main`）里直接调 **call0** 的 `os_wdt_feed()` | 新增 w2c 壳 `s3_w2c_wdt_feed/start`，7 处调用全改走壳 |
+| 3 | `esp_wifi_init_internal` 返回 **258 (ESP_ERR_INVALID_ARG)**，库日志：`wpa crypto funcs expected size=0 version=0, actual size=0 version=0` | `wcfg()` 收的是**字节偏移**，我把 11 个字写成了 `wcfg(4u + k, …)`，整张表挤进 4..14 字节 | 改成 `wcfg(4u + k * 4u, …)` |
+
+修完 1、2 之后串口能看到：`W0 phy start` → `[phy] g_phyFuns=0x3fcef3d8` → 但
+`register_chipv7_phy` 会卡死（`set_chan_freq_hw_init` 里 RF 等待不返回，一次还
+`TRAP cause=0` 在它的 `retw.n` 上）。
+
+### 二、PHY 使能改回 IDF 的语义（关键认知修正）
+
+IDF 的 `esp_adapter.c` 里：`._phy_enable = esp_phy_enable_wrapper`（→
+`esp_phy_enable(PHY_MODEM_WIFI)`）。也就是说 **PHY 使能是 WiFi 库在合适时机回调
+我们做的**，不是我们提前手动做。现在：
+
+- OSI 的 `_phy_enable` / `_phy_disable` 接到 `s3_win_phy_enable_hook()`；
+- `make S3_PHY_VIA_OSI=1` 时 bringup 之前不再手动初始化 PHY。
+
+改完之后 `esp_wifi_init_internal` 才第一次真正跑起来（之前它根本没被调到就死在
+PHY 里了）。
+
+### 三、当前进展与卡点（下一步从这里接）
+
+现在串口能看到：
+
+```
+c6os s3 boot
+M1 icache ok / flash: ... / M2 flash_diag ok / M3 wdt skipped
+M5 tasks ok, starting scheduler
+[wifimain] id=1 tick=0
+W0 phy start
+[phy] 跳过手动初始化：交给 OSI _phy_enable 回调
+W1 bringup
+B1 slot13=… magic=deadbeaf ver=00000008
+B2 cfg@… osi=… magic@144=1f2f3f4f
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+[task] 库建任务 fn=403813fc id=2 stack=6144 prio=29(->2)     ← ppTask 起来了
+[take] t=1 sem=3fcc4964 tk=ffffffff                          ← init 等 ppTask 握手（拿到）
+[recv] t=2 qh=3fcc42d4 tk=ffffffff                           ← ppTask 正常进收包循环
+[take] t=1 sem=3fcc4994 tk=ffffffff                          ← **init 卡在这里**
+```
+
+**卡点**：`esp_wifi_init_internal` 里的 init 任务（t=1）在等第二个信号量
+（3fcc4994），而没有任何人去 signal 它，且从日志看库只创建了**一个**任务（ppTask）。
+下一步很可能是：那个"事件/协议栈任务"没被创建出来（我们的 `_task_create` 只被调了
+一次），要查库为什么没建第二个任务 —— 大概率还是某个 OSI 返回值让它以为失败。
+`[task]` / `[take]` / `[evwait]` / `[recv]` 这些打印是这一轮加的，会一直留在代码里
+（它们是定位这类"卡在某个同步点"的唯一手段）。

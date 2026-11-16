@@ -726,6 +726,7 @@ u32 s3_win_wifi_main(void)
     WSTAGE(0x1005u); s3_w2c_wdt_feed();
     rc = s3_wifi_bringup();
     WSTAGE(0x1006u); s3_w2c_wdt_feed();
+    ets_printf("[wifi] bringup rc=%u\n", (unsigned)rc);
     s3_win_log("W2 bringup returned\n");
 #ifdef S3_WITH_LWIP
     /* §210/§215：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调），

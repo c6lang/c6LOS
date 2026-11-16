@@ -127,7 +127,11 @@ void os_main(void)
     pstr("M4 task wifi ok\n");
 
     /* 低优先级监控任务：纯 call0，周期性把诊断环打到串口 */
+#ifndef S3_NO_MON
     s3_beacon(3u, (u32)os_task_create("mon", port_diag_task, 0, 0u, 4096u));
+#else
+    pstr("M5 mon 任务已跳过（S3_NO_MON）\n");
+#endif
     pstr("M5 tasks ok, starting scheduler\n");
 
     os_task_start();

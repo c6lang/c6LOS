@@ -1634,6 +1634,10 @@ endif
 ifneq ($(S3_PHY_VIA_OSI),)
 WIFI_CDEFS += -DS3_PHY_VIA_OSI
 endif
+# S3_NO_WIN_SPILL=1：w2c 壳不再 spill 祖先窗口（对照实验，§228）
+ifneq ($(S3_NO_WIN_SPILL),)
+WIFI_CDEFS += -DS3_NO_WIN_SPILL
+endif
 HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS $(WIFI_CREDS)
 https:
 	@rm -rf $(WIFI_DIR)
