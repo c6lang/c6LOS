@@ -540,3 +540,40 @@ ping 本机走环回、ping 不可达地址的 `-EHOSTUNREACH` 与丢包计数�
    第一版把 16 个缓冲全 alloc 出来不还，后面的 ARP/ping 全都拿不到缓冲，
    连着报了一串不相干的失败（ARP 学不到、帧长 0）。池子测试要留句柄数组，
    测完逐个 `NetBufFree`，并用 `NetBufInUse() == 0` 收尾。
+
+### M10-2（e1000 驱动 + 真网络）已完成
+
+`port/x86_64/e1000.c`（82540EM/82541/82574）+ `kernel/net/netif_x86.c6`（桥）。
+
+- PCI：`0xCF8/0xCFC` 枚举 0~3 号总线，按 vendor `0x8086` + device
+  `0x100E/0x100F/0x10D3` 找网卡，打开命令寄存器的 IOSpace|MemSpace|BusMaster，
+  取 BAR0（MMIO，qemu 上是 `0xfebc0000`），BAR1（IO 窗口）留作回退。
+- MMIO 访问路径：`port_phys_map(bar) = DMAP_BASE + bar`。原来的直接映射窗口
+  只覆盖物理 0..1GB，而 PCI 空洞在 3~4GB，所以 mmu.c 的 `build_dmap()` 扩到
+  **0..4GB**：0..1GB 仍是普通 RAM（cache 开），1..4GB 用 2MB 页按 UC
+  （PCD|PWT）映射，专门给设备寄存器用。
+- 收发包：RX/TX 各 16 个描述符 + 16 个 2048 字节缓冲，全部 `port_phys_alloc()`
+  拿物理帧、`port_phys_map()` 拿虚拟地址；RX 用 DD 位轮询，TX 等槽位 DD
+  再填，`mfence` 保证描述符写在门铃之前。
+- **纯轮询**，不注册中断：协议栈在任务上下文跑（就是设计里那条"IRQ 里只搬
+  数据"的简化版）。`NetIfPollX86()` 把网卡里的帧搬进 NetBuf 喂给
+  `NetIfInput`；`netif_x86_link()` 是 `linkoutput`，直接 `port_net_send`。
+- qemu 侧：`-nic user,model=e1000`；客户机 10.0.2.15/24、网关 10.0.2.2。
+
+验收：`make check-ping` —— qemu 真跑：驱动初始化（MAC = `52:54:00:12:34:56`
+来自 RAR0）→ 配地址 → 轮询等链路 up → ARP 网关（学到 `52:55:0a:00:02:02`）
+→ **ping 10.0.2.2 收到应答** → ARP 解析 10.0.2.3，打印
+`PASS: net M10-2（e1000：ARP + ping 10.0.2.2）`。
+
+三个坑：
+
+1. **测试里要先 `port_mmu_init()`** —— 那个函数不只建页表，还初始化物理页
+   管理（`port_phys_alloc` 靠它）；M9 的测试都手动调了，新的 ping 测试一开始
+   漏了，症状是 `port_phys_alloc()` 全返回 0（报"没找到 e1000"），更早一版
+   还会在第一次 MMIO 读的时候直接三级故障——因为连直接映射窗口都还没建。
+2. **PCI 命令寄存器要开 IOSpace（bit0）** —— 只开 MemSpace|BusMaster 时，
+   IO 窗口读回来的全是 0（当时看到 MAC 全 0、STATUS 没有 link 位）。
+3. **`port_puts(&buf[i])` 打印数字会拖出一整段** —— 收尾统计一开始打成
+   `tx=118136` 变 `111511051100511200511`：把"数字转字符串"写成
+   `port_puts(&b[n])`，它从第 n 个字符一直打到 NUL。逐字符 `port_putc(b[n])`
+   才对（`tests/t_ping.c6`、`t_net.c6` 都改了）。

@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -995,7 +995,8 @@ endif
 # M10：SAL/协议栈只在 C6OS_NET=1 时编（默认 0 时对象列表完全不变）。
 ifeq ($(C6OS_NET),1)
 X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
-                  kernel/net/arp.c6 kernel/net/ip.c6 kernel/net/icmp.c6
+                  kernel/net/arp.c6 kernel/net/ip.c6 kernel/net/icmp.c6 \
+                  kernel/net/netif_x86.c6
 endif
 
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
@@ -1018,7 +1019,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 net ip,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 net ip ping,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1027,6 +1028,10 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o
+endif
+
+ifeq ($(C6OS_NET),1)
+X86S_OBJ   += $(X86S_DIR)/obj/e1000.o
 endif
 
 X86S_OBJ += $(X86S_OBJ_EXTRA)
@@ -1176,6 +1181,10 @@ $(X86S_DIR)/obj/userblob.o: port/x86_64/userblob.S
 	clang $(X86CFLAGS) -c -o $@ $<
 
 $(X86S_DIR)/obj/ata.o: port/x86_64/ata.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/e1000.o: port/x86_64/e1000.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
@@ -1430,6 +1439,25 @@ check-ip: x86-ip
 	  && echo "PASS: net M10-1（ARP + IPv4 + ICMP echo + loopback）" \
 	  || { echo "FAIL: net M10-1"; exit 1; }
 
+# ---- M10-2：e1000 驱动 + 真网络（qemu slirp） ----
+QEMU_NIC := -nic user,model=e1000
+
+x86-ping: caps-check-x86
+	$(MAKE) X86S_NAME=ping X86S_MAIN=tests/t_ping.c6 C6OS_NET=1 \
+		$(X86)/ping-disk.img
+
+run-x86-ping: x86-ping
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/ping-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
+
+check-ping: x86-ping
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/ping-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-ping.log | grep -q "^PASS: net M10-2" \
+	  && echo "PASS: net M10-2（e1000：ARP + ping 10.0.2.2）" \
+	  || { echo "FAIL: net M10-2"; tail -20 /tmp/check-ping.log; exit 1; }
+
 # 零侵入：C6OS_NET=0 时 S3 的对象列表里不该出现 SAL/协议栈源文件
 check-net-zero:
 	@n=$$(make -n s3 2>/dev/null | grep -cE "kernel/sal.c6|kernel/net/"); \
@@ -1559,6 +1587,10 @@ DISK_DEPS  :=
 DISK_MB    := 1
 DISK_APP   := @true
 else ifeq ($(X86S_NAME),ip)
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+else ifeq ($(X86S_NAME),ping)
 DISK_DEPS  :=
 DISK_MB    := 1
 DISK_APP   := @true

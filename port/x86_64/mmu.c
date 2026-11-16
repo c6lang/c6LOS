@@ -18,6 +18,8 @@
 #define PTE_W     0x002ull
 #define PTE_U     0x004ull
 #define PTE_PS    0x080ull
+#define PTE_PWT   0x008ull
+#define PTE_PCD   0x010ull
 #define PTE_NX    (1ull << 63)
 #define PTE_ADDR  0x000ffffffffff000ull
 
@@ -288,7 +290,9 @@ static u64 build_as(void)
     return pml4;
 }
 
-/* 直接映射窗口：物理 0..1GB 出现在 0xFFFF8000_00000000，NX。 */
+/* 直接映射窗口：物理 0..4GB 出现在 0xFFFF8000_00000000，NX。
+ * 0..1GB 是普通内存（cache 打开）；1..4GB 是 PCI/MMIO 空洞，用 2MB 页
+ * 按 UC（PCD|PWT）映射——e1000 的 BAR 落在 0xFExxxxxx，就是靠这一段访问的。 */
 static u64 build_dmap(void)
 {
     u64 pdpt = alloc_frame_zero();
@@ -296,6 +300,7 @@ static u64 build_dmap(void)
     u64 *p3;
     u64 *p2;
     u32 i;
+    u32 gb;
 
     if (pdpt == 0ull || pd == 0ull) {
         return 0ull;
@@ -305,6 +310,22 @@ static u64 build_dmap(void)
     p2 = tbl(pd);
     for (i = 0; i < 512u; i++) {
         p2[i] = ((u64)i * 0x200000ull) | PTE_P | PTE_W | PTE_PS | PTE_NX;
+    }
+    for (gb = 1u; gb < 4u; gb++) {
+        u64 pdg = alloc_frame_zero();
+        u64 base;
+        u64 *p2g;
+
+        if (pdg == 0ull) {
+            break;
+        }
+        base = (u64)gb * 0x40000000ull;
+        p3[gb] = pdg | PTE_P | PTE_W;
+        p2g = tbl(pdg);
+        for (i = 0; i < 512u; i++) {
+            p2g[i] = (base + ((u64)i * 0x200000ull)) |
+                     PTE_P | PTE_W | PTE_PS | PTE_NX | PTE_PCD | PTE_PWT;
+        }
     }
     g_dmap_pdpt = pdpt;
     return pdpt;

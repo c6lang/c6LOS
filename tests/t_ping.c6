@@ -1,0 +1,180 @@
+/* tests/t_ping.c6 —— M10-2：e1000 驱动 + 真网络（qemu slirp）
+ *
+ * qemu 的 user 网络默认参数：客户机 10.0.2.15/24，网关 10.0.2.2，DNS 10.0.2.3。
+ * 驱动初始化 → 配地址 → ARP 网关 → ping 网关，全程轮询（不靠中断）。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "los/los_typedef.h"
+#include "los/net.h"
+
+static UINT32 g_bad = 0u;
+
+static const UINT32 IP_ME = 0x0A00020Fu;     /* 10.0.2.15 */
+static const UINT32 IP_GW = 0x0A000202u;     /* 10.0.2.2 */
+static const UINT32 IP_DNS = 0x0A000203u;    /* 10.0.2.3 */
+static const UINT32 IP_MASK = 0xFFFFFF00u;
+
+static void put_u32(UINT32 v)
+{
+    CHAR b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_puts("0");
+        return;
+    }
+    i = 0u;
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static void put_hex2(UINT32 v)
+{
+    const char *d = "0123456789abcdef";
+
+    port_putc((INT32)d[(v >> 4) & 0xFu]);
+    port_putc((INT32)d[v & 0xFu]);
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got == want) {
+        return;
+    }
+    g_bad = g_bad + 1u;
+    port_puts("FAIL: net ");
+    port_puts(what);
+    port_puts(" got=");
+    put_u32((UINT32)got);
+    port_puts(" want=");
+    put_u32((UINT32)want);
+    port_puts("\n");
+}
+
+static void put_mac(const UINT8 *m)
+{
+    UINT32 i = 0u;
+
+    i = 0u;
+    while (i < (UINT32)LOS_ETH_ALEN) {
+        if (i != 0u) {
+            port_puts(":");
+        }
+        put_hex2((UINT32)m[i]);
+        i++;
+    }
+    port_puts("\n");
+}
+
+void os_main(void)
+{
+    LosNetIf *nif = (LosNetIf *)0;
+    UINT8 mac[LOS_ETH_ALEN] = {0};
+    UINT8 gwm[LOS_ETH_ALEN] = {0};
+    UINT32 i = 0u;
+    INT32 ok = 0;
+    INT32 link = 0;
+
+    port_mmu_init();                    /* 物理页管理 + 直接映射窗口（e1000 靠它） */
+    nif = NetIfAttachX86();
+    if (nif == (LosNetIf *)0) {
+        port_puts("FAIL: net M10-2 没找到 e1000（qemu 要 -nic user,model=e1000）\n");
+        return;
+    }
+    port_puts("e1000: bar=0x");
+    put_hex2((UINT32)((port_net_bar() >> 24) & 0xFFu));
+    put_hex2((UINT32)((port_net_bar() >> 16) & 0xFFu));
+    put_hex2((UINT32)((port_net_bar() >> 8) & 0xFFu));
+    put_hex2((UINT32)(port_net_bar() & 0xFFu));
+    port_puts(" mac=");
+    port_net_mac((UINT8 *)&mac[0]);
+    put_mac((const UINT8 *)&mac[0]);
+    chk("mac not zero", (mac[0] != 0u || mac[1] != 0u) ? 1 : 0, 1);
+
+    chk("setip", NetIfSetIp(nif, IP_ME, IP_MASK, IP_GW), 0);
+    chk("up", NetIfUp(nif), 0);
+    /* 链路状态可能要几百毫秒才起来，轮询等一会儿 */
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        link = port_net_link_up();
+        if (link == 1) {
+            break;
+        }
+        i++;
+    }
+    chk("link up", link, 1);
+
+    /* ARP 网关 */
+    ok = 0;
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        if (ArpResolve(nif, IP_GW, (UINT8 *)&gwm[0]) == 1) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("arp gw", ok, 1);
+    port_puts("e1000: gw mac=");
+    put_mac((const UINT8 *)&gwm[0]);
+
+    /* ping 网关 */
+    ok = 0;
+    (void)IcmpPing(nif, IP_GW, 0x4242u, 1u);
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        if (IcmpGotReply(0x4242u, 1u) == 1) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("ping gw", ok, 1);
+    port_puts("e1000: ping 10.0.2.2 ");
+    put_u32((ok == 1) ? 1u : 0u);
+    port_puts(" reply\n");
+
+    /* slirp 只对网关回 ICMP，10.0.2.3（DNS）不回包；这里验 ARP 能解析到它，
+     * 说明"同网段任意地址"的 ARP 路径都通（UDP/TCP 在 M10-3/4 用它）。 */
+    ok = 0;
+    i = 0u;
+    while (i < 2000000u) {
+        (void)NetIfPollX86(nif);
+        if (ArpResolve(nif, IP_DNS, (UINT8 *)&gwm[0]) == 1) {
+            ok = 1;
+            break;
+        }
+        i++;
+    }
+    chk("arp dns", ok, 1);
+
+    port_puts("e1000: rx=");
+    put_u32(port_net_rx_packets());
+    port_puts(" tx=");
+    put_u32(port_net_tx_packets());
+    port_puts(" drop=");
+    put_u32(port_net_rx_dropped());
+    port_puts("\n");
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: net M10-2 failures=");
+        put_u32(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: net M10-2（e1000：ARP + ping 10.0.2.2）\n");
+}

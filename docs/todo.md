@@ -230,7 +230,7 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 |---|---|---|
 | ✅ M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 的表 + 函数表分发；`priv` = 槽位号） | `make check-sal`、`make check-net-zero` |
 | ✅ M10-1 ARP+IPv4+ICMP | `kernel/net/{netbuf,netif,arp,ip,icmp}.c6` + `include/los/net.h`；16 个静态缓冲、4 张网卡、8 项 ARP 表、20 字节头不分片、环回、echo；同步线对端也是一套完整协议栈 | `make check-ip`、`make check-net-zero` |
-| M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO 寄存器、描述符环；先轮询收包再上中断 | 收发包计数增长；ARP 有应答 |
+| ✅ M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO（直接映射窗口扩到 0..4GB，1..4GB 按 UC）、RX/TX 各 16 个描述符、纯轮询；`kernel/net/netif_x86.c6` 把驱动挂到 NetIf | `make check-ping`（qemu 真跑 ping 10.0.2.2） |
 | M10-3 UDP + socket 面 | `udp.c6` + `sal_bind/sendto/recvfrom/close` | 与宿主 `nc -u` 互发成功（qemu hostfwd 或 slirp） |
 | M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
 
@@ -240,6 +240,8 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   函数表分发/错误码透传），打印 `PASS: sal M10-0`；
 - `make check-ip` —— M10-1：同步线对接两张网卡，验 ARP 学习/命中、ping 对端
   （帧逐字段校验）、ping 本机环回、不可达丢包、坏包计数、缓冲不泄漏；
+- `make check-ping` —— M10-2：qemu `-nic user,model=e1000` 真跑，ARP 网关 +
+  ping 10.0.2.2（slirp）拿到应答；
 - `make check-net-zero` —— `C6OS_NET=0` 时 SAL 与协议栈不进构建。
 
 ## 风险与依赖

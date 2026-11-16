@@ -97,6 +97,10 @@ INT32     NetIfUp(LosNetIf *nif);
 INT32     NetIfOutput(LosNetIf *nif, LosNetBuf *p);
 INT32     NetIfInput(LosNetIf *nif, LosNetBuf *p);
 UINT32    NetIfCount(VOID);
+
+/* x86 参考目标：把 port 层的 e1000 挂上来（netif_x86.c6；S3 不用） */
+LosNetIf *NetIfAttachX86(VOID);
+UINT32    NetIfPollX86(LosNetIf *nif);
 LosNetIf *NetIfGet(UINT32 i);
 
 /* ---- ARP ---- */
