@@ -215,9 +215,12 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 | ✅ M9-1 ramfs 可读写 | 32 节点静态池（文件名/父/兄弟/首子），数据按需 `os_heap_alloc/realloc`（复用内核堆，不另写分配器）；支持 create/write/read/lseek/readdir/unlink/mkdir/rmdir/rename(同父)/truncate | **完成**：`make check-vfs-ramfs` → `PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）` |
 | ✅ M9-2 块设备层 + ATA 写 | `include/los/los_block.h` + `kernel/blkdev.c6`（8 项注册表 + 函数表 + 参数校验）；`port_ata_write`（PIO + 每扇区先等空闲 + FLUSH CACHE）；直通、不做页缓存 | **完成**：`make check-vfs-blk` → 写 8 扇区到 LBA 20480 再读回逐字节一致 |
 | ✅ M9-3 FAT16/32 只读 | BPB → FAT → 簇链 → 8.3 目录项；<8MB 镜像；不做长名/写/格式化 | `mkfs.vfat` 造的镜像挂上后 readdir 看到文件、read 内容一致 |
-| M9-4 接到 Linux ABI | `LxFile.kind = LX_FD_VFS`；openat/read/write/lseek/fstat/newfstatat/getdents64/close 按 kind 分派；`/tmp` 挂 ramfs、`/` 仍是 romfs | `busybox sh -c 'echo hi > /tmp/x; cat /tmp/x'` 输出 `hi` |
+| ✅ M9-4 接到 Linux ABI | `LxFile.kind = LX_FD_VFS`；openat/read/write/lseek/fstat/newfstatat/getdents64/close 按 kind 分派；`/tmp` 挂 ramfs、`/` 仍是 romfs | `busybox sh -c 'echo hi > /tmp/x; cat /tmp/x'` 输出 `hi` |
 
-**M9 验收**：M9-0..M9-4 全过；`C6OS_VFS=0` 时 S3 对象列表与尺寸零变化。
+**M9 验收**：M9-0..M9-4 全过。可复现的验收命令：
+`make check-vfs`（一次 qemu 跑完 M9-0..M9-3 四条 PASS）、
+`make check-linuxabi-m9`（M9-4，真跑用户态 glibc 程序）、
+`make check-vfs-zero`（`C6OS_VFS=0` 时 S3 对象列表与尺寸零变化）。
 
 ## M10 网络（SAL + 最小协议栈 + e1000）
 

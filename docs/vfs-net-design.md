@@ -426,3 +426,35 @@ stat/readdir；写/删/改名/截断一律 `-EROFS`。
 4. **批量生成 C 源时反斜杠会多一层** —— Python 补丁里写成 `'\\0'`（两个反斜杠 + 0）
    落进 C 就是多字符常量（不是 0），`strcmp`/收尾判断全部失效；在生成器产物里搜
    两个反斜杠 + 0 可以一次性揪出来（本次命中 `kernel/fatfs.c6` 的 8 处）。
+
+### M9-4（接到 Linux ABI：/tmp = ramfs）已完成
+
+`linux/fs.c` 增加 `LX_FD_VFS` 一族分发：
+
+- `fs_openat`：`strip_()` 之后的路径是 `tmp` 或 `tmp/...` 就转 `LOS_FsOpen`
+  （补回前导 `/` 再交给 VFS，VFS 只认绝对路径）。
+- 文件 fd：`LxFile.node` 存 VFS fd，`g_vpath[vfd]` 记绝对路径；
+  `read/pread/write/lseek/fstat/close` 按 `kind` 分发，`LxFile.pos` 与
+  VFS 自己的游标在每次调用前用 `LOS_FsLseek` 对齐。
+- 目录 fd：ramfs 的 `open` 对目录返回 `-EISDIR`，所以目录不占 VFS 句柄，
+  只在 `g_dpath[8]` 里记路径，`node = LX_VDIR_BASE + slot`；
+  `getdents64` 的顺序是 `.`、`..`，再按 `LOS_FsReaddir` 一项一项取。
+- `linux/sys.c`：`sys_write` 对 fd ≥ 3 转 `lx_fs_write`（原来直接 EBADF）。
+- `lx_fs_init`：initramfs 解析成功后把 ramfs 挂到 `/tmp`。
+
+验收：`make check-linuxabi-m9` —— 跑一个**未修改的静态链接 Linux 程序**
+（`tests/linux/tmpfs.c`，宿主 gcc 编），它在 `/tmp` 上 create/write/lseek/read，
+再用 glibc 的 `opendir/readdir` 把它找回来，打印 `PASS: linux-abi M9-4`。
+
+四个坑：
+
+1. **`strip_()` 已经吃掉了前导 `/`** —— 前缀判断要在去掉 `/` 之后的路径上做
+   （`tmp/...`），而交给 VFS 的必须是绝对路径，得自己补回 `/`；否则
+   `vfs_owns_()` 永远返回 0，VFS 分支形同虚设（症状：open 一律 ENOENT）。
+2. **挂载点代码要放在成功返回之前** —— 第一版把 `LOS_FsMount("/tmp")` 插在
+   `lx_fs_init()` 末尾，而那个位置在"没找到 newc 尾标 → return -1"之后，
+   是死代码；内核照常启动，症状是 `/tmp/...` 一律 `-ENOENT`。
+3. **lseek 必须同步 `LxFile.pos`** —— VFS 分支只返回新位置、不写回 fd 游标的话，
+   下一次 read 还从旧位置读（症状：`lseek(0)` 返回 0，`read` 却读到 0 字节）。
+4. **目录 fd 不能走 `LOS_FsOpen`** —— ramfs 的 open 对目录返回 `-EISDIR`，
+   glibc 的 `opendir` 于是失败；目录只需要"路径 + 序号"，单独一张小表更省事。

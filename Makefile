@@ -958,7 +958,7 @@ toolchain-info:
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
-              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI)
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS)
 # c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
 # 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
 # （≈127.5KB），M9 的 VFS 一加就爆。这里统一开 -O1。
@@ -971,7 +971,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -984,7 +984,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1010,7 +1010,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1234,6 +1234,14 @@ $(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
 	cp $(LS_ELF) $(FSROOT)/bin/ls
 	python3 tools/mk-initramfs.py $@ $(FSROOT)
 
+# ---- M9-4：/tmp 挂 ramfs，用户态 write/read/getdents64 ----
+M9_SRC := tests/linux/tmpfs.c
+M9_ELF := $(X86)/tmpfs.elf
+
+$(M9_ELF): $(M9_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
 # ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
 DYN_ELF := $(X86)/busybox
 DYNFS   := $(X86)/dynfs.img
@@ -1406,6 +1414,23 @@ check-linuxabi-l6: $(SIG_IMG)
 	  && echo "PASS: linux-abi L6（信号：handler/屏蔽/SIGSEGV+siglongjmp/默认动作）" \
 	  || { echo "FAIL: linux-abi L6"; exit 1; }
 
+x86-m9: caps-check-x86
+	$(MAKE) X86S_NAME=m9 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m9-disk.img
+
+run-x86-m9: x86-m9
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/m9-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# M9-4 验收：用户态在 /tmp（ramfs）上 create/write/lseek/read/getdents64
+check-linuxabi-m9: x86-m9
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m9-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: linux-abi M9-4" \
+	  && echo "PASS: linux-abi M9-4（/tmp = ramfs：open/write/lseek/read/getdents64）" \
+	  || { echo "FAIL: linux-abi M9-4"; exit 1; }
+
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(X86)/fs-disk.img
@@ -1475,6 +1500,11 @@ DISK_DEPS  := $(FS_IMG) $(FAT_IMG)
 DISK_MB    := 32
 DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none; \
              dd if=$(FAT_IMG) of=$@ bs=512 seek=16384 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m9)
+DISK_DEPS  := $(M9_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M9_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),dyn)
 DISK_DEPS  := $(DYN_ELF) $(DYNFS)
 DISK_MB    := 16

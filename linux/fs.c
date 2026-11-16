@@ -27,6 +27,89 @@ static LxFile *g_fd = g_fdt0;
 static u64    g_fs_pa;
 
 
+#if C6OS_VFS
+#include "los/los_fs.h"
+#include "c6os/vfs.h"
+
+/* M9-4：/tmp 及其子路径交给内核 VFS（挂的是 ramfs）。
+ * g_vpath 按 **VFS fd** 索引 —— VFS fd 全局唯一，所以多个进程同时列
+ * 各自 /tmp 子目录也不会串。 */
+static char g_vpath[OS_MAX_FILES][LOS_FS_PATH_MAX];
+
+/* 目录 fd 不经过 LOS_FsOpen（ramfs 不让 open 目录），只记路径；
+ * node 落在 LX_VDIR_BASE.. 这一段，和真实 VFS fd（0..31）不会撞。 */
+#define LX_VDIR_BASE 0x100ull
+#define LX_MAX_VDIR  8u
+
+static char g_dpath[LX_MAX_VDIR][LOS_FS_PATH_MAX];
+
+static u64 vfs_dir_slot_(const char *abspath)
+{
+    u32 i = 0u;
+
+    while (i < (u32)LX_MAX_VDIR) {
+        if (g_dpath[i][0] == '\0') {
+            (void)os_str_cpy(g_dpath[i], abspath, (u32)LOS_FS_PATH_MAX);
+            return LX_VDIR_BASE + (u64)i;
+        }
+        i++;
+    }
+    return 0ull;
+}
+
+/* 注意：传进来的是 strip_() 之后的路径（已去掉前导 '/'）。 */
+static int vfs_owns_(const char *path)
+{
+    if (os_str_eq(path, "tmp") == 1) {
+        return 1;
+    }
+    if (os_str_prefix(path, "tmp/") == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+static u64 vfs_err_(int rc)
+{
+    return (rc < 0) ? ((u64)0 - (u64)(0 - rc)) : (u64)rc;
+}
+
+static int vfs_open_(const char *path, u64 flags)
+{
+    UINT32 f = (UINT32)LOS_O_RDONLY;
+
+    if ((flags & 3ull) == 1ull) {
+        f = (UINT32)LOS_O_WRONLY;
+    } else if ((flags & 3ull) == 2ull) {
+        f = (UINT32)LOS_O_RDWR;
+    }
+    if ((flags & 64ull) != 0ull) {           /* O_CREAT */
+        f |= (UINT32)LOS_O_CREAT;
+    }
+    if ((flags & 512ull) != 0ull) {          /* O_TRUNC */
+        f |= (UINT32)LOS_O_TRUNC;
+    }
+    if ((flags & 1024ull) != 0ull) {         /* O_APPEND */
+        f |= (UINT32)LOS_O_APPEND;
+    }
+    return (int)LOS_FsOpen((const CHAR *)path, f);
+}
+
+static int vfs_is_dir_(const char *path)
+{
+    LosFsStat st = {0};
+
+    st.size = 0u;
+    st.type = 0u;
+    st.mode = 0u;
+    st.mtime = 0u;
+    if (LOS_FsStat((const CHAR *)path, &st) != 0) {
+        return 0;
+    }
+    return (st.type == (UINT32)LOS_FS_TYPE_DIR) ? 1 : 0;
+}
+#endif
+
 static u64 slen_(const char *s)
 {
     u64 n = 0;
@@ -126,6 +209,11 @@ int lx_fs_init(u64 pa, u64 len)
             const char *nm = (const char *)(img + nameoff);
 
             if (nm[0] == 'T' && nm[1] == 'R' && nm[2] == 'A' && nm[3] == 'I') {
+#if C6OS_VFS
+                if (LOS_FsMount("", "/tmp", "ramfs", (VOID *)0) != 0) {
+                    return -1;
+                }
+#endif
                 return 0;                              /* TRAILER!!! */
             }
             if (g_nodes < FS_MAX_FILES) {
@@ -384,6 +472,49 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         g_fd[fd].kind = LX_FD_FILE;
         return fd;
     }
+#if C6OS_VFS
+    if (vfs_owns_(s) != 0) {
+        char vpath[LOS_FS_PATH_MAX] = {0};
+        int vfd = 0;
+
+        vpath[0] = '/';
+        (void)os_str_cpy(vpath + 1, s, (u32)(LOS_FS_PATH_MAX - 1));
+        if (vfs_is_dir_(vpath) != 0) {
+            u64 slot = vfs_dir_slot_(vpath);
+
+            if (slot == 0ull) {
+                return (u64)0 - 24ull;
+            }
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                g_dpath[(u32)(slot - LX_VDIR_BASE)][0] = '\0';
+                return (u64)0 - 24ull;
+            }
+            g_fd[fd].node = slot;
+            g_fd[fd].pos = 0ull;
+            g_fd[fd].is_dir = 1u;
+            g_fd[fd].kind = LX_FD_VFS;
+            return fd;
+        }
+        vfd = vfs_open_(vpath, flags);
+        if (vfd < 0) {
+            return vfs_err_(vfd);
+        }
+        fd = fd_alloc();
+        if (fd == LX_FD_NONE) {
+            (void)LOS_FsClose((INT32)vfd);
+            return (u64)0 - 24ull;
+        }
+        if ((u32)vfd < (u32)OS_MAX_FILES) {
+            (void)os_str_cpy(g_vpath[vfd], vpath, (u32)LOS_FS_PATH_MAX);
+        }
+        g_fd[fd].node = (u64)vfd;
+        g_fd[fd].pos = 0ull;
+        g_fd[fd].is_dir = (u32)vfs_is_dir_(vpath);
+        g_fd[fd].kind = LX_FD_VFS;
+        return fd;
+    }
+#endif
     idx = fs_find(s);
     if (idx < 0) {
         return (u64)0 - LX_ENOENT;
@@ -422,6 +553,20 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     if (f->is_dir != 0u) {
         return (u64)0 - 21;                      /* EISDIR */
     }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        int n;
+
+        if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        if (LOS_FsLseek((INT32)f->node, (UINT32)off, (INT32)LOS_SEEK_SET) < 0) {
+            return (u64)0 - LX_EINVAL;
+        }
+        n = (int)LOS_FsRead((INT32)f->node, (VOID *)dst, (UINT32)len);
+        return vfs_err_(n);
+    }
+#endif
     if (f->node == LX_FD_CONSOLE) {
         return 0ull;                             /* 还没有键盘输入：EOF */
     }
@@ -472,10 +617,48 @@ u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
     return n;
 }
 
+u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
+{
+    LxFile *f = fd_get(fd);
+
+    if (f == 0) {
+        return (u64)0 - LX_EBADF;
+    }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        int n;
+
+        if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        if (LOS_FsLseek((INT32)f->node, (UINT32)f->pos, (INT32)LOS_SEEK_SET) < 0) {
+            return (u64)0 - LX_EINVAL;
+        }
+        n = (int)LOS_FsWrite((INT32)f->node, (const VOID *)ubuf, (UINT32)len);
+        if (n > 0) {
+            f->pos += (u64)n;
+        }
+        return vfs_err_(n);
+    }
+#endif
+    return (u64)0 - LX_EBADF;
+}
+
 u64 lx_fs_fd_size(u64 fd)
 {
     LxFile *f = fd_get(fd);
 
+#if C6OS_VFS
+    if (f != 0 && f->kind == LX_FD_VFS) {
+        INT32 sz = 0;
+
+        if (f->node >= LX_VDIR_BASE) {
+            return 0ull;                         /* 目录：大小当 0 */
+        }
+        sz = LOS_FsLseek((INT32)f->node, 0, (INT32)LOS_SEEK_END);
+        return (sz < 0) ? 0ull : (u64)sz;
+    }
+#endif
     if (f == 0 || f->node >= (u64)g_nodes) {
         return 0ull;
     }
@@ -505,9 +688,26 @@ u64 lx_fs_close(u64 fd)
     if (f == 0 || fd <= 2ull) {
         return (u64)0 - LX_EBADF;
     }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        if (f->node >= LX_VDIR_BASE) {
+            u32 sl = (u32)(f->node - LX_VDIR_BASE);
+
+            if (sl < (u32)LX_MAX_VDIR) {
+                g_dpath[sl][0] = '\0';
+            }
+        } else {
+            (void)LOS_FsClose((INT32)f->node);
+            if (f->node < (u64)OS_MAX_FILES) {
+                g_vpath[(u32)f->node][0] = '\0';
+            }
+        }
+    }
+#endif
     f->node = LX_FD_NONE;
     f->pos = 0ull;
     f->is_dir = 0u;
+    f->kind = LX_FD_FILE;
     return 0ull;
 }
 
@@ -520,6 +720,33 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
     if (f == 0 || f->node == LX_FD_CONSOLE) {
         return (u64)0 - LX_EBADF;
     }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        INT32 wh = (INT32)LOS_SEEK_SET;
+        INT32 np;
+
+        if (whence == 1ull) {
+            wh = (INT32)LOS_SEEK_CUR;
+        } else if (whence == 2ull) {
+            wh = (INT32)LOS_SEEK_END;
+        } else if (whence != 0ull) {
+            return (u64)0 - LX_EINVAL;
+        }
+        if (f->node >= LX_VDIR_BASE) {
+            if (whence != 0ull) {
+                return (u64)0 - LX_EINVAL;
+            }
+            f->pos = off;
+            return off;
+        }
+        np = LOS_FsLseek((INT32)f->node, (INT32)off, wh);
+        if (np < 0) {
+            return vfs_err_(np);
+        }
+        f->pos = (u64)(u32)np;                   /* 游标是 fd 的，必须同步 */
+        return (u64)(u32)np;
+    }
+#endif
     if (f->node == LX_FD_ROOT) {
         return 0ull;
     }
@@ -548,6 +775,17 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
     if (f == 0) {
         return (u64)0 - LX_EBADF;
     }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        u64 sz = lx_fs_fd_size(fd);
+        u32 mode = (f->is_dir != 0u) ? 0040755u : 0100644u;
+
+        if (fill_stat(ustat, (u32)f->node + 2u, sz, mode) != 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        return 0ull;
+    }
+#endif
     if (f->node == LX_FD_CONSOLE) {
         if (fill_stat(ustat, 0u, 0ull, 0020620u) != 0) {
             return (u64)0 - LX_EFAULT;
@@ -651,6 +889,76 @@ u64 lx_fs_access(u64 upath, u64 mode)
     return (u64)0 - LX_ENOENT;
 }
 
+#if C6OS_VFS
+/* /tmp 目录的 getdents64：pos 0/1 是 . 和 ..，之后按 LOS_FsReaddir 的顺序。 */
+static u64 getdents_vfs_(LxFile *f, u64 ubuf, u64 len)
+{
+    u8 rec[512];
+    u64 used = 0ull;
+    const char *dir = (f->node >= LX_VDIR_BASE)
+                          ? g_dpath[(u32)(f->node - LX_VDIR_BASE)]
+                          : g_vpath[f->node];
+
+    for (;;) {
+        const char *nm = "";
+        u32 ino = 1u;
+        u32 type = 4u;
+        u64 nl = 0ull;
+        u64 rl = 0ull;
+        u64 i = 0ull;
+
+        if (f->pos == 0ull) {
+            nm = ".";
+            ino = 1u;
+            type = 4u;
+        } else if (f->pos == 1ull) {
+            nm = "..";
+            ino = 1u;
+            type = 4u;
+        } else {
+            LosFsDirent de = {0};
+
+            de.name[0] = '\0';
+            de.type = 0u;
+            de.size = 0u;
+            if (LOS_FsReaddir((const CHAR *)dir, (UINT32)(f->pos - 2ull), &de) != 0) {
+                return used;
+            }
+            nm = (const char *)de.name;
+            ino = (u32)(f->pos - 1ull);
+            type = (de.type == (UINT32)LOS_FS_TYPE_DIR) ? 4u : 8u;
+        }
+        nl = slen_(nm);
+        rl = (19ull + nl + 1ull + 7ull) & ~7ull;
+        if (used + rl > len) {
+            if (used == 0ull) {
+                return (u64)0 - LX_EINVAL;
+            }
+            return used;
+        }
+        for (i = 0; i < rl; i++) {
+            rec[i] = 0;
+        }
+        put64(rec + 0u, (u64)ino);
+        put64(rec + 8u, f->pos + 1ull);
+        rec[16] = (u8)(rl & 0xffull);
+        rec[17] = (u8)((rl >> 8) & 0xffull);
+        rec[18] = (u8)type;
+        for (i = 0; i < nl; i++) {
+            rec[19ull + i] = (u8)nm[i];
+        }
+        if (lx_user_ok(ubuf + used, rl, C6OS_PROT_W) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        for (i = 0; i < rl; i++) {
+            *(u8 *)(ubuf + used + i) = rec[i];
+        }
+        used += rl;
+        f->pos++;
+    }
+}
+#endif
+
 /* getdents64：Linux 的 dirent64 布局，名字以 NUL 结尾，记录 8 字节对齐。 */
 u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
 {
@@ -666,6 +974,11 @@ u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
     if (f->is_dir == 0u) {
         return (u64)0 - 20;                      /* ENOTDIR */
     }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        return getdents_vfs_(f, ubuf, len);
+    }
+#endif
     dir = (f->node == LX_FD_ROOT) ? "" : fs_node_name((u32)f->node);
     for (;;) {
         const char *nm;
