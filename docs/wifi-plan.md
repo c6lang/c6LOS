@@ -11597,3 +11597,35 @@ flash MMU 约束）。
 JTAG 办法先读 `g_ctx[]` 里的 `entry` 字段），看是不是闭源库
 `_task_create` 传进来的 entry 本身就不对，还是我们 `port_task_ctx_create`
 的 a2/a3/a4 参数错位。
+
+### §274 崩溃时 `g_ctx[]` 的真相：**闭源库 ppTask 的保存 sp 是野的**
+
+接着 §273，用同样的 JTAG 办法读 `g_ctx`（`nm` 给的是 `0x3fcc2e00`，`S3Ctx` =
+`u32 r[16]; u32 sp; void *stack; u32 size;` → 76 字节/ctx）：
+
+```
+0x3fcc2e40: 3fcbeb10 3fcbce00 00002000      <- ctx[0].sp / .stack / .size
+0x3fcc2e8c: 3fcd8ea0 3fcbee00 00001800      <- ctx[1].sp / .stack / .size
+```
+
+- **ctx[0]**（我们的 windowed 主任务）：栈 `0x3fcbce00` + 0x2000，保存的
+  `sp=0x3fcbeb10` —— 正好在栈顶附近，**完全正常**；
+- **ctx[1]**（闭源库的 ppTask，栈大小 0x1800=6144，和 OSI `_task_create`
+  打印的 6144 对得上）：栈 `0x3fcbee00`…`0x3fcc0600`，但保存的
+  **`sp = 0x3fcd8ea0`** —— 比它自己的栈高出约 41KB，落在
+  `S3_STACK_TOP(0x3FCD9000)` 附近那块**异常/中断用的栈**里。
+
+而 §273 里串口打的 `sp=3fcd8ea0` 正是这个值（陷阱帧基址）。两件事对上了：
+
+1. ppTask 是在一个**不属于它自己的栈**上被打断/切走的；
+2. 它下一次被恢复时，`sp` 指向异常栈那块内存 → 一路 `retw`/`ret` 弹出垃圾
+   → 最后跳到 `0x3fcb9d4d`（task.c6 静态数据 +1792 的地址，奇地址→取指异常）。
+
+所以这次 `cause=2` **不是闭源库的 bug，而是我们的中断/任务切换把 sp 存错了**：
+level-1 定时器中断里做任务切换时，往被中断任务的 ctx 里存的很可能是
+**中断自己的栈**（`_vec_level1` 换到的那块），而不是被中断现场的 sp。
+
+**下一轮第一件事**：查 `port/s3/irq.S` 的 `_vec_level1` + `s3_timer_irq` +
+`port_task_switch` 这条链，确认"被中断任务的 sp"到底是哪个值被存进
+`ctx->sp`；对照 `port_task_ctx_create` 里 `r[16]` 占位、`sp@64` 的约定
+（`ctx.c` 注释写的就是"保持 sp@64 布局"）。
