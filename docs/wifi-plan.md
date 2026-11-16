@@ -11340,3 +11340,15 @@ IDF 的 `SPILL_ALL_WINDOWS`（xt_asm_utils.h）转完一圈就结束，**不动 
 （由硬件的 overflow/`rfwo` 自己维护）。我们原来在结尾多做了一次
 "归一化成 `1<<WINDOWBASE`"，会把祖先窗口的 live 位抹掉；现在已删除、并在源码里
 写了原因。实测崩点未变（说明它不是当前的主因），但这是与官方实现对齐的正确做法。
+
+### §263 本轮补充取证（都写在这里，免得下轮重复）
+
+- **init 状态全局是好的**：JTAG dump 0x3fcba310 起 16 字，`0x3fcba318 == 3`
+  ⇒ `wifi_init_completed()` 会返回"初始化完成"，所以崩溃不在它读状态那一步。
+- `wifi_api_lock` 反汇编定位不可靠（objdump 在这段 `.flash.text` 上线性扫描会跑偏，
+  同一段里既有指令也有字面量池），别再靠反汇编硬猜。
+- `esp_wifi_get_mode`（只读 ioctl）实验**不可用**：仅仅把 `set_mode` 换成
+  `get_mode` + 一句 printf，整条链路就退回到连 `associate ssid` 都到不了
+  —— 又一次证明这一段是**时序敏感**的，实验必须只用 DRAM/RTC 信标，不能加打印。
+- 现状（每次可复现）：`set_storage` 成功 → **下一个走 ioctl 的库调用必崩**
+  （`cause=2`、PC 跳栈地址 0x3fcb9d45、`a0=0`、`ws=0`），且崩溃现场 OSI 计数不变。
