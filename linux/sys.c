@@ -400,8 +400,41 @@ static void lx_syscall_do(LxRegs *r)
         r->rax = 0ull;
         return;
 
+    case LX_SYS_poll:
+        /* 8 字节一项：{ i32 fd; i16 events; i16 revents; } */
+        if (lx_user_ok(a0, a1 * 8ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        r->rax = (u64)lx_proc_poll(a0, a1, (i64)(i32)a2);
+        return;
+
+    case LX_SYS_ppoll:
+        {
+            i64 to = -1;
+
+            if (a2 != 0ull) {
+                if (lx_user_ok(a2, 16ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                if (*(const i64 *)a2 == 0 && *(const i64 *)(a2 + 8ull) == 0) {
+                    to = 0;                  /* 零超时 = 立即返回 */
+                }
+            }
+            if (lx_user_ok(a0, a1 * 8ull, C6OS_PROT_W) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            r->rax = (u64)lx_proc_poll(a0, a1, to);
+        }
+        return;
+
     case LX_SYS_arch_prctl:
         if (a0 == LX_ARCH_SET_FS) {
+            if (lx_cur_proc() != (LxProc *)0) {
+                lx_cur_proc()->fs_base = a1;
+            }
             port_user_set_fsbase(a1);
             r->rax = 0ull;
             return;
@@ -411,7 +444,9 @@ static void lx_syscall_do(LxRegs *r)
                 r->rax = neg(LX_EFAULT);
                 return;
             }
-            *(u64 *)a1 = port_user_get_fsbase();
+            *(u64 *)a1 = (lx_cur_proc() != (LxProc *)0)
+                             ? lx_cur_proc()->fs_base
+                             : port_user_get_fsbase();
             r->rax = 0ull;
             return;
         }

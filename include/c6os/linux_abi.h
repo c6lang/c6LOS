@@ -48,6 +48,13 @@
 #define LX_SYS_setsid        112
 #define LX_SYS_sigaltstack   131
 #define LX_SYS_pipe2         293
+
+/* poll(2) 的事件位（与 Linux 一致） */
+#define LX_POLLIN   0x0001
+#define LX_POLLOUT  0x0004
+#define LX_POLLERR  0x0008
+#define LX_POLLHUP  0x0010
+#define LX_POLLNVAL 0x0020
 #define LX_SYS_pread64        17
 #define LX_SYS_readv          19
 #define LX_SYS_writev         20
@@ -73,6 +80,13 @@
 #define LX_SYS_setsid        112
 #define LX_SYS_sigaltstack   131
 #define LX_SYS_pipe2         293
+
+/* poll(2) 的事件位（与 Linux 一致） */
+#define LX_POLLIN   0x0001
+#define LX_POLLOUT  0x0004
+#define LX_POLLERR  0x0008
+#define LX_POLLHUP  0x0010
+#define LX_POLLNVAL 0x0020
 #define LX_SYS_getuid        102
 #define LX_SYS_getgid        104
 #define LX_SYS_setuid        105
@@ -87,6 +101,8 @@
 #define LX_SYS_time          201
 #define LX_SYS_getcwd         79
 #define LX_SYS_chdir          80
+#define LX_SYS_poll          7
+#define LX_SYS_ppoll         271
 #define LX_SYS_arch_prctl    158
 #define LX_SYS_gettid        186
 #define LX_SYS_getdents64    217

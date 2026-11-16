@@ -93,6 +93,7 @@ void lx_proc_attach(u64 as, u64 brk)
     p->as = as;
     p->brk = brk;
     p->mmap_top = C6OS_LINUX_MMAP_BASE;
+    p->fs_base = 0ull;                    /* 新镜像自己会 arch_prctl 设 TLS */
     p->kstack_top = (u64)(&g_kstack[g_cur][0]) + LX_KSTACK_SIZE;
     port_user_set_kstack(p->kstack_top);
 }
@@ -138,6 +139,7 @@ static void switch_to_(int next)
     lx_mmap_top_set(p->mmap_top);
     lx_fs_set_fdtab(p->fd);
     port_user_set_kstack(p->kstack_top);
+    port_user_set_fsbase(p->fs_base);
     x86_resume_frame = (u64)(&p->f);
     if (c == (LxProc *)0) {
         return;
@@ -292,6 +294,7 @@ u64 lx_proc_fork(LxRegs *r)
     ch->f.r = *r;                         /* 继承父进程的用户寄存器 */
     ch->f.r.rax = 0ull;                   /* fork 在子进程里返回 0 */
     ch->f.user_rsp = pf->user_rsp;
+    ch->fs_base = par->fs_base;
     ch->state = LX_P_READY;
     {
         u64 i;
@@ -713,6 +716,91 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
         return 0ull;                       /* stdin 还没接键盘：EOF */
     }
     return lx_fs_read(fd, ubuf, len);
+}
+
+/* 还有别的进程可能改变管道状态吗？没有就别死等（协作式调度里等不到人）。 */
+static int others_live_(int self)
+{
+    int i;
+
+    for (i = 0; i < (int)LX_MAX_PROC; i++) {
+        if (i == self) {
+            continue;
+        }
+        if (g_proc[i].state == LX_P_READY || g_proc[i].state == LX_P_RUN) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static u16 poll_events_(LxProc *p, i32 fd)
+{
+    const LxFile *f;
+
+    if (fd < 0 || fd >= (i32)C6OS_LINUX_MAX_FD) {
+        return (u16)LX_POLLNVAL;
+    }
+    f = &p->fd[fd];
+    if (f->node == LX_FD_NONE) {
+        return (u16)LX_POLLNVAL;
+    }
+    if (f->kind == LX_FD_PIPE_R) {
+        const LxPipe *pp = &g_pipe[f->node];
+        u16 ev = 0u;
+
+        if (pp->tail != pp->head) {
+            ev = (u16)(ev | (u16)LX_POLLIN);
+        }
+        if (pp->writers == 0u) {
+            ev = (u16)(ev | (u16)LX_POLLHUP);
+        }
+        return ev;
+    }
+    if (f->kind == LX_FD_PIPE_W) {
+        const LxPipe *pp = &g_pipe[f->node];
+        u16 ev = 0u;
+
+        if ((pp->tail - pp->head) < LX_PIPE_SZ) {
+            ev = (u16)(ev | (u16)LX_POLLOUT);
+        }
+        if (pp->readers == 0u) {
+            ev = (u16)(ev | (u16)LX_POLLERR);
+        }
+        return ev;
+    }
+    return (u16)LX_POLLIN;        /* 普通文件 / console：不阻塞 */
+}
+
+/* poll(2)：struct pollfd { i32 fd; i16 events; i16 revents; }，8 字节一项。
+ * 只关心"管道能不能读/写"；普通 fd 一律报就绪，避免 shell 卡在等 console 上。 */
+i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
+{
+    LxProc *p = cur_();
+    u32 rounds = 0u;
+
+    if (p == (LxProc *)0) {
+        return 0;
+    }
+    for (;;) {
+        u64 i;
+        i64 cnt = 0;
+
+        for (i = 0ull; i < nfds; i++) {
+            u8 *e = (u8 *)(ufds + i * 8ull);
+            u16 rev = poll_events_(p, *(i32 *)e);
+
+            *(u16 *)(e + 6ull) = rev;
+            if (rev != 0u) {
+                cnt++;
+            }
+        }
+        if (cnt > 0 || timeout == 0 || rounds >= 4096u || !others_live_(g_cur)) {
+            return cnt;
+        }
+        rounds++;
+        lx_proc_block();
+    }
 }
 
 u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)

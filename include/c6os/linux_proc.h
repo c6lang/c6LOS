@@ -60,6 +60,7 @@ typedef struct LxProc {
     i64 code;                 /* 退出码（ZOMBIE 时有效） */
     u64 brk;
     u64 mmap_top;
+    u64 fs_base;              /* TLS 基址：切进程时必须跟着换（MSR_FS_BASE 是全局的） */
     LxFile fd[C6OS_LINUX_MAX_FD];
 } LxProc;
 
@@ -79,6 +80,7 @@ u64      lx_proc_dup(u64 oldfd);
 u64      lx_proc_dup2(u64 oldfd, u64 newfd);
 u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
+i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
 
 /* 内存状态随进程切换（linux/sys.c 提供） */
 u64  lx_brk_get(void);
