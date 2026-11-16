@@ -48,8 +48,6 @@ u32 g_next_task_windowed = 0;
 u32 g_win_scratch[8] = {0};
 /* §258：恢复 WINDOWBASE 时需要先记住帧指针（寄存器换映射后 a1 就变了） */
 u32 g_ctx_tmp_sp = 0;
-/* §259 诊断：最近一次任务 trampoline 的入口/sp/ABI 标志/启动计数 */
-u32 g_tramp_dbg[4] = {0};
 u32 g_ts_cnt = 0;   /* 任务启动次数 */
 u32 g_sw_cnt = 0;
 u32 g_yl_cnt = 0;

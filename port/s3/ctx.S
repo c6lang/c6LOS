@@ -15,7 +15,6 @@
     .literal .Ldbg2,    0x50001800
     .literal .Lwscratch, g_win_scratch
     .literal .Ltmpsp,   g_ctx_tmp_sp
-    .literal .Ltrampdbg, g_tramp_dbg
     .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
@@ -307,12 +306,10 @@ s3_task_tramp:
     s32i    a8, a3, 0
     s32i    a12, a3, 4
     s32i    a1, a3, 8
-    /* §259 诊断：同一份信息也记进 DRAM（RTC 慢速内存会被库/PHY 写坏） */
-    l32r    a9, .Ltrampdbg
-    s32i    a12, a9, 0
-    s32i    a1, a9, 4
-    s32i    a4, a9, 8
-    s32i    a8, a9, 12
+    /* §259：这里原来还往 DRAM 全局 g_tramp_dbg 里多写 4 个字做诊断，实测
+     * **只加这 4 条 store 就足以让 WiFi 初始化阶段的时序翻车**（bringup 从
+     * 3/3 变成 0/3），说明整条链路还有很紧的时序窗口。诊断信息保留在 RTC
+     * 那 3 个字里就够了，别再往这条路径上加东西。 */
     /* 入口地址也按序号存一份，便于确认是不是同一个入口 */
     extui   a9, a8, 0, 2
     slli    a9, a9, 2

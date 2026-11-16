@@ -11206,3 +11206,42 @@ spill 过，下溢向量能把祖先窗口补回来），所以暂时保持不�
 `a0=0`、`ws=0` —— 跳到了一个栈地址上。位置正好是 `os_task_start_core` 里
 `callx0 port_task_switch` 之后（`a0=0x420188fa`），所以下一步查"新起的 windowed
 任务第一次被调度进去"这条路径（`s3_task_tramp` 的 `callx8` 前后窗口状态）。
+
+### §259 时序极敏感：**加 4 条 store 就能把结果从 3/3 打成 0/3**
+
+为了定位 `W2 bringup returned` 之后的崩溃，我在 `s3_task_tramp` 里多写了 4 条
+`s32i`（把入口/sp/ABI/计数记到 DRAM 全局 `g_tramp_dbg`）。结果：
+
+| 构建 | `W2 bringup returned` |
+| --- | --- |
+| b7a7960（只有 §258 的 WINDOWBASE 修复，无额外诊断） | **3/3** |
+| 同上 + tramp 里 4 条 store | **0/3**（退回到 `[lock]` 卡住） |
+
+⇒ 这条链路上还压着一个**极紧的时序窗口**：多 4 条 store 就翻车。已经把那段诊断
+删掉（只留原来 RTC 的 3 个字），并在源码里写了警告"别再往这条路径加东西"。
+
+**现在的稳定状态（可复现）**：
+
+```
+[lock] ... [lockok] ... esp_wifi_init_internal -> 0 ... bringup rc=0
+W2 bringup returned
+.
+Wu2.b*** TRAP sp=3fcd8ea0 cause=00000002 pc=3fcb9d45 ps=00000b10 vaddr=3fcb9d44 ws=00000000 a0=00000000
+```
+
+即：**WiFi 库初始化 3/3 成功**，然后进 `c6_lwip_start` → `lwip_init()` →
+`sys_thread_new()` 起 tcpip 线程时崩：跳进栈地址（0x3fcb9d44）、`a0=0`、`ws=0`
+（一个活窗口都没有）。`sp=3fcd8ea0` 贴着 `S3_STACK_TOP=0x3fcd9000`，说明是启动
+主任务的栈。
+
+**下一轮从这里接**：
+
+1. 崩点在新起的 windowed 任务（`tcpip_thread`）第一次被调度进来前后。先在**不改
+   时序**的前提下取证：用 JTAG 在崩住后 dump `g_lwip_stage`（已有 8 个字信标，
+   写在 C 侧、不影响启动路径）确认是 `lwip_init` 内部还是线程首次运行；
+2. 重点看 `s3_task_tramp` 的 `callx8`：新任务帧的 `PS.WOE=1`、`WB=0`、`WS=1`；
+   `callx8` 之后硬件应把新窗口的 live 位置起来（m=2 与 CALLINC=2 配套）。如果
+   这里 `WS` 没被置位，下一次 `retw` 就会按"下溢填充"去读一个从没写过的 spill
+   槽，读回来就是 `a0=0` / 栈地址这种垃圾 —— 和现场吻合；
+3. 若确认，就在 tramp 里 `callx8` 之前把 `WS` 设为 `(1<<0)|(1<<2)` 之外的正确
+   组合（或者干脆让 tramp 用 `entry`+`retw` 的 windowed 序列进入口）。
