@@ -13559,3 +13559,19 @@ tramp      : 启动过 2 个任务（wifi 主任务 + ppTask）
 ⚠️ 注意：`port_irq_fill()` 现在把 `c->sp` 记成这个 128 字节帧的地址，
 而 `RESTORE_FRAME` 结尾只 `addi a1,a1,80` —— **一旦以后打开定时器抢占，
 这两处必须一起改成 128**。当前 `-DS3_NO_PREEMPT` 下不会用到。
+
+## §362 §361 之后的新失败点，以及 `port_irq_fill` 的取舍
+
+- 默认构建（`port_irq_fill` 照旧把 `c->sp` 记成中断帧）：
+  `cause=1c LoadProhibited vaddr=fffffffc epc1=4004909a(ROM) a1=00000008
+  windowbase=6 windowstart=8` —— `a1` 已是垃圾、WS/WB 也不自洽。
+  怀疑与"中断帧现在是 128 字节、而 `RESTORE_FRAME` 只 `+80`"有关。
+- 加 `-DS3_NO_ISR_SP_PATCH`（完全不记 `c->sp`）：又回到老现场
+  `cause=1d epc1=4201860a a1=50000b00`（就是调度器主循环 a1 被换成常量的那个）
+  ⇒ 说明记录 `c->sp` 这件事本身在起正面作用，不能简单去掉。
+
+**下一步**：要么把中断帧的**大小也统一成 80**（用 §361 的办法：帧放在
+`[sp-128, sp-60)` 但只占 68 字节，可以改成 `addi a1,a1,-96` 且把布局整体
+下移 —— 注意必须整体低于 sp-48），要么让 `RESTORE_FRAME` 认识"中断帧"
+（帧里存一个标记/长度）。两者目标一致：**帧指针恢复出来的 sp 必须等于
+被打断的 sp**。
