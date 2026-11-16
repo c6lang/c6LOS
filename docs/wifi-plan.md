@@ -10797,3 +10797,49 @@ make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_
 ppTask 能进 `_queue_recv` 循环，随后在 `osi_semphr_take` 的 `retw.n`
 （`pc=0x4037c280`、`a0` 是栈地址、`ws=0x06`）炸。下一步要么把 SAVEALL 调试正确
 （它理论上是解），要么回到"归一化+spill"那一对语义上整体做对。
+
+### §246 当前状态小结（第 24~25 轮结束时）
+
+**能跑到的位置**（真板，最佳配置）：
+
+```
+make C6_ROOT=/home/winger/c6 \
+     S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" \
+     S3_PHY_VIA_OSI=1 S3_NO_WIN_SPILL=1 https
+```
+
+```
+c6os s3 boot
+M1 icache ok / M2 flash_diag ok / M3 wdt skipped / M4 task wifi ok / M5 tasks ok
+T1 call0 任务进入 windowed 主流程
+[wifimain] id=1 tick=0
+W0 phy start / [phy] 跳过手动初始化：交给 OSI _phy_enable 回调
+W1 bringup
+B1 slot13=… magic=deadbeaf ver=00000008
+B2 cfg@… osi=… magic@144=1f2f3f4f
+[lock] / [pp] pp rom version / [net80211] / [unlock] / [mtxnew] #1 #2 / [semnew] #1
+[task] 库建任务 fn=… id=2 stack=6144 prio=29(->2)      ← ppTask 建起来
+[take] t=1 sem#1 tk=ffffffff                          ← init 等 ppTask 就绪
+[give] t=2 sem#1                                      ← 握手完成
+[recv] t=2 qh=… tk=ffffffff                           ← ppTask 进了收包循环
+*** TRAP cause=0 pc=<osi_semphr_take 的 retw.n> a0=<栈地址> ws=0x06
+```
+
+**唯一剩下的拦路虎**：windowed 代码在**多层嵌套**（库 → 我们的 windowed 胶水 →
+w2c 壳 → call0 内核）时，`retw` 的窗口簿记出错（`retw.n` 直接 cause=0）。
+已知：
+- 单层（最小用例 t_win1：一个 windowed 任务 + 一次壳调用）**完全正常**；
+- `ws=0x06 / windowbase=3` 说明只有 2 个窗口 live，而这条调用链深度 ≥3 ——
+  窗口溢出/欠载向量本应参与，但看起来没有正确触发；
+- 向量实现（`_win_ovf4/8/12`、`_win_unf4/8/12`）与官方 HAL 逐条一致 ✓ 已核对；
+- `PS.WOE` 已无条件置 1 ✓；`WINDOWSTART` 恢复改成"新任务归一化 / 老任务原值" ✓。
+
+**下一步（下次接着干）**：
+1. 在 `port_task_switch` 里把 (windowstart, windowbase, a0带CALLINC位) 写进 RTC 环
+   （0x50001D00 起），用 `./tools/dbg.sh` + JTAG 读，**看第几次切换开始对不上**；
+2. 用 t_win1 扩一个"深度 3 嵌套"的最小用例（windowed a() → windowed b() →
+   壳 → call0 c()），把 WiFi 剥掉，专攻这个；
+3. 若确认是溢出向量没触发，检查 `start.S` 里 WOE/WINDOWSTART 的设置时序
+   （硬件要求：写 WOE 之后要先经过一次 `rsync`，且 WINDOWSTART 的位要与
+   `windowbase` 配套），以及 `_vec_exc`（level-1 异常入口）在 windowed 上下文里
+   有没有把 `windowstart`/`windowbase` 存进陷阱帧。
