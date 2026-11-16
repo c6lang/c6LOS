@@ -12160,3 +12160,36 @@ WIFI_MAC_NMI / BT_MAC / BT_BB / BT_BB_NMI / RWBT），一度怀疑是 level-6 �
 
 **默认路径没动**：`S3_APP_BASE=0x0`（ROM 直接引导）行为与之前完全一致
 （板子上现在跑的就是它，`[phy] calling register_chipv7_phy(mode=0)` 停住）。
+
+### §291 抓住溢出处理体：`[a1-12]` 里的"上一级 sp"是 **0**（a1 本身是合法栈地址）
+
+在 `_win_ovf8` 的 `l32e a0, a1, -12` 之后加一句 `beqz a0, .Lovf8_bad`，坏分支把
+现场写 RTC `0x50000120` 起（诊断体放在 `.text` 里，`.vector` 只有 1KB 塞不下）。
+
+走 IDF bootloader 引导，JTAG 读回：
+
+```
+0x50000120  3fcbeda0    ← a1（帧指针，合法栈地址）
+0x50000124  3fcbed80    ← a9（下一个窗口的 sp）
+0x50000128  400442a7    ← EPC1
+0x5000012c  00000000    ← WINDOWBASE
+0x50000130  00005555    ← WINDOWSTART（8 个 call8 帧都活着）
+0x50000134  00060e10    ← PS（INTLEVEL=6, EXCM=1）
+0x50000138  00000b08    ← 记号：确认确实进了 _win_ovf8 的坏分支
+```
+
+**结论**：`a1` 是好的，但 **`[a1-12]`（按 ABI 应该放着"上一级的 sp"）是 0**。
+xtos 的处理体接着要 `s32e a4, a0, -32` → 写 `0xffffffe0` → 在 EXCM 里二次异常 →
+double exception（§290 的 EXCCAUSE=0x1d / EXCVADDR=0xffffffe0 就是这么来的）。
+根源是这条调用链里**有一帧不是真正的 windowed 帧**（我们的 call0 → 跳板/W2C 壳
+手工造的帧就没有 `[fp-12]` 这个槽），调用链一深就塌。
+
+**重要副作用（已回退）**：加了 `beqz` 守卫之后，**ROM 直接引导那条路也死在 T1 了**。
+说明同样的 `[a1-12]==0` 在 ROM 路径上也会出现，而原代码"往 0xffffffe0 写"
+在那边其实**没炸**（写进去被丢掉，`rfwo` 重试后继续跑），于是带了守卫反而
+把本来能过的路挡死。所以 §291 的诊断代码只用来看现场，已经 `git stash drop`
+回退，树里没留。
+
+**下一轮真正该做的**：让 call0→windowed 的**每一帧都符合 ABI 的帧布局**
+（尤其是把上一级 sp 放在 `[fp-12]`），或者进 windowed 之前先把整个窗口组
+spill 干净、只留一个活窗口，从根上避免"深链溢出"。
