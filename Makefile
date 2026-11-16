@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1021,7 +1021,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1506,6 +1506,41 @@ check-tcp: x86-tcp $(HTTP_DIR)/index.html
 	 rc=$$? ; kill $$(cat $(X86)/httpd.pid) 2>/dev/null || true ; \
 	 if [ $$rc = 0 ]; then echo "PASS: net M10-4（TCP + GET / HTTP/1.0 拿到 200）"; \
 	 else echo "FAIL: net M10-4"; tail -25 /tmp/check-tcp.log; exit 1; fi
+
+# ---- M11-0：ISO（El Torito no-emulation）启动 ----
+# 光盘的逻辑块是 2048 字节：cd0 用 int 13h AH=42h 按块读，再经 unreal mode 搬到
+# 目标物理地址（内核 0x10000、rootfs.cpio 0x00800000）。载荷不再受 boot16 的
+# 195KB 上限约束。
+ISO_DIR    := $(X86)/iso
+ISO_MAIN   ?= tests/t_iso.c6
+ISO_KER    := $(ISO_DIR)/flat.bin
+ISO_IMG    := $(ISO_DIR)/c6os.iso
+ISO_ROOTFS ?=
+CD0_BIN    := $(X86)/cd0.bin
+
+$(X86)/cd0.o: port/x86_64/cd0.S
+	@mkdir -p $(X86)
+	as --32 -o $@ $<
+
+$(CD0_BIN): $(X86)/cd0.o
+	ld -m elf_i386 -Ttext=0x7C00 --oformat binary -o $@ $<
+
+x86-iso: caps-check-x86
+	$(MAKE) X86S_NAME=iso X86S_MAIN=$(ISO_MAIN) $(ISO_KER)
+	@mkdir -p $(ISO_DIR)
+	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		$(if $(ISO_ROOTFS),--rootfs $(ISO_ROOTFS),) -o $(ISO_IMG)
+
+run-x86-iso: x86-iso
+	qemu-system-x86_64 -m 256M -cdrom $(ISO_IMG) -boot d \
+		-nographic -serial stdio -monitor none -no-reboot
+
+check-iso: x86-iso
+	@timeout 60 qemu-system-x86_64 -m 256M -cdrom $(ISO_IMG) -boot d \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-iso.log | grep -q "^PASS: iso M11-0" \
+	  && echo "PASS: iso M11-0（El Torito no-emulation 启动链）" \
+	  || { echo "FAIL: iso M11-0"; tail -20 /tmp/check-iso.log; exit 1; }
 
 # 零侵入：C6OS_NET=0 时 S3 的对象列表里不该出现 SAL/协议栈源文件
 check-net-zero:

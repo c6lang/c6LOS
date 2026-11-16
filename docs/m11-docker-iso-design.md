@@ -52,7 +52,7 @@ c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依�
 | 编号 | 缺口 | 后果 | M11 处理 |
 |---|---|---|---|
 | G1 | 没有 CD 引导链（`boot16` 只会读 512 字节扇区、`int 13h` LBA 1..） | `-cdrom` 起不来 | M11-0：El Torito no-emulation 引导块 `port/x86_64/cd0.S` + `tools/mkiso.py` |
-| G2 | 载荷只能装在内核镜像里（`.incbin`），rootfs 没有"随 ISO 走"的通道 | 镜像得重编内核 | M11-1：ISO 里放第二段载荷 `rootfs.cpio`，`cd0` 搬到固定物理地址，内核从内存挂 romfs |
+| G2 | 载荷只能装在内核镜像里（`.incbin`），rootfs 没有"随 ISO 走"的通道 | 镜像得重编内核 | M11-1：ISO 里放第二段载荷 `rootfs.cpio`；**≤1 MB 的 rootfs** 直接跟在载荷里装到内存（M11-0 的实模式读盘路径就够），更大的才上 unreal mode / ATAPI |
 | G3 | 可写存储太小：ramfs 32 节点 / 8KB arena；FAT16 只读 | 镜像里的程序写不了东西 | M11-2：FAT16 **写**（创建/写/追加/删除/截断/sync）+ 挂 `/data`；M11-4 再扩 ramfs |
 | G4 | `fsapi.c6` 的写类操作按 FS 名字硬判断，FAT 根本没接 | FAT 上的写路径无法落地 | M11-2：VFS 挂载点改成 **ops 分发表**（`LosFsOps`），ramfs/fatfs 各自实现 |
 | G5 | 安装/解包工具没有：仓库里没有 tar/gzip/OCI/whiteout 相关代码 | docker 镜像用不上 | M11-3：`tools/mkdockeriso.py`（宿主侧 Python，`tarfile` + `json`） |
@@ -102,23 +102,25 @@ c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依�
 > ——引导块要按固定 LBA 直接读载荷，不想要 ISO9660 解析器（那得再写 200 行 C）。
 > `tools/mkfat.py` 已经是同类工具的先例，风格一致。
 
-### 3.3 引导流程（`cd0.S` 干的事）
+### 3.3 引导流程（`cd0.S` 干的事，以 M11-0 实际实现为准）
 
 ```
 BIOS 从 El Torito 把 LBA 20 的 2048 B 装到 0x7C00 并跳进来
-  ├─ 关中断、清段寄存器、栈设 0x7C00
-  ├─ 存 DL（引导盘号）
-  ├─ 开 A20（int 15h, ax=2401h）+ 进 unreal mode（4GB 限长的数据段）
-  ├─ 循环：int 13h AH=42h（每块 2048 B）读 32 块 → 0x20000 暂存区
-  │        然后用 32 位寻址 rep movsb 搬到目标物理地址（内核 0x10000 / rootfs 0x00800000）
+  ├─ 归一化 CS:IP（BIOS 可能用 0x07C0:0000 进来）、清段寄存器、栈设 0x7C00
+  ├─ 存 DL（引导盘号）、初始化 COM1（-nographic 下只有串口看得见）
+  ├─ 打印载荷参数（mkiso 回填的 LBA/块数），出问题一眼定位
+  ├─ load_payload(内核)：int 13h AH=42h，DAP 偏移恒 0、目标段每块 +0x80（2048/16）
+  │    —— 先试"一次读完"（块数 16 位，110KB 才 54 块），失败退化成一次一块
+  ├─ load_payload(rootfs)：块数为 0 就跳过
   ├─ 写引导信息块（0x7000，魔数 'C6IS'）
-  └─ 远跳 0x1000:0x0000（内核 stage1 的链接地址 0x10000）
+  └─ 切 32 位保护模式（GDT 里 4GB 平坦代码/数据段），远跳 0x10000
 ```
 
-**为什么要 unreal mode**：`int 13h` 的 DAP 只有 `段:偏移`，实模式寻址上限 ~1.06 MB，
-而 rootfs 动辄 1–2 MB、还要放到 4 MB 以上（避开 `KERNEL_RESERVED_END`）。
-用 unreal mode + `rep movsb` 分块中转，**不需要 ATAPI 驱动、不需要 ISO9660 解析器**，
-只多 ~40 行汇编。备选方案（ATAPI + SCSI READ(10)）留到 M11-4。
+**为什么不用 unreal mode**：M11-0 的载荷只有内核（110 KB），目标地址 `0x10000` 本来就
+在 1 MB 以下，实模式的"段:偏移"完全够用，而 `int 13h` 的 DAP 本来就是段:偏移——
+让目标段跟着每块 +0x80 走，连暂存区搬运都省了。unreal mode（4 GB 数据段 + 32 位寻址
+搬运）是**载荷超过 1 MB** 才需要的东西（rootfs 放在 `0x00800000` 那种场景），
+留给 M11-1 再做，不必现在就冒险（8 段汇编里每多一个模式切换就多一种挂法）。
 
 ### 3.4 引导信息块（`0x7000`，32 字节）
 
@@ -266,6 +268,53 @@ ramfs 的 32 节点 / 8KB arena 在 M11 不做扩容（M11-4 再说），镜像�
 
 （每完成一个里程碑补一节：做了什么、踩了什么坑、验收输出。）
 
-### M11-0（ISO 启动链）
+### M11-0（ISO 启动链）已完成
 
-待写。
+**做了什么**：
+
+- `port/x86_64/cd0.S`（744 B）：El Torito no-emulation 引导块。归一化 CS:IP → 初始化
+  COM1 → 打印 mkiso 回填的载荷参数 → `int 13h AH=42h` 按 2048 字节块读内核载荷
+  （目标段每块 +0x80，先试一次读完、失败退化成一块一块）→ 写引导信息块 `0x7000` →
+  切 32 位保护模式、远跳 `0x10000`（内核 stage1 是 `.code32`）。
+- `tools/mkiso.py`：写最小 ISO9660 + El Torito。布局确定：PVD@16、El Torito 卷描述@17、
+  终止符@18、引导目录@19、引导块@20、内核载荷@21…、路径表 L/M、根目录（含 `C6OS.KER;1`）。
+  回填引导块里 `C6ISOLDR` 魔数后面的 6 个 u32（内核/rootfs 的 LBA、块数、目标物理地址），
+  生成完自己再解析一遍关键字段做自检。
+- `tests/t_iso.c6` + `iso` 变体 + `make x86-iso / run-x86-iso / check-iso`。
+
+**验收**：
+
+```
+$ make check-iso
+  kernel: lba=21 blocks=54 (109496 B) -> 0x00010000
+PASS: iso M11-0（El Torito no-emulation 启动链）
+
+# 客户机内输出：
+cd0: magic0=0x00000043 k=0x00000015/0x00000036 r=0x0000004b/0x00000000
+cd0: payload loaded
+cd0: enter protected mode -> 0x10000
+c6os iso M11-0: 从 El Torito 光盘引导
+  bootinfo magic=0x53493643 version=1 flags=1
+  kernel pa=0x00010000 len=110592  rootfs pa=0x00000000 len=0
+
+# 宿主侧旁证（ISO9660 结构合法，El Torito 引导项在）：
+$ 7z l build/x86/iso/c6os.iso | tail -5
+2025-01-01 08:00:00 .....  109496  109496  C6OS.KER
+                .....        2048    2048  [BOOT]/Boot-NoEmul.img
+```
+
+**四个坑（按踩到的顺序）**：
+
+1. **`.code16` / `.code32` 必须成对**：我在 `enter32` 之前写了 `.code32`，结果后面的
+   `print`/`put_chr` 辅助例程全被按 32 位编码，16 位调用它们直接飞掉——现象是"一个字
+   都打不出来"。
+2. **清 PE 之后的远跳必须用 16 位编码**：`ljmp $0, $rm16` 若按 `.code32` 编成
+   `EA off32 sel16`，回到实模式后 CPU 按 `off16+sel16` 译码，直接飞到不知道哪里。
+3. **打印例程别把值留在 EAX 里**：`put_chr` 会把字符放进 AL，`put_hex` 每轮从 EAX
+   重新取值得出的是被改过的值（现象：常数 `0x12345678` 打成 `0x12345633`）。
+4. **`movl $0, dap+4` 会把 segment 一起清零**（DAP 里 offset 在 +4、segment 在 +6）：
+   于是第一次读盘写到物理地址 0，把实模式中断向量表砸了，第二次 `int 13h` 跳进垃圾
+   ——现象是"读一块成功（打了一个点），然后卡死"。
+
+前三个都属于"模式/寄存器宽度"这类看不见的错，第四个是纯粹的眼瞎；
+共同点是**都表现为"没有输出"**，所以 `cd0` 里那行参数打印和每个阶段的心跳很值钱。

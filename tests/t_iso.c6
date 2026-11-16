@@ -1,0 +1,105 @@
+/* tests/t_iso.c6 —— M11-0 验收：从 El Torito（no-emulation）光盘启动
+ *
+ * 光驱引导链是整个 M11 的地基，这一版只验"能起来、而且引导块把内核搬对了位置"。
+ * 引导块 cd0.S 在跳进内核前会往 0x7000 写一块引导信息（魔数 'C6IS'），
+ * 这里把它读出来打印——它不是摆设：M11-1 靠它找 rootfs.cpio 的物理地址。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define BOOTINFO_PA 0x7000u
+#define BOOTINFO_MAGIC 0x53493643u      /* 'C''6''I''S' 小端 */
+
+static void put_hex(u32 v)
+{
+    int i = 0;
+
+    port_puts("0x");
+    i = 28;
+    while (i >= 0) {
+        u32 d = (v >> (u32)i) & 0xFu;
+
+        port_putc((int)(d < 10u ? ('0' + (int)d) : ('a' + (int)(d - 10u))));
+        i = i - 4;
+    }
+}
+
+static void put_u32(u32 v)
+{
+    char b[12] = {0};
+    u32 i = 0u;
+    u32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((int)'0');
+        return;
+    }
+    while (v > 0u && i < 10u) {
+        b[i] = (char)('0' + (char)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((int)b[n]);
+    }
+}
+
+void os_main(void)
+{
+    volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
+    u32 magic = 0u;
+    u32 version = 0u;
+    u32 flags = 0u;
+    u32 kpa = 0u;
+    u32 klen = 0u;
+    u32 rpa = 0u;
+    u32 rlen = 0u;
+
+    port_init();
+    port_puts("c6os iso M11-0: 从 El Torito 光盘引导\n");
+
+    magic = bi[0];
+    version = bi[1];
+    flags = bi[2];
+    kpa = bi[3];
+    klen = bi[4];
+    rpa = bi[5];
+    rlen = bi[6];
+
+    port_puts("  bootinfo magic=");
+    put_hex(magic);
+    port_puts(" version=");
+    put_u32(version);
+    port_puts(" flags=");
+    put_u32(flags);
+    port_puts("\n  kernel pa=");
+    put_hex(kpa);
+    port_puts(" len=");
+    put_u32(klen);
+    port_puts("  rootfs pa=");
+    put_hex(rpa);
+    port_puts(" len=");
+    put_u32(rlen);
+    port_puts("\n");
+
+    if (magic != BOOTINFO_MAGIC) {
+        port_puts("FAIL: iso M11-0（引导信息块魔数不对，说明不是 cd0 引导的）\n");
+        return;
+    }
+    if (flags != 1u) {
+        port_puts("FAIL: iso M11-0（flags 不是 CD 引导）\n");
+        return;
+    }
+    if (kpa != 0x00010000u || klen == 0u) {
+        port_puts("FAIL: iso M11-0（内核载荷地址/长度不对）\n");
+        return;
+    }
+    /* 内核载荷首字节应当是我们的 stage1 机器码（非 0），顺带证明搬运确实发生了 */
+    if (*(volatile u8 *)(u64)kpa == 0u) {
+        port_puts("FAIL: iso M11-0（内核载荷没搬到位）\n");
+        return;
+    }
+    port_puts("PASS: iso M11-0（El Torito no-emulation 启动链）\n");
+}
