@@ -14,6 +14,7 @@
     .literal .Lts_cnt,  g_ts_cnt
     .literal .Ldbg2,    0x50001800
     .literal .Lwscratch, g_win_scratch
+    .literal .Ltmpsp,   g_ctx_tmp_sp
     .literal .Lyl_cnt,  g_yl_cnt
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
@@ -33,6 +34,23 @@
      *
      * 顺序：必须在恢复 a0..a15 **之前**做，因为这里要借用 a2/a3/a4/a5；
      * 它们稍后会被从帧里重新装载。PS.WOE=0 时不要碰窗口状态。 */
+    /* §258：**先把 WINDOWBASE 复原**。它是全局寄存器——别的任务的 windowed 调用
+     * 会把基址搬走；不复原的话，被打断的 windowed 函数 retw 时"调用者的窗口"就
+     * 落到了错误的物理寄存器（真板：cause=0 落在 retw.n、a0 变成栈地址）。
+     *
+     * 麻烦点在于 `wsr windowbase` 会把**所有虚拟寄存器**重新映射，包括 a1（帧指针）
+     * 自己。所以先用当前映射把帧指针存进全局，换完基址再用 `l32r`（只需要一个字面量
+     * 地址，不依赖任何寄存器）把它取回来。 */
+    l32i    a3, a1, 72           /* 目标 WINDOWBASE（刚建的任务是 0） */
+    rsr     a4, windowbase
+    beq     a3, a4, 6f
+    l32r    a4, .Ltmpsp
+    s32i    a1, a4, 0
+    wsr     a3, windowbase
+    isync
+    l32r    a1, .Ltmpsp
+    l32i    a1, a1, 0            /* 新映射下把帧指针取回来 */
+6:
     l32i    a2, a1, 64
     extui   a3, a2, 18, 1
     beqz    a3, 8f
@@ -120,9 +138,15 @@ port_task_switch:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
-    /* 保存 WINDOWSTART（帧偏移 68），恢复时按任务各自的窗口状态还原 */
+    /* 保存 WINDOWSTART（帧偏移 68）和 WINDOWBASE（帧偏移 72）。
+     * **WINDOWBASE 也必须是每任务一份**（§258）：它是全局寄存器，别任务的
+     * windowed 调用（call8/call12）会把基址搬来搬去；如果切回来时不复原，
+     * 被打断的 windowed 函数 retw 时的"调用者窗口"就落到了错误的物理寄存器上
+     * ——真板症状就是 cause=0 落在 retw.n、且 WINDOWSTART 与 CALLINC 对不上。 */
     rsr     a5, windowstart
     s32i    a5, a1, 68
+    rsr     a5, windowbase
+    s32i    a5, a1, 72
     /* 诊断：yield 计数（0x50001008=次数，0x5000100c=最近的目标 sp） */
     l32r    a14, .Lyl_cnt
     l32i    a15, a14, 0
@@ -223,9 +247,15 @@ port_task_yield:
     movi    a6, -32
     and     a5, a5, a6
     s32i    a5, a1, 64
-    /* 保存 WINDOWSTART（帧偏移 68），恢复时按任务各自的窗口状态还原 */
+    /* 保存 WINDOWSTART（帧偏移 68）和 WINDOWBASE（帧偏移 72）。
+     * **WINDOWBASE 也必须是每任务一份**（§258）：它是全局寄存器，别任务的
+     * windowed 调用（call8/call12）会把基址搬来搬去；如果切回来时不复原，
+     * 被打断的 windowed 函数 retw 时的"调用者窗口"就落到了错误的物理寄存器上
+     * ——真板症状就是 cause=0 落在 retw.n、且 WINDOWSTART 与 CALLINC 对不上。 */
     rsr     a5, windowstart
     s32i    a5, a1, 68
+    rsr     a5, windowbase
+    s32i    a5, a1, 72
     s32i    a1, a4, 64
     /* 诊断：yield 的外出任务 ctx 与保存的 sp */
     l32r    a14, .Ldbg2

@@ -11167,3 +11167,42 @@ spill 过，下溢向量能把祖先窗口补回来），所以暂时保持不�
    （把 a0/a1 存到自己的栈槽、把 WINDOWSTART 设为与 n 配套），返回后再恢复 ——
    等价于把"跨任务切换的窗口状态"从 4 个物理窗口解耦。这条如果做通，就再也不怕
    在 windowed 调用中间被切走。
+
+### §258 **修好了根因的一半**：WINDOWBASE 必须按任务保存/恢复
+
+上一节（§257）把非法指令归到 `retw` 的窗口配套规则上，但真正缺的一块是
+**WINDOWBASE 从来没被保存过**：
+
+- `WINDOWBASE` 是**全局寄存器**；闭源库的 windowed 调用（`call8`/`call12`）一走，
+  基址就搬走了；
+- 我们的 `port_task_switch` 只存了 `WINDOWSTART`/`a0..a15`/`EPC`/`PS`，**没存
+  `WINDOWBASE`**；
+- 于是一个任务在 windowed 调用中间被切走、另一个任务跑了一堆 windowed 代码之后
+  再切回来，被打断的那层 `retw` 就会把"调用者的窗口"落到**错误的物理寄存器**上
+  ⇒ 有时是 `cause=0` 落在 `retw.n`（§256/§257 的现场），有时直接跳到栈地址。
+
+修法（`port/s3/ctx.S`）：
+
+1. 两处保存点都加 `rsr a5, windowbase; s32i a5, a1, 72`（帧偏移 72，原来是空的）；
+2. `RESTORE_FRAME` 里**先**恢复 `WINDOWBASE` 再算 `WINDOWSTART`。麻烦点在于
+   `wsr windowbase` 会把**所有虚拟寄存器重新映射，包括 a1（帧指针）自己**：
+   所以先用当前映射把帧指针存进全局 `g_ctx_tmp_sp`，`wsr windowbase` 之后再用
+   `l32r a1, .Ltmpsp` + `l32i a1, a1, 0` 把它取回来（`l32r` 只依赖字面量地址，
+   不需要任何寄存器仍然有效）。
+
+**效果（真板实测，一改就稳定）**：
+
+| 配置 | 改前 | 改后 |
+| --- | --- | --- |
+| 协作（`S3_NO_PREEMPT=1`） | 多数停在 `[lock]`，偶尔到 bringup | **2/2 次都跑到 `W2 bringup returned`** |
+| 抢占（默认） | 约 1/3 能到 bringup | **2/2 次都跑到 `W2 bringup returned`** |
+
+也就是说 `esp_wifi_init_internal -> 0` + `bringup rc=0` 这一大段现在**可复现**了，
+不再是撞运气。
+
+**下一个卡点**（§259 继续）：`W2 bringup returned` 之后进 `c6_lwip_start` →
+`lwip_init()` → `sys_thread_new`（起 tcpip 线程）时会炸：
+`cause=2`（InstrFetchProhibited）、`pc=0x3fcb9d45`、`vaddr=0x3fcb9d44`（栈地址）、
+`a0=0`、`ws=0` —— 跳到了一个栈地址上。位置正好是 `os_task_start_core` 里
+`callx0 port_task_switch` 之后（`a0=0x420188fa`），所以下一步查"新起的 windowed
+任务第一次被调度进去"这条路径（`s3_task_tramp` 的 `callx8` 前后窗口状态）。
