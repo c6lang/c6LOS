@@ -58,18 +58,20 @@ _start:
     and     a3, a3, a4
     s32i    a3, a2, 0
 
-#ifndef __XTENSA_CALL0_ABI__
-    /* windowed ABI：windowstart 只标当前窗口有效；PS.WOE=1 让 call8/12 能正常
-     * 分配新窗口（否则每次调用都会走窗口溢出向量，功能上能跑但慢很多）。 */
-    movi    a3, 1
-    wsr     a3, windowstart
+    /* ★ PS.WOE=1 **无条件**设置（§238）。
+     *
+     * 原来只在 windowed 构建里设。但我们这套内核是 call0、却又会调 windowed 的
+     * 闭源库（PHY/WiFi/lwIP）—— WOE=0 时 `call8`/`entry`/`retw`/`rotw` 全都不能
+     * 正常轮转窗口（官方注释：WOE=0 时这些指令"becomes a silent noop"），
+     * windowed 代码的返回地址/帧指针全错，真板表现就是 TRAP 到地址 0、
+     * windowbase=13 / windowstart=0x2a80 这种乱值。
+     * call0 代码不受 WOE 影响（它不做窗口轮转），所以无条件置 1 是安全的。 */
     rsr     a2, ps
     movi    a3, 1
     slli    a3, a3, 18              /* PS.WOE */
     or      a2, a2, a3
     wsr     a2, ps
     rsync
-#endif
 
     /* ★ 无条件做一遍窗口状态归一（call0 构建也要做！§202）。
      *
@@ -115,18 +117,26 @@ _start:
     l32r    a1, .Lsp
     call8   .Lprime1
     j       .Lprime_done
+.align 4
+.align 4
 .Lprime1:
     entry   a1, 32
     call8   .Lprime2
     retw
+.align 4
+.align 4
 .Lprime2:
     entry   a1, 32
     call8   .Lprime3
     retw
+.align 4
+.align 4
 .Lprime3:
     entry   a1, 32
     call8   .Lprime4
     retw
+.align 4
+.align 4
 .Lprime4:
     entry   a1, 32
     retw

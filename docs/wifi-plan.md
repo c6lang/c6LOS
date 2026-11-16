@@ -10589,3 +10589,32 @@ halt 时 `windowbase=13`、`windowstart=0x2a80`、`a1=0xfffffde0`。
 
 判据：`t_winabi` 能连续跑（`d[1]` 里的轮数持续增长、`d[0]==0xC0DE1234`、
 `d[4]==0xC0DE5678`）且不 TRAP，再回来跑 WiFi 初始化。
+
+### §238 又抓到两个真 bug（但 windowed 任务首跑仍然 TRAP 到 0）
+
+1. **`PS.WOE` 之前只在 windowed 构建里置 1**（`start.S` 的 `#ifndef __XTENSA_CALL0_ABI__`
+   分支）。可我们是 call0 内核 + windowed 闭源库：WOE=0 时 `call8`/`entry`/`retw`/`rotw`
+   都不做窗口轮转（官方注释：silent noop），windowed 代码的返回地址/帧指针必然错。
+   现在改成**无条件置 WOE=1**（call0 代码不受影响）。
+2. **`s3_task_tramp` 把 ABI 标志寄存器 a4 当计数器用了**：
+   ```
+   l32r a3, .Lts_cnt ; l32i a4, a3, 0 ; addi a4,a4,1 ...
+   beqz a4, 2f        ← 这里本意是判断"入口是不是 windowed"，但 a4 已经变成启动计数
+   ```
+   于是**所有任务都被当成 windowed**（call0 任务也会被 `callx8` 调进去，返回地址带
+   CALLINC 标记）。现在诊断计数改用 a8/a9，a4 的 ABI 标志保住。
+
+两个都是真 bug（已修）。但 `tests/t_winabi.c6`（两个 windowed 任务 + `_queue_recv`
+最小复现）在真板上**仍然 TRAP**：`EXCCAUSE=0x14`、`EXCVADDR=0`、**`EPC1=0`**
+（跳到地址 0 取指）、`windowbase=13`、`windowstart=0x2a80`、`a1=0xfffffde0`；
+`d[0]` 还是 `0xFFFFFFFF`（压力任务压根没跑起来）⇒ **新建 windowed 任务的第一次
+进入就崩**。
+
+也就是说下一个要查的是"新建 windowed 任务的初始帧"：
+`port_task_ctx_create` 里 `f[1]=entry / f[2]=arg / f[3]=flag / f[15]=s3_task_tramp /
+f[16]=PS|WOE`，然后 `ctx.S` 的 `RESTORE_FRAME` 恢复并 `rfe` 进 `s3_task_tramp`。
+`EPC1=0` 说明 `rfe` 之后取指地址是 0 —— 高度怀疑 **`RESTORE_FRAME` 里
+`wsr epc1` 用的是帧偏移 60，而 `port_task_ctx_create` 写的是 `f[15]`（=偏移 60）✓
+一致**；那么更可能是 `s3_task_tramp` 里 `callx8 a12` 时 a12（入口地址）已经不对，
+或者 trampoline 自己的帧没有 `entry`（它是被 `rfe` 直接跳进来的，**没有 entry**，
+却用 `retw`/`callx8` —— 这本身就不合法）。

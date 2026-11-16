@@ -260,20 +260,24 @@ s3_task_tramp:
     /* 初始帧把 entry 放在 a2、arg 放在 a3。 */
     mov     a12, a2
     mov     a2, a3
-    /* 诊断：记录任务启动次数 / 入口地址 / 该任务起始 sp（RTC 0x50000A00 起） */
+    /* 诊断：记录任务启动次数 / 入口地址 / 该任务起始 sp（RTC 0x50000A00 起）。
+     * **注意用 a8/a9，绝不能碰 a4** —— a4 里是入口的 ABI 标志（0=call0，
+     * 1=windowed），原来这里用 a4 当计数器，等于把标志覆盖成了启动次数，
+     * 于是所有任务都走 windowed 分支（call0 任务被 callx8 调，返回地址带
+     * CALLINC 标记）——这正是 §237 里"新任务一跳就 TRAP 到地址 0"的元凶。 */
     l32r    a3, .Lts_cnt
-    l32i    a4, a3, 0
-    addi    a4, a4, 1
-    s32i    a4, a3, 0
+    l32i    a8, a3, 0
+    addi    a8, a8, 1
+    s32i    a8, a3, 0
     l32r    a3, .Lrtc_dbg
-    s32i    a4, a3, 0
+    s32i    a8, a3, 0
     s32i    a12, a3, 4
     s32i    a1, a3, 8
     /* 入口地址也按序号存一份，便于确认是不是同一个入口 */
-    extui   a5, a4, 0, 2
-    slli    a5, a5, 2
-    add     a5, a3, a5
-    s32i    a12, a5, 16
+    extui   a9, a8, 0, 2
+    slli    a9, a9, 2
+    add     a9, a3, a9
+    s32i    a12, a9, 16
     /* a4 是入口的 ABI 标志（由 port_task_ctx_create 从 g_next_task_windowed 写入）：
      *   0 -> 我们自己的 call0 任务，用 callx0
      *   1 -> 闭源库的 windowed 任务（如 ppTask），必须先置 PS.WOE 再 callx8，
