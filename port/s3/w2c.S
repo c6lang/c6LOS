@@ -101,6 +101,20 @@
      * [a1-64, a1) 里，之后内核的调用帧从 a1-64 往下长，两者不重叠。
      * 这是本轮的关键顺序：**先 spill、再把 sp 降下去调内核**。
      * 反过来（先降 sp 再 spill）槽位就会落在内核帧里，等于踩内核的局部量。 */
+#ifdef S3_W2C_MIN
+    /* 极简版（§231）：不做任何窗口操作，只借 entry 的 32 字节帧保存带窗口
+     * 标签的 a0，然后 callx0 进 call0 内核函数、取回 a0、retw。
+     * 动机：真板上 W2C+WIN_SPILL 版本在 ppTask 上下文里出现过
+     *   EXCCAUSE=3 LoadStoreError, EXCVADDR=0x40043ca4(ROM), EPC 在壳里,
+     *   halt 时 windowbase=13 / windowstart=0xa002（明显是坏的窗口状态）。
+     * 既然 spill 那套从没在真板上验证过，先退回最小实现看还炸不炸。 */
+    entry   a1, 32
+    s32i    a0, a1, 0
+    l32r    a8, 9b
+    callx0  a8
+    l32i    a0, a1, 0
+    retw
+#else
     entry   a1, 128
     s32i    a0, a1, 16           /* 存下带窗口标签的返回地址 */
     l32r    a8, 12b
@@ -114,6 +128,7 @@
     addi    a1, a1, 64
     l32i    a0, a1, 16
     retw
+#endif
     .endm
 
 

@@ -188,9 +188,16 @@ $(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
 # 关键洞察：**恢复执行后的第一次返回**必须是宽 retw —— 欠载会把下一层窗口填
 # 回来，之后各层的 retw.n 就都合法了。
 # wifi_glue.c 加不了：它太大，关掉 transform 后分支偏移会越界（汇编报错）。
+# W2C 壳的两种实现（§231）：默认带着窗口 spill；S3_W2C_MIN=1 时换成极简版
+# （只 entry+callx0+retw，不做任何窗口操作），用来对照真板上的窗口相关故障。
+W2C_DEFS :=
+ifneq ($(S3_W2C_MIN),)
+W2C_DEFS += -DS3_W2C_MIN
+endif
+
 $(BUILD)/obj/w2c.o: port/s3/w2c.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -Wa,--no-transform -c $< -o $@
+	$(XTGCC) -Wa,--no-transform $(W2C_DEFS) -c $< -o $@
 
 $(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
