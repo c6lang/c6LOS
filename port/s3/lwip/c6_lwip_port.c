@@ -129,18 +129,23 @@ static int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
 
 /* 供 .c6 侧（经 w2c 壳）调用：起 lwIP、装 netif、注册 RX 回调。
  * mac 必须是真实 MAC（见 §203：假 MAC 会让 DHCP 身份不合法）。 */
+extern int ets_printf(const char *fmt, ...);
+
 int c6_lwip_start(const unsigned char *mac)
 {
     static struct netif s_netif;
     struct netif *n;
     int i;
 
+    ets_printf("[lwip] 1 lwip_init\n");
     lwip_init();
+    ets_printf("[lwip] 2 lwip_init 完成（tcpip 线程已起）\n");
     /* NO_SYS=0：收包必须交给 tcpip 线程处理（`tcpip_input` 会把它塞进
      * tcpip 的邮箱）。之前这里传的是 `ethernet_input`，等于在 WiFi 的 RX
      * 回调上下文里**直接**跑 lwIP 的协议栈 —— 和 tcpip 线程并发访问同一批
      * 全局状态，轻则丢包乱序，重则把 pcb 链表踩坏（§220）。 */
     n = netif_add(&s_netif, 0, 0, 0, 0, c6_lwip_netif_init_cb, tcpip_input);
+    ets_printf("[lwip] 3 netif_add -> %08x\n", (unsigned)n);
     if (n == 0) {
         return -1;
     }
@@ -150,8 +155,12 @@ int c6_lwip_start(const unsigned char *mac)
     }
     /* DHCP 拿地址；拿不到就退回静态（本函数返回后由调用方等待/超时） */
     netif_set_up(n);
+    ets_printf("[lwip] 4 netif_set_up ok\n");
     dhcp_start(n);
+    ets_printf("[lwip] 5 dhcp_start ok\n");
+    ets_printf("[lwip] 6 注册 RX 回调\n");
     (void)esp_wifi_internal_reg_rxcb(C6_WIFI_IF_STA, (void *)c6_lwip_rx);
+    ets_printf("[lwip] 7 c6_lwip_start 完成\n");
     return 0;
 }
 
@@ -166,7 +175,6 @@ void c6_lwip_poll(void)
  * 自己跑的，只要把 sys_check_timeouts() 转起来 + 定期让出 CPU，它就会自己完成。
  * 返回 1 = 拿到地址（非 0 且不是 0.0.0.0）。 */
 extern unsigned int s3_w2c_task_delay(unsigned int ticks);
-extern int ets_printf(const char *fmt, ...);
 
 int c6_lwip_wait_ip(int ms)
 {

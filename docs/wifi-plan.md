@@ -10970,3 +10970,18 @@ W2 bringup returned
 （`s3_wifi_associate`），中途某处返回到了错误地址；也可能是任务退出路径
 （`os_task_exit`）在 windowed/调用链上出了问题。下一步：在 bringup 返回点之后
 加阶段标记（`W3 associate` 等），确认是在哪一步崩的。
+
+### §251 补充：加了 lwIP 阶段打印后出现"有时能过握手、有时停在半路"
+
+`c6_lwip_start` 里加了 `[lwip] 1..7` 七个阶段打印（lwip_init / netif_add /
+netif_up / dhcp_start / reg_rxcb）。两次真板实测：
+
+- 第一次：跑到 `[send]` → `Wu2` → ppTask 连打二十多轮 `[lock]/[unlock]` →
+  `[give] sem#2` → `esp_wifi_init_internal -> 0` → `bringup rc=0` → 然后
+  `cause=2` 从 `0x3fcb9d14`（数据地址）取指（§251 的现象）；
+- 第二次、第三次：停在 `[lock] t=1`（semnew #2 之后），连 `[send]` 都没到。
+
+⇒ 说明**握手路径上还有时序敏感的问题**（我们的 preempt 切换与库的信号量/队列
+握手之间）。下一步先查这个不稳定性（它比 lwIP 的崩溃更靠前）：
+可以在 `os_sched_preempt_ctx` / `port_idle` / `si3_timer_irq` 里加"每次切换的
+from→to"记录，或者临时用 `S3_NO_PREEMPT=1` 对比一下（协作式）是否稳定得多。
