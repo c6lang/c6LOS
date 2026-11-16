@@ -13690,3 +13690,15 @@ caller-saved 随手改**。
 `osi_queue_recv`（本条）。
 ⇒ **默认构建里所有 windowed→call0 的入口现在都满足 windowed ABI 的
 callee-saved 约定**。
+
+## §370 自愈看门狗：定时器中断里喂 RTC 看门狗
+
+这轮板子"CPU 死转 → USB-Serial-JTAG 整条从总线消失"，只能人工断电重插。
+`port/s3/flash.c` 里早就有 `os_wdt_start/os_wdt_feed`（RWDT，复位整片），
+但**没有任何地方去 arm 它**（`-DS3_NO_WDT` 在代码里根本没有对应实现，
+是个空开关）。
+
+现在在 `s3_timer_irq()`（定时器中断，10ms 一次）里做两件事：
+第一次进去时 `os_wdt_start(8)`，之后每次 `os_wdt_feed()`。
+⇒ 中断还在跑就一直喂；真卡死就 8 秒后整片复位、串口重新枚举，
+**不用再人工断电**，而 RTC 慢存跨复位不清，死之前的信标照样能读。
