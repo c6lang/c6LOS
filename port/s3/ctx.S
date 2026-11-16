@@ -59,12 +59,22 @@
     l32i    a2, a1, 64
     extui   a3, a2, 18, 1
     beqz    a3, 8f
-    /* 纯归一化（配合壳里 spill 的成对语义）*/
+    /* §296：**优先写回任务自己的 WINDOWSTART**。
+     * 原来一律归一化成 1<<WINDOWBASE，等于把被切走任务还压在物理窗口里、
+     * 尚未 spill 的那几组寄存器丢掉；闭源库是 windowed ABI，深调用链靠硬件
+     * 窗口活着，丢了以后 retw 就是“返回地址飞了”（§293/§294 的 cause=0）。
+     * 新建任务的帧偏移 68 是 0，仍然走归一化。 */
+    l32i    a3, a1, 68
+    bnez    a3, 7f
     rsr     a4, windowbase
-    movi     a5, 1
+    movi    a5, 1
     ssl     a4
     sll     a5, a5
     wsr     a5, windowstart
+    isync
+    j       8f
+7:
+    wsr     a3, windowstart
     isync
 8:
     l32i    a2, a1, 60
