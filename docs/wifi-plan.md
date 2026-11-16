@@ -11969,3 +11969,21 @@ NRX 0x6001CC00 之间，就是 WiFi MAC）的时钟不是 SYSCON 给的，八成
    让整条 PHY 初始化就是 IDF 的，彻底不再手工复刻（§284 的备选方案，仍然是最终解）。
 3. 参照物实验的套路很好用（刷 IDF 工程 → JTAG 读 → 立刻刷回本仓库镜像），
    以后**任何**"我们 vs 正常系统"的寄存器差异都可以这样拿，比继续猜快得多。
+
+### §286 补一条：`0x6001c0xx` / `0x60026xxx` 这些寄存器**只有 libphy 自己会碰**
+
+把整份反汇编（`objdump -d` 后 23 万行）扫了一遍"谁 `l32r` 到
+`0x6001c0xx` / `0x60026xxx`"：**73 处命中全部在 libphy 里**
+（`phy_set_signal_test`、`ram_pbus_force_mode`、`phy_11p_set`、`phy_get_cca` …），
+`libnet80211` 的 `wifi_init_process`（`esp_wifi_init_internal` 的实际实现，`0x420368e0`）
+一处都没有。
+
+也就是说：**没有"应用侧多调一个 API 就能点亮 MAC 块"这回事**，点亮它的代码就在
+`register_chipv7_phy()` 里面（`rf_init` / `bb_init` 那几步），我们卡在它前面的
+`ram_iq_est_enable()` 上 —— 这是真正的鸡生蛋。
+
+所以下一轮不必再试"再开某个时钟位/再调某个 IDF API"这条路了，只有两条路可走：
+1. 反汇编 libphy 里 `register_chipv7_phy` 到 `ram_iq_est_enable` 之间的调用链，
+   找它凭**什么条件**才去点亮 MAC（很可能是某个 `get_chip_version()`/effuse 分支）；
+2. 直接把 IDF 的 `esp_phy` 组件源码编进镜像（打桩 nvs/esp_log/esp_timer/efuse），
+   让序列不再是我们复刻的 —— 这条更稳，建议下一轮直接上。
