@@ -159,6 +159,24 @@ void port_task_ctx_check(void *ctx)
     lo = (u32)(c->stack);
     hi = lo + (u32)(c->size);
     sp = c->sp;
+    /* §305：call0 的约定是"帧里 a0 与 EPC 是同一个返回地址（差 CALLINC 位）"。
+     * 两者不一致就说明这个任务的现场已经被写串了，趁早报出来，
+     * 比让它跑到 ROM 数据区里取非法指令强。 */
+    if (lo != 0u && sp >= lo && sp < hi && (sp & 3u) == 0u) {
+        u32 *f = (u32 *)sp;
+        u32 epc = f[15];
+        u32 ra = f[0];
+        if ((epc & 0x3FFFFFFFu) != (ra & 0x3FFFFFFFu)) {
+            extern int ets_printf(const char *fmt, ...);
+            u32 *m = (u32 *)0x50000170u;
+            m[0] = m[0] + 1u;
+            if (m[0] <= 3u) {
+                m[1] = sp; m[2] = epc; m[3] = ra;
+                ets_printf("[ctx] a0/EPC 不一致：sp=%08x epc=%08x a0=%08x\n",
+                           (unsigned)sp, (unsigned)epc, (unsigned)ra);
+            }
+        }
+    }
     if (lo == 0u || sp < lo || sp >= hi || (sp & 3u) != 0u) {
         extern int ets_printf(const char *fmt, ...);
         volatile u32 *m = (volatile u32 *)0x50000100u;
