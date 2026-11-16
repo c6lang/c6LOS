@@ -11018,3 +11018,27 @@ from→to"记录，或者临时用 `S3_NO_PREEMPT=1` 对比一下（协作式）
 **下一轮第一件事**：用 `tests/t_win1.c6`（单 windowed 任务 + 一次壳调用）把
 `S3_W2C_SAVEALL` 调通。这是自包含的小目标，调通后 `make ... S3_W2C_SAVEALL=1` 应该
 直接让整条 WiFi 流程稳下来。
+
+### §253 lwIP 阶段：DHCP 挪到关联之后 + 用 RTC 信标代替 printf
+
+- `c6_lwip_start` 里原来在 `netif_set_up` 之后立刻 `dhcp_start`，真板实测**卡在
+  dhcp_start 里**（它要发第一包 → 走 `esp_wifi_internal_tx` → 库的发送路径，而当时
+  还没关联 AP）。现在改成关联成功之后再启动：新增 `c6_lwip_start_dhcp()`，
+  `s3_win_wifi_main` 在 `s3_wifi_wait_connected()` 成功后调用它，再 `c6_lwip_wait_ip`。
+- 但更靠前的卡点出现了：`[lwip] 4 netif_set_up ok` 之后连打印都不出来 —— 说明
+  **windowed 的 `ets_printf` 本身就可能是压垮窗口深度的最后一根稻草**。于是把
+  `c6_lwip_start` 里的所有 `ets_printf` 换成 RTC 信标 `LWSTAGE(v)`
+  （写 0x50000A18，零函数调用）。注意：0x50000A18 与别的诊断区有重叠风险，
+  读的时候要留意（实测读到过 0x403815a0 这种代码地址 ⇒ 被别处覆盖了）。
+
+**当前状态（诚实记录）**：整条链能跑到 `esp_wifi_init_internal -> 0` +
+`bringup rc=0`（多次里成功过几次），然后进 `c6_lwip_start` 并完成
+lwip_init/netif_add/netif_set_up，再往后就**不稳定**：有时卡住、有时
+`cause=0` 在 windowed 胶水函数的 `retw` 上炸。根因仍然是 §252：
+**windowed ↔ call0 交界处的窗口簿记**。
+
+**建议的下一步（优先级）**：
+1. 把 §231 的"整镜像 windowed"路线做完（编译链接一次就通过，只差 `start.S` 的
+   windowed 启动路径）——这是唯一能彻底消除这个 ABI 边界的方向；
+2. 或者把 `c6_lwip_port.c` / `wifi_glue.c` 里的每个 OSI 回调改成**手写汇编的
+   windowed 函数**（不做额外调用、不碰窗口状态），把层次压到最低。

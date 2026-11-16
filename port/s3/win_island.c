@@ -766,7 +766,10 @@ u32 s3_win_wifi_main(void)
             s3_wifi_dump_osi("start+scan 之后");
             s3_wifi_dump_events("start+scan 之后");
             if (s3_wifi_wait_connected(15000) != 0) {
+                extern int c6_lwip_start_dhcp(void);
+
                 WSTAGE(0x1022u);
+                (void)c6_lwip_start_dhcp();
                 s3_wifi_dump_osi("关联成功");
                 s3_wifi_dump_events("关联成功");
                 if (c6_lwip_wait_ip(20000) != 0) {

@@ -798,7 +798,14 @@ static u32 osi_task_ms_to_tick(u32 ms)
 }
 static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); return 31u; }
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
-static void osi_task_delay(u32 ticks) { s3_w2c_task_delay(ticks); }
+static void osi_task_delay(u32 ticks)
+{
+    if (g_dbg_sync != 0u) {
+        ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)ticks);
+    }
+    s3_w2c_task_delay(ticks);
+}
 
 /* ---- PHY 使能/关闭（§228）------------------------------------------------
  * IDF 的 OSI 表把这两个槽位接到 esp_phy_enable/disable(PHY_MODEM_WIFI)，也就是
