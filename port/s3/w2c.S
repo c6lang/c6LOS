@@ -156,6 +156,20 @@
 #else
     entry   a1, 128
     s32i    a0, a1, 16           /* 存下带窗口标签的返回地址 */
+    /* §367（真 bug！）：**a12..a15 必须保存**。
+     *
+     * 本壳是 windowed 函数，被闭源库用 `call8` 调进来。窗口轮转 8 个寄存器后，
+     * 壳的 **a12..a15 就是调用者的 a4..a7**，而 a4..a7 在 windowed ABI 里是
+     * **callee-saved** —— 库把长期存活的指针放在那儿，根本没料到有人会改。
+     * 我们随后 `callx0` 进 call0 内核，GCC 生成的 call0 代码把 a12..a15 当
+     * caller-saved 随手改掉 ⇒ 库里的指针被毁，之后就是"垃圾基址 + 假返回地址"
+     * 那类现场（§364：a1=0x50000b00、epc1=0x4201860e 就是这么来的）。
+     * §245 的 S3_W2C_SAVEALL 版本正是为这个写的，但它没有 PS 和 spill 死区；
+     * 这里把两边的要点合成一份默认实现。 */
+    s32i    a12, a1, 24
+    s32i    a13, a1, 28
+    s32i    a14, a1, 32
+    s32i    a15, a1, 36
     /* §310：**把 PS 存下来、callx0 之后再写回**。
      * 内核是 call0 ABI，闭源库是 windowed；两者混用时 PS.CALLINC（bit17:16）
      * 是 `retw` 判断"要回退几个窗口"的唯一依据。真板实测：从壳里 callx0
@@ -176,6 +190,10 @@
     callx0  a8
     addi    a1, a1, 64            /* addi 的立即数只到 127，128 要拆成两半 */
     addi    a1, a1, 64
+    l32i    a12, a1, 24          /* §367：还调用者的 a4..a7 */
+    l32i    a13, a1, 28
+    l32i    a14, a1, 32
+    l32i    a15, a1, 36
     l32i    a8, a1, 20
     wsr     a8, ps               /* §310：恢复 CALLINC/WOE 等 PS 位（a8 是 caller-saved，安全）*/
     rsync
@@ -198,6 +216,8 @@
     s32i    a0,  a1, 16
     s32i    a12, a1, 20
     s32i    a13, a1, 24
+    s32i    a14, a1, 28           /* §367：调用者的 a6/a7（callee-saved） */
+    s32i    a15, a1, 32
     l32r    a12, 6b
     l32i    a13, a12, 4
     s32i    a0, a12, 0
@@ -215,6 +235,8 @@
     l32i    a0,  a1, 16
     l32i    a12, a1, 20
     l32i    a13, a1, 24
+    l32i    a14, a1, 28
+    l32i    a15, a1, 32
     retw
     .endm
 #endif  /* S3_ONE_ABI */

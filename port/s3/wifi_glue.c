@@ -794,6 +794,14 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
      * 所以这里取 6144：够深调用的余量，又给别的任务留位置。 */
     if (stack < 6144u) { stack = 6144u; }
     g_next_task_windowed = 1u;   /* 库的任务入口都是 windowed ABI */
+#ifdef S3_NO_LIB_TASKS
+    /* §366 排查：**不真的建库任务**，只给个假句柄。用来判定崩溃是
+     * 发生在"库任务开始执行"之后，还是主流程自己继续走就会崩。 */
+    id = 1;
+    if (handle != 0) { *(u32 *)handle = 1u; }
+    ets_printf("[task] 跳过库任务 fn=%08x\n", (unsigned)(u32)fn);
+    return 1;
+#endif
     id = s3_w2c_task_create(name, fn, arg, p, stack);
     /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */
     {
