@@ -93,6 +93,45 @@ _start:
     wsr     a2, ps
     rsync
 
+    /* ★ 窗口"预热"：把 4 个窗口的 a1 都变成**合法栈指针**（§236）。
+     *
+     * 为什么必须做：Xtensa 只有 4 个窗口，寄存器文件里可能残留 ROM/bootloader
+     * 阶段的窗口内容（真板实测有窗口的 a1 = 0x40043ca4，一个 ROM 地址）。
+     * 我们的 w2c 壳用 `rotw` 转一整圈来强制 spill 全部窗口（和
+     * xthal_window_spill 一样），转到一个 a1 是垃圾的窗口时，硬件溢出向量就会
+     * 按那个垃圾地址写 → LoadStoreError（真板实测 cause=3, excvaddr=0x40043ca4）。
+     *
+     * 办法：在进 C 代码之前先用 4 层嵌套 call8 把每个窗口都"占"一遍
+     * （每层 entry 都会给该窗口一个真实帧），于是所有窗口的 a1 都是本栈上的
+     * 合法地址；之后不管谁用 rotw spill，写到的都是我们的栈，不会炸。 */
+    rsr     a2, ps
+    movi    a3, -32                /* 清 INTLEVEL + EXCM */
+    and     a2, a2, a3
+    movi    a3, 1
+    slli    a3, a3, 18             /* PS.WOE=1：让 rotw 真正轮转 */
+    or      a2, a2, a3
+    wsr     a2, ps
+    rsync
+    l32r    a1, .Lsp
+    call8   .Lprime1
+    j       .Lprime_done
+.Lprime1:
+    entry   a1, 32
+    call8   .Lprime2
+    retw
+.Lprime2:
+    entry   a1, 32
+    call8   .Lprime3
+    retw
+.Lprime3:
+    entry   a1, 32
+    call8   .Lprime4
+    retw
+.Lprime4:
+    entry   a1, 32
+    retw
+.Lprime_done:
+
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
     wsr     a2, vecbase
