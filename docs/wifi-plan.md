@@ -10985,3 +10985,36 @@ netif_up / dhcp_start / reg_rxcb）。两次真板实测：
 握手之间）。下一步先查这个不稳定性（它比 lwIP 的崩溃更靠前）：
 可以在 `os_sched_preempt_ctx` / `port_idle` / `si3_timer_irq` 里加"每次切换的
 from→to"记录，或者临时用 `S3_NO_PREEMPT=1` 对比一下（协作式）是否稳定得多。
+
+### §252 剩余故障的本质：**windowed 函数调 call0 时，寄存器被改但编译器不知道**
+
+真板上两类崩溃签名（都是 windowed 胶水函数的 `retw`/`retw.n` 出事）：
+
+| 配置 | 症状 |
+| --- | --- |
+| spill 打开（默认） | 有时能一路跑到 `esp_wifi_init_internal -> 0` + `bringup rc=0`；有时在 `osi_wifi_int_disable` 的 `retw.n` 炸（`cause=0`，`a0=0x8037bbba` 这种"带 CALLINC 的假地址"） |
+| `S3_NO_WIN_SPILL=1` | 稳定在 `osi_semphr_take` 的 `retw.n` 炸（`a0` = 栈地址，`ws=0x06`） |
+| `S3_W2C_SAVEALL=1`（我加的全寄存器版壳） | 第一个 windowed 调用就炸 —— 说明那版壳本身有 bug，还没调对 |
+
+**根因（现在可以确定）**：我们的胶水层/壳是 windowed 函数，却要 `callx0` 进
+**call0** 的内核。call0 的调用约定里 a0..a15 大量是 caller-saved，被调方可以随手改；
+而 **GCC 在为 windowed 函数生成代码时并不知道这一点** —— 它按 windowed 的规则认为
+`call8` 之后自己的 a0（返回地址）还在，于是函数尾部直接 `retw.n`（真板反汇编确认：
+`osi_semphr_take`/`osi_wifi_int_disable` 尾部的 `retw.n` 前面**没有** `l32i a0,a1,0`）。
+一旦被调方改到 a0，`retw` 就跳到一个假地址。
+
+两条正解：
+
+1. **让壳把 a0..a15 全存全取**（`S3_W2C_SAVEALL` 的思路）——壳对调用者完全透明，
+   编译器"以为 a0 没变"就成立。当前实现有 bug，需要在最小用例（`tests/t_win1.c6`
+   的单 windowed 任务）上单独调通；
+2. **让编译器自己知道 a0 被改**：在胶水里用内联汇编 `callx0`（clobber 列表里写
+   `"a0"` 等），编译器就会在 `retw` 前自己 `l32i a0,a1,0`。这样连壳都不需要，
+   还少一层窗口（我们只有 4 个窗口，深度很紧张）。
+
+顺带记录：`spill 打开` 比 `不 spill` 更能跑远（有一次跑到 bringup rc=0），
+因为 spill 至少把祖先窗口落到栈上；但它会重写 WINDOWSTART，所以时好时坏。
+
+**下一轮第一件事**：用 `tests/t_win1.c6`（单 windowed 任务 + 一次壳调用）把
+`S3_W2C_SAVEALL` 调通。这是自包含的小目标，调通后 `make ... S3_W2C_SAVEALL=1` 应该
+直接让整条 WiFi 流程稳下来。
