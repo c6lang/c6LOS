@@ -130,8 +130,11 @@ static int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
 /* 供 .c6 侧（经 w2c 壳）调用：起 lwIP、装 netif、注册 RX 回调。
  * mac 必须是真实 MAC（见 §203：假 MAC 会让 DHCP 身份不合法）。 */
 extern int ets_printf(const char *fmt, ...);
-/* 阶段信标：RTC 0x50000A18（不经过任何函数调用，最轻量） */
-#define LWSTAGE(v) (*(volatile unsigned int *)0x50000A18u = (unsigned int)(v))
+/* 阶段信标：DRAM 全局（RTC 慢速内存实测会被库/PHY 写坏，改用 DRAM，
+ * 崩了以后 JTAG 直接 x/8xw g_lwip_stage 就能看走到哪一步）。 */
+volatile unsigned int g_lwip_stage[8] = {0};
+#define LWSTAGE(v) (g_lwip_stage[0] = (unsigned int)(v))
+#define LWSTAGE2(i, v) (g_lwip_stage[i] = (unsigned int)(v))
 
 int c6_lwip_start(const unsigned char *mac)
 {
@@ -172,6 +175,7 @@ int c6_lwip_start(const unsigned char *mac)
 int c6_lwip_start_dhcp(void)
 {
     LWSTAGE(0x211);
+    LWSTAGE2(1, 0x2111u);
     if (netif_default == 0) {
         return -1;
     }
@@ -214,6 +218,7 @@ int c6_lwip_wait_ip(int ms)
 /* 打印当前地址（调试用） */
 void c6_lwip_print_ip(void)
 {
+    LWSTAGE2(1, 0x2111u);
     if (netif_default == 0) {
         ets_printf("[lwip] netif 不存在\n");
         return;

@@ -278,10 +278,15 @@ extern int s3_w2c_task_create(const char *name, void *entry, void *arg,
  * port/s3/wifi_glue.c）。lwIP 的线程体是 windowed 编译的，必须置 1。 */
 extern volatile u32_t g_next_task_windowed;
 
+extern volatile unsigned int g_lwip_stage[8];
+
 sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
                             void *arg, int stacksize, int prio)
 {
     u32_t saved = g_next_task_windowed;
+
+    g_lwip_stage[2] = (unsigned int)(void *)thread;   /* 线程入口 */
+    g_lwip_stage[3] = (unsigned int)(void *)arg;      /* 线程参数 */
 
     /* lwIP 某些配置下 stacksize 是 0，传下去会被内核当成最小值（1KB），
      * 对 tcpip 线程远远不够 —— 这里兜个底。 */
@@ -290,8 +295,10 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     }
 
     g_next_task_windowed = 1u;
+    g_lwip_stage[4] = 0x541u;
     (void)s3_w2c_task_create(name, (void *)thread, arg,
                              (u32_t)prio, (u32_t)stacksize);
+    g_lwip_stage[4] = 0x542u;
     g_next_task_windowed = saved;
     return 1;
 }
