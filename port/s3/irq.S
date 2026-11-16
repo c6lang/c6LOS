@@ -297,7 +297,20 @@ _vec_level1:
     j       _xt_alloca_exc
 1:
     rsr     a3, excsave2
-    addi    a1, a1, -80
+    /* §361（真病根）：**中断帧不能再压在被中断的 sp 下面**！
+     *
+     * 原来这里是 `addi a1, a1, -80`，于是帧里的 PS 槽（帧+64 = 原 sp-16）
+     * 正好压在 windowed ABI 的**溢出槽** `[sp-16]` 上 —— 那是被调用者保存
+     * caller a0 的地方。中断一来就把 slot 写花，之后窗口欠载从那里把 a0
+     * 填回来，a0 就变成了我们的 PS 值（真板现场 a0=0x00060400 ≈ PS
+     * 0x00060600），紧接着 `retw.n` cause=0。
+     *
+     * 改法：切到**专用中断栈**。被打断的 sp 存进 EXCSAVE3，帧里新开一个
+     * 槽位（偏移 68）保存它，退出时用它恢复 a1。 */
+    /* 帧放在 [sp-128, sp-60)：**必须整体低于 sp-48**，那才是 windowed ABI
+     * 溢出槽（call8: [sp-32,sp-20)，call12: [sp-48,sp-20)）的下界。
+     * 这样中断帧不会盖住被调用者保存 caller a0..a11 的槽。 */
+    addi    a1, a1, -128
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -370,7 +383,7 @@ _vec_level1:
     l32i    a13, a1, 48
     l32i    a14, a1, 52
     l32i    a15, a1, 56
-    addi    a1, a1, 80
+    addi    a1, a1, 128         /* §361：回到被打断的 sp */
     rfe
 
     .section .text, "ax", @progbits
@@ -400,3 +413,7 @@ port_irq_restore:
 #else
     retw
 #endif
+
+    .section .text, "ax", @progbits
+    .align  4
+    .literal_position
