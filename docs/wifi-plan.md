@@ -10350,3 +10350,42 @@ EPC1     = 0x42014415 (s3_w2c_current_task 中间，w2c 壳里)
    改成**纯汇编手写**的窗口安全版本，逐个替换、逐个用 JTAG 验证。
 3. 或者换思路：让内核原语也编成 **windowed**（同一份 .c6 用 `-mabi=windowed` 编到
    一个单独的库里给 windowed 侧用），彻底消除 windowed→call0 的边界。
+
+### §231 两个方向性实验（都做了，结论明确）
+
+#### 实验 A：极简 W2C 壳（`S3_W2C_MIN=1`）
+
+把 w2c 壳从"entry 128 + WIN_SPILL + 64 字节死区 + callx0"简化成
+"entry 32 + 存 a0 + callx0 + 取回 a0 + retw"，不做任何窗口操作。
+
+- 结果：比带 spill 的版本**多走一步**（ppTask 能回到 `_queue_recv` 循环），
+  但 init 任务（t=1）随后仍然无声卡住；JTAG 读到的异常现场是
+  `EXCCAUSE=29 (StoreProhibited)`、`EXCVADDR=0x56`（近似 NULL 解引用）、
+  `EPC1=0x420179f3`（在 `os_task_start_core` 里）。
+- 说明：w2c 壳不是唯一问题；**windowed 库和 call0 内核这个拼接方式本身**在深调用
+  下会互相踩。这条路可能永远需要"逐个壳调参"，风险高。
+
+#### 实验 B：整个镜像用 windowed ABI 编译（`make ... S3_ABI=windowed`）
+
+既然内核/闭源库一个是 call0、一个是 windowed，最彻底的办法是**让内核也用
+windowed**（我们的 port 本来就写了 `#ifdef __XTENSA_CALL0_ABI__` 的两条路）。
+
+- **编译链接一次通过**：`Successfully created ESP32-S3 image` + `chkimg OK`
+  （IRAM/IROM/DRAM 都还在预算内）。
+- 但真板上只打印 `entry 0x4037853c` 就没了 —— 连 `c6os s3 boot` 都没到，说明死在
+  `start.S` 的 windowed 入口（窗口初始化/WINDOWSTART 归一化那段、
+  以及 `_start` 之后第一条 `entry` 的窗口状态）。
+- 这不是坏消息：说明这条路**有希望但要改 port 的启动代码**（把 windowed 路径补完整：
+  正确的 `entry` 帧、WINDOWSTART 初始化、以及 ctx.S/irq.S 在 windowed 下的
+  上下文保存）。
+
+#### 结论与建议的下一步优先级
+
+| 优先级 | 方向 | 理由 |
+| --- | --- | --- |
+| 1 | **把 windowed ABI 这条路打通**（改 start.S 的 windowed 入口 + ctx.S 的上下文保存） | 一次投入换来"没有 ABI 边界"，之后再也不用调 w2c 壳/窗口 spill；而且内核与闭源库同 ABI 正是 IDF 的做法（FreeRTOS 也是 windowed） |
+| 2 | 继续调 call0+壳 这条路 | 现在能走到 `esp_wifi_init_internal` 的 ppTask 握手之后，但每次都用真板 + JTAG 定位，成本高、且每次只前进一点点 |
+
+无论走哪条，**工具已经齐了**：`make ... https` 出镜像、`tools/flashmon.sh` 刷+抓、
+`tools/dbg.sh` + gdb 做 JTAG 断点/读内存、`_vec_default` 的 RTC 现场、以及
+`[task]/[take]/[give]/[recv]/[lock]` 同步点追踪。
