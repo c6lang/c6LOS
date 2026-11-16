@@ -10389,3 +10389,31 @@ windowed**（我们的 port 本来就写了 `#ifdef __XTENSA_CALL0_ABI__` 的两
 无论走哪条，**工具已经齐了**：`make ... https` 出镜像、`tools/flashmon.sh` 刷+抓、
 `tools/dbg.sh` + gdb 做 JTAG 断点/读内存、`_vec_default` 的 RTC 现场、以及
 `[task]/[take]/[give]/[recv]/[lock]` 同步点追踪。
+
+### §232 windowed 构建到底死在 port_init 的哪儿（真板 + JTAG 实测）
+
+`S3_ABI=windowed` 的镜像刷进去后：
+
+- RTC `0x50000000 = 0xa1` → `_start` 跑完、**.bss 清完了**；
+- RTC STORE7 `0x600080CC = 0xb0b0b0b0` → **进了 `port_init`**（那是它的第一个信标）；
+- 然后 TRAP 进 `_vec_default`（halt 时 pc 在 `_vec_default` 的自旋里，
+  a0=0x80379c15（带窗口标签），windowbase=9 / windowstart=0x2a0）。
+
+也就是说 windowed 路并不像表面那样"死在 _start"：`_start → call8 port_init` 是通的，
+死在 `port_init` 的第一批动作里（`os_flash_init()` / `os_icache_enable()` 一带 ——
+那里要经 `s3_win_call_config_icache_mode` 进 ROM 的 windowed 函数）。
+
+要把这条路走通，需要补的恰好是"windowed 内核"的几处基础设施：
+
+1. `port_init` 里各个 `call8` 进来的函数，其 `entry` 帧与 WINDOWSTART 状态要自洽
+   （我们的 `_start` 已把 WINDOWSTART 归一化成 1<<windowbase，但 `call8` 之后
+   window 轮转由硬件做，溢出/欠载向量要不要在 windowed 内核里也参与，需要确认）；
+2. `ctx.S` 的任务上下文在新 ABI 下的保存/恢复（a0..a15 + WINDOWSTART + EPC/PS）；
+3. `irq.S` 的异常入口：windowed 下 `_vec_level1` 的现场保存/`rfe` 前要不要做
+   `rotw`/`wsr windowstart`。
+
+工作量不小（相当于把 port 的窗口语义整体捋一遍），但收益是"内核与闭源库同 ABI"，
+后面所有 OSI 回调都不再有边界问题。
+
+**决策（本轮）**：先守在 call0 这条能跑的线上（已经推进到
+`esp_wifi_init_internal` 内部、ppTask 握手成功），把 windowed 重构留作专项。
