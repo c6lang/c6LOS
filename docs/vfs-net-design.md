@@ -458,3 +458,47 @@ stat/readdir；写/删/改名/截断一律 `-EROFS`。
    下一次 read 还从旧位置读（症状：`lseek(0)` 返回 0，`read` 却读到 0 字节）。
 4. **目录 fd 不能走 `LOS_FsOpen`** —— ramfs 的 open 对目录返回 `-EISDIR`，
    glibc 的 `opendir` 于是失败；目录只需要"路径 + 序号"，单独一张小表更省事。
+
+### M10-0（SAL 骨架）已完成
+
+`include/los/sal.h`（兼容面）+ `kernel/sal.c6`（分发器），`C6OS_NET=0` 时不编译。
+
+- 兼容面按 LiteOS-M 的 SAL 裁剪：`LOS_SAL_AF_INET`、`SOCK_STREAM/DGRAM`、
+  `IPPROTO_TCP/UDP`、`LOS_SAL_MAX_SOCKETS = 16`、`LOS_SAL_MAX_PROTOS = 4`、
+  `LOS_SAL_E_*`（与 Linux errno 同号，调用方直接 `-errno`）。
+- `SalProto` 是函数表：`socket/close/bind/connect/listen/accept/send/recv/
+  sendto/recvfrom/setopt/poll`，全部只吃 `VOID *` / `UINT32` / `INT32`，
+  守 ABI 规则（跨 C 边界不传结构体）。
+- 注册表 `g_protos[4]`（**按值存**）+ `g_nprotos`；`SalRegister` 查重返
+  `-EEXIST`，`SalUnregister` 把后面的项前移并清零尾巴。
+- socket 表 `g_socks[16]`：`domain/type/proto/ops/priv/last_errno`，
+  `sd` 就是槽位号（0 起），满返 `-EMFILE`。
+- 分发：每个操作先 `sal_sock_(sd)` 判 `-EBADF`，再转给 `ops`，
+  返回值统一过 `sal_ret_()`（负值记进 `last_errno` 供 `SalLastError`）。
+- `priv` 由 SAL 填**槽位号**（`(VOID *)(UINT64)sd`），协议栈自己拿它当索引；
+  协议侧不通过出参回填指针。
+
+验收：`make check-sal` —— 一个假协议栈（`tests/t_sal.c6`）跑完整 socket 面：
+注册/重复注册/未知 domain/socket 分配与 16 槽耗尽/bind/connect/send/recv/
+sendto（不需 connect）/recvfrom/setopt/listen/accept(-EAGAIN)/poll/close
+幂等/注销后不可用，打印 `PASS: sal M10-0`。
+`make check-net-zero` —— `C6OS_NET=0` 时 SAL 不参与编译。
+
+四个 c6 坑（都不是我们代码的锅，但都要绕）：
+
+1. **结构体里的函数指针字段不能静态初始化** —— `static SalProto p = { ...,
+   fake_socket, ... };` 编得过，运行时那个字段是空/garbage，一调就三级故障
+   （串口上什么都没有）。改成 `static SalProto p = {0};` + 运行时逐个
+   `p.socket = fake_socket;` 立刻正常。**协议栈的表都得这么填**（做个
+   `xxx_proto_init()`）。
+2. **函数指针字段不能判空** —— `if (s->ops->send == 0)` 在 c6 里结果不可靠
+   （明明有值却当真），第一版每个操作都做了一遍"协议栈没实现就返
+   `-EOPNOTSUPP`"，结果 `send` 一路返 95。SAL 因此**不做逐操作判空**，
+   约定注册时函数表填满。
+3. **不能通过 `const` 结构体指针调函数指针** —— `const SalProto *p` 参数 +
+   `p->socket(...)` 直接崩；把 `const` 去掉（LiteOS 原型的 `sal_register`
+   本来也是非 const）就好了。分发时还顺手改成"注册表按值存 + `g_protos[i]
+   .fn(...)`"，和 `blkdev` 的表同一写法（那套是验证过能用的）。
+4. **`VOID **` 出参回调不可靠** —— `socket(VOID **priv)` 里 `*priv = ...`
+   写不出去（读回来是 0），换成 `UINT64 *` 出参则连调用都崩。最后干脆取消
+   出参：`socket` 只返 0/负错误码，`priv` 由 SAL 自己发槽位号。

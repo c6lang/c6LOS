@@ -228,13 +228,17 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 | 任务 | 细节 | 验收 |
 |---|---|---|
-| M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 槽 + `SalProto` 函数表分发）；先用假协议栈单测 | `make check-sal`：注册→socket→close→反注册全通，未注册/参数错返回 -1 |
+| ✅ M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 的表 + 函数表分发；`priv` = 槽位号） | `make check-sal`、`make check-net-zero` |
 | M10-1 ARP+IPv4+ICMP | `kernel/net/{netif,arp,ip,icmp}.c6`；loopback + 静态 IP/MAC | qemu 里 `ping 10.0.2.2`（slirp 网关）有回包 |
 | M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO 寄存器、描述符环；先轮询收包再上中断 | 收发包计数增长；ARP 有应答 |
 | M10-3 UDP + socket 面 | `udp.c6` + `sal_bind/sendto/recvfrom/close` | 与宿主 `nc -u` 互发成功（qemu hostfwd 或 slirp） |
 | M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
 
-**M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。
+**M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。可复现的验收命令：
+
+- `make check-sal` —— M10-0：假协议栈跑完整个 socket 面（注册表/16 槽/
+  函数表分发/错误码透传），打印 `PASS: sal M10-0`；
+- `make check-net-zero` —— `C6OS_NET=0` 时 SAL 与协议栈不进构建。
 
 ## 风险与依赖
 

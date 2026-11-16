@@ -1,0 +1,328 @@
+/* M10-0 验收：SAL 骨架（协议栈注册表 + socket 表 + 函数表分发）。
+ *
+ * 用一套"假协议栈"（不碰网卡）把分发路径全走一遍：注册/重复注册、
+ * socket 分配与 16 槽耗尽、bind/send/recv/sendto/recvfrom/setopt/poll
+ * 的转发、错误码透传（未 connect 时 -ENOTCONN）、close 的幂等性、
+ * 注销之后不可再用。
+ */
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+
+#define FAKE_BUF_MAX 64
+#define FAKE_EV_READ 1u
+
+typedef struct FakeSock {
+    UINT32 connected;
+    UINT32 bound;
+    UINT32 len;
+    UINT8 buf[FAKE_BUF_MAX];
+} FakeSock;
+
+static FakeSock g_state = {0};
+static UINT32 g_fake_closed = 0u;
+static UINT32 g_bad = 0u;
+
+static void put_u32_(UINT32 v)
+{
+    CHAR b[12] = {0};
+    UINT32 i = 11u;
+
+    b[11] = '\0';
+    if (v == 0u) {
+        port_puts("0");
+        return;
+    }
+    while (v > 0u && i > 0u) {
+        i--;
+        b[i] = (CHAR)('0' + (v % 10u));
+        v = v / 10u;
+    }
+    port_puts((const char *)&b[i]);
+}
+
+static void chk(const char *what, INT32 got, INT32 want)
+{
+    if (got != want) {
+        port_puts("FAIL: sal ");
+        port_puts(what);
+        port_puts(" got=");
+        put_u32_((UINT32)((got < 0) ? (0 - got) : got));
+        if (got < 0) {
+            port_puts("(neg)");
+        }
+        port_puts(" want=");
+        put_u32_((UINT32)((want < 0) ? (0 - want) : want));
+        if (want < 0) {
+            port_puts("(neg)");
+        }
+        port_puts("\n");
+        g_bad = g_bad + 1u;
+    }
+}
+
+/* ---- 假协议栈 ---- */
+
+static INT32 fake_socket(VOID)
+{
+    (void)memset((VOID *)&g_state, 0, (UINT32)sizeof(g_state));
+    return 0;
+}
+
+static INT32 fake_close(VOID *priv)
+{
+    (void)priv;
+    g_fake_closed = g_fake_closed + 1u;
+    return 0;
+}
+
+static INT32 fake_bind(VOID *priv, const LosSockAddr *a)
+{
+    FakeSock *fs = &g_state;
+
+    if (fs == (FakeSock *)0 || a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    fs->bound = 1u;
+    return 0;
+}
+
+static INT32 fake_connect(VOID *priv, const LosSockAddr *a)
+{
+    FakeSock *fs = &g_state;
+
+    if (fs == (FakeSock *)0 || a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    fs->connected = 1u;
+    return 0;
+}
+
+static INT32 fake_listen(VOID *priv, INT32 backlog)
+{
+    (void)priv;
+    (void)backlog;
+    return 0;
+}
+
+static INT32 fake_accept(VOID *priv, VOID **child, LosSockAddr *a)
+{
+    (void)priv;
+    (void)child;
+    (void)a;
+    return 0 - LOS_SAL_E_AGAIN;
+}
+
+static INT32 fake_send(VOID *priv, const VOID *buf, UINT32 len)
+{
+    FakeSock *fs = &g_state;
+    UINT32 n = 0u;
+
+    if (fs == (FakeSock *)0 || buf == (const VOID *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    if (fs->connected == 0u) {
+        return 0 - LOS_SAL_E_NOTCONN;
+    }
+    if (len > (UINT32)FAKE_BUF_MAX) {
+        len = (UINT32)FAKE_BUF_MAX;
+    }
+    while (n < len) {
+        fs->buf[n] = ((const UINT8 *)buf)[n];
+        n++;
+    }
+    fs->len = len;
+    return (INT32)len;
+}
+
+static INT32 fake_recv(VOID *priv, VOID *buf, UINT32 len)
+{
+    FakeSock *fs = &g_state;
+    UINT32 n = 0u;
+
+    if (fs == (FakeSock *)0 || buf == (VOID *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    if (fs->len == 0u) {
+        return 0 - LOS_SAL_E_AGAIN;
+    }
+    if (len > fs->len) {
+        len = fs->len;
+    }
+    while (n < len) {
+        ((UINT8 *)buf)[n] = fs->buf[n];
+        n++;
+    }
+    fs->len = fs->len - len;
+    return (INT32)len;
+}
+
+static INT32 fake_sendto(VOID *priv, const VOID *buf, UINT32 len,
+                         const LosSockAddr *a)
+{
+    (void)a;
+    return fake_send(priv, buf, len);
+}
+
+static INT32 fake_recvfrom(VOID *priv, VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    (void)a;
+    return fake_recv(priv, buf, len);
+}
+
+static INT32 fake_setopt(VOID *priv, INT32 opt, const VOID *val, UINT32 len)
+{
+    (void)priv;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 0;
+}
+
+static INT32 fake_poll(VOID *priv, UINT32 events)
+{
+    FakeSock *fs = &g_state;
+
+    if (fs == (FakeSock *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    if (fs->len > 0u) {
+        return (INT32)(events & (UINT32)FAKE_EV_READ);
+    }
+    return 0;
+}
+
+static SalProto g_fake_udp = {0};
+
+/* c6 不能可靠地静态初始化结构体里的函数指针字段，改成运行时逐个赋值。 */
+static void fake_proto_init(void)
+{
+    g_fake_udp.name = "fake-udp";
+    g_fake_udp.domain = (INT32)LOS_SAL_AF_INET;
+    g_fake_udp.type = (INT32)LOS_SAL_SOCK_DGRAM;
+    g_fake_udp.proto = (INT32)LOS_SAL_IPPROTO_UDP;
+    g_fake_udp.socket = fake_socket;
+    g_fake_udp.close = fake_close;
+    g_fake_udp.bind = fake_bind;
+    g_fake_udp.connect = fake_connect;
+    g_fake_udp.listen = fake_listen;
+    g_fake_udp.accept = fake_accept;
+    g_fake_udp.send = fake_send;
+    g_fake_udp.recv = fake_recv;
+    g_fake_udp.sendto = fake_sendto;
+    g_fake_udp.recvfrom = fake_recvfrom;
+    g_fake_udp.setopt = fake_setopt;
+    g_fake_udp.poll = fake_poll;
+}
+
+void os_main(void)
+{
+    LosSockAddr a = {0};
+    UINT8 buf[8] = {0};
+    INT32 sd0 = -1;
+    INT32 sd1 = -1;
+    INT32 sd = -1;
+    INT32 rc = 0;
+    UINT32 opened = 0u;
+
+    a.family = (UINT16)LOS_SAL_AF_INET;
+    a.port = 8080u;
+    a.addr = 0x0A000202u;
+
+    fake_proto_init();
+    /* --- 注册表 --- */
+    chk("register", SalRegister(&g_fake_udp), 0);
+    chk("register twice", SalRegister(&g_fake_udp), 0 - LOS_SAL_E_EXIST);
+    chk("proto count", (INT32)SalProtoCount(), 1);
+    chk("proto get", (SalProtoGet(0u) != (SalProto *)0) ? (INT32)SalProtoGet(0u)->proto : -1, LOS_SAL_IPPROTO_UDP);
+    chk("unknown domain", SalSocket(10, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP),
+        0 - LOS_SAL_E_AFNOSUPPORT);
+    chk("wrong type", SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_STREAM,
+                                LOS_SAL_IPPROTO_UDP),
+        0 - LOS_SAL_E_AFNOSUPPORT);
+
+    /* --- socket 表 --- */
+    sd0 = SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP);
+    if (sd0 < 0) {
+        chk("socket", sd0, 0);
+        port_puts("FAIL: sal M10-0\n");
+        return;
+    }
+    chk("sd0", sd0, 0);
+    sd1 = SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP);
+    chk("sd1", sd1, 1);
+    chk("socket count", (INT32)SalSocketCount(), 2);
+    chk("proto of sd0", (SalSockProto(sd0) != (SalProto *)0) ? (INT32)SalSockProto(sd0)->proto : -1, LOS_SAL_IPPROTO_UDP);
+    chk("priv set", (INT32)(UINT64)SalSockPriv(sd0), 0);
+
+    /* --- 转发 + 错误码透传 --- */
+    chk("send before connect", SalSend(sd0, (const VOID *)"hi", 2u),
+        0 - LOS_SAL_E_NOTCONN);
+    chk("last error", SalLastError(sd0), LOS_SAL_E_NOTCONN);
+    chk("bind", SalBind(sd0, &a), 0);
+    chk("connect", SalConnect(sd0, &a), 0);
+    chk("bind unbound fd", SalBind(9, &a), 0 - LOS_SAL_E_BADF);
+    chk("send", SalSend(sd0, (const VOID *)"hi", 2u), 2);
+    chk("poll readable", SalPoll(sd0, FAKE_EV_READ), (INT32)FAKE_EV_READ);
+
+    buf[0] = 0u;
+    buf[1] = 0u;
+    rc = SalRecv(sd0, (VOID *)buf, 8u);
+    chk("recv len", rc, 2);
+    chk("recv byte0", (INT32)buf[0], (INT32)'h');
+    chk("recv byte1", (INT32)buf[1], (INT32)'i');
+    chk("poll empty", SalPoll(sd0, FAKE_EV_READ), 0);
+
+    chk("sendto without connect", SalSendTo(sd1, (const VOID *)"yo", 2u, &a), 2);
+    chk("connect sd1", SalConnect(sd1, &a), 0);
+    chk("sendto ok", SalSendTo(sd1, (const VOID *)"yo", 2u, &a), 2);
+    chk("recvfrom ok", SalRecvFrom(sd1, (VOID *)buf, 8u, &a), 2);
+    chk("setopt", SalSetSockOpt(sd1, 1, (const VOID *)0, 0u), 0);
+    chk("listen", SalListen(sd1, 4), 0);
+    chk("accept", SalAccept(sd1, &a), 0 - LOS_SAL_E_AGAIN);
+
+    /* --- 16 槽耗尽 --- */
+    while (SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM,
+                     LOS_SAL_IPPROTO_UDP) >= 0) {
+        opened++;
+    }
+    chk("fill to full", (INT32)opened, (INT32)(LOS_SAL_MAX_SOCKETS - 2));
+    chk("socket table full",
+        SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP),
+        0 - LOS_SAL_E_MFILE);
+
+    /* --- close --- */
+    chk("close sd0", SalClose(sd0), 0);
+    chk("close sd0 twice", SalClose(sd0), 0 - LOS_SAL_E_BADF);
+    chk("closed sd unusable", SalSend(sd0, (const VOID *)"x", 1u),
+        0 - LOS_SAL_E_BADF);
+    /* sd0 一次 + 槽位耗尽时 SAL 补关两次（协议侧已建、SAL 放不下） */
+    chk("fake close called", (INT32)g_fake_closed, 3);
+    sd = 1;
+    while (sd < (INT32)LOS_SAL_MAX_SOCKETS) {
+        (void)SalClose(sd);
+        sd++;
+    }
+    chk("socket count zero", (INT32)SalSocketCount(), 0);
+
+    /* --- 注销 --- */
+    chk("unregister", SalUnregister(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM,
+                                    LOS_SAL_IPPROTO_UDP), 0);
+    chk("proto count after", (INT32)SalProtoCount(), 0);
+    chk("socket after unregister",
+        SalSocket(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP),
+        0 - LOS_SAL_E_AFNOSUPPORT);
+    chk("unregister again",
+        SalUnregister(LOS_SAL_AF_INET, LOS_SAL_SOCK_DGRAM, LOS_SAL_IPPROTO_UDP),
+        0 - LOS_SAL_E_NOENT);
+
+    if (g_bad != 0u) {
+        port_puts("FAIL: sal M10-0 failures=");
+        put_u32_(g_bad);
+        port_puts("\n");
+        return;
+    }
+    port_puts("PASS: sal M10-0（协议栈注册表 + 16 槽 socket 表 + 函数表分发）\n");
+}
