@@ -225,17 +225,21 @@ $(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
 # wifi_glue.c 里那批 wifi_osi_funcs_t 桩函数会被 **windowed ABI 的闭源库回调**，
 # 所以必须用 -mabi=windowed 编译；它自己对外暴露的入口（s3_wifi_osi_init 等）
 # 由 call0 侧经孤岛桥调用。
+# windowed 胶水的优化级别：默认 -Os；用 -O0 可以强制 GCC 在 retw 前显式恢复
+# a0（§255 的对照实验），也可以用来排查"寄存器被 call0 改掉"类问题。
+S3_SHIM_OPT ?= -Os
+
 $(BUILD)/obj/wifi_glue.o: port/s3/wifi_glue.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/wpa_crypto.o: port/s3/wpa_crypto.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj

@@ -11062,3 +11062,17 @@ lwip_init/netif_add/netif_set_up，再往后就**不稳定**：有时卡住、�
 **目前的判断**：主路径已经打通到"库初始化成功"，剩下的都在 windowed/call0 交界
 （§252）与时序竞态这两件事上。下一步要么把 ABI 边界彻底去掉（整镜像 windowed，
 §231 已验证能编译链接），要么把 OSI 回调改成手写汇编的最小 windowed 函数。
+
+### §255 `-O0` 编 windowed 胶水：IRAM 溢出 4224 字节，不可行
+
+想法：`-O0` 时 GCC 的 windowed 尾声会在 `retw` 前显式 `l32i a0, a1, 0`，正好能治
+§252 那个"编译器不知道 a0 被 call0 改掉"的问题。为此把三个 windowed 单元的优化级别
+参数化成 `S3_SHIM_OPT`（默认 `-Os`）。实测：
+
+```
+make ... S3_SHIM_OPT=-O0 https
+ld: region `IRAM' overflowed by 4224 bytes
+```
+
+⇒ `-O0` 不可行（我们的 IRAM 只剩约 7KB 余量）。开关留在 Makefile 里备用。
+要治 §252 只能走"壳存全寄存器"或"整镜像 windowed"这两条路（§252 已列）。
