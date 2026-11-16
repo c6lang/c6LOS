@@ -3,6 +3,7 @@
 
 #include "c6os/types.h"
 #include "los/los_fs.h"
+#include "los/los_block.h"
 #include "c6os/errno.h"
 
 /* 内核内部的 VFS（LiteOS-M 兼容面在 include/los/los_fs.h）。
@@ -24,7 +25,8 @@ typedef struct {
 typedef struct {
     u32 used;
     char path[LOS_FS_PATH_MAX];   /* 挂载点："/"、"/tmp"…… */
-    char type[OS_FS_TYPE_MAX];    /* "romfs" / "ramfs" */
+    char type[OS_FS_TYPE_MAX];    /* "romfs" / "ramfs" / "fatfs" */
+    char dev[LOS_DEV_NAME_MAX];   /* 块设备名（fatfs 用；内存后端留空） */
     void *priv;                   /* 后端私有数据 */
 } OsMount;
 
@@ -63,6 +65,26 @@ int romfs_close(OsMount *m, void *fh);
 int romfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len);
 int romfs_stat(OsMount *m, const char *rel, LosFsStat *st);
 int romfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de);
+
+/* fatfs 的挂载参数：分区起始扇区（0 = 从卷首） */
+typedef struct {
+    u32 lba;
+} OsFsPart;
+
+/* fatfs.c6：FAT16/32 只读后端（M9-3） */
+int fatfs_mount(OsMount *m, void *data);
+int fatfs_umount(OsMount *m);
+int fatfs_open(OsMount *m, const char *rel, u32 flags, void **fh);
+int fatfs_close(OsMount *m, void *fh);
+int fatfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len);
+int fatfs_write(OsMount *m, void *fh, u32 pos, const void *buf, u32 len);
+int fatfs_stat(OsMount *m, const char *rel, LosFsStat *st);
+int fatfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de);
+int fatfs_unlink(OsMount *m, const char *rel);
+int fatfs_mkdir(OsMount *m, const char *rel);
+int fatfs_rmdir(OsMount *m, const char *rel);
+int fatfs_rename(OsMount *m, const char *from, const char *to);
+int fatfs_truncate(OsMount *m, const char *rel, u32 size);
 
 /* ramfs.c6：可读写内存后端（M9-1） */
 int ramfs_mount(OsMount *m, void *data);

@@ -18,6 +18,9 @@ static int open_(OsMount *m, const char *rel, u32 flags, void **fh)
     if (os_str_eq(m->type, "ramfs") == 1) {
         return ramfs_open(m, rel, flags, fh);
     }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_open(m, rel, flags, fh);
+    }
     return 0 - OS_E_INVAL;
 }
 
@@ -28,6 +31,9 @@ static int close_(OsMount *m, void *fh)
     }
     if (os_str_eq(m->type, "ramfs") == 1) {
         return ramfs_close(m, fh);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_close(m, fh);
     }
     return 0 - OS_E_INVAL;
 }
@@ -40,6 +46,9 @@ static int read_(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
     if (os_str_eq(m->type, "ramfs") == 1) {
         return ramfs_read(m, fh, pos, buf, len);
     }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_read(m, fh, pos, buf, len);
+    }
     return 0 - OS_E_INVAL;
 }
 
@@ -51,6 +60,9 @@ static int stat_(OsMount *m, const char *rel, LosFsStat *st)
     if (os_str_eq(m->type, "ramfs") == 1) {
         return ramfs_stat(m, rel, st);
     }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_stat(m, rel, st);
+    }
     return 0 - OS_E_INVAL;
 }
 
@@ -61,6 +73,9 @@ static int readdir_(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
     }
     if (os_str_eq(m->type, "ramfs") == 1) {
         return ramfs_readdir(m, rel, idx, de);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_readdir(m, rel, idx, de);
     }
     return 0 - OS_E_INVAL;
 }
@@ -132,6 +147,13 @@ INT32 LOS_FsRead(INT32 fd, VOID *buf, UINT32 len)
 
     if (f == (OsFile *)0 || buf == (VOID *)0) {
         return 0 - OS_E_BADF;
+    }
+    /* 各后端不一定知道文件大小（fat 的句柄就是簇号），统一在这里夹紧 */
+    if (f->pos >= f->size) {
+        return 0;
+    }
+    if (len > f->size - f->pos) {
+        len = f->size - f->pos;
     }
     rc = read_(&g_os_mounts[f->mnt], f->fh, f->pos, buf, (u32)len);
     if (rc > 0) {

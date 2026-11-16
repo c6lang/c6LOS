@@ -21,6 +21,7 @@ typedef struct {
 } RomfsNode;
 
 typedef struct {
+    u32 used;
     u32 nodes;
     RomfsNode n[ROMFS_MAX_NODES];
 } RomfsPriv;
@@ -166,13 +167,15 @@ int romfs_mount(OsMount *m, void *data)
     if (im == (OsFsImage *)0 || im->buf == (void *)0 || im->len == 0u) {
         return 0 - OS_E_INVAL;
     }
-    while (i < (u32)ROMFS_MAX_MOUNTS && i < (u32)OS_MAX_MOUNTS) {
-        if (&g_os_mounts[i] == m) {
+    while (i < (u32)ROMFS_MAX_MOUNTS) {
+        if (g_romfs[i].used == 0u) {
             slot = i;
+            i = (u32)ROMFS_MAX_MOUNTS;
+        } else {
+            i++;
         }
-        i++;
     }
-    if (slot == 0xffffffffu || slot >= (u32)ROMFS_MAX_MOUNTS) {
+    if (slot == 0xffffffffu) {
         return 0 - OS_E_NOMEM;
     }
     pv = &g_romfs[slot];
@@ -186,6 +189,11 @@ int romfs_mount(OsMount *m, void *data)
 
 int romfs_umount(OsMount *m)
 {
+    RomfsPriv *pv = (RomfsPriv *)m->priv;
+
+    if (pv != (RomfsPriv *)0) {
+        pv->used = 0u;
+    }
     m->priv = (void *)0;
     return 0;
 }

@@ -396,3 +396,33 @@ romfs/ramfs 各自实现同名方法。结论是**这个 c6 版本上跨 TU 分�
    不需要，写路径不等就会让后续命令被驱动器忽略 —— 现象是 `LOS_BlockWrite`
    直接返回 -1，看起来像"写支持没做对"。
 2. 镜像尺寸又顶到了 boot16 的 255 扇区上限（见上面第 1 条记录），已扩到 382 扇区。
+
+### M9-3（FAT16/32 只读）已完成
+
+`kernel/fatfs.c6`：BPB 解析（512 字节扇区、spc 必须是 2 的幂、nfats/fatsz16/32、
+root_ents、totsec16/32）→ 首簇（FAT16 取目录项 +26 的 16 位；FAT32 拼 +20/+26
+高低字）→ 簇链 `fat_next_`（0xFFF8/0x0FFFFFF8 为结束）→ 8.3 目录项
+（跳过 0xE5、0x0F 长名、卷标 0x08）。只读后端：mount/umount/open/close/read/
+stat/readdir；写/删/改名/截断一律 `-EROFS`。
+
+镜像：`tools/mkfat.py` 生成 4MB FAT16（1 个文件 `HELLO.TXT` + 1 个子目录 `SUB`），
+`tools/mkfs.py` 在 LBA 16384 处把它嵌进 `vfs-disk.img`（磁盘 32MB）。
+`tests/t_vfs.c6` 的 M9-3 段覆盖 stat/read/readdir 与三条错误路径
+（写被拒 `-EROFS`、目录当文件打开 `-EISDIR`、不存在的名字 `-ENOENT`）。
+
+验收：`make check-vfs` → 一次 qemu 跑完 M9-0..M9-3 四条 `PASS: vfs M9-*`。
+
+四个坑：
+
+1. **后端私有表不能用挂载点下标** —— 最初每个后端靠 `&g_os_mounts[i] == m`
+   找自己的槽位，而 `/fat` 是第 3 个挂载点（下标 2），`FAT_MAX_MOUNTS`/
+   `RAMFS_MAX_MOUNTS` 只有 2 ⇒ 永远 `-ENOMEM`。改成每个后端结构体自带
+   `used` 标志、各自扫描自己的表。
+2. **设备名要在进后端之前写进挂载项** —— `OsMount.dev` 原来在 `*_mount()`
+   成功之后才拷贝，而 `fatfs_mount` 第一件事就是 `LOS_DeviceGet(m->dev)`，
+   拿到空串 ⇒ `-ENOENT`（现象：`FAIL: mount fatfs`）。
+3. **FAT16 的起始簇只在目录项 +26（16 位）** —— 照 FAT32 的 `hi << 16 | lo`
+   去读会得到 `2 << 16`，于是 `read` 被夹成 0 字节，表现成"打开成功、读到 0 字节"。
+4. **批量生成 C 源时反斜杠会多一层** —— Python 补丁里写成 `'\\0'`（两个反斜杠 + 0）
+   落进 C 就是多字符常量（不是 0），`strcmp`/收尾判断全部失效；在生成器产物里搜
+   两个反斜杠 + 0 可以一次性揪出来（本次命中 `kernel/fatfs.c6` 的 8 处）。

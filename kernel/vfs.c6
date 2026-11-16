@@ -132,7 +132,6 @@ int os_vfs_mount(const char *dev, const char *path, const char *type, void *data
     int slot = -1;
     int rc = 0;
 
-    (void)dev;
     rc = os_vfs_path_check(path);
     if (rc != 0) {
         return rc;
@@ -155,11 +154,17 @@ int os_vfs_mount(const char *dev, const char *path, const char *type, void *data
     os_str_cpy(g_os_mounts[slot].path, path, (u32)LOS_FS_PATH_MAX);
     os_str_cpy(g_os_mounts[slot].type, type, (u32)OS_FS_TYPE_MAX);
     g_os_mounts[slot].priv = (void *)0;
+    if (dev != (const char *)0) {
+        (void)strncpy(g_os_mounts[slot].dev, dev, (size_t)(LOS_DEV_NAME_MAX - 1));
+        g_os_mounts[slot].dev[LOS_DEV_NAME_MAX - 1] = '\0';
+    }
 
     if (os_str_eq(type, "romfs") == 1) {
         rc = romfs_mount(&g_os_mounts[slot], data);
     } else if (os_str_eq(type, "ramfs") == 1) {
         rc = ramfs_mount(&g_os_mounts[slot], data);
+    } else if (os_str_eq(type, "fatfs") == 1) {
+        rc = fatfs_mount(&g_os_mounts[slot], data);
     } else {
         rc = 0 - OS_E_INVAL;
     }
@@ -182,6 +187,8 @@ int os_vfs_umount(const char *path)
                 (void)romfs_umount(&g_os_mounts[i]);
             } else if (os_str_eq(g_os_mounts[i].type, "ramfs") == 1) {
                 (void)ramfs_umount(&g_os_mounts[i]);
+            } else if (os_str_eq(g_os_mounts[i].type, "fatfs") == 1) {
+                (void)fatfs_umount(&g_os_mounts[i]);
             }
             g_os_mounts[i].used = 0u;
             g_os_mounts[i].priv = (void *)0;

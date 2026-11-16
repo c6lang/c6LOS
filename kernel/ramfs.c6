@@ -39,6 +39,7 @@ typedef struct {
 } RamfsNode;
 
 typedef struct {
+    u32 used;
     u32 nodes;
     RamfsNode n[RAMFS_MAX_NODES];
     OsHeap heap;
@@ -221,17 +222,20 @@ int ramfs_mount(OsMount *m, void *data)
     u32 i = 0u;
 
     (void)data;
-    while (i < (u32)OS_MAX_MOUNTS) {
-        if (&g_os_mounts[i] == m) {
+    while (i < (u32)RAMFS_MAX_MOUNTS) {
+        if (g_ramfs[i].used == 0u) {
             slot = i;
+            i = (u32)RAMFS_MAX_MOUNTS;
+        } else {
+            i++;
         }
-        i++;
     }
-    if (slot == 0xffffffffu || slot >= (u32)RAMFS_MAX_MOUNTS) {
+    if (slot == 0xffffffffu) {
         return 0 - OS_E_NOMEM;
     }
     pv = &g_ramfs[slot];
     (void)memset((void *)pv, 0, sizeof(*pv));
+    pv->used = 1u;
     os_heap_init(&pv->heap, (void *)pv->arena, (u32)RAMFS_ARENA_SIZE);
 
     /* 根目录 */

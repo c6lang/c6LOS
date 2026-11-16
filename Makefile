@@ -981,7 +981,7 @@ ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
 $(error C6OS_VFS=1 暂不接在 user/elf/fs/dyn 上（Linux ABI 侧的对接在 M9-4）
 endif
 X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
-                  kernel/fsapi.c6 kernel/blkdev.c6 kernel/heap.c6
+                  kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
 ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
@@ -1334,12 +1334,14 @@ run-x86-vfs: x86-vfs
 		-boot c -nographic -serial stdio -monitor none -no-reboot
 
 check-vfs: x86-vfs
-	@timeout 40 qemu-system-x86_64 -m 256M \
+	@timeout 60 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
-		| tr -d '\r' | grep -q "^PASS: vfs M9-0" \
-	  && echo "PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）" \
-	  || { echo "FAIL: vfs M9-0"; exit 1; }
+		| tr -d '\r' > $(X86)/vfs.log; \
+	  for m in M9-0 M9-1 M9-2 M9-3; do \
+	    grep -q "^PASS: vfs $$m" $(X86)/vfs.log || { echo "FAIL: vfs $$m"; exit 1; }; \
+	  done; \
+	  grep -E "^PASS: vfs M9-" $(X86)/vfs.log
 
 # 零侵入：C6OS_VFS=0 时 S3 的对象列表里不该出现任何 VFS 源文件
 check-vfs-ramfs: x86-vfs
@@ -1349,6 +1351,20 @@ check-vfs-ramfs: x86-vfs
 		| tr -d '\r' | grep -q "^PASS: vfs M9-1" \
 	  && echo "PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）" \
 	  || { echo "FAIL: vfs M9-1"; exit 1; }
+
+FAT_IMG := $(X86)/fat.img
+
+$(FAT_IMG): tools/mkfat.py
+	@mkdir -p $(X86)
+	python3 tools/mkfat.py $@ 4096
+
+check-vfs-fat: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-3" \
+	  && echo "PASS: vfs M9-3（FAT16 只读：mount + stat + read HELLO.TXT + readdir）" \
+	  || { echo "FAIL: vfs M9-3"; exit 1; }
 
 check-vfs-blk: x86-vfs
 	@timeout 40 qemu-system-x86_64 -m 256M \
@@ -1455,9 +1471,10 @@ DISK_MB    := 16
 DISK_APP   = dd if=$(LS_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),vfs)
-DISK_DEPS  := $(FS_IMG)
-DISK_MB    := 16
-DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+DISK_DEPS  := $(FS_IMG) $(FAT_IMG)
+DISK_MB    := 32
+DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none; \
+             dd if=$(FAT_IMG) of=$@ bs=512 seek=16384 conv=notrunc status=none
 else ifeq ($(X86S_NAME),dyn)
 DISK_DEPS  := $(DYN_ELF) $(DYNFS)
 DISK_MB    := 16

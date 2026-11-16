@@ -8,6 +8,7 @@
 #include "c6os/vfs.h"
 #include "los/los_fs.h"
 #include "los/los_block.h"
+#include "c6os/string.h"
 
 #define FS_PA 0x06000000u          /* 96MB：initramfs 映像 */
 
@@ -19,6 +20,9 @@ static LosFsDirent g_de = {0};
 static char        g_buf[8] = {0};
 static char        g_buf2[24] = {0};
 static u8          g_blk_src[8u * 512u] = {0};
+static OsFsPart    g_part = {0};
+
+#define FAT_LBA 16384u               /* FAT 镜像放在 8MB 处（Makefile 里 dd 进去的） */
 
 /* M9-2 的临时缓冲放在 3MB：低端恒等映射区里 VA == PA，ATA 驱动可以直接用 */
 #define BLK_SCRATCH  0x00300000u
@@ -221,6 +225,69 @@ static int blk_case(void)
     return 0;
 }
 
+
+/* M9-3：FAT16 只读（镜像由 tools/mkfat.py 生成：根目录一个 HELLO.TXT） */
+static int fat_case(void)
+{
+    int dev = 0;
+    int rc = 0;
+    int fd = 0;
+    u32 n = 0u;
+
+    if ((int)LOS_DeviceGet("ata0") < 0) {
+        dev = (int)LOS_DeviceRegister("ata0", 512u, 65536u, blk_rd_cb, blk_wr_cb);
+        if (dev < 0) {
+            port_puts("FAIL: fat 重新注册设备\n");
+            return -1;
+        }
+    }
+    g_part.lba = FAT_LBA;
+    rc = (int)LOS_FsMount("ata0", "/fat", "fatfs", &g_part);
+    if (rc != 0) {
+        port_puts("FAIL: mount fatfs\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    g_st.type = 0u;
+    if ((int)LOS_FsStat("/fat/HELLO.TXT", &g_st) != 0 ||
+        g_st.size != 10u || g_st.type != (UINT32)LOS_FS_TYPE_FILE) {
+        port_puts("FAIL: fat stat HELLO.TXT\n");
+        return -1;
+    }
+    fd = (int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: fat open HELLO.TXT\n");
+        return -1;
+    }
+    n = 0u;
+    while (n < 24u) {
+        g_buf2[n] = 0;
+        n++;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 16u);
+    if (rc != 10 || memcmp((const void *)g_buf2, (const void *)"hello fat\n", 10u) != 0) {
+        port_puts("FAIL: fat read HELLO.TXT\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    g_de.name[0] = '\0';
+    if ((int)LOS_FsReaddir("/fat", 0u, &g_de) != 0) {
+        port_puts("FAIL: fat readdir\n");
+        return -1;
+    }
+    if (g_de.name[0] != 'H' || g_de.name[5] != '.' || g_de.name[6] != 'T') {
+        port_puts("FAIL: fat 目录项名字\n");
+        return -1;
+    }
+    if ((int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDWR) >= 0) {
+        port_puts("FAIL: fat 是只读的\n");
+        return -1;
+    }
+    port_puts("vfs: FAT16 只读 mount/stat/read/readdir 全通\n");
+    return 0;
+}
+
 void os_main(void)
 {
     u8 *p = 0;
@@ -354,4 +421,9 @@ void os_main(void)
         return;
     }
     port_puts("PASS: vfs M9-2（块设备层 + ATA 写：8 扇区写-读回一致）\n");
+
+    if (fat_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-3（FAT16 只读：mount/stat/read/readdir）\n");
 }
