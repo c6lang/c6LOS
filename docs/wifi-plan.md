@@ -12323,3 +12323,34 @@ ctx[1] sp=3fcc0330 stack=3fcbee40 size= 6144 OK
   0x0d/0x10/0x12/0x13/0x15/0x16/0x1d/0x25/0x2a/0x2b/0x56/0x58/0x5e
   就是这条路上被调到的），以及库自己创建的任务（`ppTask` 等）第一次
   被真正调度时的窗口基址。
+
+## §295 下一个最可疑的点：切走时"活跃窗口没落盘"
+
+`port_task_switch` 现在的做法是：`rsil a5,15` → 想到新任务的
+`WINDOWBASE`（记录在 ctx+72）→ `wsr.windowbase` → 再把
+`WINDOWSTART` 写成"只有当前一个窗口活跃"（`1<<WINDOWBASE`）。
+
+对 **call0** 的任务（我们内核自己的任务）这套没问题：call0 不用窗口。
+但闭源库的任务是 **windowed**：它跑起来时一次 `call8` 嵌套就会占多个
+物理窗口，硬件是在"窗口溢出"时才把寄存器写进栈的（spill）。
+我们在切换时直接把 `WINDOWSTART` 清成一个窗口，等于**丢掉被切走任务
+还压在物理窗口里、尚未 spill 的那几组寄存器**（a0~a15 的一半）。
+等它下次被调度回来，`retw`/下溢处理体从栈上恢复的是旧值 ——
+表现就是"返回地址飞了、PC 落在指令中间"，和 §293/§294 抓到的
+`cause=0`、`pc` 在 ROM 里、`a0` 是垃圾完全吻合。
+
+**下一步（下一轮直接做这个）**：
+
+1. 在 `port_task_switch` 里，改 `wsr.windowstart` **之前**先把当前
+   WINDOWBASE 起、WINDOWSTART 里标记为活跃的窗口逐个 spill 到各自的
+   `[sp-16..-4]`（就是 `s32e a0,a1,-16` / `s32e a1,a1,-12` /
+   `s32e a2,a1,-8` / `s32e a3,a1,-4`，配合 `rotw` 一圈回到原点），
+   对齐 xtos 的 `_xtos_spill_all_windows` 语义。此时再清
+   `WINDOWSTART` 才是安全的。
+2. 或者更省事：**切换时不动 WINDOWBASE/WINDOWSTART**，让硬件窗口
+   自然轮转（任务之间共享同一套窗口，靠 spill/underflow 保证正确性），
+   ctx 里只存 a0~a15 + ps + pc。这样完全避开"窗口状态跟任务绑定"
+   这件事——代价是 a0/a1 的保存要更小心。
+
+两条路都要先做一件事：把 `port_task_switch` 里 WINDOWSTART 这段的
+真板行为记录下来（现在只有静态推断）。
