@@ -10417,3 +10417,39 @@ windowed**（我们的 port 本来就写了 `#ifdef __XTENSA_CALL0_ABI__` 的两
 
 **决策（本轮）**：先守在 call0 这条能跑的线上（已经推进到
 `esp_wifi_init_internal` 内部、ppTask 握手成功），把 windowed 重构留作专项。
+
+### §233 用 JTAG 看两个任务和"正在跑的那段代码"：
+
+命令：`./tools/dbg.sh build/wifi/c6os.elf <脚本>`（脚本里 `monitor halt` + `x/…`）。
+本轮拿到的关键事实：
+
+1. **两个任务都是正常阻塞的，不是崩的**：读 `g_ctx[i].sp` 得到各任务的陷阱帧，
+   `+60` 的 EPC 都是 `0x420166e4`（就是 `port_task_switch` 里的切换点），
+   PS 分别是 `0x00060900` / `0x00060100`。也就是说
+   - 任务1（init，8KB 栈）：在等某个同步对象；
+   - 任务2（ppTask，6KB 栈）：在 `_queue_recv` 里等消息（正常）。
+2. **但"正在跑的那段内核代码"的栈指针是坏的**：halt 时 `pc` 在 `_vec_default`
+   的自旋里，`a1 = 0x3fcb95f2`——**奇数**，而且落在 `g_stack_pool`（0x3fcbcd20 起）
+   **下方**的 .bss/heap 区里，不可能是合法栈。两个任务帧里也都能看到
+   `0x3fcb95f2 / 0x3fcb9582` 这串值。
+3. 异常现场：`cause=29 (StoreProhibited)`、`excvaddr=0x56`、
+   `EPC1=0x420179f3`（在 `os_task_start_core` 的调度循环里）。
+
+**结论**：两个 windowed 任务之间切换之后，**内核自己的栈指针被写坏了**
+（a1 变成 0x3fcb95f2 这种值），于是调度/空转路径下一次压栈就炸。
+问题还在上下文切换/中断入口这一层（`ctx.S` + `irq.S`），而不是 WiFi 库。
+
+下一步的具体做法（按顺序）：
+
+1. 在 `port_task_switch` 里加"RTC 环 + 校验"：切换前后把 a1、WINDOWSTART、
+   正在切换的 from/to 任务 id 写进 RTC（0x50001D00 起），并检查 a1 是否落在
+   合法栈范围内（`g_stack_pool .. g_stack_pool+24576`），一旦越界就把
+   "越界的那次切换"记下来（from/to/旧a1/新a1）——这是唯一能把"谁写坏了 a1"
+   钉死的办法；
+2. 重点看 `_vec_level1`（定时器中断）在 windowed 任务里嵌套时的帧：
+   中断入口保存 a0..a15/EPC/PS 用的是 80 字节帧，而任务切换也用同一种帧，
+   两者嵌套时 `S3Ctx.sp` 指向的应该是中断帧；如果中断帧和任务帧混了，
+   `a1` 就会被写成帧里的某个值（正好能解释 0x3fcb95f2 这种"像栈又不像栈"的数）；
+3. 另一个可疑点：`RESTORE_FRAME` 里恢复 PS 时用 `ps | 0x10`（清 EXCM?），
+   以及 `_vec_level1` 是否在 `rfe` 前恢复 `windowstart` —— windowed 任务被
+   中断打断再恢复，窗口状态必须逐个核对。
