@@ -10706,3 +10706,46 @@ W1 bringup / B1 magic=deadbeaf ver=8 / B2 osi=…
 即：架构调整成功（跳板/单 windowed 任务都验证了），但 ppTask 在"给完启动信号量之后"
 仍然卡住。下一步就在这个最小状态上用 JTAG 抓 ppTask 的 PC（它现在只有一个 windowed
 上下文，窗口问题已经排除，剩下的应该是某个 OSI 返回值/初始化没做完）。
+
+### §242 **目前最好的组合**：call0 任务 + 单 windowed 任务 + **壳里不 spill**
+
+```
+make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" \
+     S3_PHY_VIA_OSI=1 S3_NO_WIN_SPILL=1 https
+```
+
+道理：我们的内核是 call0，**从不轮转窗口**，所以窗口文件里那些"祖先窗口"不会被我们
+弄坏，壳里根本不需要 spill；反过来 spill 的 `rotw` 转圈会去碰那些从未初始化的窗口
+（真板上就是那个 a1=0x40043ca4 的 ROM 残留窗口）→ 直接 LoadStoreError。
+§241 的架构（只有库的 ppTask 是 windowed）又保证了"只有一个窗口上下文"。
+
+真板实测（这是目前走到最远的一次）：
+
+```
+[task] 库建任务 fn=403815fc id=2 stack=6144 prio=29(->2)
+[take] t=1 sem#1 tk=ffffffff
+[give] t=2 sem#1
+[recv] t=2 qh=3fcc4420 tk=ffffffff        ← ppTask 进了收包循环（第一次看到！）
+*** TRAP sp=3fcbeb90 cause=0 pc=4037c2f7 ps=00060f10 ws=00000006 a0=3fcbebc0
+```
+
+新的故障点很具体：`pc=0x4037c2f7` 是 **`osi_semphr_take` 结尾的 `retw.n`**
+（`mov a2,a3` 之后），`a0=0x3fcbebc0` 是本任务栈上的地址（不是代码地址），
+`ws=0x06`（两个窗口 live，是真实调用链的状态）。也就是说：
+
+> 在 `osi_semphr_take`（windowed 的 OSI 回调）里，它自己 `call8 sem_trace` 转了一次
+> 窗口；`sem_trace` 返回后 `retw.n` 用的 a0 已经不是自己的返回地址了 —— **窗口映射
+> 在"windowed 函数 → windowed 函数"的普通调用里就已经错位**。
+
+这条线索把问题从"任务切换"缩小到了"**windowed 函数之间的普通 call8/retw**"。
+下一步（很值得做，范围小）：
+
+1. 写一个最小 windowed 调用链用例（`a()` 里 `call8 b()` 几次再 `retw`），在真板上
+   验证"windowed→windowed 普通调用"是否本身就坏；如果坏，问题就在
+   `start.S` 的 WOE/WINDOWSTART 初始状态或 `_win_ovf*`/`_win_unf*` 向量本身；
+2. 对照 `irq.S` 里的溢出/欠载向量实现与 ISA 手册（每个窗口 4/8/12 个寄存器、
+   `-16/-32/-48` 的偏移、`rfwo`/`rfwu`），特别是 `_win_unf4/8/12` 里
+   `l32e a0, a5, -16` 这种写法对应的 a5 语义；
+3. 顺带确认 `osi_semphr_take`/`sem_trace` 这种小函数能不能让编译器别生成
+   `call8 sem_trace`（比如把 sem_trace 改成 `static inline` / 直接内联），
+   先用"减少一次窗口轮转"的方式绕过去验证假设。
