@@ -31,6 +31,8 @@
 | MPU/隔离 | 无 | 可选 MPU（`LOSCFG_MPU_ENABLE`，默认关闭） | **最大安全差距**：c6LOS 任务同地址空间同特权 |
 | 低功耗/tickless | 无 | `LOSCFG_KERNEL_TICKLESS`/电源组件 | 未实现 |
 | 多架构 | S3 Xtensa、rv32、x86-64、sim | Cortex-M、RISC-V、Xtensa、C-SKY 等 | c6LOS 端口少，但 c6→C99/LLVM 链路有可移植性 |
+| **文件系统** | **无**（只有裸扇区读 `port_ata_read`，无 VFS/块设备抽象） | **VFS**（`LOS_Fs*` 一族）+ ramfs/fatfs/littlefs（按 `LOSCFG_*` 选） | 计划 M9：按 `LOS_Fs*` 面对齐补 VFS + ramfs + 块设备 + FAT 只读，见 `docs/vfs-net-design.md` |
+| **网络** | **无**（无 netif/协议栈/网卡驱动；S3 侧仅闭源 WiFi 胶水 `wifi_glue.c`） | **SAL**（`sal_*`，POSIX 风格 socket）+ lwIP | 计划 M10：SAL + netif/ARP/IPv4/ICMP/UDP/TCP 最小子集 + qemu e1000；S3 WiFi 见 `docs/wifi-plan.md` |
 | 工具链 | c6 → C99（S3）/LLVM IR（risc6/x86） | 各架构 GCC/Clang | c6LOS 依赖 c6 编译器 |
 
 ## 3. API 兼容层差异

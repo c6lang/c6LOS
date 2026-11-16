@@ -205,6 +205,34 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 
 ---
 
+## M9 文件系统（VFS + ramfs + 块设备 + FAT 只读）
+
+设计见 `docs/vfs-net-design.md` §2。开关 `C6OS_VFS`（默认 0；为 0 时下列文件**不进对象列表**）。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| M9-0 门禁与 VFS 核心 | `include/los/los_fs.h` + `los_block.h`；`kernel/vfs.c6`（挂载表/路径解析/file 表/ops 分发）+ `kernel/romfs.c6`（把现有 newc cpio 包成只读 fs）+ `kernel/fsapi.c6`（errno ↔ LOS 错误码） | `make check-vfs`：`LOS_FsMount("/","romfs")` 成功、`open("/bin/busybox")` 成功、`read` 前 4 字节 `\x7fELF`；关闭开关时 `make -n s3` 不含新增对象 |
+| M9-1 ramfs 可读写 | 32 节点静态池（文件名/父/兄弟/首子），数据按需 alloc；create/write/read/lseek/readdir/unlink/mkdir/rmdir/rename/truncate | 写 1KB 读回逐字节一致；readdir 看到该文件；unlink 后 open 失败 |
+| M9-2 块设备层 + ATA 写 | `LOS_DeviceRegister/BlockRead/BlockWrite`（8 项注册表）；`port_ata_write`（PIO + flush 0xE7）；直通、不做页缓存 | 写 8 扇区到 LBA 4096 再读回逐字节一致（qemu） |
+| M9-3 FAT16/32 只读 | BPB → FAT → 簇链 → 8.3 目录项；<8MB 镜像；不做长名/写/格式化 | `mkfs.vfat` 造的镜像挂上后 readdir 看到文件、read 内容一致 |
+| M9-4 接到 Linux ABI | `LxFile.kind = LX_FD_VFS`；openat/read/write/lseek/fstat/newfstatat/getdents64/close 按 kind 分派；`/tmp` 挂 ramfs、`/` 仍是 romfs | `busybox sh -c 'echo hi > /tmp/x; cat /tmp/x'` 输出 `hi` |
+
+**M9 验收**：M9-0..M9-4 全过；`C6OS_VFS=0` 时 S3 对象列表与尺寸零变化。
+
+## M10 网络（SAL + 最小协议栈 + e1000）
+
+设计见 `docs/vfs-net-design.md` §3。开关 `C6OS_NET`（默认 0，同 M9 的零侵入要求）。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| M10-0 SAL 骨架 | `include/los/sal.h` + `kernel/sal.c6`（协议栈注册表 + 16 个 socket 槽 + `SalProto` 函数表分发）；先用假协议栈单测 | `make check-sal`：注册→socket→close→反注册全通，未注册/参数错返回 -1 |
+| M10-1 ARP+IPv4+ICMP | `kernel/net/{netif,arp,ip,icmp}.c6`；loopback + 静态 IP/MAC | qemu 里 `ping 10.0.2.2`（slirp 网关）有回包 |
+| M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO 寄存器、描述符环；先轮询收包再上中断 | 收发包计数增长；ARP 有应答 |
+| M10-3 UDP + socket 面 | `udp.c6` + `sal_bind/sendto/recvfrom/close` | 与宿主 `nc -u` 互发成功（qemu hostfwd 或 slirp） |
+| M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
+
+**M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |
