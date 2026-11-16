@@ -251,11 +251,13 @@ void *s3_timer_irq(u32 frame_sp)
      * 人工断电重插（这轮就吃了一次）。这里在定时器中断里挂上 RTC 看门狗：
      * 中断还在跑就每 10ms 喂一次；一旦真的卡死（中断停了/死循环），8 秒后
      * 整片复位，串口重新枚举 —— 而 RTC 慢存不清，死之前的信标还能读出来。 */
+#ifdef S3_AUTO_WDT
     {
         static u32 wdt_armed;
         if (wdt_armed == 0u) { wdt_armed = 1u; os_wdt_start(8u); }
         os_wdt_feed();
     }
+#endif
 
     /* 记下被打断的主流程 PC（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
      * 就知道主流程停在哪条指令上。 */

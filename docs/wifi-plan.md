@@ -13702,3 +13702,23 @@ callee-saved 约定**。
 第一次进去时 `os_wdt_start(8)`，之后每次 `os_wdt_feed()`。
 ⇒ 中断还在跑就一直喂；真卡死就 8 秒后整片复位、串口重新枚举，
 **不用再人工断电**，而 RTC 慢存跨复位不清，死之前的信标照样能读。
+
+## §371 ⚠️ §370 的自动看门狗**必须默认关**（已改成 `-DS3_AUTO_WDT` 才开）
+
+上板后果很严重：应用只要卡死（中断一停），8 秒后 RTC 看门狗整片复位，
+于是板子进入**无限复位循环** —— USB-Serial-JTAG 每 8 秒断一次，
+主机侧根本来不及 `set config #1`：
+
+```
+usb 2-4: USB disconnect, device number 108
+usb 2-4: new full-speed USB device number 109
+cdc_acm 2-4:1.0: ttyACM1: USB ACM device
+usb 2-4: can't set config #1, error -71      ← 每 8 秒重复
+```
+
+`/dev/ttyACM*` 忽有忽无，openocd 报 `libusb_get_string_descriptor_ascii() failed`，
+esptool 报 `OSError: [Errno 71] Protocol error` —— **烧写和串口都被自己搞死**。
+这就是上一轮"设备从总线上消失"的真正原因（不是硬件坏）。
+
+⇒ 改成 `#ifdef S3_AUTO_WDT` 才 arm，默认关闭。要用自愈狗调试时再加，
+而且**只在本来就会卡死的实验镜像上用**。
