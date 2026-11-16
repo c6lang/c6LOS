@@ -13653,3 +13653,25 @@ caller-saved 随手改**。
 
 （§245 的 `S3_W2C_SAVEALL` 早就写过这个要点，但它那份没有 PS 保存和 spill
 死区，所以两者要合并 —— 现在默认实现就是合并后的。）
+
+## §368 双 ABI 边界的整体复查（§367 之后）
+
+把"windowed 代码 → call0 代码"的每条路都过了一遍：
+
+| 桥 | 保存 a12..a15？ | 备注 |
+|---|---|---|
+| `port/s3/w2c.S` 默认 `W2C` | **原来没有 ← 本轮修了** | 库/ lwIP 调 OSI 回调全走这里 |
+| `port/s3/w2c.S` `W2C_TRACE` | 原来只存 a12/a13 | 已补 a14/a15 |
+| `port/s3/win_bridge.S` | 有 | 一直是对的 |
+| `port/s3/abi_thunk.S` | 有（文件头注释还专门写了这条规则） | 正确 |
+
+另外确认：`wifi_glue.c` / `win_island.c` / `lwip/c6_lwip_port.c` /
+`lwip/sys_arch.c` **都只经 `s3_w2c_*` / `s3_win_*` 桥**调进内核，没有直接
+（违反 ABI 地）调用 call0 函数；窗口化的 lwIP 也是 `-mabi=windowed` 编的，
+`sys_arch.c` 用的是 `s3_w2c_sem_*` 桥 ⇒ 这四个文件的 OSI 路径都被 §367 覆盖到。
+
+> ⚠️ 硬件侧：本轮 ESP32-S3 的 USB-Serial-JTAG 整条从总线上掉下去了
+> （`lsusb` 里已经没有 `303a:1001`，`/dev/ttyACM*` 不存在，openocd 报
+> `libusb_get_string_descriptor_ascii() failed`），**需要物理插拔/断电重插**
+> 才能继续烧写和串口验证。§367 的修复已经编好（`build/wifi/c6os.bin`），
+> 等设备回来就能直接验证。
