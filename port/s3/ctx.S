@@ -18,21 +18,32 @@
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
-    /* WINDOWSTART：恢复成"只有当前窗口 live"（归一化）。
+    /* WINDOWSTART 恢复策略（混合版，§246）：
      *
-     * 这一版与 §242 的真板结论配套：w2c 壳里 **不 spill**（S3_NO_WIN_SPILL）、
-     * 内核 call0 不轮转窗口，归一化之后 `retw` 会走**欠载向量**把祖先窗口按 a1 链
-     * 从栈上 fill 回来 —— 所以要保证祖先在栈上（壳里没 spill 时其实不在；
-     * 这就是当前仍未解决的矛盾点，详见 docs/wifi-plan.md §242/§244）。
-     * 实测对比：改成"按任务恢复保存的 WINDOWSTART"会让 ppTask 连启动握手都发不出来
-     * （§240/§244），所以这里保持归一化，别再单独改这一处。 */
+     *   - **刚建的任务**（帧偏移 68 = 0，`port_task_ctx_create` 只清 17 个字）：
+     *     归一化成 `1<<WINDOWBASE`，即"只有当前窗口 live"，交给它从零开始轮转；
+     *   - **被切走的任务**：写回它自己保存的 WINDOWSTART 原值。
+     *
+     * 为什么必须按任务保存：WINDOWBASE 是**全局**寄存器，而别的任务（闭源库的
+     * windowed 代码）会做 call8/call12 把 WINDOWBASE 搬走。如果恢复时"归一化成
+     * 1<<当前base"，刚恢复的 a0..a15 就落到了错的窗口，`retw` 的 CALLINC 与
+     * WINDOWBASE 不再配套 —— 真板症状就是 `retw.n` 直接 cause=0、
+     * a0 变成栈地址（§242/§243：`osi_semphr_take` 结尾）。
+     * 写回原值则会连 WINDOWBASE 一起复原（硬件由 WINDOWSTART 推导 WINDOWBASE）。
+     *
+     * 顺序：必须在恢复 a0..a15 **之前**做，因为这里要借用 a2/a3/a4/a5；
+     * 它们稍后会被从帧里重新装载。PS.WOE=0 时不要碰窗口状态。 */
     l32i    a2, a1, 64
     extui   a3, a2, 18, 1
     beqz    a3, 8f
+    l32i    a5, a1, 68
+    bnez    a5, 7f
+    /* 新任务：归一化到当前 base */
     rsr     a4, windowbase
     movi    a5, 1
     ssl     a4
     sll     a5, a5
+7:
     wsr     a5, windowstart
     isync
 8:
