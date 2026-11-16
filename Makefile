@@ -949,7 +949,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
@@ -970,7 +970,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1183,6 +1183,45 @@ $(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
 	cp $(LS_ELF) $(FSROOT)/bin/ls
 	python3 tools/mk-initramfs.py $@ $(FSROOT)
 
+# ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
+DYN_ELF := $(X86)/busybox
+DYNFS   := $(X86)/dynfs.img
+DYNROOT := $(X86)/dynroot
+LD_SO   := /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+LIBC6   := /usr/lib/x86_64-linux-gnu/libc.so.6
+LIBRES  := /usr/lib/x86_64-linux-gnu/libresolv.so.2
+
+$(DYN_ELF): /usr/bin/busybox
+	@mkdir -p $(dir $@)
+	cp /usr/bin/busybox $@
+
+$(DYNFS): $(DYN_ELF) tools/mk-initramfs.py
+	@rm -rf $(DYNROOT)
+	@mkdir -p $(DYNROOT)/bin $(DYNROOT)/lib64 $(DYNROOT)/lib/x86_64-linux-gnu
+	cp $(LD_SO)  $(DYNROOT)/lib64/ld-linux-x86-64.so.2
+	cp $(LIBC6)  $(DYNROOT)/lib/x86_64-linux-gnu/libc.so.6
+	cp $(LIBRES) $(DYNROOT)/lib/x86_64-linux-gnu/libresolv.so.2
+	cp $(DYN_ELF) $(DYNROOT)/bin/busybox
+	python3 tools/mk-initramfs.py $@ $(DYNROOT)
+
+x86-dyn: caps-check-x86
+	$(MAKE) X86S_NAME=dyn X86S_MAIN=tests/t_x86_dyn.c6 LINUX_ABI=1 \
+		$(X86)/dyn-disk.img
+
+run-x86-dyn: x86-dyn
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/dyn-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L4 验收：宿主上那个**动态链接的 PIE** busybox 被装载、ld.so 自己把 libc.so
+# mmap 进来并做完重定位，然后 busybox 打印它自己的输出。
+check-linuxabi-l4: x86-dyn
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/dyn-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^lib64\$$" \
+	  && echo "PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）" \
+	  || { echo "FAIL: linux-abi L4"; exit 1; }
+
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(X86)/fs-disk.img
@@ -1247,6 +1286,11 @@ DISK_DEPS  := $(LS_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(LS_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),dyn)
+DISK_DEPS  := $(DYN_ELF) $(DYNFS)
+DISK_MB    := 16
+DISK_APP   = dd if=$(DYN_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(DYNFS) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else
 DISK_DEPS  :=
 DISK_MB    := 1

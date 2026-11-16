@@ -64,20 +64,12 @@ void os_main(void)
         port_puts("FAIL: port_as_create\n");
         return;
     }
-    if (lx_elf_load(as, IMG_PA, size, &entry, &phdr, &phnum, &phent, &brk) != 0) {
-        port_puts("FAIL: lx_elf_load（只支持 ET_EXEC 静态）\n");
+    if (lx_exec_prepare(as, IMG_PA, size, "/hello") != 0) {
+        port_puts("FAIL: lx_exec_prepare\n");
         return;
     }
-    port_puts("elf: segments mapped\n");
-
-    lx_proc_init(as, brk);
-    if (lx_build_stack(as, entry, phdr, phnum, phent, &rsp, &sbase) != 0) {
-        port_puts("FAIL: lx_build_stack\n");
-        return;
-    }
-    port_puts("elf: stack ready, entering userland\n");
-
-    port_user_enter(as, entry, rsp, 0u);
+    port_puts("elf: 段与栈就绪，进入用户态\n");
+    port_user_enter(as, lx_exec_entry(), lx_exec_rsp(), 0u);
 
     port_puts("FAIL: returned from userland（不应发生）\n");
 }

@@ -12,6 +12,11 @@
  * 描述 ILP32/LP64 混合的 ABI 表，正是 architecture.md §3 警告的那类风险。
  * 规则：linux/ 下的文件只有在 C6OS_LINUX_ABI=1 时才进入编译单元列表。 */
 
+/* mmap 的两个标志（只用到这两个） */
+#define LX_AT_EMPTY_PATH  0x1000ull
+#define LX_MAP_FIXED      0x10ull
+#define LX_MAP_ANONYMOUS  0x20ull
+
 /* x86-64 Linux 系统调用号（只列已实现/即将实现的） */
 #define LX_SYS_read            0
 #define LX_SYS_write           1
@@ -25,13 +30,23 @@
 #define LX_SYS_brk            12
 #define LX_SYS_ioctl          16
 #define LX_SYS_pread64        17
+#define LX_SYS_readv          19
+#define LX_SYS_writev         20
 #define LX_SYS_access         21
 #define LX_SYS_exit           60
+#define LX_SYS_ioctl          16
+#define LX_SYS_getuid        102
+#define LX_SYS_getgid        104
+#define LX_SYS_setuid        105
+#define LX_SYS_setgid        106
+#define LX_SYS_geteuid       107
+#define LX_SYS_getegid       108
 #define LX_SYS_getpid         39
 #define LX_SYS_clone          56
 #define LX_SYS_execve         59
 #define LX_SYS_wait4          61
 #define LX_SYS_uname          63
+#define LX_SYS_time          201
 #define LX_SYS_getcwd         79
 #define LX_SYS_chdir          80
 #define LX_SYS_arch_prctl    158
@@ -60,6 +75,8 @@
 #define LX_ENOMEM  12
 #define LX_EINVAL  22
 #define LX_ENOSYS  38
+#define LX_ENOTTY  25
+#define LX_ESRCH   3
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {
@@ -84,15 +101,18 @@ typedef struct {
  * 内核据此决定从磁盘读多少扇区。 */
 u64 lx_elf_image_size(u64 img_pa, u64 max_bytes);
 
-/* 把映像里的 ELF64 加载进地址空间 as。img 是文件在物理内存里的基址。
- * 全部用 out 参数而不是结构体：调用方是 c6，避免跨语言的结构体布局假设。 */
-int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
+/* L2/L4：装载一个 ELF64 映像到 as。ET_EXEC 忽略 base（vaddr 即绝对地址），
+ * ET_DYN（PIE / ld.so）所有地址加 base。 */
+int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
                 u64 *o_entry, u64 *o_phdr, u64 *o_phnum, u64 *o_phentsize,
                 u64 *o_brk_end);
 
-/* 建初始用户栈（argc/argv/envp/auxv），返回初始 RSP 与栈底。 */
-int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
-                   u64 *out_rsp, u64 *out_base);
+/* 一步做完"装载主程序 + 解释器（若有）+ 建栈 + 登记进程"。
+ * c6 侧只需要：lx_exec_prepare → lx_exec_entry/lx_exec_rsp → port_user_enter。 */
+int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path);
+void lx_exec_arg1(const char *a);
+u64 lx_exec_entry(void);
+u64 lx_exec_rsp(void);
 
 /* 登记当前进程（系统调用层用）。 */
 void lx_proc_init(u64 as, u64 brk_start);
@@ -110,9 +130,15 @@ u64  lx_fs_read(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_close(u64 fd);
 u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
 u64  lx_fs_fstat(u64 fd, u64 ustat);
-u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat);
+u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags);
 u64  lx_fs_access(u64 upath, u64 mode);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
+u64  lx_fs_fd_size(u64 fd);
+u64  lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off);
+u64  lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off);
+/* 内核侧路径查询（不做用户态权限检查）：给 ELF 加载器找解释器用。 */
+u64  lx_fs_size_of(const char *path);
+u64  lx_fs_pa_of(const char *path);
 
 /* 系统调用分发（从汇编进来，可改写 r->rax 作为返回值）。 */
 void lx_syscall(LxRegs *r);

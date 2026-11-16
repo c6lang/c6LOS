@@ -2,12 +2,19 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 
-/* ELF64 静态加载器（L2）。
- * 只处理 ET_EXEC（静态链接的非 PIE）。PIE/动态链接在 L3/L4。 */
+/* ELF64 加载器。
+ *  L2：ET_EXEC（静态非 PIE）。
+ *  L4：ET_DYN（PIE / ld.so）+ PT_INTERP + AT_BASE/AT_ENTRY。
+ *
+ * 动态链接不由内核做：内核只把 ld.so 摆到 AT_BASE、把 RIP 指向它的入口，
+ * 其余（libc.so 的 mmap、relocation、符号解析）全是 ld.so 自己的事——
+ * 这正是 linuxulator/WSL1 这类 personality 的做法，也是 Tier 3 的第一条原则。 */
 
 #define PAGE      4096ull
 #define PT_LOAD   1u
+#define PT_INTERP 3u
 #define ET_EXEC   2u
+#define ET_DYN    3u
 #define PF_X      1u
 #define PF_W      2u
 #define PF_R      4u
@@ -63,6 +70,11 @@ typedef struct {
 
 #define STACK_PAGES 32ull
 #define STACK_BUF   4096ull
+#define INTERP_MAX  128ull
+
+static u64 g_exec_entry;
+static u64 g_exec_rsp;
+static const char *g_arg1;      /* 可选的 argv[1]（busybox ls / 这类命令用） */
 
 static u64 slen(const char *s)
 {
@@ -137,7 +149,8 @@ u64 lx_elf_image_size(u64 img_pa, u64 max_bytes)
     return need;
 }
 
-int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
+/* base 只对 ET_DYN 生效；ET_EXEC 的 vaddr 就是绝对地址。 */
+int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
                 u64 *o_entry, u64 *o_phdr, u64 *o_phnum, u64 *o_phentsize,
                 u64 *o_brk_end)
 {
@@ -156,8 +169,10 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
     if (h->ident[4] != 2u || h->ident[5] != 1u) {
         return -3;
     }
-    if (h->type != ET_EXEC) {
-        return -4;                        /* 静态非 PIE；PIE 留给 L3 */
+    if (h->type == ET_EXEC) {
+        base = 0ull;
+    } else if (h->type != ET_DYN) {
+        return -4;
     }
     if ((u64)h->phentsize != sizeof(Elf64Ph)) {
         return -5;
@@ -168,6 +183,7 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
 
     for (i = 0; i < h->phnum; i++) {
         const Elf64Ph *ph = (const Elf64Ph *)(img + h->phoff + (u64)i * sizeof(Elf64Ph));
+        u64 pv;
         u64 va0;
         u64 va1;
         u64 va;
@@ -178,12 +194,13 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
         if (ph->offset + ph->filesz > img_size) {
             return -7;
         }
+        pv = ph->vaddr + base;
         if (ph->offset <= h->phoff && h->phoff < ph->offset + ph->filesz) {
-            phdr = ph->vaddr + (h->phoff - ph->offset);
+            phdr = pv + (h->phoff - ph->offset);
         }
 
-        va0 = ph->vaddr & ~(PAGE - 1ull);
-        va1 = (ph->vaddr + ph->memsz + PAGE - 1ull) & ~(PAGE - 1ull);
+        va0 = pv & ~(PAGE - 1ull);
+        va1 = (pv + ph->memsz + PAGE - 1ull) & ~(PAGE - 1ull);
         for (va = va0; va < va1; va += PAGE) {
             u64 pa = port_phys_alloc();
             u64 s;
@@ -198,10 +215,10 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
             for (s = 0; s < PAGE; s++) {
                 page[s] = 0;
             }
-            s = (va > ph->vaddr) ? va : ph->vaddr;
-            e = (va + PAGE < ph->vaddr + ph->filesz) ? (va + PAGE) : (ph->vaddr + ph->filesz);
+            s = (va > pv) ? va : pv;
+            e = (va + PAGE < pv + ph->filesz) ? (va + PAGE) : (pv + ph->filesz);
             if (e > s) {
-                const u8 *src = img + ph->offset + (s - ph->vaddr);
+                const u8 *src = img + ph->offset + (s - pv);
                 u8 *dst = page + (s - va);
                 u64 n = e - s;
                 u64 k;
@@ -231,7 +248,7 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
     if (phdr == 0ull || brk == 0ull) {
         return -10;
     }
-    *o_entry = h->entry;
+    *o_entry = h->entry + base;
     *o_phdr = phdr;
     *o_phnum = (u64)h->phnum;
     *o_phentsize = (u64)h->phentsize;
@@ -239,8 +256,9 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size,
     return 0;
 }
 
-int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
-                   u64 *out_rsp, u64 *out_base)
+static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
+                       u64 at_base, u64 phdr, u64 phnum, u64 phentsize,
+                       u64 *out_rsp)
 {
     u64 top = C6OS_LINUX_STACK_TOP;
     u64 base = top - STACK_PAGES * PAGE;
@@ -252,6 +270,9 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
     u64 va_plat;
     u64 va_execfn;
     u64 va_rand;
+    u64 va_arg1;
+    u64 nargv;
+    u64 fixed;
     u64 i;
     u8 *pg;
 
@@ -272,9 +293,13 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
         }
     }
 
-    va_argv0 = push_str(buf, &w, va_base, "/hello");
+    va_argv0 = push_str(buf, &w, va_base, path);
+    va_arg1 = 0ull;
+    if (g_arg1 != 0) {
+        va_arg1 = push_str(buf, &w, va_base, g_arg1);
+    }
     va_plat = push_str(buf, &w, va_base, "x86_64");
-    va_execfn = push_str(buf, &w, va_base, "/hello");
+    va_execfn = push_str(buf, &w, va_base, path);
     w -= 16ull;
     va_rand = va_base + w;
     for (i = 0; i < 16ull; i++) {
@@ -284,7 +309,9 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
     /* 固定部分：envp 结尾(8) + argv 结尾(8) + argv[0](8) + argc(8) + auxv。
      * 若 argc 落不到 16 字节边界，只在**字符串与 auxv 之间**垫 8 字节：
      * 垫在 envp 与 auxv 之间会被 glibc 当成 AT_NULL，auxv 整个读空。 */
-    if (((va_base + w - (32ull + 16ull * (NAUX + 1ull))) & 15ull) != 0ull) {
+    nargv = (g_arg1 != 0) ? 2ull : 1ull;
+    fixed = 8ull * (3ull + nargv);      /* argc + argv[] + argv NULL + envp NULL */
+    if (((va_base + w - (fixed + 16ull * (NAUX + 1ull))) & 15ull) != 0ull) {
         push8(buf, &w, 0ull);
     }
 
@@ -298,18 +325,21 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
     PUSH_AUX(AT_GID, 0ull);
     PUSH_AUX(AT_EUID, 0ull);
     PUSH_AUX(AT_UID, 0ull);
-    PUSH_AUX(AT_ENTRY, entry);
-    PUSH_AUX(AT_BASE, 0ull);
+    PUSH_AUX(AT_ENTRY, at_entry);                    /* 主程序入口（不是 ld.so） */
+    PUSH_AUX(AT_BASE, at_base);                      /* ld.so 装载基址；静态为 0 */
     PUSH_AUX(AT_FLAGS, 0ull);
     PUSH_AUX(AT_PAGESZ, PAGE);
     PUSH_AUX(AT_PHENT, phentsize);
     PUSH_AUX(AT_PHNUM, phnum);
-    PUSH_AUX(AT_PHDR, phdr);
+    PUSH_AUX(AT_PHDR, phdr);                         /* 主程序的 phdr */
 
     push8(buf, &w, 0ull);                      /* envp 结尾 */
     push8(buf, &w, 0ull);                      /* argv 结尾 */
+    if (nargv == 2ull) {
+        push8(buf, &w, va_arg1);               /* argv[1] */
+    }
     push8(buf, &w, va_argv0);                  /* argv[0] */
-    push8(buf, &w, 1ull);                      /* argc */
+    push8(buf, &w, nargv);                     /* argc */
 
     pg = (u8 *)port_phys_map(frames[STACK_PAGES - 1ull]);
     for (i = 0; i + w < STACK_BUF; i++) {
@@ -317,6 +347,105 @@ int lx_build_stack(u64 as, u64 entry, u64 phdr, u64 phnum, u64 phentsize,
     }
 
     *out_rsp = va_base + w;
-    *out_base = base;
     return 0;
+}
+
+/* 读 PT_INTERP（解释器路径）到内核缓冲。返回长度，0 表示静态链接。 */
+static u64 elf_interp(u64 img_pa, u64 img_size, char *out, u64 cap)
+{
+    const u8 *img = (const u8 *)port_phys_map(img_pa);
+    const Elf64Hdr *h = (const Elf64Hdr *)img;
+    u16 i;
+
+    if (img_size < sizeof(Elf64Hdr)) {
+        return 0ull;
+    }
+    if (h->phoff + (u64)h->phnum * sizeof(Elf64Ph) > img_size) {
+        return 0ull;
+    }
+    for (i = 0; i < h->phnum; i++) {
+        const Elf64Ph *ph = (const Elf64Ph *)(img + h->phoff + (u64)i * sizeof(Elf64Ph));
+        u64 k;
+
+        if (ph->type != PT_INTERP) {
+            continue;
+        }
+        if (ph->filesz == 0ull || ph->filesz > cap ||
+            ph->offset + ph->filesz > img_size) {
+            return 0ull;
+        }
+        for (k = 0; k < ph->filesz; k++) {
+            out[k] = (char)img[ph->offset + k];
+        }
+        out[ph->filesz - 1ull] = '\0';
+        return ph->filesz;
+    }
+    return 0ull;
+}
+
+int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
+{
+    u64 e = 0ull;
+    u64 ph = 0ull;
+    u64 pn = 0ull;
+    u64 pe = 0ull;
+    u64 brk = 0ull;
+    u64 ie = 0ull;
+    u64 iph = 0ull;
+    u64 ipn = 0ull;
+    u64 ipe = 0ull;
+    u64 ibrk = 0ull;
+    char ipath[INTERP_MAX];
+    u64 ilen;
+    u64 ibase = 0ull;
+
+    if (lx_elf_load(as, img_pa, img_size, C6OS_LINUX_ELF_BASE,
+                    &e, &ph, &pn, &pe, &brk) != 0) {
+        return -1;
+    }
+    port_puts("elf: 主程序已装载\n");
+
+    ilen = elf_interp(img_pa, img_size, ipath, INTERP_MAX);
+    if (ilen != 0ull) {
+        u64 isz = lx_fs_size_of(ipath);
+        u64 ipa = lx_fs_pa_of(ipath);
+
+        port_puts("elf: 解释器 ");
+        port_puts(ipath);
+        port_puts("\n");
+        if (isz == 0ull || ipa == 0ull) {
+            port_puts("elf: FAIL 解释器不在 initramfs 里\n");
+            return -2;
+        }
+        ibase = C6OS_LINUX_INTERP_BASE;
+        if (lx_elf_load(as, ipa, isz, ibase, &ie, &iph, &ipn, &ipe, &ibrk) != 0) {
+            port_puts("elf: FAIL 解释器装载失败\n");
+            return -3;
+        }
+    }
+
+    lx_proc_init(as, brk);
+    lx_fs_fd_reset();
+    if (build_stack(as, path, (ibase != 0ull) ? ie : e, e, ibase, ph, pn, pe,
+                    &g_exec_rsp) != 0) {
+        return -4;
+    }
+    g_exec_entry = (ibase != 0ull) ? ie : e;
+    return 0;
+}
+
+u64 lx_exec_entry(void)
+{
+    return g_exec_entry;
+}
+
+u64 lx_exec_rsp(void)
+{
+    return g_exec_rsp;
+}
+
+/* 给用户程序塞一个 argv[1]（例如 busybox 的 "ls"）。必须在 lx_exec_prepare 前调用。 */
+void lx_exec_arg1(const char *a)
+{
+    g_arg1 = a;
 }

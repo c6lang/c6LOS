@@ -18,6 +18,15 @@ static u64 neg(u64 e)
     return (u64)0 - e;
 }
 
+static void put_hex(u64 v)
+{
+    int i;
+
+    for (i = 60; i >= 0; i -= 4) {
+        port_putc("0123456789abcdef"[(v >> (u8)i) & 0xfull]);
+    }
+}
+
 static void put_dec(u64 v)
 {
     char buf[24];
@@ -129,6 +138,31 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     return len;
 }
 
+/* writev：ld.so 打印错误信息走的就是它（没有它连"为什么失败"都看不见）。 */
+static u64 sys_writev(u64 fd, u64 iov, u64 cnt)
+{
+    u64 i;
+    u64 total = 0ull;
+
+    if (fd != 1ull && fd != 2ull) {
+        return neg(LX_EBADF);
+    }
+    if (lx_user_ok(iov, cnt * 16ull, C6OS_PROT_R) == 0) {
+        return neg(LX_EFAULT);
+    }
+    for (i = 0; i < cnt; i++) {
+        u64 base = *(const u64 *)(iov + i * 16ull);
+        u64 len = *(const u64 *)(iov + i * 16ull + 8ull);
+        u64 r = sys_write(fd, base, len);
+
+        if ((i64)r < 0) {
+            return r;
+        }
+        total += r;
+    }
+    return total;
+}
+
 static u64 sys_getrandom(u64 buf, u64 len, u64 flags)
 {
     u64 i;
@@ -158,16 +192,26 @@ static u64 sys_brk(u64 want)
     return g_brk;
 }
 
-static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags)
+static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 {
     u64 at = addr;
     u64 n = (len + 4095ull) & ~4095ull;
+    /* 文件映射要让内核把文件内容写进这些页，所以先一律给 W；
+     * 真正的只读/RELRO/W^X 收窄等 mprotect 落地后再说（见 docs §6）。 */
+    u64 perm = C6OS_PROT_R | C6OS_PROT_W;
 
-    (void)flags;
     if (n == 0ull) {
         return neg(LX_EINVAL);
     }
-    if (at == 0ull) {
+    if ((prot & 2ull) != 0ull) {
+        perm |= C6OS_PROT_W;
+    }
+    if ((prot & 4ull) != 0ull) {
+        perm |= C6OS_PROT_X;              /* ld.so 映射 libc 代码段时必须有 X */
+    }
+    if ((flags & LX_MAP_FIXED) != 0ull && at != 0ull) {
+        at &= ~4095ull;                   /* ld.so 先探地址，再 MAP_FIXED 回来 */
+    } else if (at == 0ull) {
         if (g_mmap_top < n) {
             return neg(LX_ENOMEM);
         }
@@ -176,11 +220,51 @@ static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags)
     } else {
         at &= ~4095ull;
     }
-    if (port_as_map(g_as, at, 0ull, n,
-                    C6OS_PROT_R | ((prot & 2ull) != 0ull ? C6OS_PROT_W : 0u)) != 0) {
-        return neg(LX_ENOMEM);
+    if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
+        if (port_as_map(g_as, at, 0ull, n, perm) != 0) {
+            return neg(LX_ENOMEM);
+        }
+    } else {
+        /* 文件映射（MAP_PRIVATE）：逐页"分配页框 → 从 initramfs 拷内容 → 挂页表"。
+         * 次序很重要：先挂页表再写用户地址，在 TLB 里还是旧页框的情况下会把
+         * 数据写丢（ld.so 的 .dynamic 就是这么被写成全零的）。 */
+        u64 fsz = lx_fs_fd_size(fd);
+        u64 p = 0ull;
+
+        while (p < n) {
+            u64 pa = port_phys_alloc();
+            u8 *kpg;
+            u64 k;
+
+            if (pa == 0ull) {
+                return neg(LX_ENOMEM);
+            }
+            kpg = (u8 *)port_phys_map(pa);
+            k = 0ull;
+            while (k < 4096ull) {
+                kpg[k] = 0;
+                k++;
+            }
+            if (p + off < fsz) {
+                u64 cnt = fsz - (p + off);
+
+                if (cnt > 4096ull) {
+                    cnt = 4096ull;
+                }
+                (void)lx_fs_pread_k(fd, (u64)kpg, cnt, off + p);
+            }
+            if (port_as_map(g_as, at + p, pa, 4096ull, perm) != 0) {
+                return neg(LX_ENOMEM);
+            }
+            p += 4096ull;
+        }
     }
     return at;
+}
+
+static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
+{
+    return sys_mmap2(addr, len, prot, flags, fd, off);
 }
 
 void lx_syscall(LxRegs *r)
@@ -190,8 +274,14 @@ void lx_syscall(LxRegs *r)
     u64 a1 = r->rsi;
     u64 a2 = r->rdx;
     u64 a3 = r->r10;
+    u64 a4 = r->r8;
+    u64 a5 = r->r9;
 
     switch (nr) {
+    case LX_SYS_writev:
+        r->rax = sys_writev(a0, a1, a2);
+        return;
+
     case LX_SYS_write:
         if (a0 > 2ull) {
             r->rax = neg(LX_EBADF);        /* 只读 initramfs：写路径留给 L5 */
@@ -225,7 +315,7 @@ void lx_syscall(LxRegs *r)
         return;
 
     case LX_SYS_newfstatat:
-        r->rax = lx_fs_statat(a0, a1, a2);
+        r->rax = lx_fs_statat(a0, a1, a2, a3);
         return;
 
     case LX_SYS_getdents64:
@@ -263,7 +353,11 @@ void lx_syscall(LxRegs *r)
         return;
 
     case LX_SYS_mmap:
-        r->rax = sys_mmap(a0, a1, a2, a3);
+        r->rax = sys_mmap(a0, a1, a2, a3, a4, a5);
+        return;
+
+    case LX_SYS_pread64:
+        r->rax = lx_fs_pread(a0, a1, a2, a3);
         return;
 
     case LX_SYS_munmap:
@@ -345,6 +439,27 @@ void lx_syscall(LxRegs *r)
 
     case LX_SYS_getrandom:
         r->rax = sys_getrandom(a0, a1, a2);
+        return;
+
+    case LX_SYS_getuid:
+    case LX_SYS_geteuid:
+    case LX_SYS_getgid:
+    case LX_SYS_getegid:
+    case LX_SYS_setuid:
+    case LX_SYS_setgid:
+        r->rax = 0ull;                     /* 单用户 root */
+        return;
+
+    case LX_SYS_ioctl:
+        /* 没有真终端：一律 ENOTTY，ls 会退回单列输出 */
+        r->rax = neg(LX_ENOTTY);
+        return;
+
+    case LX_SYS_time:
+        if (a0 != 0ull && lx_user_ok(a0, 8ull, C6OS_PROT_W) != 0) {
+            *(u64 *)a0 = 1700000000ull;
+        }
+        r->rax = 1700000000ull;            /* 没有 RTC：给个固定时刻 */
         return;
 
     case LX_SYS_getpid:

@@ -61,8 +61,13 @@
 #ifndef C6OS_LINUX_STACK_TOP
 #define C6OS_LINUX_STACK_TOP 0x7fffffffe000ull
 #endif
+/* ld.so 的装载基址。mmap 区从 C6OS_LINUX_MMAP_BASE 向下长，
+ * 两者之间留出 240GB，保证 ld.so 不会被用户 mmap 顶掉。 */
+#ifndef C6OS_LINUX_INTERP_BASE
+#define C6OS_LINUX_INTERP_BASE 0x7f0000000000ull
+#endif
 #ifndef C6OS_LINUX_MMAP_BASE
-#define C6OS_LINUX_MMAP_BASE 0x7f0000000000ull
+#define C6OS_LINUX_MMAP_BASE 0x7ff000000000ull
 #endif
 
 #endif

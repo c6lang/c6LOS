@@ -101,6 +101,34 @@ void x86_exc_dump(LxRegs *r, u64 cr2)
     dbg_hex(r->rsi);
     port_puts(" rdi=");
     dbg_hex(r->rdi);
+    port_puts("\n   rbx=");
+    dbg_hex(r->rbx);
+    port_puts(" rbp=");
+    dbg_hex(r->rbp);
+    port_puts(" r8=");
+    dbg_hex(r->r8);
+    port_puts(" r9=");
+    dbg_hex(r->r9);
+    port_puts("\n   r10=");
+    dbg_hex(r->r10);
+    port_puts(" r11=");
+    dbg_hex(r->r11);
+    port_puts(" r12=");
+    dbg_hex(r->r12);
+    port_puts(" r13=");
+    dbg_hex(r->r13);
+    port_puts("\n   r14=");
+    dbg_hex(r->r14);
+    port_puts(" r15=");
+    dbg_hex(r->r15);
+    port_puts("\n   栈:");
+    {
+        u64 i;
+        for (i = 0; i < 10ull; i++) {
+            port_puts(" ");
+            dbg_hex(*(u64 *)(p[5] + i * 8ull));
+        }
+    }
     port_puts("\n");
     port_panic_halt();
 }

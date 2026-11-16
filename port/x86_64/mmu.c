@@ -385,6 +385,9 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
         if (map4k(as, vaddr + off, pa, leaf | PTE_U) != 0) {
             return -3;
         }
+        /* 同一 VA 重映射（MAP_FIXED 覆盖旧页）时，TLB 里可能还是旧页框；
+         * 不刷的话紧接着写这个 VA 会写进已经没人看的旧帧。 */
+        invlpg(vaddr + off);
         off += PAGE_SZ;
     }
     return 0;

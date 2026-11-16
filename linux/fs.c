@@ -33,6 +33,7 @@ static u32    g_nodes;
 static LxFd   g_fd[C6OS_LINUX_MAX_FD];
 static u64    g_fs_pa;
 
+
 static u64 slen_(const char *s)
 {
     u64 n = 0;
@@ -91,6 +92,9 @@ static const char *strip_(const char *p)
 {
     while (*p == '/') {
         p++;
+    }
+    if (p[0] == '.' && p[1] == '\0') {
+        return "";                     /* "." 就是根目录 */
     }
     while (p[0] == '.' && p[1] == '/') {
         p += 2;
@@ -388,7 +392,8 @@ u64 lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode)
     return fs_openat(dirfd, upath, flags);
 }
 
-u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
+/* 从文件读，不动 fd 位置（pread64、以及 mmap 的文件内容拷贝都用它）。 */
+static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
 {
     LxFd *f = fd_get(fd);
     u32 idx;
@@ -401,28 +406,83 @@ u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
     if (f == 0) {
         return (u64)0 - LX_EBADF;
     }
-    if (f->node == FD_CONSOLE) {
-        return 0ull;                             /* 还没有键盘输入：EOF */
-    }
     if (f->is_dir != 0u) {
         return (u64)0 - 21;                      /* EISDIR */
     }
+    if (f->node == FD_CONSOLE) {
+        return 0ull;                             /* 还没有键盘输入：EOF */
+    }
     idx = (u32)f->node;
-    if (f->pos >= g_node[idx].size) {
+    if (off >= g_node[idx].size) {
         return 0ull;
     }
-    left = g_node[idx].size - f->pos;
+    left = g_node[idx].size - off;
     n = (len < left) ? len : left;
-    if (lx_user_ok(ubuf, n, C6OS_PROT_W) == 0) {
+    if (n == 0ull) {
+        return 0ull;
+    }
+    if (user != 0u && lx_user_ok(dst, n, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
-    pa = g_fs_pa + g_node[idx].off + f->pos;
+    pa = g_fs_pa + g_node[idx].off + off;
     src = (const u8 *)port_phys_map(pa);
     for (i = 0; i < n; i++) {
-        *(u8 *)(ubuf + i) = src[i];
+        *(u8 *)(dst + i) = src[i];
     }
-    f->pos += n;
     return n;
+}
+
+u64 lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off)
+{
+    return pread_(fd, ubuf, len, off, 1u);
+}
+
+/* 内核目标（dmap 里的物理页）：不查用户权限。文件映射用它把内容先灌进页框，
+ * 再挂页表——避免"先挂页表再写用户 VA"踩到 TLB 别名。 */
+u64 lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off)
+{
+    return pread_(fd, kdst, len, off, 0u);
+}
+
+u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
+{
+    LxFd *f = fd_get(fd);
+    u64 n;
+
+    if (f == 0) {
+        return (u64)0 - LX_EBADF;
+    }
+    n = lx_fs_pread(fd, ubuf, len, f->pos);
+    if ((i64)n > 0) {
+        f->pos += n;
+    }
+    return n;
+}
+
+u64 lx_fs_fd_size(u64 fd)
+{
+    LxFd *f = fd_get(fd);
+
+    if (f == 0 || f->node >= (u64)g_nodes) {
+        return 0ull;
+    }
+    return g_node[(u32)f->node].size;
+}
+
+/* ---- 内核侧路径查询（给 ELF 加载器用） ---- */
+
+u64 lx_fs_size_of(const char *path)
+{
+    int i = fs_find(strip_(path));
+
+    return (i < 0) ? 0ull : g_node[(u32)i].size;
+}
+
+u64 lx_fs_pa_of(const char *path)
+{
+    int i = fs_find(strip_(path));
+
+    return (i < 0) ? 0ull : g_fs_pa + g_node[(u32)i].off;
 }
 
 u64 lx_fs_close(u64 fd)
@@ -494,7 +554,7 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
     return 0ull;
 }
 
-u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat)
+u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
 {
     char path[FS_NAME];
     const char *s;
@@ -522,6 +582,13 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat)
     }
     s = strip_(path);
     if (s[0] == '\0') {
+        /* AT_EMPTY_PATH：path 为空时按 dirfd 取文件自己的 stat。
+         * glibc 的 fstat 就走这条路；不认它的话所有文件都会拿到根目录那
+         * 一套 dev/ino，动态链接器据此判定"这个库已经加载过"，
+         * 于是第二个库整个被跳过（busybox 需要 libresolv + libc 时必踩）。 */
+        if ((flags & LX_AT_EMPTY_PATH) != 0ull && (i64)dirfd >= 0) {
+            return lx_fs_fstat(dirfd, ustat);
+        }
         if (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) {
             return (u64)0 - LX_EFAULT;
         }

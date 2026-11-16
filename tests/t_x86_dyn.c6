@@ -1,0 +1,109 @@
+/* L4 验收：动态链接。
+ *
+ * 磁盘布局：
+ *   LBA 1024  用户态 ELF（宿主 /usr/bin/busybox，动态链接的 PIE）
+ *   LBA 4096  initramfs（内含 ld-linux、libc.so.6、libresolv.so.2）
+ *
+ * 内核做的事只有：把 PIE 装到 0x400000、把 PT_INTERP 指向的 ld.so 装到
+ * AT_BASE、RIP 指向 ld.so 入口。之后的 libc.so 映射、重定位、符号解析
+ * 全是 ld.so 自己的事——内核不为动态链接写一行代码。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/linux_abi.h"
+
+#define IMG_PA 0x04000000u
+#define FS_PA  0x06000000u
+
+void os_main(void)
+{
+    u64 as = 0u;
+    u64 size = 0u;
+    u64 sec = 0u;
+    u64 fsz = 0u;
+    u64 fsec = 0u;
+    u64 i = 0u;
+    u64 off = 0u;
+    u64 chunk = 0u;
+    u8 *p = 0;
+
+    port_init();
+    port_puts("c6os linux-abi L4: 动态链接（未修改的 busybox PIE）\n");
+
+    port_mmu_init();
+    port_linux_arch_init();
+    port_phys_reserve(IMG_PA, 0x00400000u);
+    port_phys_reserve(FS_PA, 0x00400000u);
+
+    if (port_ata_read(1024u, 8u, IMG_PA) != 0) {
+        port_puts("FAIL: 读 ELF 头部\n");
+        return;
+    }
+    size = lx_elf_image_size(IMG_PA, 0x00200000u);
+    if (size == 0u) {
+        port_puts("FAIL: 不是有效的 ELF64 映像\n");
+        return;
+    }
+    sec = (size + 511u) / 512u;
+    off = 8u;
+    while (off < sec) {
+        chunk = sec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read(1024u + (u32)off, (u32)chunk, IMG_PA + off * 512u) != 0) {
+            port_puts("FAIL: 读 ELF 正文\n");
+            return;
+        }
+        off += chunk;
+    }
+    port_puts("elf: 映像已就位\n");
+
+    if (port_ata_read(4096u, 1u, FS_PA) != 0) {
+        port_puts("FAIL: 读 initramfs 头部\n");
+        return;
+    }
+    p = (u8 *)port_phys_map(FS_PA);
+    i = 0u;
+    while (i < 8u) {
+        fsz |= (u64)p[i] << (u8)(8u * i);
+        i++;
+    }
+    if (fsz == 0u || fsz > 0x003c0000u) {
+        port_puts("FAIL: initramfs 长度不合理\n");
+        return;
+    }
+    fsec = (fsz + 511u) / 512u;
+    off = 0u;
+    while (off < fsec) {
+        chunk = fsec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read(4097u + (u32)off, (u32)chunk, FS_PA + off * 512u) != 0) {
+            port_puts("FAIL: 读 initramfs 正文\n");
+            return;
+        }
+        off += chunk;
+    }
+    if (lx_fs_init(FS_PA, fsz) != 0) {
+        port_puts("FAIL: cpio 解析失败\n");
+        return;
+    }
+    port_puts("fs: initramfs 已挂载\n");
+
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: port_as_create\n");
+        return;
+    }
+    lx_exec_arg1("ls");
+    if (lx_exec_prepare(as, IMG_PA, size, "/bin/busybox") != 0) {
+        port_puts("FAIL: lx_exec_prepare\n");
+        return;
+    }
+    port_puts("elf: 就绪，进入用户态（RIP = 解释器入口）\n");
+    port_user_enter(as, lx_exec_entry(), lx_exec_rsp(), 0u);
+
+    port_puts("FAIL: 从用户态返回（不应发生）\n");
+}

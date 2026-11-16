@@ -1,6 +1,6 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：L3 已跑通（initramfs + 文件语义；未修改的静态 Linux ELF 用 opendir/read 读真实文件）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：L4 已跑通（动态链接；未修改的动态 PIE `busybox` 执行 `ls /` 成功）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -14,6 +14,7 @@
 | L1 ring3 通路 | **完成** | `make check-linuxabi` → `PASS: linux-abi L1（ring3 + int 0x80）` |
 | L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
 | L3 initramfs + 文件语义 | **完成** | `make check-linuxabi-l3` → `PASS: linux-abi L3（initramfs + 文件语义）` |
+| L4 动态链接 + ld.so | **完成** | `make check-linuxabi-l4` → `PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）` |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -79,6 +80,43 @@ hello from the c6LOS initramfs
 它的系统调用序列与同一二进制在宿主上的 `strace -f` **逐条一致**：
 `brk brk arch_prctl set_tid_address set_robust_list rseq(→ENOSYS) prlimit64
 readlinkat getrandom brk brk brk mprotect write exit_group`。
+
+L4 实测输出（`build/x86/dyn-disk.img`）。宿主上现成的 `/usr/bin/busybox` 是
+**动态链接 PIE**（`PT_INTERP = /lib64/ld-linux-x86-64.so.2`，`DT_NEEDED =
+libresolv.so.2 + libc.so.6`），原封不动放进盘里，参数 `ls /`：
+
+```
+c6os linux-abi L4: 动态链接（未修改的 busybox PIE）
+elf: 映像已就位
+fs: initramfs 已挂载
+elf: 主程序已装载
+elf: 解释器 /lib64/ld-linux-x86-64.so.2
+elf: 就绪，进入用户态（RIP = 解释器入口）
+bin
+lib
+lib64
+
+[lx] exit(0) —— 用户进程正常结束
+```
+
+这条通路里**内核不做动态链接**：它只把主程序和 `ld.so` 各自按 ELF 段映射进
+同一个地址空间，在栈上摆好 `AT_PHDR`/`AT_BASE`/`AT_ENTRY`，RIP 直接指向
+`ld.so` 入口。重定位、符号解析、`DT_NEEDED` 递归加载、版本检查全部由 `ld.so`
+自己完成——内核只要保证 `openat`/`pread`/`mmap`/`fstat` 的语义与 Linux 一致。
+`ld.so` 映射库文件时走 `mmap` 的 file-backed 分支：分配物理页 → 用
+`lx_fs_pread_k` 把 initramfs 内容拷进内核页 → 再建用户页表。
+
+两个必须踩过才知道的细节：
+
+- **`fstat` 的 `AT_EMPTY_PATH`**：本机 glibc 的 `fstat` 实际发的是
+  `newfstatat(fd, "", &st, AT_EMPTY_PATH=0x1000)`。只按路径查表的话空路径会被
+  当成 `/`，于是**所有文件都返回根目录那套 `st_dev`/`st_ino`**；而 `ld.so`
+  正是用 dev/ino 判断"这个文件已经加载过"，结果第二个库（libc）被整个跳过，
+  接着就是满屏 `version 'GLIBC_2.x' not found`。症状离原因极远，最后靠
+  `[open]`/`[fstat]` 日志才定位：libc 只 open、**一次 mmap 都没发**。
+- **`invlpg`**：`mmap` 填完页表必须刷 TLB，否则 `ld.so` 读回的 `.dynamic` 仍是
+  零页（表现为 `link_map->l_info[DT_STRTAB]` 为 NULL，随即在
+  `_dl_map_object` 里 #GP）。
 
 已在 L1/L2 打通的硬件事实：E820 采集（boot16）→ PMM 位图 → 每进程 4 级页表 →
 PML4[256] 直接映射窗口 → GDT/TSS（`ltr` 的 16 字节描述符必须在 GDT 限长内）→
@@ -283,7 +321,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L1** ✅ | GDT/TSS/IDT、ring3、PMM、4 级页表、`int 0x80`、首次返回用户态 | 用户态打印 `hello from ring3` 并 `exit(0)`，内核收到状态 0 |
 | **L2** ✅ | `syscall` 通道、最小 syscall 集、`copy_from_user`、ELF64 静态加载器 | 加载**未修改的 Linux 静态 ELF**，它自己打印的那行字出现在串口上，并以 `exit_group(0)` 结束 |
 | **L3** ✅ | initramfs（newc cpio）+ fd 表 + `openat`/`read`/`fstat`/`getdents64`/`lseek` | 未修改的静态 Linux 程序用 `opendir`/`readdir`/`open`/`read` 列出并读出 initramfs 里的文件 |
-| **L4** | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation | 动态链接（PIE）的 `busybox` 跑起 `busybox ls /` |
+| **L4** ✅ | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation 全交给 `ld.so` | 动态链接（PIE）的 `busybox` 跑起 `ls /` |
 | **L5** | 进程模型：`fork`(CoW)、`execve`、`wait4`、`pipe`、fd 继承 | `sh -c 'a | b'` 管道通，`fork` 子进程退出码正确 |
 | **L6** | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`longjmp` 恢复 |
 | **L7** | 线程：`clone`、futex 完整、FS base 切换、`pthread` | 静态 `pthread` 程序 4 线程计数正确 |
@@ -304,7 +342,8 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | L2 最小集 ✅ | `read`(0) `write`(1) `exit`(60) `exit_group`(231) `brk`(12) `mmap`(9) `munmap`(11) `mprotect`(10) `arch_prctl`(158) `set_tid_address`(218) `set_robust_list`(273) `getrandom`(318) `rseq`(334，返回 ENOSYS) `prlimit64`(302) `readlinkat`(267) `uname`(63) `getpid`(39) `gettid`(186) `futex`(202，单线程空实现) |
 | L3 文件 ✅ | `openat`(257) `open`(2) `close`(3) `read`(0) `fstat`(5) `newfstatat`(262) `lseek`(8) `getdents64`(217) `access`(21) `getcwd`(79) |
 | L3 待补 | `ioctl`(16) `readlink`(89) `getuid`(102) `dup`(32) `pipe2`(293)（随 L4/L5 补齐） |
-| L4 动态 | `pread64`(17) `fcntl`(72) `poll`(7) `epoll_create1`(291)、`ld.so` 的重定位与 `mmap` 文件映射 |
+| L4 动态 ✅ | `mmap` 文件映射(9) `pread64`(17) `writev`(20) `fstat`→`newfstatat(AT_EMPTY_PATH)` `ioctl`(16) `getuid`/`getgid`/`geteuid`/`getegid` `setuid`/`setgid` `time`(201) |
+| L4 待补 | `fcntl`(72) `poll`(7) `epoll_create1`(291) `readlink`(89) `dup`(32)（随 L5 补齐） |
 | L5 进程 | `clone`(56) `fork`(57) `vfork`(58) `execve`(59) `wait4`(61) `pipe2`(293) `dup2`(33) `getppid`(110) `chdir`(80) `getcwd`(79) `kill`(62) |
 | L6 信号 | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `rt_sigtimedwait`(128) |
 | L7 线程 | `clone` 完整语义、`futex` 完整、`sched_yield`(24) `gettid`(186) `tgkill`(234) |
