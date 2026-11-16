@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1021,7 +1021,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp iso,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1390,7 +1390,7 @@ check-vfs-fat: x86-vfs
 		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
 		| tr -d '\r' | grep -q "^PASS: vfs M9-3" \
-	  && echo "PASS: vfs M9-3（FAT16 只读：mount + stat + read HELLO.TXT + readdir）" \
+	  && echo "PASS: vfs M9-3（FAT16：mount + stat + read HELLO.TXT + readdir）" \
 	  || { echo "FAIL: vfs M9-3"; exit 1; }
 
 check-vfs-blk: x86-vfs
@@ -1532,6 +1532,30 @@ x86-iso: caps-check-x86
 	@mkdir -p $(ISO_DIR)
 	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		$(if $(ISO_ROOTFS),--rootfs $(ISO_ROOTFS),) -o $(ISO_IMG)
+
+# ---- M11-2：可读写硬盘（FAT16 写）----
+x86-fatw: caps-check-x86
+	$(MAKE) X86S_NAME=fatw X86S_MAIN=tests/t_fat_write.c6 C6OS_VFS=1 \
+		$(X86)/fatw-disk.img
+
+run-x86-fatw: x86-fatw
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/fatw-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# 客户机里写，宿主把数据盘那段抠出来用 7z 看——证明真的落盘了
+check-fat-write:
+	@rm -f $(X86)/fatw-disk.img
+	@$(MAKE) x86-fatw
+	@timeout 90 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/fatw-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-fat-write.log | grep -q "^PASS: fat M11-2" \
+	  && echo "PASS: fat M11-2（/data 可读写：创建/写/读回/追加/截断/目录/删除）" \
+	  || { echo "FAIL: fat M11-2"; tail -25 /tmp/check-fat-write.log; exit 1; }
+	@dd if=$(X86)/fatw-disk.img of=/tmp/fatw-check.img bs=512 skip=16384 count=8192 status=none
+	@7z l /tmp/fatw-check.img 2>/dev/null | grep -q "A\\.TXT" \
+	  && echo "PASS: fat M11-2 宿主侧（数据盘里能看到 D1/A.TXT）" \
+	  || { echo "FAIL: fat M11-2 宿主侧（数据盘里没有 D1/A.TXT）"; 7z l /tmp/fatw-check.img | tail -12; exit 1; }
 
 # ---- M11-1：ISO 内嵌只读 rootfs（newc cpio 走 romfs 挂 /）----
 ISO_ROOTFS_DIR := $(ISO_DIR)/rootfs
@@ -1693,6 +1717,10 @@ DISK_DEPS  := $(FS_IMG) $(FAT_IMG)
 DISK_MB    := 32
 DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none; \
              dd if=$(FAT_IMG) of=$@ bs=512 seek=16384 conv=notrunc status=none
+else ifeq ($(X86S_NAME),fatw)
+DISK_DEPS  := $(FAT_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(FAT_IMG) of=$@ bs=512 seek=16384 conv=notrunc status=none
 else ifeq ($(X86S_NAME),m9)
 DISK_DEPS  := $(M9_ELF) $(FS_IMG)
 DISK_MB    := 16

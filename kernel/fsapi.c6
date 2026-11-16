@@ -172,10 +172,13 @@ INT32 LOS_FsWrite(INT32 fd, const VOID *buf, UINT32 len)
         return 0 - OS_E_BADF;
     }
     m = &g_os_mounts[f->mnt];
-    if (os_str_eq(m->type, "ramfs") != 1) {
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        rc = ramfs_write(m, f->fh, f->pos, buf, (u32)len);
+    } else if (os_str_eq(m->type, "fatfs") == 1) {
+        rc = fatfs_write(m, f->fh, f->pos, buf, (u32)len);
+    } else {
         return 0 - OS_E_ROFS;              /* romfs 只读 */
     }
-    rc = ramfs_write(m, f->fh, f->pos, buf, (u32)len);
     if (rc > 0) {
         f->pos = f->pos + (u32)rc;
         if (f->pos > f->size) {
@@ -269,6 +272,9 @@ INT32 LOS_FsUnlink(const CHAR *path)
     if (os_str_eq(m->type, "ramfs") == 1) {
         return (INT32)ramfs_unlink(m, rel);
     }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return (INT32)fatfs_unlink(m, rel);
+    }
     return 0 - OS_E_ROFS;
 }
 
@@ -284,6 +290,9 @@ INT32 LOS_FsMkdir(const CHAR *path)
     if (os_str_eq(m->type, "ramfs") == 1) {
         return (INT32)ramfs_mkdir(m, rel);
     }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return (INT32)fatfs_mkdir(m, rel);
+    }
     return 0 - OS_E_ROFS;
 }
 
@@ -298,6 +307,9 @@ INT32 LOS_FsRmdir(const CHAR *path)
     }
     if (os_str_eq(m->type, "ramfs") == 1) {
         return (INT32)ramfs_rmdir(m, rel);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return (INT32)fatfs_rmdir(m, rel);
     }
     return 0 - OS_E_ROFS;
 }
@@ -324,6 +336,9 @@ INT32 LOS_FsRename(const CHAR *from, const CHAR *to)
     if (os_str_eq(m1->type, "ramfs") == 1) {
         return (INT32)ramfs_rename(m1, r1, r2);
     }
+    if (os_str_eq(m1->type, "fatfs") == 1) {
+        return (INT32)fatfs_rename(m1, r1, r2);
+    }
     return 0 - OS_E_ROFS;
 }
 
@@ -338,6 +353,9 @@ INT32 LOS_FsTruncate(const CHAR *path, UINT32 size)
     }
     if (os_str_eq(m->type, "ramfs") == 1) {
         return (INT32)ramfs_truncate(m, rel, (u32)size);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return (INT32)fatfs_truncate(m, rel, (u32)size);
     }
     return 0 - OS_E_ROFS;
 }

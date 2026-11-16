@@ -54,7 +54,7 @@ c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依�
 | G1 | 没有 CD 引导链（`boot16` 只会读 512 字节扇区、`int 13h` LBA 1..） | `-cdrom` 起不来 | M11-0：El Torito no-emulation 引导块 `port/x86_64/cd0.S` + `tools/mkiso.py` |
 | G2 | 载荷只能装在内核镜像里（`.incbin`），rootfs 没有"随 ISO 走"的通道 | 镜像得重编内核 | M11-1：ISO 里放第二段载荷 `rootfs.cpio`；**≤1 MB 的 rootfs** 直接跟在载荷里装到内存（M11-0 的实模式读盘路径就够），更大的才上 unreal mode / ATAPI |
 | G3 | 可写存储太小：ramfs 32 节点 / 8KB arena；FAT16 只读 | 镜像里的程序写不了东西 | M11-2：FAT16 **写**（创建/写/追加/删除/截断/sync）+ 挂 `/data`；M11-4 再扩 ramfs |
-| G4 | `fsapi.c6` 的写类操作按 FS 名字硬判断，FAT 根本没接 | FAT 上的写路径无法落地 | M11-2：VFS 挂载点改成 **ops 分发表**（`LosFsOps`），ramfs/fatfs 各自实现 |
+| G4 | `fsapi.c6` 的写类操作按 FS 名字硬判断，FAT 根本没接 | FAT 上的写路径无法落地 | M11-2：把 FAT 接进同一条分派链（`fsapi.c6` 里 `os_str_eq(type, "fatfs")` 分支）。**ops 分发表重构推迟**，理由见 §9 M11-2 |
 | G5 | 安装/解包工具没有：仓库里没有 tar/gzip/OCI/whiteout 相关代码 | docker 镜像用不上 | M11-3：`tools/mkdockeriso.py`（宿主侧 Python，`tarfile` + `json`） |
 | G6 | Linux ABI 没有写类 syscall（`mkdir/unlink/rename/ftruncate/fsync/statfs`） | 用户态不能建文件、不能保证落盘 | M11-2（薄封装到 `LOS_Fs*`），本轮先做镜像跑起来必需的那几个 |
 | G7 | 没有 namespace/cgroup/pivot_root/overlay | 不是容器 | **本轮不做**（§8） |
@@ -380,3 +380,57 @@ mmu: e820=00000007 free_kb=0003ef80
 4. **两个 iso 目标共用 `build/x86/iso/`**：`stage2.elf`/`flat.bin` 会被复用，换了 main
    或 `C6OS_VFS` 不整目录清掉，就会"新 ISO 跑旧内核"（现象：`check-iso` 里冒出
    M11-1 的 FAIL 行）。
+
+### M11-2（可读写硬盘：FAT16 写）已完成
+
+**做了什么**：
+
+- `kernel/fatfs.c6` 从"只读"扩成读写：新增 `fat_write_`（扇区写，走 `LOS_BlockWrite`）、
+  `fat_get_/fat_set_`（FAT 项读改，**所有 FAT 副本都写**）、`fat_alloc_`（first-fit
+  找空闲簇 + 标链尾 + 清 0）、`fat_free_chain_`、`fat_dent_sec_/fat_dent_put_/
+  fat_dent_update_`（目录项定位/写入/改大小）、`fat_dir_slot_`（空槽，子目录满了还能
+  扩一簇）、`fat_add_dent_`（建文件/建目录，目录顺带写 `.` 和 `..`）、
+  `fat_chain_grow_/fat_chain_trim_`（簇链增长/收缩）。
+  打开的文件进一张 8 槽的 `FatFile` 表（`fh` 里放槽号+1），写回时才找得到目录项。
+- 后端函数：`fatfs_open` 支持 `O_CREAT/O_EXCL/O_TRUNC`；`fatfs_write`（按需扩簇、
+  逐扇区读改写、最后更新目录项大小）、`fatfs_truncate`（收缩还簇/增长补簇）、
+  `fatfs_unlink`、`fatfs_mkdir`、`fatfs_rmdir`（非空目录返 `-ENOTEMPTY`）、
+  `fatfs_rename`（返 `-EOPNOTSUPP`，8.3 改名不做）。
+- `kernel/fsapi.c6`：`LOS_FsWrite/Unlink/Mkdir/Rmdir/Rename/Truncate` 加 `fatfs` 分支。
+- `tests/t_fat_write.c6` + `fatw` 变体 + `make x86-fatw/run-x86-fatw/check-fat-write`。
+
+**写盘顺序**（掉电一致性）：先写数据簇 → 再改 FAT → 最后改目录项；
+FAT16 是写穿（每个扇区立刻 `LOS_BlockWrite`），所以 `LOS_FsSync` 对它就是空操作。
+
+**验收**：
+
+```
+$ make check-fat-write
+PASS: fat M11-2（/data 可读写：创建/写/读回/追加/截断/目录/删除）
+PASS: fat M11-2 宿主侧（数据盘里能看到 D1/A.TXT）
+
+# 客户机内：
+c6os fat M11-2: /data 可读写（FAT16）
+  /data: HELLO.TXT NEW.TXT D1/
+PASS: fat M11-2（/data 可读写：创建/写/读回/追加/截断/目录/删除）
+```
+
+宿主侧那段是 `dd` 把 LBA 16384 起的 FAT 区抠成 `/tmp/fatw-check.img`，再用 `7z l`
+列出来的——**写真的落到盘上了**，不是内存里糊弄。
+
+**偏差与坑**：
+
+1. **ops 分发表没做**：设计里说 M11-2 第一步是把 `fsapi.c6` 的"按 FS 名字 if/else"
+   改成挂载点上的 `const LosFsOps *`。实际做法是**直接在原分派链里加 `fatfs` 分支**
+   —— 重构要同时改 `vfs.c6`/`ramfs.c6`/`romfs.c6`/`fsapi.c6` 四个文件，风险和
+   改动面都比"加两个分支"大，而这一步真正要的是"FAT 能写"。ops 表仍留在待办里
+   （见 §7 之后），`fsapi.c6` 里所有分派已经集中在 `open_/close_/read_/stat_/
+   readdir_` 和写类那几个函数里，将来替换点是清楚的。
+2. **测试要自己注册块设备**：`LOS_FsMount("ata0", ...)` 之前得
+   `LOS_DeviceRegister("ata0", 512, 32768, ata_rd, ata_wr)`，否则 mount 返 `-ENOENT`
+   （M9 的 t_vfs 里也是这么做的，我一开始漏了）。
+3. **验收盘必须每次重建**：`mkfat.py` 的镜像被 guest 写脏之后，第二次跑
+   `mkdir /data/D1` 会 `-EEXIST`。`check-fat-write` 现在先 `rm -f` 掉
+   `fatw-disk.img` 再重建，保证可重复。
+4. **M9-3 的"FAT 只读"断言作废**：`tests/t_vfs.c6` 里原来用
+   `LOS_FsOpen(..., O_RDWR) < 0` 证明只读，M11-2 之后这条必然失败，改成验能打开。

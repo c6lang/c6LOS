@@ -226,7 +226,8 @@ static int blk_case(void)
 }
 
 
-/* M9-3：FAT16 只读（镜像由 tools/mkfat.py 生成：根目录一个 HELLO.TXT） */
+/* M9-3：FAT16 读（镜像由 tools/mkfat.py 生成：根目录一个 HELLO.TXT）；
+ * M11-2 之后这个后端可写了，写侧验收在 tests/t_fat_write.c6。 */
 static int fat_case(void)
 {
     int dev = 0;
@@ -280,11 +281,15 @@ static int fat_case(void)
         port_puts("FAIL: fat 目录项名字\n");
         return -1;
     }
-    if ((int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDWR) >= 0) {
-        port_puts("FAIL: fat 是只读的\n");
+    /* M11-2 起 FAT16 可写了：这里只验"能打开读写"（写路径的完整验收在
+     * make check-fat-write 里），romfs 那边才是真只读。 */
+    fd = (int)LOS_FsOpen("/fat/HELLO.TXT", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: fat 重新打开失败\n");
         return -1;
     }
-    port_puts("vfs: FAT16 只读 mount/stat/read/readdir 全通\n");
+    (void)LOS_FsClose(fd);
+    port_puts("vfs: FAT16 mount/stat/read/readdir 全通（写路径见 check-fat-write）\n");
     return 0;
 }
 
