@@ -13229,3 +13229,21 @@ windowbase=0x9   windowstart=0xaaaa   槽位=0x0f(双重异常)
 下一轮就从这里下手：审计 `port/s3/ctx.S` 的 `s3_task_tramp`（a4=ABI 标志、设 WOE、
 `callx8`）、`port_task_create` 造初始帧时写进去的 PS/CALLINC/a1/a0，
 以及 `RESTORE_FRAME` 里 `WINDOWSTART` 归一化对"新 windowed 任务"是否正确。
+
+## §339 新任务初始帧没清 WS/WB 槽（潜在 bug，已补；但不是当前崩溃的原因）
+
+`port_task_ctx_create` 只把初始帧的前 17 个字（a0..a15 + EPC + PS）清零，
+帧偏移 68（WINDOWSTART）和 72（WINDOWBASE）**没清**。`RESTORE_FRAME` 看到
+"WINDOWSTART 非 0"就会跳过 `1<<WINDOWBASE` 归一化、把垃圾直接写进 WINDOWSTART。
+已改成清满 20 个字。
+
+真板上症状**不变**（还是 `[give]` 之后 `pc=40048c6e cause=0 a0=0x00060900`），
+因为栈池在 BSS 里、第一次用到时本来就是 0 —— 但这是个真隐患，留着补丁。
+
+另外确认了一件可疑的事：`RESTORE_FRAME` 里
+`wsr a3, windowstart` 会**重新映射所有虚拟寄存器（包括 a1）**，
+文件里 60 行处的注释也说"要先用全局变量把帧指针存起来"，但现在的代码
+**并没有**做这一步 —— 只是因为我们写进去的 `1<<WINDOWBASE` 和当前 WB 一致，
+硬件才没有搬 WB。如果哪天写进去的是别的值，`l32i a2, a1, 60` 就会读到错的地址。
+下一轮的探针就打在 `RESTORE_FRAME` 里：记录进入时的 a1、写入的 WS、
+`wsr` 之后的 WB、以及随后读出来的 EPC/PS/a0。

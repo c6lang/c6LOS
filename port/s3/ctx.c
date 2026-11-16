@@ -112,8 +112,13 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 80u;
     f = (u32 *)top;
 
+    /* §339：**必须把整帧 20 个字都清零**。原来只清 17 个字（a0..a15 + EPC
+     * + PS），帧偏移 68（WINDOWSTART）和 72（WINDOWBASE）里是栈上的垃圾；
+     * RESTORE_FRAME 看到"WINDOWSTART 非 0"就跳过归一化、直接把垃圾写进
+     * WINDOWSTART —— 新任务一开始窗口账目就是错的，闭源库的 ppTask 第一次
+     * 用 ROM 打印就 `retw.n` 炸掉（cause=0、a0=PS 值 0x60900，§327/§338）。 */
     i = 0;
-    while (i < 17u) {
+    while (i < 20u) {
         f[i] = 0u;
         i++;
     }
