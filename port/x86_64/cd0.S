@@ -35,6 +35,32 @@ start2:
     sti
     call serial_init
 
+    /* ---- E820：物理内存表（boot16 在盘引导路径里做的，光盘这边自己做）----
+     * count @0x5000（u32），条目 @0x5010（24B：base u64 / len u64 / type u32 / attr u32）。
+     * 内核的物理帧分配器只认这张表，少了它 port_mmu_init 直接失败。 */
+    movl $0, 0x5000
+    movw $0x5010, %di
+    xorl %ebx, %ebx
+e820_loop:
+    movl $0xE820, %eax
+    movl $0x534D4150, %edx
+    movl $24, %ecx
+    int $0x15
+    jc e820_done
+    cmpl $0x534D4150, %eax
+    jne e820_done
+    cmpl $0, 16(%di)              /* type（偏移 16；20 是 ACPI 属性位，别弄混） */
+    je e820_skip
+    incw 0x5000
+    addw $24, %di
+    cmpw $(0x5010 + 24 * 32), %di
+    jae e820_done
+e820_skip:
+    testl %ebx, %ebx              /* ebx == 0 表示枚举结束 */
+    jz e820_done
+    jmp e820_loop
+e820_done:
+
     /* A20（1MB 以内的载荷用不到，但顺手打开，免得后面忘） */
     movw $0x2401, %ax
     int $0x15
@@ -85,7 +111,7 @@ start2:
     jz no_rootfs
     movl magic+28, %eax
     movl %eax, dst_pa
-    call load_payload
+    call load_payload_hi
 no_rootfs:
     movw $msg_loaded, %si
     call print
@@ -177,6 +203,109 @@ fail:
 1:
     hlt
     jmp 1b
+
+/* ---- 读大于 1MB 的载荷：每次 32 块（64KB）读到 0x80000 暂存区，
+ *      再进 unreal mode 用 32 位寻址搬到 dst_pa ----
+ * int 13h 的 DAP 只有"段:偏移"，实模式到不了 1MB 以上；unreal mode 让
+ * ds/es 的缓存描述符保持 4GB 限长，回到实模式后用 32 位寄存器寻址搬运。
+ * 每一块（64KB）进出一次 unreal mode，BIOS 调用始终在干净的实模式段下做。 */
+load_payload_hi:
+1:
+    movl blocks_left, %eax
+    testl %eax, %eax
+    jz 9f
+    movl $32, %ecx
+    cmpl %ecx, %eax
+    jae 2f
+    movl %eax, %ecx
+2:
+    movl %ecx, chunk
+    movw %cx, dap+2
+    movw $0, dap+4
+    movw $0x8000, dap+6             /* 暂存区 0x80000 */
+    movl cur_lba, %eax
+    movl %eax, dap+8
+    movl $0, dap+12
+    movb drive, %dl
+    movw $dap, %si
+    movb $0x42, %ah
+    sti
+    int $0x13
+    jc fail
+    call unreal_on
+    movl $0x00080000, %esi
+    movl dst_pa, %edi
+    movl chunk, %ecx
+    shll $11, %ecx                  /* 字节数 */
+    call copy_flat
+    call unreal_off
+    movl chunk, %eax
+    addl %eax, cur_lba
+    subl %eax, blocks_left
+    shll $11, %eax
+    addl %eax, dst_pa
+    jmp 1b
+9:
+    ret
+
+/* 进 unreal mode：ds/es 保留 4GB 限长的数据段描述符缓存。
+ * 关键：不玩"清 PE 之后再远跳"——那一步要 16 位编码的 EA 才能被实模式正确译码，
+ * 稍不注意就飞。这里改成先跳到 16 位代码段（选择子 0x18，D=0、base 0），
+ * 在 PM 里就把 CS 换成 16 位形式，然后清 PE 直接接着跑，不用再远跳。 */
+unreal_on:
+    lgdt gdt_desc
+    movl %cr0, %eax
+    orl $0x00000001, %eax
+    movl %eax, %cr0
+    ljmp $0x08, $unreal_pm
+    .code32
+unreal_pm:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
+    movw %ax, %ss
+    ljmp $0x18, $unreal_pm16       /* 16 位代码段（D=0，base 0） */
+    .code16
+unreal_pm16:
+    movl %cr0, %eax
+    andl $0xFFFFFFFE, %eax
+    movl %eax, %cr0                /* 回实模式：CS 已经是 16 位/base 0 */
+    xorw %ax, %ax
+    movw %ax, %fs
+    movw %ax, %gs
+    ret
+
+/* 把 ds/es 换回普通实模式段（64KB），BIOS 调用前用 */
+unreal_off:
+    xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    ret
+
+/* esi = 源（32 位物理地址），edi = 目标，ecx = 字节数 */
+copy_flat:
+    movl %ecx, %ebx
+    shrl $2, %ecx
+1:
+    movl (%esi), %eax
+    movl %eax, %es:(%edi)
+    addl $4, %esi
+    addl $4, %edi
+    decl %ecx
+    jnz 1b
+    andl $3, %ebx
+2:
+    jz 3f
+    movb (%esi), %al
+    movb %al, %es:(%edi)
+    incl %esi
+    incl %edi
+    decl %ebx
+    jmp 2b
+3:
+    ret
 
 /* COM1 115200 8N1 —— 与 console.c 一致，内核起来后会再初始化一遍 */
 serial_init:
@@ -295,11 +424,14 @@ blocks_left:
     .long 0
 dst_pa:
     .long 0
+chunk:
+    .long 0
     .align 8
 gdt:
     .quad 0
     .quad 0x00CF9A000000FFFF        /* 32 位代码，base 0，4GB */
     .quad 0x00CF92000000FFFF        /* 32 位数据，base 0，4GB */
+    .quad 0x00009A000000FFFF        /* 16 位代码，base 0，64KB（unreal 回程用） */
 gdt_end:
 gdt_desc:
     .word gdt_end - gdt - 1

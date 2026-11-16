@@ -111,16 +111,25 @@ BIOS 从 El Torito 把 LBA 20 的 2048 B 装到 0x7C00 并跳进来
   ├─ 打印载荷参数（mkiso 回填的 LBA/块数），出问题一眼定位
   ├─ load_payload(内核)：int 13h AH=42h，DAP 偏移恒 0、目标段每块 +0x80（2048/16）
   │    —— 先试"一次读完"（块数 16 位，110KB 才 54 块），失败退化成一次一块
-  ├─ load_payload(rootfs)：块数为 0 就跳过
+  ├─ load_payload_hi(rootfs)：块数为 0 就跳过。每次 32 块（64 KB）读到 0x80000
+  │    暂存区，再进 unreal mode 用 32 位寻址搬到 dst（0x00800000）——每块进出一次，
+  │    BIOS 调用始终在干净的实模式段下做
   ├─ 写引导信息块（0x7000，魔数 'C6IS'）
   └─ 切 32 位保护模式（GDT 里 4GB 平坦代码/数据段），远跳 0x10000
 ```
 
-**为什么不用 unreal mode**：M11-0 的载荷只有内核（110 KB），目标地址 `0x10000` 本来就
-在 1 MB 以下，实模式的"段:偏移"完全够用，而 `int 13h` 的 DAP 本来就是段:偏移——
-让目标段跟着每块 +0x80 走，连暂存区搬运都省了。unreal mode（4 GB 数据段 + 32 位寻址
-搬运）是**载荷超过 1 MB** 才需要的东西（rootfs 放在 `0x00800000` 那种场景），
-留给 M11-1 再做，不必现在就冒险（8 段汇编里每多一个模式切换就多一种挂法）。
+**内核走实模式直读、rootfs 走 unreal mode**：M11-0 的载荷只有内核（110 KB），目标
+`0x10000` 在 1 MB 以下，实模式的"段:偏移"完全够用，`int 13h` 的 DAP 本来就是段:偏移
+——让目标段跟着每块 +0x80 走，连暂存区搬运都省了。rootfs 要放到 `0x00800000`（4 MB
+以上，躲开 `KERNEL_RESERVED_END`），就得靠 unreal mode：ds/es 的缓存描述符保持 4 GB
+限长，回到实模式后仍能用 32 位寄存器寻址搬运。
+
+**unreal mode 的回程别用"清 PE 之后远跳"**：那一步的 `EA` 必须按 16 位编码才会被实模式
+正确译码，写成 32 位形式就飞。M11-1 改成：先 `ljmp $0x18`（GDT 里的 16 位代码段，
+D=0、base 0）进 16 位 PM 存根，再清 PE 直接往下跑，不再需要远跳。
+
+**cd0 还得自己收 E820**：盘引导路径里是 `boot16.S` 收的，光盘引导压根不经过它；
+少了 `0x5000` 那张表，`port_mmu_init()` 直接 "e820=00000000 / FAIL dmap"。
 
 ### 3.4 引导信息块（`0x7000`，32 字节）
 
@@ -318,3 +327,56 @@ $ 7z l build/x86/iso/c6os.iso | tail -5
 
 前三个都属于"模式/寄存器宽度"这类看不见的错，第四个是纯粹的眼瞎；
 共同点是**都表现为"没有输出"**，所以 `cd0` 里那行参数打印和每个阶段的心跳很值钱。
+
+### M11-1（ISO 内嵌只读 rootfs）已完成
+
+**做了什么**：
+
+- `cd0.S` 增加 `load_payload_hi()`：每 32 块（64 KB）读进 `0x80000` 暂存区，再
+  `unreal_on` → `copy_flat`（32 位寻址 `movsl` + 字节尾巴）→ `unreal_off` 搬到
+  `dst_pa`；每块进出一次 unreal mode，BIOS 调用始终在干净实模式段下。
+- `cd0.S` 增加 **E820 收集**（原来只有 `boot16.S` 做，光盘路径不经过它）。
+- `tests/t_iso_rootfs.c6`（`iso` 变体 + `C6OS_VFS=1`）：读引导信息块 → `port_phys_reserve`
+  把 rootfs 那段从 PMM 里挖掉 → 剥掉 initramfs 的 8 字节长度前缀（512 字节头）→
+  `LOS_FsMount("", "/", "romfs", &img)` → `LOS_FsReaddir/Stat/Open/Read` 走一圈。
+- Makefile：`ISO_CPIO`（`tools/mk-initramfs.py` 打的小 rootfs）、`x86-iso-rootfs`、
+  `run-x86-iso-rootfs`、`check-iso-rootfs`。两个 iso 目标都先 `rm -rf $(ISO_DIR)`——
+  变体名都是 `iso`，main 和 `C6OS_VFS` 不同，不整目录清掉就会拿旧内核去跑新 ISO。
+
+**验收**：
+
+```
+$ make check-iso-rootfs
+  kernel: lba=21 blocks=66 (133616 B) -> 0x00010000
+  rootfs: lba=87 blocks=1 (920 B) -> 0x00800000
+PASS: iso M11-1（ISO 内嵌 rootfs：romfs 挂 /，readdir/stat/open/read 通）
+
+# 客户机内：
+cd0: magic0=0x00000043 k=0x00000015/0x00000042 r=0x00000057/0x00000001
+cd0: payload loaded
+cd0: enter protected mode -> 0x10000
+c6os iso M11-1: ISO 内嵌 rootfs
+  bootinfo magic=0x53493643 flags=1 rootfs pa=0x00800000 len=2048
+mmu: e820=00000007 free_kb=0003ef80
+  pmm reserved, free_kb=257884
+  cpio body=408 head=070701
+  romfs 挂到 /（LOS_FsMount）
+  /etc-release  size=11
+  /hello.txt  size=26
+  stat /hello.txt size=26
+  read: hello from the ISO rootfs
+```
+
+**坑**：
+
+1. **unreal mode 的回程不能用"清 PE + 远跳"**：`ljmp $0, $rm16` 若编成 32 位 `EA`，
+   实模式会按 `off16+sel16` 读错位直接飞。改成先跳 `0x18`（16 位代码段，D=0、base 0）
+   进 PM 存根，再清 PE 继续跑，不用远跳。
+2. **光盘引导路径没人收 E820**：`boot16.S` 只在盘引导时跑，`cd0` 不收就
+   `e820=00000000` → `port_mmu_init` 失败。抄一份 `int 15h/0xE820` 的循环进 `cd0`。
+3. **`tools/mk-initramfs.py` 的镜像有 512 字节头**（8 字节小端长度 + 504 字节 0），
+   内核侧消费要跳过，否则 romfs 看到的是 `98 01 00 00…` 而不是 `070701`，mount 返
+   `-EINVAL`。
+4. **两个 iso 目标共用 `build/x86/iso/`**：`stage2.elf`/`flat.bin` 会被复用，换了 main
+   或 `C6OS_VFS` 不整目录清掉，就会"新 ISO 跑旧内核"（现象：`check-iso` 里冒出
+   M11-1 的 FAIL 行）。

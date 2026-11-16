@@ -1526,10 +1526,42 @@ $(CD0_BIN): $(X86)/cd0.o
 	ld -m elf_i386 -Ttext=0x7C00 --oformat binary -o $@ $<
 
 x86-iso: caps-check-x86
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
 	$(MAKE) X86S_NAME=iso X86S_MAIN=$(ISO_MAIN) $(ISO_KER)
 	@mkdir -p $(ISO_DIR)
 	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		$(if $(ISO_ROOTFS),--rootfs $(ISO_ROOTFS),) -o $(ISO_IMG)
+
+# ---- M11-1：ISO 内嵌只读 rootfs（newc cpio 走 romfs 挂 /）----
+ISO_ROOTFS_DIR := $(ISO_DIR)/rootfs
+ISO_CPIO       := $(ISO_DIR)/rootfs.cpio
+
+$(ISO_CPIO): tools/mk-initramfs.py
+	@mkdir -p $(ISO_ROOTFS_DIR)
+	@printf 'hello from the ISO rootfs\n' > $(ISO_ROOTFS_DIR)/hello.txt
+	@printf 'c6OS M11-1\n' > $(ISO_ROOTFS_DIR)/etc-release
+	python3 tools/mk-initramfs.py $@ $(ISO_ROOTFS_DIR)
+
+x86-iso-rootfs: caps-check-x86
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_rootfs.c6 C6OS_VFS=1 $(ISO_KER)
+	$(MAKE) $(ISO_CPIO)
+	@mkdir -p $(ISO_DIR)
+	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ISO_CPIO) -o $(ISO_IMG)
+
+run-x86-iso-rootfs: x86-iso-rootfs
+	qemu-system-x86_64 -m 256M -cdrom $(ISO_IMG) -boot d \
+		-nographic -serial stdio -monitor none -no-reboot
+
+check-iso-rootfs: x86-iso-rootfs
+	@timeout 60 qemu-system-x86_64 -m 256M -cdrom $(ISO_IMG) -boot d \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-iso-rootfs.log | grep -q "^PASS: iso M11-1" \
+	  && echo "PASS: iso M11-1（ISO 内嵌 rootfs：romfs 挂 /，readdir/stat/open/read 通）" \
+	  || { echo "FAIL: iso M11-1"; tail -25 /tmp/check-iso-rootfs.log; exit 1; }
 
 run-x86-iso: x86-iso
 	qemu-system-x86_64 -m 256M -cdrom $(ISO_IMG) -boot d \
