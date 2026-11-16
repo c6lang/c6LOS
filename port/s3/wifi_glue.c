@@ -298,15 +298,10 @@ static void osi_semphr_delete(void *sem)
 static u32 g_sem_n = 0u;
 static void sem_trace(u32 op, u32 obj, u32 ticks, u32 r)
 {
-    volatile u32 *t = (volatile u32 *)0x50001C00u;
-    u32 k = g_sem_n & 7u;
-
-    g_sem_n = g_sem_n + 1u;
-    t[k * 5u]      = g_sem_n;
-    t[k * 5u + 1u] = op;
-    t[k * 5u + 2u] = obj;
-    t[k * 5u + 3u] = ticks;
-    t[k * 5u + 4u] = r;
+    /* 诊断环暂时停用（§243）：它本身在真板上引发了 LoadProhibited
+     * （inlined 之后 l32i.n a8, a6, 0 里 a6 是 0）。诊断不该主导故障，
+     * 先把它变成空函数，等主流程通了再恢复。 */
+    (void)op; (void)obj; (void)ticks; (void)r;
 }
 static int osi_semphr_take(void *sem, u32 ticks)
 {

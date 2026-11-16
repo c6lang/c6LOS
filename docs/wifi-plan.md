@@ -10749,3 +10749,15 @@ make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_
 3. 顺带确认 `osi_semphr_take`/`sem_trace` 这种小函数能不能让编译器别生成
    `call8 sem_trace`（比如把 sem_trace 改成 `static inline` / 直接内联），
    先用"减少一次窗口轮转"的方式绕过去验证假设。
+
+### §243 sem_trace 诊断本身会在真板上炸（已停用）
+
+把 `sem_trace` 内联后故障换了位置（`cause=0x1c LoadProhibited, vaddr=0`，
+`l32i.n a8, a6, 0` 里 a6=0），说明这段"往 RTC 环写诊断"的代码本身在 windowed
+上下文里会踩到寄存器/地址问题（它是被 `call8` 调的、又要轮转窗口）。
+把 `sem_trace` 改成空函数之后，故障回到 `osi_semphr_take/give` 结尾的 `retw.n`
+（`pc=0x4037c280, a0=0x3fcbebc0` 栈地址、`ws=0x06`）——
+**即"windowed 回调函数返回时 a0 不对"这个核心问题依旧**。
+
+结论：诊断代码要写得极少（只用 `ets_printf`，不要额外函数调用），
+核心问题仍然是 windowed 函数之间的 `call8`/`retw` 窗口配对。
