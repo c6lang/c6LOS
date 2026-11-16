@@ -115,6 +115,15 @@ static void *osi_malloc(u32 n)
         if ((u32)b + (u32)sizeof(WhBlk) + b->size > end) { break; }
         b = (WhBlk *)((u8 *)b + sizeof(WhBlk) + b->size);
     }
+    /* §297：堆耗尽——库很可能没检查返回值就直接解引用（真板上表现为
+     * cause=0x1d、EXCVADDR=NULL+偏移）。这里记次数和最近一次的大小，并
+     * 在第一次失败时打一行，方便判断要不要扩堆。 */
+    *(volatile u32 *)0x50000748u = *(volatile u32 *)0x50000748u + 1u;
+    *(volatile u32 *)0x5000074cu = n;
+    if (*(volatile u32 *)0x50000748u == 1u) {
+        extern int ets_printf(const char *fmt, ...);
+        ets_printf("[heap] 分配失败 n=%u\n", (unsigned)n);
+    }
     return 0;
 }
 
