@@ -82,10 +82,18 @@
     /* §296/§311：写回任务自己的 WINDOWSTART（帧偏移 68，切换时保存）。
      * §307 试过完全不管窗口状态，结果一样崩；§310 修掉 CALLINC 之后重试这条。 */
     l32i    a3, a1, 68
-    beqz    a3, 8f
+    bnez    a3, 7f
+    /* §313：帧里没有保存值（新建任务）时必须**归一化**成 `1<<WINDOWBASE`。
+     * 直接跳过 wsr 会把**别的任务**留下的 WINDOWSTART（真板：0x8000，base=15）
+     * 留在硬件里，恢复出来的 a0..a15 就落在错的窗口，rfe 之后落到 ROM 里
+     * 的非法地址（cause=0，a0=PS 值）。 */
+    rsr     a3, windowbase
+    movi    a4, 1
+    ssl     a3
+    sll     a3, a4
+7:
     wsr     a3, windowstart
     isync
-8:
     l32i    a2, a1, 60
     wsr     a2, epc1
     l32i    a2, a1, 64
@@ -171,8 +179,8 @@ port_task_switch:
     s32i    a5, a1, 68
     rsr     a5, windowbase
     s32i    a5, a1, 72
-    /* §304：现场已入帧，先把祖先窗口整圈 spill 干净再切走。 */
-    S3_SPILL_ALL
+    /* §312：S3_SPILL_ALL 整圈 rotw 会触发窗口溢出 → 溢出处理体里
+     * `s32e a0,a9,-16` 用到脏 a9，双重异常打死在 _vec_default。停用它。 */
     /* 诊断：yield 计数（0x50001008=次数，0x5000100c=最近的目标 sp） */
     l32r    a14, .Lyl_cnt
     l32i    a15, a14, 0

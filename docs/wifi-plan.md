@@ -12769,3 +12769,59 @@ b
 * 下一步就是**让它别等**：查清 ROM 那个"主流程等待"是在等哪个标志/队列，
   把 `esp_wifi_start` + `connect` 推下去；或者直接把主流程改成
   "init 不等待、异步继续"。
+
+## §312~§314 崩溃点定位到 ROM 里的 `retw.n`：窗口状态在任务切换时被污染
+
+### §312 先把默认向量记录读出来（JTAG 直接读 RTC，不改 irq.S）
+
+`0x50000100`：`0000bad0 | 0000001d | ffffffd1 | 40379590 | 00060817 | 00000001 | 3fcc03e0 | 00000009 | 00000200 | 0000000f`
+
+* `cause=0x1d` = StoreProhibited，`vaddr=0xffffffd1` = **`a9-16` 且 `a9=0xffffffe1`（垃圾）**；
+* `epc1=0x40379590` 正好在 `port_task_switch` 里的 `S3_SPILL_ALL`（`rotw` 串）；
+* `ps=0x00060817`：`EXCM=1`、`INTLEVEL=7`、`WOE=1` ⇒ 是**双重异常**。
+
+结论：§304 的"切换时整圈 spill"里 `rotw` 撞上**活窗口**，溢出处理体拿到的 `a9` 是
+我们 call0 内核帧里的临时值（不是栈指针）→ `s32e a0,a9,-16` 直接写飞。
+关掉 `S3_SPILL_ALL`（§312）后双重异常消失，恢复成可打印的 `*** TRAP`。
+
+### §313 新建任务的 `WINDOWSTART` 必须归一化
+
+`RESTORE_FRAME` 在帧里 `WINDOWSTART==0`（新建任务）时**不能直接跳过 `wsr`**：
+别的任务留下的 `WINDOWSTART=0x8000`（base=15）会生效，恢复出来的 a0..a15 落在错的窗口。
+改成 `1<<WINDOWBASE`。这一条是正确性修复（本身没改变症状）。
+
+### §314 真正的崩溃点：ROM 里的 `retw.n`（非法指令）
+
+关掉 spill 后 `*** TRAP` 稳定复现：
+
+```
+*** TRAP sp=3fcbeb00 cause=00000000 pc=40048c6e ps=00060f10 vaddr=00000000 callinc=00000002 a0=00060900
+```
+
+用 JTAG 把 ROM 那一段 dump 下来反汇编（`objdump -D -b binary -m xtensa`），
+`0x40048c6e` 就是 **`retw.n`**：
+
+```
+40048c30: entry a1, 32
+40048c33: call8 0x400442a4
+40048c4b: call8 0x40048804
+40048c69: call8 0x40048804
+40048c6c: mov   a2, a10
+40048c6e: retw.n          <-- 非法指令
+40048c70: entry a1, 32    <-- 下一个 ROM 函数
+```
+
+`entry` 会把 `PS.CALLINC` 清 0，`retw.n` 要求 `CALLINC==0` 且与 `a0[31:30]` 配套；
+现场 `PS.CALLINC=2`（call12）⇒ 非法。`a0=0x00060900` 恰好是**帧里保存的 PS 值**，
+说明返回地址寄存器早被踩成 PS 了。
+
+也就是说：**任务切回 task1（`sp=0x3fcbeb00` 就是 ctx0）之后，它的窗口/寄存器是脏的。**
+这正是"切走时闭源库的活窗口没被 spill"的直接后果 —— §304 想解决它，但做法
+（在 call0 内核帧里 `rotw`）反而写飞。§312 的 RTC 记录把这两件事串起来了。
+
+### 下一步（明确的工程结论）
+
+要正确切走"正处在 windowed 深调用里"的任务，必须在**windowed 上下文里**
+（也就是 `port/s3/w2c.S` 的壳里，那里 `[a1-12]` 的帧链是 ABI 合法的）
+把祖先窗口 spill 出去，而不是在 call0 内核的 `port_task_switch` 里 `rotw`。
+对应的填充侧已经在 `_win_unf4/8/12` 里了，两边必须严格对称。
