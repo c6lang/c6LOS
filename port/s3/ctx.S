@@ -17,6 +17,39 @@
     .literal .Ltmpsp,   g_ctx_tmp_sp
     .literal .Lyl_cnt,  g_yl_cnt
 
+
+/* §304：把当前所有祖先窗口整圈 spill 到各自栈帧（同 w2c.S 的 WIN_SPILL）。
+ * 任务切换前必须先做：否则被切走任务的寄存器还压在物理窗口里，
+ * 等它被调度回来时物理寄存器已经是别的任务的内容了。 */
+    .macro  S3_SPILL_ALL
+    rsr     a8, ps
+    extui   a9, a8, 4, 1
+    bnez    a9, 55f
+    rsr     a9, epc1
+    movi    a10, -32
+    and     a10, a10, a8
+    movi    a11, 1
+    slli    a11, a11, 18
+    addi    a11, a11, 7
+    or      a10, a10, a11
+    wsr     a10, ps
+    rsync
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    3
+    and     a12, a12, a12
+    rotw    4
+    wsr     a8, ps
+    rsync
+    wsr     a9, epc1
+55:
+    .endm
+
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
     .macro  RESTORE_FRAME
     /* WINDOWSTART 恢复策略（混合版，§246）：
@@ -64,17 +97,11 @@
      * 尚未 spill 的那几组寄存器丢掉；闭源库是 windowed ABI，深调用链靠硬件
      * 窗口活着，丢了以后 retw 就是“返回地址飞了”（§293/§294 的 cause=0）。
      * 新建任务的帧偏移 68 是 0，仍然走归一化。 */
-    l32i    a3, a1, 68
-    bnez    a3, 7f
     rsr     a4, windowbase
     movi    a5, 1
     ssl     a4
     sll     a5, a5
     wsr     a5, windowstart
-    isync
-    j       8f
-7:
-    wsr     a3, windowstart
     isync
 8:
     l32i    a2, a1, 60
@@ -162,6 +189,8 @@ port_task_switch:
     s32i    a5, a1, 68
     rsr     a5, windowbase
     s32i    a5, a1, 72
+    /* §304：现场已入帧，先把祖先窗口整圈 spill 干净再切走。 */
+    S3_SPILL_ALL
     /* 诊断：yield 计数（0x50001008=次数，0x5000100c=最近的目标 sp） */
     l32r    a14, .Lyl_cnt
     l32i    a15, a14, 0

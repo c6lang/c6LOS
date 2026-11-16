@@ -158,9 +158,12 @@
     beqz    a9, .Lno_spill\@
     WIN_SPILL
 .Lno_spill\@:
-    addi    a1, a1, -64
+    /* §303：spill 死区从 64 加到 128 —— 4 个物理窗口 × 16 字节 = 64 只是
+     * 下限，祖先窗口的下溢槽会再往外扩，64 还不够安全。 */
+    addi    a1, a1, -128
     l32r    a8, 9b
     callx0  a8
+    addi    a1, a1, 64            /* addi 的立即数只到 127，128 要拆成两半 */
     addi    a1, a1, 64
     l32i    a0, a1, 16
     retw
