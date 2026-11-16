@@ -704,11 +704,18 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
      * RTC 环在真板上会互相覆盖、read-mem 又会先复位，只有这里直接打印
      * 才可靠（一次启动只有两三次）。 */
     {
+        /* §320 实验：这条打印原来走 ets_printf + s3_w2c_current_task()（一个
+         * windowed 壳）。真板上崩溃点正好是 ROM printf 内部那个 `retw.n`，
+         * 所以先把它换成"只写 RTC、不调任何函数"的记法，看崩溃是否跟着消失。 */
         static u32 recv_n_;
         if (recv_n_ < 3u) {
+            volatile u32 *d_ = (volatile u32 *)0x50000600u;
+            u32 k_ = recv_n_ * 4u;
+            d_[k_ + 0u] = (u32)(void *)qh;
+            d_[k_ + 1u] = (u32)ticks;
+            d_[k_ + 2u] = 0x52454356u;   /* 'RECV' */
             recv_n_ = recv_n_ + 1u;
-            ets_printf("[recv] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
-                       (unsigned)(void *)qh, (unsigned)ticks);
+            d_[12] = recv_n_;
         }
     }
     if (ticks == 0u) {

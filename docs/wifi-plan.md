@@ -12920,3 +12920,49 @@ ar4=60000000 ar5=00000380 ar6=00000045 ar7=6000001c  ar8=3fcef130 ar9=60038004
 顺带确认：`S3_ABI ?= call0`（`https` 目标没有覆盖它），所以
 `irq.S` 里 level-1 定时器 handler 走的是 `call0 s3_timer_irq` 分支
 **不轮转窗口** —— "中断里轮转窗口导致溢出" 这条假设可以排除。
+
+## §320 崩溃归位：栈扫描证明崩在 **task1（主流程）**，不是 ppTask
+
+用 OpenOCD 的 `mdw` 顺着 `sp` 向下扫 `0x3fcbe700..0x3fcbeb00`，把像代码地址的
+字逐个 `addr2line`：
+
+```
+[3fcbe81c] = 42017738 os_sched_preempt_ctx
+[3fcbe87c] = 420545c4 ram_iq_est_enable      <- PHY 早期留下的旧值
+[3fcbe8a0] = 40055cdc ??                      <- ROM
+[3fcbe8cc] = 40041a76 ??                      <- ROM
+[3fcbea98] = 403817f0 ppTask                  <- 库任务函数体（不是返回地址）
+```
+
+结论：
+1. `0x3fcbeaf0` 落在 **task1 的栈区**（`0x3fcbce50..0x3fcbee50`），所以撞死的是
+   **call0 主流程那个任务**，`ppTask` 那边只是正常阻塞在 `_queue_recv`
+   （反汇编 `ppTask` 开头：`callx8 funcs[16]` = `_wifi_thread_semphr_get`，
+   然后 `callx8 funcs[29]` = `_queue_recv(xphyQueue,&msg,MAX_DELAY)`）。
+2. 崩溃帧正好压在 ROM 那个函数 `entry a1,32` 的溢出区上
+   （`[sp-16..-4]` ↔ 我们陷阱帧的 PS/WS/WB 槽），所以**打印出来的 `a0=0x00060900`
+   很可能不是原始 a0**，而是被陷阱帧覆盖后的残留 —— 这条线索不能再用。
+
+## §321 已排除的两个方向（都试过，症状不变）
+
+| 试的改动 | 结果 |
+|---|---|
+| 把 `[recv]` 那条 `ets_printf` 删掉（改成纯 RTC 记录） | 症状**完全不变**，pc/a0/cause 一模一样 ⇒ 不是这条打印惹的 |
+| 给 `W2C_TRACE`（阻塞 `queue_get` 走的就是它）补上 §310 那套 PS 存取 | 症状**完全不变** |
+| 整体换成 `S3_W2C_SAVEALL=1`（保存全部 a0..a15 的"理论正确版"） | **更糟**：一开始就炸在 `42013fb8`、`a0=3fcb9400`（一个栈指针）⇒ 这个变体现在不能用 |
+
+另外确认 `S3_ABI ?= call0`（`https` 目标没覆盖），所以 `irq.S` 里
+level-1 handler 是 `call0 s3_timer_irq`（反汇编 `40379d37: call0 40379ac0`），
+**中断路径不轮转窗口** —— "中断里轮转窗口" 这条也排除。
+
+## §322 现在的定位结论
+
+崩溃点唯一确定的事实是：**在 ROM 的 `retw.n`（0x40048c6e）上取到非法指令，
+`PS.CALLINC=2` 而 `a0` 没有窗口标签**。也就是窗口/调用深度账目在
+"我们 call0 内核 ↔ windowed 闭源库" 之间来回穿的那一层被打乱了，
+而不是某一条具体语句。下一步只有两条路：
+
+1. **统一 ABI**：`S3_ABI=windowed` 重编内核（连同 `c6` 生成的代码），
+   把 `W2C`/`_win_*` 兜底全部删掉，让整个系统只有一种调用约定；
+2. **精确定位**：接管 `ets_printf`（ROM 符号是 `PROVIDE` 的，我们给出强定义即可覆盖，
+   真身 `0x400005d0`）记录每次调用的返回地址，把"谁在第 N 次打印时进入 ROM"钉死。
