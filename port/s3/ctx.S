@@ -79,30 +79,11 @@
      * 为偶发 WS=0、a0=0、PC 跳进栈地址）。最后那句 `wsr ps` 会把 INTLEVEL
      * 恢复成帧里保存的值，所以这里直接拉到 15 就行。 */
     rsil    a5, 15
-    l32i    a3, a1, 72           /* 目标 WINDOWBASE（刚建的任务是 0） */
-    rsr     a4, windowbase
-    beq     a3, a4, 6f
-    l32r    a4, .Ltmpsp
-    s32i    a1, a4, 0
-    wsr     a3, windowbase
-    isync
-    l32r    a1, .Ltmpsp
-    l32i    a1, a1, 0            /* 新映射下把帧指针取回来 */
-6:
-    l32i    a2, a1, 64
-    extui   a3, a2, 18, 1
-    beqz    a3, 8f
-    /* §296：**优先写回任务自己的 WINDOWSTART**。
-     * 原来一律归一化成 1<<WINDOWBASE，等于把被切走任务还压在物理窗口里、
-     * 尚未 spill 的那几组寄存器丢掉；闭源库是 windowed ABI，深调用链靠硬件
-     * 窗口活着，丢了以后 retw 就是“返回地址飞了”（§293/§294 的 cause=0）。
-     * 新建任务的帧偏移 68 是 0，仍然走归一化。 */
-    rsr     a4, windowbase
-    movi    a5, 1
-    ssl     a4
-    sll     a5, a5
-    wsr     a5, windowstart
-    isync
+    /* §307 实验：**切换时完全不碰 WINDOWBASE / WINDOWSTART**。
+     * 理由：W2C 壳在每次"库 → 内核"的边界上已经把祖先窗口整圈 spill 干净，
+     * 所以窗口状态本来是全局自洽的；而每任务一份反而会因为"物理窗口内容
+     * 和保存的 live 位对不上"让闭源码 retw 到错的窗口（§295~§306 的反复）。
+     * 让硬件窗口像在单任务里一样自然轮转。 */
 8:
     l32i    a2, a1, 60
     wsr     a2, epc1

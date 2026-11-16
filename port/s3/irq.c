@@ -141,6 +141,26 @@ void s3_trap(u32 frame_sp)
     __asm__ __volatile__("rsr %0, ps" : "=r"(ps));
     (void)f;
     s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
+    /* §308：**打印之前**先把第一次异常的现场落进 RTC 0x50000140。
+     * 因为我们的打印路径（port_puts / trap_hex）自己在 EXCM=1 的上下文里
+     * 也可能触发窗口异常，导致"看到的 pc=0x40048c6e"其实是打印过程里
+     * 二次异常的现场（§306 实测 PS=0x00060f10，INTLEVEL=15、EXCM=1）。 */
+    {
+        volatile u32 *t = (volatile u32 *)0x50000140u;
+        u32 va = 0;
+        __asm__ __volatile__("rsr %0, excvaddr" : "=r"(va));
+        t[0] = cause;
+        t[1] = va;
+        t[2] = pc;
+        t[3] = ps;
+        t[4] = frame_sp;
+        t[5] = f[0];
+        t[6] = f[1];
+        t[7] = f[15];
+        t[8] = f[16];
+        t[9] = f[17];
+        t[10] = f[18];
+    }
 
     port_puts("*** TRAP sp=");
     trap_hex(frame_sp);
