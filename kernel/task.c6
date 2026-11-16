@@ -62,6 +62,7 @@ static void task_release_locks(u32 id) {
 #define g_cur (g_cur_arr[g_core])
 
 static void make_ready(OsTask *t) {
+    *(volatile u32 *)0x50000D8Cu = *(volatile u32 *)0x50000D8Cu + 1u;
     if (t->suspend_cnt > 0u) {
         t->state = (u8)OS_TASK_SUSP;
     } else {
@@ -72,6 +73,8 @@ static void make_ready(OsTask *t) {
 static u32 g_waiters = 0;
 
 static void unblock(OsTask *t, int result) {
+    port_putc('u');                    /* 谁被唤醒（§250） */
+    port_putc((int)('0' + (t->id & 7u)));
     if (t->state == (u8)OS_TASK_BLOCKED && g_waiters > 0u) {
         g_waiters = g_waiters - 1u;
     }
@@ -337,6 +340,7 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;
     g_waiters = g_waiters + 1u;
+    port_putc('b');          /* 阻塞计入 g_waiters（§250） */
     return 0;
 }
 
@@ -394,9 +398,6 @@ int os_task_wake_event(void *obj, u32 bits) {
     u32 i = 0;
     int woke = 0;
 
-    if (g_waiters == 0u) {
-        return 0;
-    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -418,10 +419,16 @@ int os_task_wake_event(void *obj, u32 bits) {
 u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     u32 i = 0;
     OsTask *best = 0;
-
-    if (g_waiters == 0u) {
-        return 0u;
+    /* 诊断（§250）：RTC 0x50001820 起 4 个字
+     *   [0]=调用次数 [1]=命中次数 [2]=g_waiters==0 的次数 [3]=make_ready 次数 */
+    {
+        volatile u32 *wd = (volatile u32 *)0x50000D80u;
+        wd[0] = wd[0] + 1u;
     }
+
+    /* 不再用 g_waiters==0 做快速返回（§250）：计数器一旦与实际状态失配，
+     * 这里就会把真正的等待者跳过，消息永远发不出去（真板症状：消息入队了、
+     * 接收方一直不被唤醒）。直接扫任务表，代价可以忽略。 */
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -433,8 +440,11 @@ u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
         i++;
     }
     if (best == 0) {
+        port_putc('.');      /* 没匹配上等待者（§250） */
         return 0;
     }
+    port_putc('W');         /* 匹配上并 unblock（§250） */
+    *(volatile u32 *)0x50000D84u = *(volatile u32 *)0x50000D84u + 1u;
     unblock(best, result);
     return best->id;
 }
@@ -446,9 +456,6 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
 void os_task_wake_all(void *obj, int result) {
     u32 i = 0;
 
-    if (g_waiters == 0u) {
-        return;
-    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj) {

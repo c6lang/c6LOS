@@ -10916,3 +10916,57 @@ slot_write/tail++/count++ → os_task_wake_first(q, Q_WAIT_GET, 0) → os_obj_un
 3. 如果匹配没问题，就查 idle 循环的调度：`port_idle` 里是否只看
    `os_sched_preempt_ctx()` 而漏掉了"被 unblock 的任务"（S3_NO_PREEMPT 已关，
    但 idle→任务的切换路径要单独确认）。
+
+### §250 **关键 bug 修好了**：`g_waiters` 快速返回把真正的等待者跳过
+
+真板串口加了内核级标记（`b`=任务阻塞计入、`W`=唤醒命中、`z`=唤醒时 g_waiters==0、
+`u<id>`=被 unblock 的任务、`.`=没匹配上）之后，看到的顺序是：
+
+```
+[take] t=1 sem#1
+b                                   ← init 阻塞，g_waiters=1
+[give] t=2 sem#1  → W u1            ← ppTask 给信号量，唤醒 init，g_waiters=0
+[recv] t=2 qh=…  → b                ← ppTask 阻塞在收包队列，g_waiters=1
+u1                                  ← 又有人 unblock 任务 1（虚假唤醒）→ g_waiters=0 ✗
+[send] t=1 qh=…  → z                ← 发消息时 g_waiters 已经是 0 ⇒ **唤醒被跳过**
+```
+
+根因：`os_task_wake_first_id` / `os_task_wake_event` / `os_task_wake_all` 开头都有
+
+```c
+if (g_waiters == 0u) { return 0; }   /* "没人等待"的快速返回 */
+```
+
+而 `g_waiters` 只是个**全局计数**，一旦因为虚假唤醒/超时解阻塞而失配，就会变成 0，
+于是真正的等待者被跳过 —— 消息明明入队了（`put_ok=1`），接收方永远不被唤醒。
+**修法：删掉这三个快速返回，直接扫任务表**（代价可忽略）。
+真板效果立竿见影：
+
+```
+[send] t=1 qh=3fcc443c tk=1
+Wu2                                 ← ppTask 被唤醒
+[lock]/[unlock] t=2 …（连打二十多轮，ppTask 真的在干活）
+[give] t=2 sem#2 → Wu1
+[wifi] esp_wifi_init_internal -> 0  ← **esp_wifi_init_internal 第一次返回 0！**
+[wifi] bringup rc=0
+W2 bringup returned
+```
+
+这是从"卡在库初始化"到"库初始化成功"的转折点。
+
+### §251 下一个卡点：bringup 返回后从栈地址取指
+
+紧接着上面：
+
+```
+*** TRAP sp=3fcd8ea0 cause=00000002 pc=3fcb9d15 ps=00000b10 vaddr=3fcb9d14 a0=00000000 ws=0
+```
+
+`cause=2` = InstructionFetchError，`vaddr=0x3fcb9d14` 落在 **DRAM/heap** 区
+（0x3fcb9xxx），`sp=0x3fcd8ea0` 是**主栈/idle 栈**（`_stack_top`=0x3FCD9000 附近），
+`a0=0`、`ws=0`。→ 从主栈上下文里跳到了一个数据地址。
+
+最可能的解释：wifi 任务在 `s3_win_wifi_main` 里走完 bringup 后继续做关联
+（`s3_wifi_associate`），中途某处返回到了错误地址；也可能是任务退出路径
+（`os_task_exit`）在 windowed/调用链上出了问题。下一步：在 bringup 返回点之后
+加阶段标记（`W3 associate` 等），确认是在哪一步崩的。
