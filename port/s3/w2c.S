@@ -50,38 +50,29 @@
  * 都不能动（a4..a7 = 调用者的 a12..a15 是 callee-saved，a12..a15 = 调用者的
  * a0..a3 是 retw 要用的返回地址和帧指针）。 */
     .macro  WIN_SPILL
-    rsr     a8, ps
-    extui   a9, a8, 4, 1
-    bnez    a9, .Lspill_end\@   /* EXCM=1（正在异常里）：窗口不能碰，跳过 */
-    rsr     a9, epc1
-    movi    a10, -32
-    and     a10, a10, a8         /* 清 INTLEVEL(0..3) 和 EXCM(bit4) */
-    movi    a11, 1
-    slli    a11, a11, 18
-    addi    a11, a11, 7          /* WOE(bit18) | INTLEVEL=7 */
-    or      a10, a10, a11
-    wsr     a10, ps
-    rsync
-    and     a12, a12, a12
-    rotw    3
-    and     a12, a12, a12
-    rotw    3
-    and     a12, a12, a12
-    rotw    3
-    and     a12, a12, a12
-    rotw    3
-    and     a12, a12, a12
-    rotw    4
-    wsr     a8, ps               /* 恢复原 PS */
-    rsync
-    wsr     a9, epc1
-    /* §262：spill 完之后**绝不能**把 WINDOWSTART 归一化成 1<<WINDOWBASE。
-     * IDF 的 SPILL_ALL_WINDOWS（xt_asm_utils.h）转完一圈就结束，WindowsStart
-     * 由硬件的 overflow/rfwo 自己维护；归一化会把祖先窗口的 live 位抹掉，
-     * 而它们的寄存器内容其实还在物理寄存器里 —— 之后需要它们时硬件会走
-     * "下溢填充"去读一个从没写过的 spill 槽，读回来的就是栈上的垃圾
-     * （真板症状：PC 跳进栈地址、a0=0、ws=0）。 */
-.Lspill_end\@:
+    /* §315：改用 IDF 官方 `window_spill_function`（下面 s3_win_spill）来
+     * spill 祖先窗口。之前这里是手写的一圈 `rotw`：rotw 落到活窗口上会触发
+     * 窗口溢出异常，而溢出处理体要用 `[a1-12]` 那条**帧链**去算落点；
+     * 我们这套 call0 内核的帧里那条链是垃圾，于是 `s32e a0,a9,-16` 直接用
+     * 脏 a9 写飞（§312 的 RTC 记录：vaddr=0xffffffd1 = a9-16，a9=0xffffffe1）。
+     *
+     * 官方版本不靠帧链：它用一串 `call4/8/12` 深度调用把窗口基址推满一整圈，
+     * 由硬件溢出机制把每个活窗口 spill 到它自己的栈帧里，返回时再退回来。
+     * 这个函数会破坏 caller-saved 的 a2..a7，而本壳要把参数透传给内核，
+     * 所以先存到帧里空闲的 [a1+64..] 再取回。 */
+    s32i    a2, a1, 64
+    s32i    a3, a1, 68
+    s32i    a4, a1, 72
+    s32i    a5, a1, 76
+    s32i    a6, a1, 80
+    s32i    a7, a1, 84
+    call8   s3_win_spill
+    l32i    a2, a1, 64
+    l32i    a3, a1, 68
+    l32i    a4, a1, 72
+    l32i    a5, a1, 76
+    l32i    a6, a1, 80
+    l32i    a7, a1, 84
     .endm
 
     .macro  W2C name, target
@@ -341,4 +332,44 @@ osi_queue_recv:
     l32i    a0,  a1, 16
     l32i    a12, a1, 20
     l32i    a13, a1, 24
+    retw
+
+
+/* ---- s3_win_spill：IDF `window_spill_function`（XCHAL_NUM_AREGS=64）----
+ * 语义：把它**调用者的祖先**窗口全部 spill 到各自栈帧；返回后没有祖先窗口
+ * 还活在 AR 里。被调用方式（call4/8/12）由 a0 的 bit31:30 判断。
+ * 这段和 esp-idf components/xtensa/include/xtensa/coreasm.h 完全一致。 */
+    .align  4
+    .global s3_win_spill
+    .type   s3_win_spill, @function
+s3_win_spill:
+    entry   a1, 48
+    bbci.l  a0, 31, 1f          /* 用 call4 调的 */
+    bbsi.l  a0, 30, 2f          /* 用 call12 调的 */
+    call4   .Lws52              /* 用 call8 调的：再补一个 call4 */
+    retw
+1:  call8   .Lws52              /* 用 call4 调的：再补一个 call8 */
+    retw
+2:  call12  .Lws40              /* 用 call12 调的：可以少转一个 call12 */
+    retw
+
+    .align  4
+.Lws52:
+    entry   a1, 48
+    call12  .Lws40
+    retw
+    .align  4
+.Lws40:
+    entry   a1, 48
+    call12  .Lws28
+    retw
+    .align  4
+.Lws28:
+    entry   a1, 48
+    call12  .Lws16
+    retw
+    .align  4
+.Lws16:
+    entry   a1, 16
+    movi    a15, 0
     retw

@@ -8,6 +8,8 @@
     .literal .Lg_cur,   g_s3_cur
     .literal .Lprid_base, g_prid_base
     .literal .Lrtc_dbg, 0x50000A00
+    .literal .Lrec_rs,  0x50000400   /* §317：恢复点记录 */
+    .literal .Lrec_sw,  0x50000300   /* §316：切换点记录 a0/EPC/PS/WS/WB */
     .literal .Lrtc_sw,  0x50001000   /* switch 计数 */
     .literal .Lrtc_yl,  0x50001008   /* yield 计数 */
     .literal .Lsw_cnt,  g_sw_cnt
@@ -79,6 +81,26 @@
      * 为偶发 WS=0、a0=0、PC 跳进栈地址）。最后那句 `wsr ps` 会把 INTLEVEL
      * 恢复成帧里保存的值，所以这里直接拉到 15 就行。 */
     rsil    a5, 15
+    /* §317：把**这次真正用来恢复的帧**记下来（4 项 x 8 字环）：
+     * 序号、帧地址、EPC、PS、WS、WB。切回来时崩在 ROM 的 retw.n，
+     * 先要弄清 rfe 到底跳去了哪里。 */
+    l32r    a4, .Lrec_rs
+    l32i    a6, a4, 0
+    extui   a6, a6, 0, 2
+    slli    a6, a6, 5
+    add     a6, a6, a4
+    s32i    a1, a6, 4
+    l32i    a7, a1, 60
+    s32i    a7, a6, 8
+    l32i    a7, a1, 64
+    s32i    a7, a6, 12
+    l32i    a7, a1, 68
+    s32i    a7, a6, 16
+    l32i    a7, a1, 72
+    s32i    a7, a6, 20
+    l32i    a7, a4, 0
+    addi    a7, a7, 1
+    s32i    a7, a4, 0
     /* §296/§311：写回任务自己的 WINDOWSTART（帧偏移 68，切换时保存）。
      * §307 试过完全不管窗口状态，结果一样崩；§310 修掉 CALLINC 之后重试这条。 */
     l32i    a3, a1, 68
@@ -166,6 +188,25 @@ port_task_switch:
     slli    a14, a14, 30         /* 0x40000000：代码段基址高位 */
     or      a15, a15, a14
     s32i    a15, a1, 60
+    /* §316：把每次切换点的 a0 / 算出来的 EPC / PS / WS / WB 记进 RTC 环形区
+     * （0x50000300=序号，0x50000304 起每项 16 字节），用来查"切回来时
+     * EPC 为什么会是 ROM 里的 retw.n"。a11..a14 此时已经压进帧，可以随便用。 */
+    l32r    a14, .Lrec_sw
+    l32i    a13, a14, 0
+    extui   a13, a13, 0, 3
+    slli    a12, a13, 5
+    add     a12, a12, a14
+    s32i    a0,  a12, 4
+    s32i    a15, a12, 8
+    rsr     a11, ps
+    s32i    a11, a12, 12
+    rsr     a11, windowstart
+    s32i    a11, a12, 16
+    rsr     a11, windowbase
+    s32i    a11, a12, 20
+    l32i    a13, a14, 0
+    addi    a13, a13, 1
+    s32i    a13, a14, 0
     rsr     a5, ps
     movi    a6, -32
     and     a5, a5, a6
