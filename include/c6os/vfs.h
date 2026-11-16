@@ -3,6 +3,7 @@
 
 #include "c6os/types.h"
 #include "los/los_fs.h"
+#include "c6os/errno.h"
 
 /* 内核内部的 VFS（LiteOS-M 兼容面在 include/los/los_fs.h）。
  *
@@ -13,14 +14,6 @@
 #define OS_MAX_FILES   32
 #define OS_FS_TYPE_MAX 8
 
-/* errno（内部统一用 -errno 返回，LOS_Fs* 出口原样透出） */
-#define OS_E_NOENT  2
-#define OS_E_BADF   9
-#define OS_E_NOMEM  12
-#define OS_E_EXIST  17
-#define OS_E_ISDIR  21
-#define OS_E_INVAL  22
-#define OS_E_ROFS   30
 
 /* 只读镜像型文件系统的描述。buf 必须在挂载期间一直有效（romfs 不拷贝）。 */
 typedef struct {

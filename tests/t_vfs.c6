@@ -7,6 +7,7 @@
 #include "c6os/port.h"
 #include "c6os/vfs.h"
 #include "los/los_fs.h"
+#include "los/los_block.h"
 
 #define FS_PA 0x06000000u          /* 96MB：initramfs 映像 */
 
@@ -17,6 +18,11 @@ static LosFsStat   g_st = {0};
 static LosFsDirent g_de = {0};
 static char        g_buf[8] = {0};
 static char        g_buf2[24] = {0};
+static u8          g_blk_src[8u * 512u] = {0};
+
+/* M9-2 的临时缓冲放在 3MB：低端恒等映射区里 VA == PA，ATA 驱动可以直接用 */
+#define BLK_SCRATCH  0x00300000u
+#define BLK_TEST_LBA 20480u          /* 10MB 处，不和 initramfs（LBA 4096）抢 */
 
 /* M9-1：ramfs 可读写（写 → 读回 → 截断 → 改名 → 建/删目录 → 删除） */
 static int ramfs_case(void)
@@ -134,6 +140,84 @@ static int ramfs_case(void)
         return -1;
     }
     port_puts("vfs: ramfs 写-读回-lseek-截断-改名-mkdir/rmdir-unlink 全通\n");
+    return 0;
+}
+
+
+/* M9-2：块设备层 + ATA PIO 写（写 8 扇区 → 破坏缓冲 → 读回逐字节比对） */
+static int blk_rd_cb(u32 d, u32 blk, u32 cnt, void *buf)
+{
+    (void)d;
+    return (int)port_ata_read(blk, cnt, (u64)buf);
+}
+
+static int blk_wr_cb(u32 d, u32 blk, u32 cnt, const void *buf)
+{
+    (void)d;
+    return (int)port_ata_write(blk, cnt, (u64)buf);
+}
+
+static int blk_case(void)
+{
+    u8 *p = 0;
+    int dev = 0;
+    int rc = 0;
+    u32 i = 0u;
+
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        g_blk_src[i] = (u8)((i * 7u + 3u) & 0xFFu);
+        i++;
+    }
+    p = (u8 *)port_phys_map(BLK_SCRATCH);
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        p[i] = g_blk_src[i];
+        i++;
+    }
+
+    dev = (int)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
+    if (dev < 0) {
+        port_puts("FAIL: LOS_DeviceRegister\n");
+        return -1;
+    }
+    if ((int)LOS_DeviceCount() != 1 || (int)LOS_DeviceGet("ata0") != dev) {
+        port_puts("FAIL: 设备表\n");
+        return -1;
+    }
+    if (LOS_BlockSize((UINT32)dev) != 512u ||
+        LOS_BlockCount((UINT32)dev) != 32768u) {
+        port_puts("FAIL: 块大小/块数\n");
+        return -1;
+    }
+    rc = (int)LOS_BlockWrite((UINT32)dev, BLK_TEST_LBA, 8u, (void *)p);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_BlockWrite\n");
+        return -1;
+    }
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        p[i] = 0;
+        i++;
+    }
+    rc = (int)LOS_BlockRead((UINT32)dev, BLK_TEST_LBA, 8u, (void *)p);
+    if (rc != 0) {
+        port_puts("FAIL: LOS_BlockRead\n");
+        return -1;
+    }
+    i = 0u;
+    while (i < (u32)sizeof(g_blk_src)) {
+        if (p[i] != g_blk_src[i]) {
+            port_puts("FAIL: 块设备读回不一致\n");
+            return -1;
+        }
+        i++;
+    }
+    if ((int)LOS_DeviceUnregister("ata0") != 0 || (int)LOS_DeviceCount() != 0) {
+        port_puts("FAIL: 反注册\n");
+        return -1;
+    }
+    port_puts("vfs: 块设备 写-读回 8 扇区逐字节一致\n");
     return 0;
 }
 
@@ -265,4 +349,9 @@ void os_main(void)
         return;
     }
     port_puts("PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）\n");
+
+    if (blk_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-2（块设备层 + ATA 写：8 扇区写-读回一致）\n");
 }

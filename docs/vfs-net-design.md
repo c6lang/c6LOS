@@ -335,8 +335,9 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 1. **x86 stage2 只能装 255 扇区（≈127.5KB）**。`port/x86_64/boot16.S` 用三个 DAP
    读 LBA 1..255（127+120+8），所以 `flat.bin` 超过 130560 字节就会被**静默截断** ——
    现象是内核一句日志都不打就死（连 banner 都没有），非常像链接/入口问题。
-   VFS 一上来把镜像顶到 157KB 直接撞线；现在压回 117KB。M10 网络必然会再撞，
-   届时得扩 boot16 的 DAP 列表（或改成循环读）。
+   VFS 一上来把镜像顶到 157KB 直接撞线；后来压回 117KB。M9-2 又把它推到 131KB，
+   于是**已扩过一轮**：`boot16.S` 加了 `dap4`（127 扇区 @ LBA 256 → 0x2FE00），
+   容量 255 → 382 扇区（≈191KB）。M10 网络迟早还要再扩，届时直接改循环读。
 2. **c6 产出的 IR 需要 `-O1`**。`X86IRFLAGS` 之前没有优化级，clang 按 -O0 编 IR，
    几百行的内核文件就能吃掉 10KB+ 代码段（VFS 三个文件加了 44KB）。
    统一加 `-O1` 后：L3 镜像 111KB→108KB、vfs 镜像 158KB→117KB。
@@ -381,3 +382,17 @@ romfs/ramfs 各自实现同名方法。结论是**这个 c6 版本上跨 TU 分�
 
 等 c6 的 interface 支持"跨 TU 存值 + 分派"之后再切；在那之前 FS 后端用
 `m->type` 分发（12 个方法、2 个后端，量还可控）。
+
+### M9-2（块设备层 + ATA PIO 写）已完成
+
+`kernel/blkdev.c6`：`LosDevRead/Write` 函数表 + 8 项设备注册表 + 参数校验
+（`blk + cnt` 越界、空指针、只读设备分别返回 `-EINVAL/-EROFS`）；
+`port/x86_64/ata.c` 补 `port_ata_write`（WRITE SECTORS + FLUSH CACHE）。
+
+验收：`make check-vfs-blk` → 写 8 扇区到 LBA 20480 再读回逐字节一致。
+
+两个坑：
+1. **ATA 写每扇区前必须先等空闲**（`ata_wait_idle`：BSY 清、ERR 未置）。读路径
+   不需要，写路径不等就会让后续命令被驱动器忽略 —— 现象是 `LOS_BlockWrite`
+   直接返回 -1，看起来像"写支持没做对"。
+2. 镜像尺寸又顶到了 boot16 的 255 扇区上限（见上面第 1 条记录），已扩到 382 扇区。

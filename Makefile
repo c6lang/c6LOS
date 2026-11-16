@@ -981,7 +981,7 @@ ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
 $(error C6OS_VFS=1 暂不接在 user/elf/fs/dyn 上（Linux ABI 侧的对接在 M9-4）
 endif
 X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
-                  kernel/fsapi.c6 kernel/heap.c6
+                  kernel/fsapi.c6 kernel/blkdev.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
 ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
@@ -1349,6 +1349,14 @@ check-vfs-ramfs: x86-vfs
 		| tr -d '\r' | grep -q "^PASS: vfs M9-1" \
 	  && echo "PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）" \
 	  || { echo "FAIL: vfs M9-1"; exit 1; }
+
+check-vfs-blk: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-2" \
+	  && echo "PASS: vfs M9-2（块设备层 + ATA PIO 写：写 8 扇区读回逐字节一致）" \
+	  || { echo "FAIL: vfs M9-2"; exit 1; }
 
 check-vfs-zero:
 	@n=$$(make -n s3 2>/dev/null | grep -c "kernel/vfs.c6"); \

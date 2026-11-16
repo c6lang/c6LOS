@@ -90,6 +90,7 @@ void *port_phys_map(u64 pa);
 void port_phys_reserve(u64 pa, u64 bytes);
 /* ATA PIO 读（L2 用它把 ELF 从磁盘搬进内存；L4 的 VFS 复用）。 */
 int  port_ata_read(u32 lba, u32 count, u64 dst_pa);
+int  port_ata_write(u32 lba, u32 count, u64 src_pa);
 
 /* 特权级底座：GDT/TSS/IDT、syscall 通道、每个 CPU 的内核栈。 */
 void port_linux_arch_init(void);/* 进入 ring3。不返回（返回路径由 syscall 的 iretq 负责）。 */

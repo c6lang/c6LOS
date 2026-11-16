@@ -1,0 +1,164 @@
+/* kernel/blkdev.c6 — 块设备层（M9-2）
+ *
+ * 与 LiteOS-M 的 `los_block.h` 对齐：一张注册表 + 按块读写的函数表。
+ * 具体驱动（x86 ATA PIO / S3 SPI NOR）只实现 `LosDevRead/LosDevWrite`，
+ * 上层（FAT、ramfs 的快照等）只认设备号。
+ *
+ * buf 一律是**内核虚拟地址**：x86 低端恒等映射区里 VA == PA，S3 上就是内部 RAM
+ * 指针。这样驱动侧不需要知道调用者是谁，也符合 c6 的跨边界规则。
+ */
+#include "c6os/types.h"
+#include "c6os/errno.h"
+#include "c6os/string.h"
+#include "los/los_block.h"
+
+typedef struct {
+    u32 used;
+    char name[LOS_DEV_NAME_MAX];
+    u32 blk_size;
+    u32 blk_count;
+    LosDevRead rd;
+    LosDevWrite wr;
+} OsBlkDev;
+
+static OsBlkDev g_devs[LOS_MAX_DEVICES] = {0};
+
+/* 符号前缀：c6 走 LLVM IR 时 static 不是 internal linkage，跨 TU 同名会撞 */
+static int blk_find_(const char *name)
+{
+    u32 i = 0u;
+
+    if (name == (const char *)0) {
+        return -1;
+    }
+    while (i < (u32)LOS_MAX_DEVICES) {
+        if (g_devs[i].used != 0u && strcmp(g_devs[i].name, name) == 0) {
+            return (int)i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+static int blk_chk_(UINT32 dev, UINT32 blk, UINT32 cnt, const VOID *buf)
+{
+    if (dev >= (UINT32)LOS_MAX_DEVICES || g_devs[dev].used == 0u) {
+        return 0 - OS_E_INVAL;
+    }
+    if (buf == (const VOID *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (cnt == 0u) {
+        return 0;
+    }
+    if (g_devs[dev].blk_count != 0u && blk + cnt > g_devs[dev].blk_count) {
+        return 0 - OS_E_INVAL;
+    }
+    return 0;
+}
+
+INT32 LOS_DeviceRegister(const CHAR *name, UINT32 blkSize, UINT32 blkCount,
+                         LosDevRead rd, LosDevWrite wr)
+{
+    u32 i = 0u;
+    int slot = -1;
+
+    if (name == (const CHAR *)0 || blkSize == 0u || rd == (LosDevRead)0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (blk_find_((const char *)name) >= 0) {
+        return 0 - OS_E_EXIST;
+    }
+    while (i < (UINT32)LOS_MAX_DEVICES) {
+        if (g_devs[i].used == 0u) {
+            slot = (int)i;
+            i = (UINT32)LOS_MAX_DEVICES;
+        } else {
+            i++;
+        }
+    }
+    if (slot < 0) {
+        return 0 - OS_E_NOMEM;
+    }
+    g_devs[slot].used = 1u;
+    g_devs[slot].blk_size = (u32)blkSize;
+    g_devs[slot].blk_count = (u32)blkCount;
+    g_devs[slot].rd = rd;
+    g_devs[slot].wr = wr;
+    (void)strncpy(g_devs[slot].name, (const char *)name,
+                  (size_t)(LOS_DEV_NAME_MAX - 1));
+    g_devs[slot].name[LOS_DEV_NAME_MAX - 1] = '\0';
+    return (INT32)slot;
+}
+
+INT32 LOS_DeviceUnregister(const CHAR *name)
+{
+    int idx = blk_find_((const char *)name);
+
+    if (idx < 0) {
+        return 0 - OS_E_NOENT;
+    }
+    (void)memset((void *)&g_devs[idx], 0, sizeof(g_devs[idx]));
+    return 0;
+}
+
+INT32 LOS_DeviceGet(const CHAR *name)
+{
+    return (INT32)blk_find_((const char *)name);
+}
+
+INT32 LOS_DeviceCount(VOID)
+{
+    u32 i = 0u;
+    u32 n = 0u;
+
+    while (i < (UINT32)LOS_MAX_DEVICES) {
+        if (g_devs[i].used != 0u) {
+            n++;
+        }
+        i++;
+    }
+    return (INT32)n;
+}
+
+INT32 LOS_BlockRead(UINT32 dev, UINT32 blk, UINT32 cnt, VOID *buf)
+{
+    int rc = blk_chk_(dev, blk, cnt, (const VOID *)buf);
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (g_devs[dev].rd == (LosDevRead)0) {
+        return 0 - OS_E_INVAL;
+    }
+    return (INT32)g_devs[dev].rd(dev, blk, cnt, buf);
+}
+
+INT32 LOS_BlockWrite(UINT32 dev, UINT32 blk, UINT32 cnt, const VOID *buf)
+{
+    int rc = blk_chk_(dev, blk, cnt, buf);
+
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    if (g_devs[dev].wr == (LosDevWrite)0) {
+        return 0 - OS_E_ROFS;              /* 只读设备 */
+    }
+    return (INT32)g_devs[dev].wr(dev, blk, cnt, buf);
+}
+
+UINT32 LOS_BlockSize(UINT32 dev)
+{
+    if (dev >= (UINT32)LOS_MAX_DEVICES || g_devs[dev].used == 0u) {
+        return 0u;
+    }
+    return (UINT32)g_devs[dev].blk_size;
+}
+
+UINT32 LOS_BlockCount(UINT32 dev)
+{
+    if (dev >= (UINT32)LOS_MAX_DEVICES || g_devs[dev].used == 0u) {
+        return 0u;
+    }
+    return (UINT32)g_devs[dev].blk_count;
+}
