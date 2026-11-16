@@ -85,18 +85,19 @@ _win_ovf8:
 
     .align 4
 _win_unf8:
+    /* §299 诊断：**进入处理体时**的 a9 就是那个窗口的 sp。如果高字节是 0
+     * （0x00000000~0x00FFFFFF，不可能是 DRAM/flash），说明窗口里的 a1 本身
+     * 被写成了小整数。记进 RTC 0x50000160 再继续跑（a2/a3 马上会被 l32e
+     * 重新装载，这里借用不影响恢复）。 */
+    extui   a2, a9, 24, 8
+    bnez    a2, 4f
+    movi    a3, 0x50
+    slli    a3, a3, 24
+    s32i    a9, a3, 0x160
+    s32i    a2, a3, 0x164
+4:
     l32e    a0, a9, -16
     l32e    a1, a9, -12
-    /* §298 诊断：填充回来的"调用者 sp"如果高字节是 0（0x00000000~0x00FFFFFF，
-     * 不可能是 DRAM/flash），说明 spill 槽里被写了小整数。把 a9/a1 存进
-     * RTC 0x50000160 并就地停机，抓第一次坏 fill。 */
-    extui   a2, a1, 24, 8
-    bnez    a2, 3f
-    movi    a6, 0x50
-    slli    a6, a6, 24
-    s32i    a9, a6, 0x160
-    s32i    a1, a6, 0x164
-3:
     bnez    a1, 1f
     mov     a1, a9
 1:  l32e    a2, a9,  -8
