@@ -71,6 +71,21 @@ int romfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len);
 int romfs_stat(OsMount *m, const char *rel, LosFsStat *st);
 int romfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de);
 
+/* ramfs.c6：可读写内存后端（M9-1） */
+int ramfs_mount(OsMount *m, void *data);
+int ramfs_umount(OsMount *m);
+int ramfs_open(OsMount *m, const char *rel, u32 flags, void **fh);
+int ramfs_close(OsMount *m, void *fh);
+int ramfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len);
+int ramfs_write(OsMount *m, void *fh, u32 pos, const void *buf, u32 len);
+int ramfs_stat(OsMount *m, const char *rel, LosFsStat *st);
+int ramfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de);
+int ramfs_unlink(OsMount *m, const char *rel);
+int ramfs_mkdir(OsMount *m, const char *rel);
+int ramfs_rmdir(OsMount *m, const char *rel);
+int ramfs_rename(OsMount *m, const char *from, const char *to);
+int ramfs_truncate(OsMount *m, const char *rel, u32 size);
+
 extern OsMount g_os_mounts[OS_MAX_MOUNTS];
 extern OsFile  g_os_files[OS_MAX_FILES];
 

@@ -1,0 +1,606 @@
+/* kernel/ramfs.c6 — 可读写内存文件系统（M9-1）
+ *
+ * 节点用"父指针 + 兄弟链表 + 首子指针"，不引入 dentry 缓存：32 个节点、
+ * 目录深度两三级，线性扫就是最快的做法。
+ *
+ * 数据区复用**内核堆**（kernel/heap.c6 的 os_heap_*），不是在文件系统里另写
+ * 一个分配器 —— 一个内核里只该有一份堆实现（architecture.md §2.1 的同一原则）。
+ * 数据按需 alloc/realloc，删除时 free；每个挂载点一份 arena，所以两个挂载点
+ * 互不影响。
+ */
+#include "c6os/types.h"
+#include "c6os/vfs.h"
+#include "c6os/heap.h"
+#include "c6os/string.h"
+#include "los/los_fs.h"
+
+#define RAMFS_MAX_NODES  32
+#define RAMFS_NAME_MAX   32
+
+#define RAMFS_MAX_MOUNTS 2
+#define RAMFS_ARENA_SIZE (8u * 1024u)
+
+#define RAMFS_NONE 0xffffffffu
+
+typedef struct {
+    u8 *data;
+} RamfsData;
+
+typedef struct {
+    u32 used;
+    u32 dir;              /* 1 = 目录 */
+    u32 parent;
+    u32 sibling;
+    u32 child;
+    u32 size;
+    u32 cap;
+    u8 *data;
+    char name[RAMFS_NAME_MAX];
+} RamfsNode;
+
+typedef struct {
+    u32 nodes;
+    RamfsNode n[RAMFS_MAX_NODES];
+    OsHeap heap;
+    u8 arena[RAMFS_ARENA_SIZE];
+} Ramfs;
+
+static Ramfs g_ramfs[RAMFS_MAX_MOUNTS] = {0};
+
+/* ---- 节点表 ------------------------------------------------------------- */
+
+static int ramfsslot_alloc_(Ramfs *pv)
+{
+    u32 i = 1u;                            /* 0 号永远是根 */
+
+    while (i < (u32)RAMFS_MAX_NODES) {
+        if (pv->n[i].used == 0u) {
+            return (int)i;
+        }
+        i++;
+    }
+    return 0 - OS_E_NOMEM;
+}
+
+static int ramfsfind_(Ramfs *pv, u32 parent, const char *name)
+{
+    u32 c = pv->n[parent].child;
+
+    while (c != RAMFS_NONE) {
+        if (os_str_eq(pv->n[c].name, name) == 1) {
+            return (int)c;
+        }
+        c = pv->n[c].sibling;
+    }
+    return -1;
+}
+
+static void ramfslink_(Ramfs *pv, u32 parent, u32 node)
+{
+    pv->n[node].parent = parent;
+    pv->n[node].sibling = pv->n[parent].child;
+    pv->n[parent].child = node;
+}
+
+static void ramfsunlink_(Ramfs *pv, u32 node)
+{
+    u32 parent = pv->n[node].parent;
+    u32 c = 0u;
+    u32 prev = RAMFS_NONE;
+
+    if (parent == RAMFS_NONE || parent >= (u32)RAMFS_MAX_NODES) {
+        return;
+    }
+    c = pv->n[parent].child;
+    while (c != RAMFS_NONE) {
+        if (c == node) {
+            if (prev == RAMFS_NONE) {
+                pv->n[parent].child = pv->n[c].sibling;
+            } else {
+                pv->n[prev].sibling = pv->n[c].sibling;
+            }
+            pv->n[c].sibling = RAMFS_NONE;
+            return;
+        }
+        prev = c;
+        c = pv->n[c].sibling;
+    }
+}
+
+static int ramfsnode_new_(Ramfs *pv, u32 parent, const char *name, u32 dir)
+{
+    int slot = ramfsslot_alloc_(pv);
+    u32 k = 0u;
+
+    if (slot < 0) {
+        return slot;
+    }
+    k = (u32)slot;
+    (void)memset((void *)&pv->n[k], 0, sizeof(pv->n[k]));
+    pv->n[k].used = 1u;
+    pv->n[k].dir = dir;
+    pv->n[k].parent = parent;
+    pv->n[k].sibling = RAMFS_NONE;
+    pv->n[k].child = RAMFS_NONE;
+    os_str_cpy(pv->n[k].name, name, (u32)RAMFS_NAME_MAX);
+    ramfslink_(pv, parent, k);
+    return slot;
+}
+
+/* 按相对路径找节点；create/dir_new 控制最后一段不存在时是否新建。 */
+static int ramfswalk_(Ramfs *pv, const char *rel, u32 create, u32 dir_new)
+{
+    u32 cur = 0u;
+    u32 i = 0u;
+    char seg[RAMFS_NAME_MAX] = {0};
+
+    if (rel[0] == '\0') {
+        return 0;                          /* 根 */
+    }
+    for (;;) {
+        u32 sn = 0u;
+        u32 last = 0u;
+        int next = 0;
+
+        while (rel[i] != '\0' && rel[i] != '/') {
+            if (sn + 1u >= (u32)RAMFS_NAME_MAX) {
+                return 0 - OS_E_INVAL;
+            }
+            seg[sn] = rel[i];
+            sn++;
+            i++;
+        }
+        seg[sn] = '\0';
+        if (sn == 0u) {
+            return 0 - OS_E_INVAL;
+        }
+        if (pv->n[cur].dir == 0u) {
+            return 0 - OS_E_INVAL;         /* 中间段不是目录 */
+        }
+        last = (rel[i] == '\0') ? 1u : 0u;
+        next = ramfsfind_(pv, cur, seg);
+        if (next < 0) {
+            if (create == 0u || last == 0u) {
+                return 0 - OS_E_NOENT;
+            }
+            next = ramfsnode_new_(pv, cur, seg, dir_new);
+            if (next < 0) {
+                return next;
+            }
+        }
+        cur = (u32)next;
+        if (last != 0u) {
+            return (int)cur;
+        }
+        i++;                               /* 吃掉 '/' */
+    }
+}
+
+static int ramfsensure_(Ramfs *pv, u32 idx, u32 need)
+{
+    u32 cap = pv->n[idx].cap;
+    u32 ncap = 0u;
+    u8 *p = (u8 *)0;
+
+    if (need <= cap) {
+        return 0;
+    }
+    ncap = (cap == 0u) ? 256u : cap;
+    while (ncap < need) {
+        ncap = ncap * 2u;
+    }
+    if (pv->n[idx].data == (u8 *)0) {
+        p = (u8 *)os_heap_alloc(&pv->heap, ncap);
+    } else {
+        p = (u8 *)os_heap_realloc(&pv->heap, (void *)pv->n[idx].data, ncap);
+    }
+    if (p == (u8 *)0) {
+        return 0 - OS_E_NOMEM;
+    }
+    pv->n[idx].data = p;
+    pv->n[idx].cap = ncap;
+    return 0;
+}
+
+static void ramfsdrop_(Ramfs *pv, u32 idx)
+{
+    if (pv->n[idx].data != (u8 *)0) {
+        (void)os_heap_free(&pv->heap, (void *)pv->n[idx].data);
+        pv->n[idx].data = (u8 *)0;
+    }
+    pv->n[idx].cap = 0u;
+    pv->n[idx].size = 0u;
+}
+
+/* ---- 后端接口 ----------------------------------------------------------- */
+
+int ramfs_mount(OsMount *m, void *data)
+{
+    Ramfs *pv = (Ramfs *)0;
+    u32 slot = 0xffffffffu;
+    u32 i = 0u;
+
+    (void)data;
+    while (i < (u32)OS_MAX_MOUNTS) {
+        if (&g_os_mounts[i] == m) {
+            slot = i;
+        }
+        i++;
+    }
+    if (slot == 0xffffffffu || slot >= (u32)RAMFS_MAX_MOUNTS) {
+        return 0 - OS_E_NOMEM;
+    }
+    pv = &g_ramfs[slot];
+    (void)memset((void *)pv, 0, sizeof(*pv));
+    os_heap_init(&pv->heap, (void *)pv->arena, (u32)RAMFS_ARENA_SIZE);
+
+    /* 根目录 */
+    pv->n[0].used = 1u;
+    pv->n[0].dir = 1u;
+    pv->n[0].parent = RAMFS_NONE;
+    pv->n[0].sibling = RAMFS_NONE;
+    pv->n[0].child = RAMFS_NONE;
+    pv->n[0].name[0] = '\0';
+    pv->nodes = 1u;
+
+    m->priv = pv;
+          /* 值 → 胖指针，self = &g_ramfs[slot] */
+    return 0;
+}
+
+int ramfs_umount(OsMount *m)
+{
+    (void)m;
+    return 0;
+}
+
+int ramfs_open(OsMount *m, const char *rel, u32 flags, void **fh)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    u32 creat = ((flags & (u32)LOS_O_CREAT) != 0u) ? 1u : 0u;
+    u32 exist = 0u;
+    int idx = 0;
+
+    if (fh == (void **)0) {
+        return 0 - OS_E_INVAL;
+    }
+    if (rel[0] == '\0') {
+        return 0 - OS_E_ISDIR;             /* 不能把根当文件打开 */
+    }
+    exist = 1u;
+    idx = ramfswalk_(pv, rel, 0u, 0u);
+    if (idx < 0) {
+        exist = 0u;
+        if (creat == 0u) {
+            return idx;
+        }
+        idx = ramfswalk_(pv, rel, 1u, 0u);
+        if (idx < 0) {
+            return idx;
+        }
+    } else if ((flags & (u32)LOS_O_EXCL) != 0u && creat != 0u) {
+        return 0 - OS_E_EXIST;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    if (exist != 0u && (flags & (u32)LOS_O_TRUNC) != 0u) {
+        ramfsdrop_(pv, (u32)idx);
+    }
+    *fh = (void *)(u64)((u32)idx + 1u);
+    return 0;
+}
+
+int ramfs_close(OsMount *m, void *fh)
+{
+    (void)m;
+    (void)fh;
+    return 0;
+}
+
+int ramfs_read(OsMount *m, void *fh, u32 pos, void *buf, u32 len)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    u32 idx = (u32)(u64)fh - 1u;
+    u32 n = 0u;
+
+    if (fh == (void *)0 || idx >= (u32)RAMFS_MAX_NODES) {
+        return 0 - OS_E_BADF;
+    }
+    if (pv->n[idx].used == 0u) {
+        return 0 - OS_E_BADF;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    if (pos >= pv->n[idx].size) {
+        return 0;
+    }
+    n = pv->n[idx].size - pos;
+    if (n > len) {
+        n = len;
+    }
+    if (n > 0u) {
+        (void)memcpy(buf, (const void *)(pv->n[idx].data + pos), (size_t)n);
+    }
+    return (int)n;
+}
+
+int ramfs_write(OsMount *m, void *fh, u32 pos, const void *buf, u32 len)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    u32 idx = (u32)(u64)fh - 1u;
+    int rc = 0;
+
+    if (fh == (void *)0 || idx >= (u32)RAMFS_MAX_NODES) {
+        return 0 - OS_E_BADF;
+    }
+    if (pv->n[idx].used == 0u) {
+        return 0 - OS_E_BADF;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    if (len == 0u) {
+        return 0;
+    }
+    rc = ramfsensure_(pv, idx, pos + len);
+    if (rc != 0) {
+        return rc;
+    }
+    (void)memcpy((void *)(pv->n[idx].data + pos), buf, (size_t)len);
+    if (pos + len > pv->n[idx].size) {
+        pv->n[idx].size = pos + len;
+    }
+    return (int)len;
+}
+
+int ramfs_stat(OsMount *m, const char *rel, LosFsStat *st)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int idx = 0;
+
+    if (st == (LosFsStat *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    idx = ramfswalk_(pv, rel, 0u, 0u);
+    if (idx < 0) {
+        return idx;
+    }
+    st->size = pv->n[idx].size;
+    st->type = (pv->n[idx].dir != 0u) ? (UINT32)LOS_FS_TYPE_DIR
+                                      : (UINT32)LOS_FS_TYPE_FILE;
+    st->mode = 0u;
+    st->mtime = 0u;
+    return 0;
+}
+
+int ramfs_readdir(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int dir = 0;
+    u32 c = 0u;
+    u32 seen = 0u;
+
+    if (de == (LosFsDirent *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    dir = ramfswalk_(pv, rel, 0u, 0u);
+    if (dir < 0) {
+        return dir;
+    }
+    if (pv->n[dir].dir == 0u) {
+        return 0 - OS_E_INVAL;
+    }
+    c = pv->n[dir].child;
+    while (c != RAMFS_NONE) {
+        if (seen == idx) {
+            os_str_cpy((char *)de->name, pv->n[c].name, (u32)LOS_FS_NAME_MAX);
+            de->type = (pv->n[c].dir != 0u) ? (UINT32)LOS_FS_TYPE_DIR
+                                            : (UINT32)LOS_FS_TYPE_FILE;
+            de->size = pv->n[c].size;
+            return 0;
+        }
+        seen++;
+        c = pv->n[c].sibling;
+    }
+    return 0 - OS_E_NOENT;
+}
+
+int ramfs_unlink(OsMount *m, const char *rel)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int idx = 0;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    idx = ramfswalk_(pv, rel, 0u, 0u);
+    if (idx < 0) {
+        return idx;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;             /* 目录走 rmdir */
+    }
+    ramfsdrop_(pv, (u32)idx);
+    ramfsunlink_(pv, (u32)idx);
+    pv->n[idx].used = 0u;
+    return 0;
+}
+
+int ramfs_mkdir(OsMount *m, const char *rel)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int idx = 0;
+
+    if (pv == (Ramfs *)0 || rel[0] == '\0') {
+        return 0 - OS_E_INVAL;
+    }
+    idx = ramfswalk_(pv, rel, 1u, 1u);
+    if (idx < 0) {
+        return idx;
+    }
+    if (pv->n[idx].dir == 0u) {
+        return 0 - OS_E_EXIST;
+    }
+    return 0;
+}
+
+int ramfs_rmdir(OsMount *m, const char *rel)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int idx = 0;
+
+    if (pv == (Ramfs *)0 || rel[0] == '\0') {
+        return 0 - OS_E_INVAL;
+    }
+    idx = ramfswalk_(pv, rel, 0u, 0u);
+    if (idx < 0) {
+        return idx;
+    }
+    if (pv->n[idx].dir == 0u) {
+        return 0 - OS_E_INVAL;
+    }
+    if (pv->n[idx].child != RAMFS_NONE) {
+        return 0 - OS_E_EXIST;             /* 非空 */
+    }
+    ramfsunlink_(pv, (u32)idx);
+    pv->n[idx].used = 0u;
+    return 0;
+}
+
+/* 只做同父改名：跨目录移动在 M9-1 没有需求，直接拒绝，免得写半套语义。 */
+static void ramfssplit_(const char *rel, char *dir, u32 dirsz, char *name, u32 namesz)
+{
+    u32 i = 0u;
+    u32 slash = 0xffffffffu;
+
+    while (rel[i] != '\0') {
+        if (rel[i] == '/') {
+            slash = i;
+        }
+        i++;
+    }
+    if (slash == 0xffffffffu) {
+        dir[0] = '\0';
+        os_str_cpy(name, rel, namesz);
+        return;
+    }
+    {
+        u32 k = 0u;
+
+        while (k < slash && k + 1u < dirsz) {
+            dir[k] = rel[k];
+            k++;
+        }
+        dir[k] = '\0';
+    }
+    os_str_cpy(name, rel + slash + 1u, namesz);
+}
+
+int ramfs_rename(OsMount *m, const char *from, const char *to)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    char d1[RAMFS_NAME_MAX] = {0};
+    char d2[RAMFS_NAME_MAX] = {0};
+    char n2[RAMFS_NAME_MAX] = {0};
+    int a = 0;
+    int b = 0;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    a = ramfswalk_(pv, from, 0u, 0u);
+    if (a < 0) {
+        return a;
+    }
+    if (ramfswalk_(pv, to, 0u, 0u) >= 0) {
+        return 0 - OS_E_EXIST;
+    }
+    ramfssplit_(from, d1, (u32)RAMFS_NAME_MAX, n2, (u32)RAMFS_NAME_MAX);
+    ramfssplit_(to, d2, (u32)RAMFS_NAME_MAX, n2, (u32)RAMFS_NAME_MAX);
+    if (os_str_eq(d1, d2) == 0) {
+        return 0 - OS_E_INVAL;             /* 跨目录移动没实现 */
+    }
+    b = ramfswalk_(pv, d2, 0u, 0u);
+    if (b < 0) {
+        return b;
+    }
+    if (pv->n[a].parent != (u32)b) {
+        return 0 - OS_E_INVAL;
+    }
+    os_str_cpy(pv->n[a].name, n2, (u32)RAMFS_NAME_MAX);
+    return 0;
+}
+
+int ramfs_truncate(OsMount *m, const char *rel, u32 size)
+{
+    Ramfs *pv = (Ramfs *)m->priv;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    int idx = 0;
+    int rc = 0;
+
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    idx = ramfswalk_(pv, rel, 0u, 0u);
+    if (idx < 0) {
+        return idx;
+    }
+    if (pv->n[idx].dir != 0u) {
+        return 0 - OS_E_ISDIR;
+    }
+    if (size == 0u) {
+        ramfsdrop_(pv, (u32)idx);
+        return 0;
+    }
+    rc = ramfsensure_(pv, (u32)idx, size);
+    if (rc != 0) {
+        return rc;
+    }
+    if (size > pv->n[idx].size) {
+        (void)memset((void *)(pv->n[idx].data + pv->n[idx].size), 0,
+                     (size_t)(size - pv->n[idx].size));
+    }
+    pv->n[idx].size = size;
+    return 0;
+}

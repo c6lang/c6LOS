@@ -345,3 +345,39 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 另外：`LOS_Fs*` 的错误约定是 `-errno`（POSIX 风格），与 LiteOS-M 原文的
 `LOS_ERRNO_*` 不同 —— 见 `include/los/los_fs.h` 顶部说明；函数名与参数顺序
 保持与 LiteOS-M 一致。
+
+### M9-1（ramfs 可读写）已完成
+
+`kernel/ramfs.c6`：32 节点静态池（父指针 + 兄弟链表 + 首子指针），数据走
+**内核堆**（`kernel/heap.c6` 的 `os_heap_alloc/realloc/free`）—— 一个内核里只保留
+一份堆实现，文件系统不再自造分配器。方法：create/write/read/lseek/readdir/
+unlink/mkdir/rmdir/rename（**只支持同父改名**，跨目录搬移没需求就明确拒绝）/
+truncate。`Makefile` 把 `ramfs.c6` 与 `heap.c6` 加进 `C6OS_VFS=1` 的对象列表。
+
+验收：`make check-vfs-ramfs` → `PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/
+mkdir/rmdir/unlink）`；`make check-vfs`（M9-0）与 `make check-vfs-zero`（S3 零侵入）
+同时保持绿。
+
+#### 关于用 c6 的 `interface` 做后端抽象（试过了，暂不采用）
+
+`docs/architecture.md` §12 把 `interface`（胖指针 + 编译器生成 vtable）列为惯用法，
+所以 M9 的第一版后端抽象就是按它写的：`interface LosFs { fs_open/fs_read/... }`，
+romfs/ramfs 各自实现同名方法。结论是**这个 c6 版本上跨 TU 分派不工作**：
+
+1. 编译、链接都过（两条链都试了：c6→LLVM IR→clang，以及探针里的单 TU 用例）；
+2. 但把接口值**存进结构体、在另一个 TU 里调用**时，会跳进 `.bss` 执行 →
+   `v6 #UD` 死循环（qemu `-d int` 里 RIP 落在 `__bss_start` 之后的数据区）；
+3. 单 TU 内（探针、c6 自带 `tests/interface.c6`）是好的；`tests/tu/interface.c6`
+   也只演示了"每个 TU 自己转换、自己调用"，没有演示"一个 TU 生成 vtable、另一个
+   TU 调用"。
+
+顺带两个已经落地的副产品：
+- `interface` 的转换会调编译器运行时 `__tcc_iface_init(&self, &vt, &dst)`，
+  freestanding 链接没有 libtcc1 → 已按 libtcc1 的实现补进 `rt/x86_libc.c` 与
+  `rt/c6rt.c`（与"复用编译器标准库"同一原则：缺的是库）；
+- **c6 走 LLVM IR 时 `static` 函数不是 internal linkage**：两个 TU 里同名的
+  `static` 助手（如 `find_`）在链接期会 `multiple definition`。所以内核文件里的
+  文件级辅助函数一律加本文件前缀（`romfs_find_` / `ramfs_find_`）。
+
+等 c6 的 interface 支持"跨 TU 存值 + 分派"之后再切；在那之前 FS 后端用
+`m->type` 分发（12 个方法、2 个后端，量还可控）。

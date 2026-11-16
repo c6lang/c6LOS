@@ -16,6 +16,126 @@ static OsFsImage   g_img = {0};
 static LosFsStat   g_st = {0};
 static LosFsDirent g_de = {0};
 static char        g_buf[8] = {0};
+static char        g_buf2[24] = {0};
+
+/* M9-1：ramfs 可读写（写 → 读回 → 截断 → 改名 → 建/删目录 → 删除） */
+static int ramfs_case(void)
+{
+    int rc = 0;
+    int fd = 0;
+    u32 n = 0u;
+
+    rc = (int)LOS_FsMount("", "/tmp", "ramfs", (void *)0);
+    if (rc != 0) {
+        port_puts("FAIL: mount ramfs\n");
+        return -1;
+    }
+    fd = (int)LOS_FsOpen("/tmp/a", (UINT32)(LOS_O_RDWR | LOS_O_CREAT));
+    if (fd < 0) {
+        port_puts("FAIL: create /tmp/a\n");
+        return -1;
+    }
+    rc = (int)LOS_FsWrite(fd, "hello ramfs", 11u);
+    if (rc != 11) {
+        port_puts("FAIL: write /tmp/a\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    fd = (int)LOS_FsOpen("/tmp/a", (UINT32)LOS_O_RDONLY);
+    if (fd < 0) {
+        port_puts("FAIL: reopen /tmp/a\n");
+        return -1;
+    }
+    n = 0u;
+    while (n < 24u) {
+        g_buf2[n] = 0;
+        n++;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 11u);
+    if (rc != 11 || g_buf2[0] != 'h' || g_buf2[4] != 'o' || g_buf2[10] != 's') {
+        port_puts("FAIL: readback /tmp/a\n");
+        return -1;
+    }
+    /* lseek 回开头再读 5 字节 */
+    rc = (int)LOS_FsLseek(fd, 0, (UINT32)LOS_SEEK_SET);
+    if (rc != 0) {
+        port_puts("FAIL: lseek\n");
+        return -1;
+    }
+    rc = (int)LOS_FsRead(fd, g_buf2, 5u);
+    if (rc != 5 || g_buf2[0] != 'h' || g_buf2[4] != 'o') {
+        port_puts("FAIL: reread after lseek\n");
+        return -1;
+    }
+    (void)LOS_FsClose(fd);
+
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) != 0 || g_st.size != 11u) {
+        port_puts("FAIL: stat /tmp/a size\n");
+        return -1;
+    }
+    g_de.name[0] = '\0';
+    if ((int)LOS_FsReaddir("/tmp", 0u, &g_de) != 0) {
+        port_puts("FAIL: readdir /tmp\n");
+        return -1;
+    }
+    if (g_de.name[0] != 'a' || g_de.name[1] != '\0') {
+        port_puts("FAIL: readdir /tmp 里不是 a\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsTruncate("/tmp/a", 5u) != 0) {
+        port_puts("FAIL: truncate\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) != 0 || g_st.size != 5u) {
+        port_puts("FAIL: truncate 后 size\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsRename("/tmp/a", "/tmp/b") != 0) {
+        port_puts("FAIL: rename\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/a", &g_st) >= 0) {
+        port_puts("FAIL: rename 后旧名字还在\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    if ((int)LOS_FsStat("/tmp/b", &g_st) != 0) {
+        port_puts("FAIL: rename 后新名字不在\n");
+        return -1;
+    }
+
+    if ((int)LOS_FsMkdir("/tmp/d") != 0) {
+        port_puts("FAIL: mkdir\n");
+        return -1;
+    }
+    g_st.size = 0u;
+    g_st.type = 0u;
+    if ((int)LOS_FsStat("/tmp/d", &g_st) != 0 ||
+        g_st.type != (UINT32)LOS_FS_TYPE_DIR) {
+        port_puts("FAIL: stat /tmp/d\n");
+        return -1;
+    }
+    if ((int)LOS_FsRmdir("/tmp/d") != 0) {
+        port_puts("FAIL: rmdir\n");
+        return -1;
+    }
+    if ((int)LOS_FsUnlink("/tmp/b") != 0) {
+        port_puts("FAIL: unlink\n");
+        return -1;
+    }
+    if ((int)LOS_FsOpen("/tmp/b", (UINT32)LOS_O_RDONLY) >= 0) {
+        port_puts("FAIL: unlink 后还能打开\n");
+        return -1;
+    }
+    port_puts("vfs: ramfs 写-读回-lseek-截断-改名-mkdir/rmdir-unlink 全通\n");
+    return 0;
+}
 
 void os_main(void)
 {
@@ -140,4 +260,9 @@ void os_main(void)
     port_puts("vfs: 错误路径（不存在/只读/是目录）都按预期报错\n");
 
     port_puts("PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）\n");
+
+    if (ramfs_case() != 0) {
+        return;
+    }
+    port_puts("PASS: vfs M9-1（ramfs：写/读回/lseek/截断/改名/mkdir/rmdir/unlink）\n");
 }

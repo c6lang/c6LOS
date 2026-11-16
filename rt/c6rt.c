@@ -107,3 +107,16 @@ unsigned int strnlen(const char *s, unsigned int n)
     while (i < n && s[i] != '\0') { i++; }
     return i;
 }
+
+/* ---- c6 编译器运行时的 interface helper（
+ * tcc/lib/libtcc1.c 里是同一份实现）---------------------------------------
+ * `interface` 的转换会生成 `__tcc_iface_init(&struct, &vtable, &tmp)`：
+ * 把 {self, vt} 两个机器字写进目标。freestanding 链接没有 libtcc1，
+ * 所以这里补上（与"复用编译器标准库"同一原则：缺的是库，不是模块）。 */
+void __tcc_iface_init(void *self, const void *vt, void *dst)
+{
+    void **d = (void **)dst;
+
+    d[0] = self;
+    d[1] = (void *)vt;
+}

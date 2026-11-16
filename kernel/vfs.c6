@@ -158,6 +158,8 @@ int os_vfs_mount(const char *dev, const char *path, const char *type, void *data
 
     if (os_str_eq(type, "romfs") == 1) {
         rc = romfs_mount(&g_os_mounts[slot], data);
+    } else if (os_str_eq(type, "ramfs") == 1) {
+        rc = ramfs_mount(&g_os_mounts[slot], data);
     } else {
         rc = 0 - OS_E_INVAL;
     }
@@ -178,6 +180,8 @@ int os_vfs_umount(const char *path)
         if (g_os_mounts[i].used != 0u && os_str_eq(g_os_mounts[i].path, path) == 1) {
             if (os_str_eq(g_os_mounts[i].type, "romfs") == 1) {
                 (void)romfs_umount(&g_os_mounts[i]);
+            } else if (os_str_eq(g_os_mounts[i].type, "ramfs") == 1) {
+                (void)ramfs_umount(&g_os_mounts[i]);
             }
             g_os_mounts[i].used = 0u;
             g_os_mounts[i].priv = (void *)0;
