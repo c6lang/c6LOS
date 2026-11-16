@@ -274,6 +274,7 @@ DHCP/DNS（先用静态 IP）、S3 闭源 WiFi 栈（`docs/wifi-plan.md`）。
 | 定时 | `os_timeout`/`tick`/`swtmr` | TCP 重传、`sal_select` 超时 |
 | 中断 | `hwi.c6` | 网卡中断只做"搬包 + post sem"；ATA 仍用 PIO 轮询 |
 | 错误码 | `LOS_ERRNO_*`（`api.md` §4） | VFS/SAL 出口统一翻译，内部用 errno 风格 |
+| 运行库 | `include/c6os/string.h`（`rt/c6rt.c` / `rt/x86_libc.c` 提供实现） | **一律复用** `memcpy/memset/strlen/strcmp/strncpy`，不手搓循环；见 `architecture.md` §2.1 |
 | ABI | `architecture.md` §3 | 跨 C 边界只传 `void*`/`u32`/`u64`/函数指针 |
 
 ## 5. 里程碑与验收（汇总）

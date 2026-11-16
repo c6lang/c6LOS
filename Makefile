@@ -20,6 +20,10 @@ S3_SHIM_ABI ?= windowed
 # ---- Linux ELF 二进制兼容层（personality，见 docs/linux-abi.md）----------
 # 默认关闭：kernel/linux/ 不参与任何目标的编译，镜像尺寸零影响。
 LINUX_ABI ?= 0
+
+# ---- M9：VFS/文件系统（见 docs/vfs-net-design.md）-------------------------
+# 默认关闭：C6OS_VFS=0 时 kernel/vfs.c6 等完全不参与编译，镜像尺寸零影响。
+C6OS_VFS ?= 0
 # 各 port 的能力位（include/c6os/caps.h）：MMU|USER|IRQ_USER = 7
 CAPS_X86  := 7
 CAPS_S3   := 0
@@ -955,7 +959,10 @@ toolchain-info:
 X86        := build/x86
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
               -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI)
-X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
+# c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
+# 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
+# （≈127.5KB），M9 的 VFS 一加就爆。这里统一开 -O1。
+X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2 -O1
 X86S_NAME  ?= sched
 X86S_MAIN  ?= tests/t_x86_sched.c6
 X86S_DIR   := $(X86)/$(X86S_NAME)
@@ -964,8 +971,23 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
+endif
+
+# M9：VFS 子系统只在完整内核目标上编（Linux ABI 侧的对接在 M9-4）。
+ifeq ($(C6OS_VFS),1)
+ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
+$(error C6OS_VFS=1 暂不接在 user/elf/fs/dyn 上（Linux ABI 侧的对接在 M9-4）
+endif
+X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/fsapi.c6
+# vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
+# 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
+ifneq ($(filter user elf fs dyn vfs,$(X86S_NAME)),)
+X86S_OBJ_EXTRA :=
+else
+X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
+endif
 endif
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
@@ -987,7 +1009,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -997,6 +1019,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o
 endif
+
+X86S_OBJ += $(X86S_OBJ_EXTRA)
 
 x86: caps-check-x86 $(X86)/disk.img
 
@@ -1300,6 +1324,29 @@ $(PRE_IMG): $(PRE_ELF) $(X86)/dyn-disk.img
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(PRE_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
+x86-vfs: caps-check-x86
+	$(MAKE) X86S_NAME=vfs X86S_MAIN=tests/t_vfs.c6 C6OS_VFS=1 \
+		$(X86)/vfs-disk.img
+
+run-x86-vfs: x86-vfs
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+check-vfs: x86-vfs
+	@timeout 40 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/vfs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^PASS: vfs M9-0" \
+	  && echo "PASS: vfs M9-0（romfs 挂载 + stat/open/read/readdir）" \
+	  || { echo "FAIL: vfs M9-0"; exit 1; }
+
+# 零侵入：C6OS_VFS=0 时 S3 的对象列表里不该出现任何 VFS 源文件
+check-vfs-zero:
+	@n=$$(make -n s3 2>/dev/null | grep -c "kernel/vfs.c6"); \
+	 test "$$n" = "0" \
+	  && echo "PASS: C6OS_VFS=0 时 S3 不编 VFS（零侵入）" \
+	  || { echo "FAIL: VFS 漏进 S3 对象列表"; exit 1; }
+
 check-linuxabi-l8: $(PRE_IMG)
 	@timeout 20 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(PRE_IMG),if=ide \
@@ -1390,6 +1437,10 @@ DISK_DEPS  := $(LS_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(LS_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),vfs)
+DISK_DEPS  := $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),dyn)
 DISK_DEPS  := $(DYN_ELF) $(DYNFS)
 DISK_MB    := 16

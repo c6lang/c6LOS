@@ -77,3 +77,84 @@ unsigned long long __umoddi3(unsigned long long a, unsigned long long b)
     }
     return r;
 }
+
+/* ---- 字符串（标准库，全内核共用一份实现）--------------------------------
+ * 之前只补了 memcpy/memmove/memset，VFS/协议栈这些"按名字找东西"的模块一
+ * 上来就要 strlen/strcmp/strncpy。与其每个模块手搓，不如在这里补齐——
+ * 和 rt/c6rt.c（freestanding 目标）保持同一组符号。 */
+
+unsigned long strlen(const char *s)
+{
+    unsigned long n = 0;
+
+    while (s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+unsigned long strnlen(const char *s, unsigned long max)
+{
+    unsigned long n = 0;
+
+    while (n < max && s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    unsigned long i = 0;
+
+    while (a[i] != '\0' && b[i] != '\0') {
+        if (a[i] != b[i]) {
+            return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+        }
+        i++;
+    }
+    return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+}
+
+int strncmp(const char *a, const char *b, unsigned long n)
+{
+    unsigned long i = 0;
+
+    while (i < n && a[i] != '\0' && b[i] != '\0') {
+        if (a[i] != b[i]) {
+            return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+        }
+        i++;
+    }
+    if (i == n) {
+        return 0;
+    }
+    return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+}
+
+char *strcpy(char *dst, const char *src)
+{
+    unsigned long i = 0;
+
+    while (src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+    return dst;
+}
+
+char *strncpy(char *dst, const char *src, unsigned long n)
+{
+    unsigned long i = 0;
+
+    while (i < n && src[i] != '\0') {
+        dst[i] = src[i];
+        i++;
+    }
+    while (i < n) {
+        dst[i] = '\0';
+        i++;
+    }
+    return dst;
+}
