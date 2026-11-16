@@ -27,6 +27,33 @@ static LxProc  g_proc[LX_MAX_PROC];
 static LxPipe  g_pipe[LX_MAX_PIPE];
 static u8      g_kstack[LX_MAX_PROC][LX_KSTACK_SIZE];
 static int     g_cur = -1;
+
+/* L8：抢占。定时器每 tick 进来一次，攒够时间片就让出 CPU。 */
+#define LX_SLICE_TICKS 2u
+
+static u32 g_irq_ticks;
+static u32 g_preempt_switch;
+static u32 g_slice;
+
+static void pdec_(u32 v)
+{
+    char b[12];
+    u32 k = 0u;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u && k < 11u) {
+        b[k] = (char)('0' + (int)(v % 10u));
+        v /= 10u;
+        k++;
+    }
+    while (k > 0u) {
+        k--;
+        port_putc((int)b[k]);
+    }
+}
 static u64     g_pid_next = 1ull;
 static int     g_resched;
 
@@ -170,7 +197,10 @@ static int pick_next_(int from)
 {
     int i;
 
-    for (i = 1; i <= (int)LX_MAX_PROC; i++) {
+    /* i 只能到 LX_MAX_PROC-1：resched_ 在调用前已经把"当前"置成 READY，
+     * 若循环最后一圈绕回 from，(from + LX_MAX_PROC) % LX_MAX_PROC == from，
+     * 就会把当前槽位自己挑出来 -> switch_to_(自己) 用陈旧 ksp 自切换、换坏栈。 */
+    for (i = 1; i < (int)LX_MAX_PROC; i++) {
         int k = (from + i) % (int)LX_MAX_PROC;
 
         if (g_proc[k].state == LX_P_READY) {
@@ -189,6 +219,11 @@ static void switch_to_(int next)
     u64 prev_sp;
 
     if (c != (LxProc *)0) {
+        if (c->irq_frame != 0u) {
+            /* 被定时器切走的次数：这里数最准 —— 抢占后的 resched_ 要等这个
+             * 进程再被调度回来才返回，那时候 g_cur 早就变回去了。 */
+            g_preempt_switch++;
+        }
         /* 让出前必须把**活**的 brk/mmap_top 存回自己的 PCB —— 否则切回来时
          * lx_set_as 那几行会用陈旧值把 g_brk/g_mmap_top 还原，后续 mmap 就会
          * 和已有映射重叠（pthread 的 8MB 栈一出现就必炸）。 */
@@ -205,12 +240,13 @@ static void switch_to_(int next)
     lx_fs_set_fdtab(p->fd);
     port_user_set_kstack(p->kstack_top);
     port_user_set_fsbase(p->fs_base);
-    if (p->started != 0u) {
+    if (p->started == 0u) {
+        lx_sig_deliver_frame(p, &p->f);     /* 还没跑过：p->f 的快照才是权威 */
+    } else if (p->irq_frame == 0u) {
         /* 陷入帧固定在内核栈顶 128 字节（x86_syscall_entry 压的 16 个寄存器），
-         * 阻塞/让出都不会挪动它 —— p->f 只有"首次启动"时才是权威的。 */
+         * 阻塞/让出都不会挪动它。被定时器抢占的进程例外：活帧是 20 个 qword
+         * （15 寄存器 + 硬件帧），这种就延后到它下次系统调用返回再投递。 */
         lx_sig_deliver_frame(p, (LxFrame *)(p->kstack_top - (u64)sizeof(LxFrame)));
-    } else {
-        lx_sig_deliver_frame(p, &p->f);
     }
     x86_resume_frame = (u64)(&p->f);
     if (c == (LxProc *)0) {
@@ -254,6 +290,28 @@ void lx_sched_tick(void)
     }
     g_resched = 0;
     resched_();
+}
+
+/* L8：定时器 tick（只从 ring3 的 IRQ 路径进来）。到点就让出一次 CPU；
+ * 被抢占的进程重新上 CPU 时从这里继续返回它的中断帧。 */
+void lx_sched_preempt(void)
+{
+    LxProc *c = cur_();
+    int before;
+
+    if (c == (LxProc *)0 || c->state != LX_P_RUN) {
+        return;
+    }
+    g_irq_ticks++;
+    g_slice++;
+    if (g_slice < LX_SLICE_TICKS) {
+        return;
+    }
+    g_slice = 0u;
+    c->irq_frame = 1u;
+    resched_();
+    c->irq_frame = 0u;
+    (void)before;
 }
 
 void lx_proc_block(void)
@@ -396,6 +454,11 @@ void lx_proc_exit(u64 code)
         }
     }
     wake_(c->ppid);
+    port_puts("\n[preempt] ticks=");
+    pdec_(g_irq_ticks);
+    port_puts(" switch=");
+    pdec_(g_preempt_switch);
+    port_puts("\n");
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");

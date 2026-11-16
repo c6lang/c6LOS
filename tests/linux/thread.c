@@ -26,7 +26,7 @@ static void *worker(void *arg)
     int i;
 
     for (i = 0; i < 100; i++) {
-        counter++;
+        __sync_fetch_and_add(&counter, 1);   /* 抢占后普通 ++ 会丢更新 */
     }
     for (i = 0; i < 20; i++) {
         pthread_mutex_lock(&lock);

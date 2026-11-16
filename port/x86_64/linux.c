@@ -3,6 +3,9 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 
+extern void x86_timer_entry(void);
+extern void port_linux_timer_init(void);
+
 /* x86-64 特权级底座：GDT（含 DPL3 用户段）+ TSS + 系统调用门。
  *
  * 选择子布局刻意与 Linux 一致，便于 syscall/sysret 的 STAR 语义：
@@ -221,6 +224,48 @@ void port_linux_arch_init(void)
         wrmsr(0xc0000082u, (u32)(ent & 0xffffffffull), (u32)(ent >> 32));  /* LSTAR */
         wrmsr(0xc0000084u, 0x600u, 0u);                 /* SFMASK: 清 IF|DF */
     }
+    port_linux_timer_init();                            /* L8：抢占的定时源 */
+}
+
+static void outb_(u16 port, u8 v)
+{
+    __asm__ __volatile__("outb %0, %1" : : "a"(v), "Nd"(port));
+}
+
+/* L8 抢占：PIC 重映射到 0x20，只开 IRQ0；PIT 约 200Hz。
+ * 中断门是 0x8E（进内核自动清 IF），所以内核里永远不会被打断 —— 抢占只发生在
+ * ring3，这正是 IRQ_USER 的语义。 */
+void port_linux_timer_init(void)
+{
+    u32 div = 1193182u / 200u;
+
+    outb_(0x20u, 0x11u);               /* ICW1：需要 ICW4 */
+    outb_(0xA0u, 0x11u);
+    outb_(0x21u, 0x20u);               /* ICW2：主片 → 0x20 */
+    outb_(0xA1u, 0x28u);               /*       从片 → 0x28 */
+    outb_(0x21u, 0x04u);               /* ICW3：从片挂在主片 IRQ2 */
+    outb_(0xA1u, 0x02u);
+    outb_(0x21u, 0x01u);               /* ICW4：8086 模式 */
+    outb_(0xA1u, 0x01u);
+    outb_(0x21u, 0xFEu);               /* 只放开 IRQ0（定时器） */
+    outb_(0xA1u, 0xFFu);
+
+    outb_(0x43u, 0x36u);               /* 通道 0，先低后高，模式 3 */
+    outb_(0x40u, (u8)(div & 0xFFu));
+    outb_(0x40u, (u8)((div >> 8) & 0xFFu));
+
+    x86_idt_set(0x20, x86_timer_entry, 0u);
+}
+
+/* 定时器中断：先 EOI（否则再也收不到 tick），再给调度器一次机会。
+ * 这里可能切到别的进程；切回来以后继续返回，rax..r15 原样弹回用户态。 */
+static u32 g_dbg_ticks;
+
+void x86_timer_dispatch(LxRegs *r)
+{
+    (void)r;
+    outb_(0x20u, 0x20u);
+    lx_sched_preempt();
 }
 
 /* L5：切进程时同时换 syscall 入口用的内核栈和 TSS.RSP0（int 0x80 用后者）。 */

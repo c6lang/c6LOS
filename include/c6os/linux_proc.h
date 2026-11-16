@@ -82,6 +82,7 @@ typedef struct LxProc {
     u32 alt_flags;
     u32 killed;                   /* wait4 状态：0=正常退出，1=被信号杀 */
     u32 started;                  /* 已经进过用户态：陷入帧在内核栈顶，不在 f 里 */
+    u32 irq_frame;                /* 当前活帧是"定时器中断帧"（20 个 qword） */
     u32 sig_code[LX_NSIG];
     LxSigAction sa[LX_NSIG];
     LxFile fd[C6OS_LINUX_MAX_FD];
@@ -106,6 +107,7 @@ u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
+void     lx_sched_preempt(void);
 u64      lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
                               u64 ctid, u64 tls);
 u64      lx_proc_set_tid_address(u64 ptr);

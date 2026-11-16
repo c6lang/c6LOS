@@ -16,7 +16,7 @@ port_user_enter:
     movq %rcx, %rdi              /* 用户程序拿到 arg */
     pushq $0x23                  /* SS  = 用户数据 0x20 | 3 */
     pushq %rdx                   /* RSP */
-    pushq $0x2                   /* RFLAGS：IF=0（L1 先屏蔽中断；L2 接 IRQ_USER） */
+    pushq $0x202                 /* RFLAGS：IF=1 —— 抢占式调度靠用户态中断 */
     pushq $0x2b                  /* CS  = 用户代码 0x28 | 3 */
     pushq %rsi                   /* RIP */
     xorq %rax, %rax
@@ -230,6 +230,49 @@ x86_exc_common:
     popq %rbx
     popq %rax
     addq $16, %rsp                       /* 丢掉 vec 与 err */
+    iretq
+
+/* ---- 定时器（IRQ0 → 向量 0x20）-----------------------------------------
+ *
+ * 从 ring3 进来时 CPU 已经用 TSS.RSP0 换到本进程的内核栈，并压好了
+ * [RIP, CS, RFLAGS, RSP, SS]。这里只补 15 个通用寄存器交给 C，处理完
+ * 原样弹回去 iretq —— 注意**不能**套用 x86_ret_to_user：那条路要用 rcx
+ * 和 r11 装 RIP/RFLAGS，而中断必须原封不动保留用户的 rcx/r11。
+ */
+.globl x86_timer_entry
+x86_timer_entry:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, %rdi
+    call x86_timer_dispatch
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
     iretq
 
 .section .data

@@ -1274,6 +1274,27 @@ $(THR_IMG): $(THR_ELF) $(X86)/dyn-disk.img
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(THR_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
+PRE_ELF := $(X86)/preempt.elf
+PRE_IMG := $(X86)/preempt-disk.img
+
+$(PRE_ELF): tests/linux/preempt.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(PRE_IMG): $(PRE_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(PRE_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-l8: $(PRE_IMG)
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(PRE_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot \
+		> $(X86)/preempt.log 2>&1 || true
+	@grep -q "^preempt: parent runs while child spins" $(X86)/preempt.log \
+	  && grep -q "^\[preempt\] ticks=.*switch=[1-9]" $(X86)/preempt.log \
+	  && echo "PASS: linux-abi L8（抢占：ring3 定时器中断 + 时间片轮转）" \
+	  || { echo "FAIL: linux-abi L8"; exit 1; }
+
 check-linuxabi-l7: $(THR_IMG)
 	@timeout 60 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(THR_IMG),if=ide \

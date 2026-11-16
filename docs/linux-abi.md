@@ -1,7 +1,9 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：**L0–L7 全梯子已跑通** —— 未修改的动态 `busybox` 能跑 `sh` 管道，信号能
-> 捕获/恢复，`pthread` 4 线程 + mutex 计数正确。Tier 3 完成· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：**L0–L8 全梯子已跑通** —— 未修改的动态 `busybox` 能跑 `sh` 管道，信号能
+> 捕获/恢复，`pthread` 4 线程 + mutex 计数正确，调度已是**抢占式**（ring3 定时器
+> 中断 + 时间片轮转）。范围：只保证"跑得动这类未修改二进制"，不含网络，文件系统
+> 是只读 initramfs（见 §11）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -19,6 +21,7 @@
 | L5 进程模型 | **完成** | `make check-linuxabi-l5` → 未修改的 `busybox sh` 跑出 `GOT:hello-from-pipe`（§0.2） |
 | L6 信号 | **完成** | `make check-linuxabi-l6` → `sig: SIGSEGV caught, back via siglongjmp`（§0.3） |
 | L7 线程 | **完成** | `make check-linuxabi-l7` → `thr: 4 threads joined, counter=400, mutex=80`（§0.4） |
+| L8 抢占式调度 | **完成** | `make check-linuxabi-l8` → 子进程纯用户态死循环时父进程仍能跑，内核 `[preempt] ticks=9 switch=1`（§0.5） |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -298,6 +301,42 @@ thr: done
 协作式调度下线程不会被抢占，所以"计数正确"靠的是每个线程一次跑到底 + 共享
 同一份地址空间；抢占要等 `IRQ_USER`（见 §11 的取舍）。
 
+### 0.5 L8 抢占：ring3 的 IF=1 + PIT 定时器
+
+- 返回用户态时 `RFLAGS.IF=1`（`port_user_enter` 的初始帧和 `x86_ret_to_user` 都
+  带上 IF）；`syscall` 的 `SFMASK=0x600` 清 IF，所以**内核态永远不可抢占** ——
+  等价于"进内核即关中断的临界区"，进程表、页表、fd 表都不需要额外加锁。
+- `port_linux_timer_init()`：PIC 重映射到 0x20/0x28、只放开 IRQ0、PIT 约 200Hz、
+  IDT 上装 0x20 号**中断门**（0x8E，进内核自动清 IF）。
+- `x86_timer_entry`：补 15 个通用寄存器 → `x86_timer_dispatch`（EOI + 让调度器
+  看一眼）→ 原样弹回 `iretq`。这里**不能**复用 `x86_ret_to_user`：那条路拿
+  rcx/r11 装 RIP/RFLAGS，而中断必须原封不动保留用户的 rcx/r11。
+- `lx_sched_preempt()`：每 `LX_SLICE_TICKS`(=2) 个 tick 调一次 `resched_()`。
+  被定时器抢占的进程，活帧是 20 个 qword（15 寄存器 + 硬件帧），不是
+  `kstack_top-128` 那份 LxFrame，所以 `switch_to_` 靠 `LxProc.irq_frame` 判断，
+  这种情况把信号投递延后到它下次系统调用返回。
+
+实测（`make check-linuxabi-l8`，未修改的动态链接程序）：
+
+```
+preempt: parent runs while child spins
+[preempt] ticks=9 switch=1
+```
+
+子进程是**纯用户态死循环**（一次系统调用都不做）：协作式内核里父进程永远回不来，
+现在定时器把它切下去，父进程才拿到 CPU。`ticks` 是 ring3 定时器中断次数，
+`switch` 是"被定时器切走"的次数。
+
+#### 顺手修掉的调度 bug（这个才是第一版的死因）
+
+`pick_next_()` 的循环写成 `i <= LX_MAX_PROC`，最后一圈
+`(from + LX_MAX_PROC) % LX_MAX_PROC == from` 会把**当前槽位自己**返回；而
+`resched_()` 在调用它之前刚把当前置成 READY，于是单进程时必然
+`switch_to_(自己)` —— 用陈旧 `ksp` 自切换，把内核栈换坏（现象是随机 RIP 的
+`#GP` 接三重故障，CPU 日志里 `SP=0000:0`）。协作式调度下 `resched_` 很少在
+"只有自己 READY"时被调用，所以这条一直潜伏；抢占每 2 个 tick 走一次这条路，
+一开就必炸。改成 `i < LX_MAX_PROC`。
+
 ---
 
 ## 1. 定位：personality，不是"移植 Linux"
@@ -470,6 +509,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L5** ✅ | 进程模型：`fork`、`execve`、`wait4`、`pipe`、`poll`、fd 继承 | 未修改的 `busybox sh` 跑通 `echo … \| while read …` 管道，三进程按序退出（§0.2） |
 | **L6** ✅ | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`kill`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`siglongjmp` 恢复；默认动作下 `wait4` 看到 `WIFSIGNALED`（§0.3） |
 | **L7** ✅ | 线程：`clone`、`futex`(WAIT/WAKE)、每线程 FS base、`pthread` | 未修改的 pthread 程序 4 线程 + mutex 计数正确（§0.4） |
+| **L8** ✅ | 抢占式调度：ring3 `IF=1`、PIT 定时器中断、时间片轮转 | 子进程纯用户态死循环时父进程仍能运行，内核计数 `switch≥1`（§0.5） |
 
 每级验收必须在 `make check-linuxabi` 里可复现，且**上一级不退**。
 
@@ -542,6 +582,17 @@ L2 阶段的实际证据与限制：
 ---
 
 ## 11. 明确不做
+
+- **网络（socket）**：一条都没有。`socket/connect/bind/listen/accept/send/recv/
+  setsockopt` 全部走 `-ENOSYS`，也没有网卡驱动或 TCP/IP 栈。initramfs 里的
+  `libresolv.so.2` 只是因为 `busybox` 有 `DT_NEEDED`（必须能加载，不是能用）。
+- **可写文件系统**：文件系统是**只读**的 newc cpio initramfs（内核解析成节点表），
+  fd 只做读；`open` 不带 `O_CREAT/O_WRONLY`，没有 `unlink/mkdir/rename/truncate`、
+  没有 `mount`、也没有块设备上的文件系统（`port_ata_read` 只按裸扇区读 ELF 与
+  initramfs 镜像）。写方向只有 console 和 pipe。
+- 任意发行版二进制的全兼容：只保证本文档里这几个**未修改**的测试二进制
+  （静态 glibc 程序、动态 PIE busybox、信号用例、pthread 用例）跑得动，
+  不追求通用性（见 §7 末尾）。
 
 - 不追求跑任意发行版二进制（缺 `/proc` 全表、`/sys`、cgroup、namespace 就不承诺）；
 - 不支持 32 位 x86 二进制（`int 0x80` 的 i386 ABI 不做）；
