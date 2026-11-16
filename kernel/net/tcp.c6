@@ -1,0 +1,609 @@
+/* kernel/net/tcp.c6 —— TCP 最小子集（M10-4）
+ *
+ * 目标只有一句话：能在 qemu 里对宿主 HTTP 服务发 `GET / HTTP/1.0` 并读到
+ * `200 OK`。所以只做"能跑通一次请求"的那部分：
+ *   - 主动握手（connect）与被动监听（listen/accept）两条路径都实现了；
+ *   - 停止-等待式发送（一次一个未确认段，固定窗口），超时重发；
+ *   - 累计确认、FIN 关闭、RST 直接复位。
+ * 不做：窗口滑动/拥塞控制/SACK/选项（MSS、时间戳都不谈）、乱序重组
+ * （只接受 seq == rcv_nxt 的段，其余回重复 ACK）。
+ *
+ * 环回：目的 IP 是自己时 IpOutput 会把包喂回 IpInput，所以这里的
+ * TcpInput 是**同步递归**进来的（见 g_recursion 的保护，深度上限 4）。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "c6os/port.h"
+#include "los/net.h"
+
+#define TCP_MAX_SOCKS   4u
+#define TCP_RXBUF       1024u
+#define TCP_MSS         512u
+#define TCP_RETRY_MAX   8u
+#define TCP_RTO         2000u      /* TcpTick() 的计数单位，测试里自己数 */
+#define TCP_WIN         1024u
+
+#define TS_CLOSED    0u
+#define TS_LISTEN    1u
+#define TS_SYN_SENT  2u
+#define TS_SYN_RCVD  3u
+#define TS_ESTAB     4u
+#define TS_FIN_WAIT1 5u
+#define TS_CLOSE_WAIT 6u
+#define TS_LAST_ACK  7u
+#define TS_TIME_WAIT 8u
+#define TS_FIN_WAIT2 9u
+
+#define TF_FIN 0x01u
+#define TF_SYN 0x02u
+#define TF_RST 0x04u
+#define TF_PSH 0x08u
+#define TF_ACK 0x10u
+
+typedef struct TcpSock {
+    UINT32 used;
+    UINT32 state;
+    UINT32 parent;              /* 被动打开的连接属于哪个监听者（0xFFFFFFFF = 无） */
+    UINT32 accepted;            /* accept 过没有 */
+    UINT16 lport;
+    UINT32 rip;
+    UINT16 rport;
+    UINT32 iss;
+    UINT32 snd_nxt;
+    UINT32 snd_una;
+    UINT32 snd_wnd;
+    UINT32 rcv_nxt;
+    UINT32 tx_seq;
+    UINT32 tx_len;
+    UINT32 retries;
+    UINT32 last_tick;
+    UINT8  tx[TCP_MSS];
+    UINT32 rx_head;
+    UINT32 rx_len;
+    UINT8  rx[TCP_RXBUF];
+    UINT32 fin_sent;
+    UINT32 fin_recv;
+} TcpSock;
+
+static TcpSock g_tcp[TCP_MAX_SOCKS] = {0};
+static UINT32 g_tick = 0u;
+static UINT32 g_isn = 0x20000u;
+static UINT32 g_eph = 49152u;
+static UINT32 g_recursion = 0u;
+
+static INT32 tcp_err_(INT32 e)
+{
+    return 0 - e;
+}
+
+static TcpSock *tcp_get_(INT32 sd)
+{
+    if (sd < 0 || sd >= (INT32)TCP_MAX_SOCKS) {
+        return (TcpSock *)0;
+    }
+    if (g_tcp[sd].used == 0u) {
+        return (TcpSock *)0;
+    }
+    return &g_tcp[sd];
+}
+
+static INT32 tcp_alloc_(VOID)
+{
+    UINT32 i = 0u;
+    INT32 sd = -1;
+
+    i = 0u;
+    while (i < (UINT32)TCP_MAX_SOCKS) {
+        if (g_tcp[i].used == 0u) {
+            sd = (INT32)i;
+            i = (UINT32)TCP_MAX_SOCKS;
+        } else {
+            i++;
+        }
+    }
+    if (sd < 0) {
+        return -1;
+    }
+    (void)memset((VOID *)&g_tcp[sd], 0, (UINT32)sizeof(TcpSock));
+    g_tcp[sd].used = 1u;
+    g_tcp[sd].parent = 0xFFFFFFFFu;
+    return sd;
+}
+
+/* 组一个 TCP 段发出去。 */
+static INT32 tcp_xmit_(LosNetIf *nif, TcpSock *s, UINT8 flags, UINT32 seq,
+                       UINT32 ack, const UINT8 *data, UINT32 len)
+{
+    LosNetBuf *p = (LosNetBuf *)0;
+    UINT8 *h = (UINT8 *)0;
+    UINT32 i = 0u;
+    UINT16 c = 0u;
+
+    if (nif == (LosNetIf *)0 || s == (TcpSock *)0) {
+        return tcp_err_(22);
+    }
+    if (len > (UINT32)TCP_MSS) {
+        len = (UINT32)TCP_MSS;
+    }
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, (UINT32)LOS_TCP_HLEN + len);
+    if (p == (LosNetBuf *)0) {
+        return tcp_err_(12);
+    }
+    h = &p->data[p->off];
+    NetPut16(&h[0], s->lport);
+    NetPut16(&h[2], s->rport);
+    NetPut32(&h[4], seq);
+    NetPut32(&h[8], ack);
+    h[12] = 0x50u;                       /* data offset = 5 个 32 位字 */
+    h[13] = flags;
+    NetPut16(&h[14], (UINT16)TCP_WIN);
+    NetPut16(&h[16], 0u);
+    NetPut16(&h[18], 0u);
+    i = 0u;
+    while (i < len && data != (const UINT8 *)0) {
+        h[(UINT32)LOS_TCP_HLEN + i] = data[i];
+        i++;
+    }
+    c = NetCsumPseudo(nif->ip, s->rip, (UINT8)LOS_IP_PROTO_TCP, h,
+                      (UINT32)LOS_TCP_HLEN + len);
+    NetPut16(&h[16], c);
+    return IpOutput(nif, s->rip, (UINT8)LOS_IP_PROTO_TCP, p);
+}
+
+static VOID tcp_send_ack_(LosNetIf *nif, TcpSock *s)
+{
+    (void)tcp_xmit_(nif, s, (UINT8)(TF_ACK), s->snd_nxt, s->rcv_nxt,
+                    (const UINT8 *)0, 0u);
+}
+
+/* 把一个段塞进接收缓冲（只接 seq == rcv_nxt 的顺序数据）。 */
+static UINT32 tcp_rx_append_(TcpSock *s, const UINT8 *data, UINT32 len)
+{
+    UINT32 room = (UINT32)TCP_RXBUF - s->rx_len;
+    UINT32 i = 0u;
+    UINT32 n = len;
+
+    if (n > room) {
+        n = room;                       /* 溢出的部分丢掉（窗口只有 1KB） */
+    }
+    i = 0u;
+    while (i < n) {
+        s->rx[(s->rx_head + s->rx_len + i) % (UINT32)TCP_RXBUF] = data[i];
+        i++;
+    }
+    s->rx_len = s->rx_len + n;
+    return n;
+}
+
+INT32 TcpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
+{
+    UINT8 *h = (UINT8 *)0;
+    UINT16 sport = 0u;
+    UINT16 dport = 0u;
+    UINT32 seq = 0u;
+    UINT32 ack = 0u;
+    UINT8 flags = 0u;
+    UINT32 doff = 0u;
+    UINT32 plen = 0u;
+    UINT32 i = 0u;
+    TcpSock *s = (TcpSock *)0;
+    TcpSock *l = (TcpSock *)0;
+    INT32 sd = -1;
+
+    if (nif == (LosNetIf *)0 || p == (LosNetBuf *)0) {
+        NetBufFree(p);
+        return tcp_err_(22);
+    }
+    if (p->len < (UINT32)LOS_TCP_HLEN) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return tcp_err_(22);
+    }
+    h = &p->data[p->off];
+    if (NetCsumPseudo(src, nif->ip, (UINT8)LOS_IP_PROTO_TCP, h, p->len) != 0u) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return tcp_err_(22);
+    }
+    sport = NetGet16(&h[0]);
+    dport = NetGet16(&h[2]);
+    seq = NetGet32(&h[4]);
+    ack = NetGet32(&h[8]);
+    doff = ((UINT32)h[12] >> 4) * 4u;
+    flags = h[13];
+    if (doff < (UINT32)LOS_TCP_HLEN || doff > p->len) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return tcp_err_(22);
+    }
+    plen = p->len - doff;
+    if (g_recursion > 4u) {
+        NetBufFree(p);
+        return tcp_err_(11);
+    }
+    /* 先找已建立的连接（按本地端口 + 对端），再找监听者 */
+    i = 0u;
+    while (i < (UINT32)TCP_MAX_SOCKS) {
+        if (g_tcp[i].used != 0u && g_tcp[i].lport == dport &&
+            g_tcp[i].state != (UINT32)TS_LISTEN && g_tcp[i].state != (UINT32)TS_CLOSED &&
+            (g_tcp[i].rip == src || g_tcp[i].state == (UINT32)TS_SYN_RCVD) &&
+            g_tcp[i].rport == sport) {
+            s = &g_tcp[i];
+            i = (UINT32)TCP_MAX_SOCKS;
+        } else {
+            i++;
+        }
+    }
+    if (s == (TcpSock *)0) {
+        i = 0u;
+        while (i < (UINT32)TCP_MAX_SOCKS) {
+            if (g_tcp[i].used != 0u && g_tcp[i].lport == dport &&
+                g_tcp[i].state == (UINT32)TS_LISTEN) {
+                l = &g_tcp[i];
+                i = (UINT32)TCP_MAX_SOCKS;
+            } else {
+                i++;
+            }
+        }
+    }
+    /* 监听者收到 SYN：建一条子连接，回 SYN|ACK */
+    if (s == (TcpSock *)0 && l != (TcpSock *)0 &&
+        (flags & (UINT8)TF_SYN) != 0u && (flags & (UINT8)TF_ACK) == 0u) {
+        sd = tcp_alloc_();
+        if (sd < 0) {
+            NetBufFree(p);
+            return tcp_err_(24);
+        }
+        s = &g_tcp[sd];
+        s->state = (UINT32)TS_SYN_RCVD;
+        s->lport = dport;
+        s->rip = src;
+        s->rport = sport;
+        s->parent = (UINT32)((l - &g_tcp[0]));
+        s->accepted = 0u;
+        s->iss = g_isn;
+        g_isn = g_isn + 0x1000u;
+        s->snd_una = s->iss;
+        s->snd_nxt = s->iss + 1u;
+        s->rcv_nxt = seq + 1u;
+        s->snd_wnd = (UINT32)TCP_WIN;
+        g_recursion = g_recursion + 1u;
+        (void)tcp_xmit_(nif, s, (UINT8)(TF_SYN | TF_ACK), s->iss, s->rcv_nxt,
+                        (const UINT8 *)0, 0u);
+        g_recursion = g_recursion - 1u;
+        NetBufFree(p);
+        return 0;
+    }
+    if (s == (TcpSock *)0) {
+        nif->rx_dropped = nif->rx_dropped + 1u;
+        NetBufFree(p);
+        return tcp_err_(2);
+    }
+    g_recursion = g_recursion + 1u;
+    if ((flags & (UINT8)TF_RST) != 0u) {
+        s->state = (UINT32)TS_CLOSED;
+    } else if (s->state == (UINT32)TS_SYN_SENT) {
+        if ((flags & (UINT8)TF_SYN) != 0u && (flags & (UINT8)TF_ACK) != 0u &&
+            ack == s->snd_nxt) {
+            s->rcv_nxt = seq + 1u;
+            s->snd_una = ack;
+            s->state = (UINT32)TS_ESTAB;
+            tcp_send_ack_(nif, s);
+        }
+    } else if (s->state == (UINT32)TS_SYN_RCVD) {
+        if ((flags & (UINT8)TF_ACK) != 0u && ack == s->snd_nxt) {
+            s->snd_una = ack;
+            s->state = (UINT32)TS_ESTAB;
+        }
+    } else {
+        if ((flags & (UINT8)TF_ACK) != 0u) {
+            if (s->tx_len != 0u && ack >= (s->tx_seq + s->tx_len)) {
+                s->snd_una = ack;
+                s->tx_len = 0u;
+                s->retries = 0u;
+            } else if (ack > s->snd_una) {
+                s->snd_una = ack;
+            }
+        }
+        if (plen != 0u) {
+            if (seq == s->rcv_nxt) {
+                (void)tcp_rx_append_(s, &h[doff], plen);
+                s->rcv_nxt = s->rcv_nxt + plen;
+            }
+            tcp_send_ack_(nif, s);
+        }
+        if ((flags & (UINT8)TF_FIN) != 0u && seq + plen == s->rcv_nxt) {
+            s->rcv_nxt = s->rcv_nxt + 1u;
+            s->fin_recv = 1u;
+            if (s->state == (UINT32)TS_ESTAB) {
+                s->state = (UINT32)TS_CLOSE_WAIT;
+            } else if (s->state == (UINT32)TS_FIN_WAIT1) {
+                s->state = (UINT32)TS_TIME_WAIT;
+            } else if (s->state == (UINT32)TS_FIN_WAIT2) {
+                s->state = (UINT32)TS_TIME_WAIT;
+            }
+            tcp_send_ack_(nif, s);
+        }
+    }
+    g_recursion = g_recursion - 1u;
+    NetBufFree(p);
+    return 0;
+}
+
+/* 由调用方（测试/网络任务）周期性调用：跑超时重传。 */
+VOID TcpTick(VOID)
+{
+    UINT32 i = 0u;
+    TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    g_tick = g_tick + 1u;
+    nif = NetIfGet(0u);
+    if (nif == (LosNetIf *)0) {
+        return;
+    }
+    i = 0u;
+    while (i < (UINT32)TCP_MAX_SOCKS) {
+        s = &g_tcp[i];
+        i++;
+        if (s->used == 0u) {
+            continue;
+        }
+        if (s->retries >= (UINT32)TCP_RETRY_MAX) {
+            if (s->state == (UINT32)TS_SYN_SENT || s->state == (UINT32)TS_SYN_RCVD ||
+                s->state == (UINT32)TS_ESTAB || s->state == (UINT32)TS_FIN_WAIT1) {
+                s->state = (UINT32)TS_CLOSED;
+                g_recursion = 0u;
+            }
+            continue;
+        }
+        if (g_tick - s->last_tick < (UINT32)TCP_RTO) {
+            continue;
+        }
+        if (s->state == (UINT32)TS_SYN_SENT) {
+            s->last_tick = g_tick;
+            s->retries = s->retries + 1u;
+            (void)tcp_xmit_(nif, s, (UINT8)TF_SYN, s->iss, 0u, (const UINT8 *)0, 0u);
+        } else if (s->tx_len != 0u) {
+            s->last_tick = g_tick;
+            s->retries = s->retries + 1u;
+            (void)tcp_xmit_(nif, s, (UINT8)(TF_ACK | TF_PSH), s->tx_seq, s->rcv_nxt,
+                            (const UINT8 *)&s->tx[0], s->tx_len);
+        }
+    }
+}
+
+INT32 TcpSockOpen(VOID)
+{
+    return tcp_alloc_();
+}
+
+INT32 TcpSockClose(INT32 sd)
+{
+    TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    nif = NetIfGet(0u);
+    if (nif != (LosNetIf *)0 && s->state == (UINT32)TS_ESTAB) {
+        (void)tcp_xmit_(nif, s, (UINT8)(TF_FIN | TF_ACK), s->snd_nxt, s->rcv_nxt,
+                        (const UINT8 *)0, 0u);
+        s->snd_nxt = s->snd_nxt + 1u;
+        s->fin_sent = 1u;
+        s->state = (UINT32)TS_FIN_WAIT1;
+    }
+    if (s->state == (UINT32)TS_CLOSE_WAIT || s->state == (UINT32)TS_TIME_WAIT) {
+        (void)memset((VOID *)s, 0, (UINT32)sizeof(TcpSock));
+        s->parent = 0xFFFFFFFFu;
+        return 0;
+    }
+    /* 其它状态直接放掉槽位（最小子集：不做 TIME_WAIT 定时） */
+    (void)memset((VOID *)s, 0, (UINT32)sizeof(TcpSock));
+    s->parent = 0xFFFFFFFFu;
+    return 0;
+}
+
+INT32 TcpSockBind(INT32 sd, UINT16 port)
+{
+    TcpSock *s = (TcpSock *)0;
+    UINT32 i = 0u;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (port == 0u) {
+        return tcp_err_(22);
+    }
+    i = 0u;
+    while (i < (UINT32)TCP_MAX_SOCKS) {
+        if (g_tcp[i].used != 0u && &g_tcp[i] != s && g_tcp[i].lport == port) {
+            return tcp_err_(98);
+        }
+        i++;
+    }
+    s->lport = port;
+    return 0;
+}
+
+INT32 TcpSockListen(INT32 sd, INT32 backlog)
+{
+    TcpSock *s = (TcpSock *)0;
+
+    (void)backlog;
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (s->lport == 0u) {
+        return tcp_err_(22);
+    }
+    s->state = (UINT32)TS_LISTEN;
+    return 0;
+}
+
+INT32 TcpSockAccept(INT32 sd)
+{
+    UINT32 i = 0u;
+
+    if (tcp_get_(sd) == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    i = 0u;
+    while (i < (UINT32)TCP_MAX_SOCKS) {
+        if (g_tcp[i].used != 0u && g_tcp[i].parent == (UINT32)sd &&
+            g_tcp[i].accepted == 0u &&
+            (g_tcp[i].state == (UINT32)TS_ESTAB || g_tcp[i].state == (UINT32)TS_CLOSE_WAIT)) {
+            g_tcp[i].accepted = 1u;
+            return (INT32)i;
+        }
+        i++;
+    }
+    return tcp_err_(11);                 /* -EAGAIN */
+}
+
+INT32 TcpSockConnect(INT32 sd, UINT32 ip, UINT16 port)
+{
+    TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (ip == 0u || port == 0u) {
+        return tcp_err_(22);
+    }
+    nif = NetIfGet(0u);
+    if (nif == (LosNetIf *)0) {
+        return tcp_err_(101);
+    }
+    if (s->lport == 0u) {
+        s->lport = (UINT16)g_eph;
+        g_eph = g_eph + 1u;
+    }
+    s->rip = ip;
+    s->rport = port;
+    s->iss = g_isn;
+    g_isn = g_isn + 0x1000u;
+    s->snd_una = s->iss;
+    s->snd_nxt = s->iss + 1u;
+    s->rcv_nxt = 0u;
+    s->snd_wnd = (UINT32)TCP_WIN;
+    s->state = (UINT32)TS_SYN_SENT;
+    s->last_tick = g_tick;
+    s->retries = 0u;
+    (void)tcp_xmit_(nif, s, (UINT8)TF_SYN, s->iss, 0u, (const UINT8 *)0, 0u);
+    return 0;
+}
+
+INT32 TcpSockSend(INT32 sd, const VOID *buf, UINT32 len)
+{
+    TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+    const UINT8 *b = (const UINT8 *)buf;
+    UINT32 i = 0u;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (s->state != (UINT32)TS_ESTAB && s->state != (UINT32)TS_CLOSE_WAIT) {
+        return tcp_err_(107);            /* -ENOTCONN */
+    }
+    if (s->tx_len != 0u) {
+        return tcp_err_(11);             /* 还有没确认的段（停止-等待） */
+    }
+    if (len > (UINT32)TCP_MSS) {
+        len = (UINT32)TCP_MSS;
+    }
+    nif = NetIfGet(0u);
+    if (nif == (LosNetIf *)0) {
+        return tcp_err_(101);
+    }
+    i = 0u;
+    while (i < len) {
+        s->tx[i] = b[i];
+        i++;
+    }
+    s->tx_len = len;
+    s->tx_seq = s->snd_nxt;
+    s->snd_nxt = s->snd_nxt + len;
+    s->retries = 0u;
+    s->last_tick = g_tick;
+    (void)tcp_xmit_(nif, s, (UINT8)(TF_ACK | TF_PSH), s->tx_seq, s->rcv_nxt,
+                    (const UINT8 *)&s->tx[0], len);
+    return (INT32)len;
+}
+
+INT32 TcpSockRecv(INT32 sd, VOID *buf, UINT32 max)
+{
+    TcpSock *s = (TcpSock *)0;
+    UINT8 *dst = (UINT8 *)buf;
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (s->rx_len == 0u) {
+        return tcp_err_(11);
+    }
+    n = s->rx_len;
+    if (n > max) {
+        n = max;
+    }
+    i = 0u;
+    while (i < n) {
+        dst[i] = s->rx[(s->rx_head + i) % (UINT32)TCP_RXBUF];
+        i++;
+    }
+    s->rx_head = (s->rx_head + n) % (UINT32)TCP_RXBUF;
+    s->rx_len = s->rx_len - n;
+    return (INT32)n;
+}
+
+INT32 TcpSockPoll(INT32 sd, UINT32 events)
+{
+    TcpSock *s = (TcpSock *)0;
+    INT32 r = 0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (s->rx_len != 0u) {
+        r = (INT32)(events & 1u);
+    }
+    if (s->state == (UINT32)TS_ESTAB) {
+        r = r | (INT32)(events & 2u);
+    }
+    return r;
+}
+
+UINT32 TcpState(INT32 sd)
+{
+    TcpSock *s = (TcpSock *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return 0u;
+    }
+    return s->state;
+}
+
+UINT32 TcpFinRecv(INT32 sd)
+{
+    TcpSock *s = (TcpSock *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return 0u;
+    }
+    return s->fin_recv;
+}

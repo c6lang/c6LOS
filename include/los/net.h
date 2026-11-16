@@ -35,6 +35,7 @@
 #define LOS_IP_HLEN         20u
 #define LOS_IP_PROTO_ICMP   1u
 #define LOS_IP_PROTO_TCP    6u
+#define LOS_TCP_HLEN        20u
 #define LOS_IP_PROTO_UDP    17u
 #define LOS_IP_TTL          64u
 
@@ -75,6 +76,7 @@ VOID   NetPut32(UINT8 *p, UINT32 v);
 UINT16 NetGet16(const UINT8 *p);
 UINT32 NetGet32(const UINT8 *p);
 UINT16 NetCsum(const UINT8 *data, UINT32 len);
+UINT16 NetCsumPseudo(UINT32 src, UINT32 dst, UINT8 proto, const UINT8 *seg, UINT32 len);
 
 /* ---- 以太网头（上层填目的 MAC + 类型，源 MAC 由 NetIfOutput 补） ---- */
 
@@ -127,6 +129,23 @@ INT32  UdpSockRecv(INT32 ud, VOID *buf, UINT32 max);
 INT32  UdpSockRecvFrom(INT32 ud, VOID *buf, UINT32 max, UINT32 *ip, UINT16 *port);
 INT32  UdpSockPoll(INT32 ud, UINT32 events);
 INT32  UdpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
+
+/* ---- TCP（kernel/net/tcp.c6） ---- */
+
+INT32  TcpSockOpen(VOID);
+INT32  TcpSockClose(INT32 sd);
+INT32  TcpSockBind(INT32 sd, UINT16 port);
+INT32  TcpSockListen(INT32 sd, INT32 backlog);
+INT32  TcpSockAccept(INT32 sd);
+INT32  TcpSockConnect(INT32 sd, UINT32 ip, UINT16 port);
+INT32  TcpSockSend(INT32 sd, const VOID *buf, UINT32 len);
+INT32  TcpSockRecv(INT32 sd, VOID *buf, UINT32 max);
+INT32  TcpSockPoll(INT32 sd, UINT32 events);
+UINT32 TcpState(INT32 sd);
+UINT32 TcpFinRecv(INT32 sd);
+VOID   TcpTick(VOID);
+INT32  TcpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
+INT32  SalTcpInit(VOID);
 
 /* 把 UDP 注册到 SAL（kernel/net/sal_udp.c6） */
 INT32  SalUdpInit(VOID);

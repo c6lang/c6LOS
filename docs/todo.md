@@ -232,7 +232,7 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 | ✅ M10-1 ARP+IPv4+ICMP | `kernel/net/{netbuf,netif,arp,ip,icmp}.c6` + `include/los/net.h`；16 个静态缓冲、4 张网卡、8 项 ARP 表、20 字节头不分片、环回、echo；同步线对端也是一套完整协议栈 | `make check-ip`、`make check-net-zero` |
 | ✅ M10-2 e1000 驱动 | `port/x86_64/e1000.c`：PCI `0xCF8/0xCFC` 枚举、MMIO（直接映射窗口扩到 0..4GB，1..4GB 按 UC）、RX/TX 各 16 个描述符、纯轮询；`kernel/net/netif_x86.c6` 把驱动挂到 NetIf | `make check-ping`（qemu 真跑 ping 10.0.2.2） |
 | ✅ M10-3 UDP + socket 面 | `kernel/net/udp.c6`（8 槽 + 4 深队列 + RFC768 校验和 + 环回）+ `sal_udp.c6`（注册成 SalProto；SAL 的 priv 改为协议侧句柄） | `make check-udp`（环回语义 + slirp DNS 真往返） |
-| M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
+| ✅ M10-4 TCP 最小子集 | 三次握手/累计确认/固定窗口/超时重传/FIN；`listen/accept/connect/send/recv/select` | qemu 里 `GET / HTTP/1.0` 拿到宿主 `http.server` 的 `HTTP/1.0 200` |
 
 **M10 验收**：M10-0..M10-4 全过；`C6OS_NET=0` 时零侵入。可复现的验收命令：
 
@@ -244,6 +244,9 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
   ping 10.0.2.2（slirp）拿到应答；
 - `make check-udp` —— M10-3：SAL socket 语义（bind/sendto/recvfrom/poll/close）
   + 向 10.0.2.3:53 发 DNS 查询收到应答；
+- `make check-tcp` —— M10-4：TCP 握手/收发/FIN（客户机连自己，环回完成）
+  + 经 slirp 向宿主的 `python3 -m http.server 8000` 发 `GET / HTTP/1.0`
+  拿到 `200 OK`；
 - `make check-net-zero` —— `C6OS_NET=0` 时 SAL 与协议栈不进构建。
 
 ## 风险与依赖

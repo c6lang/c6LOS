@@ -1,0 +1,128 @@
+/* kernel/net/sal_tcp.c6 —— 把 TCP 包成 SAL 协议栈（M10-4）
+ *
+ * priv 是 SAL 存下的协议侧句柄（TcpSockOpen 的返回值）。
+ * accept 的语义：监听 socket 上取一条已完成握手的连接，填回对端地址。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+#include "los/net.h"
+
+static SalProto g_sal_tcp = {0};
+
+static INT32 salt_sd_(VOID *priv)
+{
+    return (INT32)(UINT64)priv;
+}
+
+static INT32 salt_socket(VOID)
+{
+    return TcpSockOpen();
+}
+
+static INT32 salt_close(VOID *priv)
+{
+    return TcpSockClose(salt_sd_(priv));
+}
+
+static INT32 salt_bind(VOID *priv, const LosSockAddr *a)
+{
+    if (a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return TcpSockBind(salt_sd_(priv), a->port);
+}
+
+static INT32 salt_connect(VOID *priv, const LosSockAddr *a)
+{
+    if (a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return TcpSockConnect(salt_sd_(priv), a->addr, a->port);
+}
+
+static INT32 salt_listen(VOID *priv, INT32 backlog)
+{
+    return TcpSockListen(salt_sd_(priv), backlog);
+}
+
+static INT32 salt_accept(VOID *priv, VOID **child, LosSockAddr *a)
+{
+    INT32 sd = 0;
+
+    sd = TcpSockAccept(salt_sd_(priv));
+    if (sd < 0) {
+        return sd;
+    }
+    if (child != (VOID **)0) {
+        *child = (VOID *)(UINT64)sd;
+    }
+    if (a != (LosSockAddr *)0) {
+        a->family = (UINT16)LOS_SAL_AF_INET;
+        a->port = 0u;
+        a->addr = 0u;
+    }
+    return sd;
+}
+
+static INT32 salt_send(VOID *priv, const VOID *buf, UINT32 len)
+{
+    return TcpSockSend(salt_sd_(priv), buf, len);
+}
+
+static INT32 salt_recv(VOID *priv, VOID *buf, UINT32 len)
+{
+    return TcpSockRecv(salt_sd_(priv), buf, len);
+}
+
+static INT32 salt_sendto(VOID *priv, const VOID *buf, UINT32 len,
+                         const LosSockAddr *a)
+{
+    (void)priv;
+    (void)buf;
+    (void)len;
+    (void)a;
+    return 0 - LOS_SAL_E_OPNOTSUPP;      /* TCP 不认 sendto */
+}
+
+static INT32 salt_recvfrom(VOID *priv, VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    (void)a;
+    return TcpSockRecv(salt_sd_(priv), buf, len);
+}
+
+static INT32 salt_setopt(VOID *priv, INT32 opt, const VOID *val, UINT32 len)
+{
+    (void)priv;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 0;
+}
+
+static INT32 salt_poll(VOID *priv, UINT32 events)
+{
+    return TcpSockPoll(salt_sd_(priv), events);
+}
+
+INT32 SalTcpInit(VOID)
+{
+    g_sal_tcp.name = "tcp";
+    g_sal_tcp.domain = (INT32)LOS_SAL_AF_INET;
+    g_sal_tcp.type = (INT32)LOS_SAL_SOCK_STREAM;
+    g_sal_tcp.proto = (INT32)LOS_SAL_IPPROTO_TCP;
+    g_sal_tcp.socket = salt_socket;
+    g_sal_tcp.close = salt_close;
+    g_sal_tcp.bind = salt_bind;
+    g_sal_tcp.connect = salt_connect;
+    g_sal_tcp.listen = salt_listen;
+    g_sal_tcp.accept = salt_accept;
+    g_sal_tcp.send = salt_send;
+    g_sal_tcp.recv = salt_recv;
+    g_sal_tcp.sendto = salt_sendto;
+    g_sal_tcp.recvfrom = salt_recvfrom;
+    g_sal_tcp.setopt = salt_setopt;
+    g_sal_tcp.poll = salt_poll;
+    return SalRegister(&g_sal_tcp);
+}

@@ -56,6 +56,20 @@ static SalSock *sal_sock_(INT32 sd)
     return &g_socks[sd];
 }
 
+/* 找一个空槽，< 0 表示满了。 */
+static INT32 sal_slot_(VOID)
+{
+    UINT32 i = 0u;
+
+    while (i < (UINT32)LOS_SAL_MAX_SOCKETS) {
+        if (g_socks[i].used == 0u) {
+            return (INT32)i;
+        }
+        i++;
+    }
+    return -1;
+}
+
 static INT32 sal_ret_(SalSock *s, INT32 rc)
 {
     if (rc < 0) {
@@ -214,11 +228,31 @@ INT32 SalListen(INT32 sd, INT32 backlog)
 INT32 SalAccept(INT32 sd, LosSockAddr *a)
 {
     SalSock *s = sal_sock_(sd);
+    INT32 child = 0;
+    INT32 nsd = -1;
 
     if (s == (SalSock *)0) {
         return sal_err_(LOS_SAL_E_BADF);
     }
-    return sal_ret_(s, s->ops->accept(s->priv, (VOID **)0, a));
+    child = s->ops->accept(s->priv, (VOID **)0, a);
+    if (child < 0) {
+        return sal_ret_(s, child);
+    }
+    /* 新连接要有自己的 sd：槽位照抄监听者的协议/domain/type，
+     * priv 用协议侧给的子句柄。 */
+    nsd = sal_slot_();
+    if (nsd < 0) {
+        (void)s->ops->close((VOID *)(UINT64)child);
+        return sal_err_(LOS_SAL_E_MFILE);
+    }
+    g_socks[nsd].used = 1u;
+    g_socks[nsd].domain = s->domain;
+    g_socks[nsd].type = s->type;
+    g_socks[nsd].proto = s->proto;
+    g_socks[nsd].ops = s->ops;
+    g_socks[nsd].priv = (VOID *)(UINT64)child;
+    g_socks[nsd].last_errno = 0;
+    return nsd;
 }
 
 INT32 SalSend(INT32 sd, const VOID *buf, UINT32 len)

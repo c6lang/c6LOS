@@ -611,3 +611,52 @@ ping 本机走环回、ping 不可达地址的 `-EHOSTUNREACH` 与丢包计数�
 2. **第一个 UDP 包会撞上 ARP 未解析** —— `IpOutput` 在 ARP 表里查不到下一跳时
    返回 `-EHOSTUNREACH` 并丢包（这是设计好的：不排队等 ARP）。测试里要么先
    `ArpResolve` 预热，要么看到 `-113` 就 poll 一下重发。
+
+### M10-4 TCP 最小子集（已完成）
+
+**做了什么**：`kernel/net/tcp.c6` + `kernel/net/sal_tcp.c6` + `tests/t_tcp.c6`，
+目标只有一个——在 qemu 里对宿主 HTTP 服务发 `GET / HTTP/1.0` 并读到 `200 OK`。
+
+- `tcp.c6`：4 个连接槽。状态机 `CLOSED/LISTEN/SYN_SENT/SYN_RCVD/ESTAB/
+  FIN_WAIT1/FIN_WAIT2/CLOSE_WAIT/TIME_WAIT`；**停止-等待**式发送（一次一个
+  未确认段，窗口固定 1KB），超时由 `TcpTick()` 驱动重发（`TCP_RTO` 个 tick、
+  最多 8 次），累计确认，FIN 拆分关闭，RST 直接把连接打回 `CLOSED`。
+  不做：滑窗/拥塞控制/选项(MSS/时间戳)/乱序重组（只接 `seq == rcv_nxt`
+  的段，其余回重复 ACK）。
+- 主动与被动打开都实现了：`TcpSockConnect()` 发 SYN 进 `SYN_SENT`；
+  监听者收到 SYN 就 `tcp_alloc_()` 建一条子连接（`parent` 指向监听槽）
+  回 `SYN|ACK`，`TcpSockAccept()` 扫 `parent == sd && accepted == 0` 的
+  `ESTAB` 连接。
+- 环回：目的 IP 是自己时 `IpOutput` 直接把包喂回 `IpInput`，所以 `TcpInput`
+  是**同步递归**进来的（`g_recursion` 保护，深度上限 4）。测试因此可以让
+  客户机连自己：`listen 8080` + `connect 10.0.2.15:8080` 在本机内跑完
+  三次握手/双向收发/FIN，不依赖宿主，每一步都能确定性断言。
+- `sal_tcp.c6`：`SalProto`（AF_INET/SOCK_STREAM/IPPROTO_TCP）；`sendto` 返
+  `-EOPNOTSUPP`；`poll` 事件位 1=可读、2=可写（`ESTAB` 即可写）。
+- **`SalAccept` 现在会给新连接分配一个 sd**：协议侧 `accept` 返回子句柄，
+  SAL 找一个空槽、照抄监听者的 domain/type/ops、`priv = 子句柄`。之前
+  `SalAccept` 直接把协议句柄返回给用户，用户拿它当 fd 用会串到别的 socket。
+- `ip.c6`：`IPPROTO_TCP` 分派到 `TcpInput`。
+
+验收：`make check-tcp` —— qemu `-nic user,model=e1000`，宿主先起
+`python3 -m http.server 8000`（`build/x86/http/`），客户机经 slirp 的
+`10.0.2.2:8000` 发请求，读到 `HTTP/1.0 200 OK` 打印
+`PASS: net M10-4（TCP + GET / HTTP/1.0 拿到 200）`。
+
+**这一轮挖出两个大坑（都不是 TCP 自己的问题）**：
+
+1. **内核 .bss 压在引导页表上，而且没人清 .bss** —— 老布局里 `.bss` 一路
+   长到 `0x70000~0x73000`，正好是 `stage1.S` 放的 PML4/PDPT/PD；`stage1`
+   还在 `stack2`（也在 .bss 里）压过东西。镜像小的时候砸不到人，M10-4
+   多加 1KB 代码后 `g_found`/`g_mmio` 就落在页表那三个页里，
+   `g_mmio` 读出 `0x10800083` 这种"半个页表项"，e1000 一读 MMIO 就 #PF
+   → 三级故障，串口一个字都没有。修法两件：`stage1.S` 把页表挪到
+   `0x200000`（内核 `.bss` 现在到 `0x72684`，中间留足 1.5MB），
+   `stage2.S` 的 `_start64` 在设栈之前 `rep stosb` 清 `__bss_start..__bss_end`。
+   **教训**：x86 镜像"变大就崩、串口全哑"先怀疑 .bss 与固定地址的引导结构重叠，
+   别在驱动里找。
+2. **`NetCsumPseudo` 的"算出 0 写全 1"是发送侧的事** —— RFC 768 只要求 UDP
+   *发送*时把 0 写成 `0xFFFF`，我把这条塞进了公共函数，于是 TCP 接收侧
+   "校验和正确 ⇒ 补码为 0" 的包被改写成 `0xFFFF` 判成坏包，SYN 进了
+   `TcpInput` 又被自己丢掉（现象：`connect` 的 `xmit rc=-22`、`TcpInput`
+   一行日志都没有）。现在 `NetCsumPseudo` 只管算，`udp_xmit_` 自己做 0→全 1。

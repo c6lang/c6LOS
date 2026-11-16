@@ -141,7 +141,10 @@ INT32 IpInput(LosNetIf *nif, LosNetBuf *p)
     if (proto == (UINT8)LOS_IP_PROTO_UDP) {
         return UdpInput(nif, p, src);
     }
+    if (proto == (UINT8)LOS_IP_PROTO_TCP) {
+        return TcpInput(nif, p, src);
+    }
     nif->rx_dropped = nif->rx_dropped + 1u;
     NetBufFree(p);
-    return 0 - 93;                  /* TCP 在 M10-4 接 */
+    return 0 - 93;                  /* 其它协议不认 */
 }

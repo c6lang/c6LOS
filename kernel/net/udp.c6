@@ -65,37 +65,6 @@ static UdpSock *udp_by_port_(UINT16 port)
     return (UdpSock *)0;
 }
 
-static UINT16 udp_csum_(UINT32 src, UINT32 dst, const UINT8 *seg, UINT32 len)
-{
-    UINT32 sum = 0u;
-    UINT32 i = 0u;
-    UINT16 c = 0u;
-
-    /* 伪首部：src(4) dst(4) 0 proto(1) len(2) */
-    sum = sum + (((src >> 16) & 0xFFFFu));
-    sum = sum + ((src) & 0xFFFFu);
-    sum = sum + (((dst >> 16) & 0xFFFFu));
-    sum = sum + ((dst) & 0xFFFFu);
-    sum = sum + (UINT32)LOS_IP_PROTO_UDP;
-    sum = sum + len;
-    i = 0u;
-    while (i + 1u < len) {
-        sum = sum + ((((UINT32)seg[i]) << 8) | ((UINT32)seg[i + 1u]));
-        i = i + 2u;
-    }
-    if (i < len) {
-        sum = sum + (((UINT32)seg[i]) << 8);
-    }
-    while ((sum >> 16) != 0u) {
-        sum = (sum & 0xFFFFu) + (sum >> 16);
-    }
-    c = (UINT16)((~sum) & 0xFFFFu);
-    if (c == 0u) {
-        c = 0xFFFFu;
-    }
-    return c;
-}
-
 INT32 UdpSockOpen(VOID)
 {
     UINT32 i = 0u;
@@ -195,7 +164,10 @@ static INT32 udp_xmit_(LosNetIf *nif, UINT16 lport, UINT32 ip, UINT16 port,
         h[(UINT32)UDP_HLEN + i] = src[i];
         i++;
     }
-    c = udp_csum_(nif->ip, ip, h, len + (UINT32)UDP_HLEN);
+    c = NetCsumPseudo(nif->ip, ip, (UINT8)LOS_IP_PROTO_UDP, h, len + (UINT32)UDP_HLEN);
+    if (c == 0u) {
+        c = 0xFFFFu;                    /* UDP 的 0 要写成全 1 */
+    }
     NetPut16(&h[6], c);
     return IpOutput(nif, ip, (UINT8)LOS_IP_PROTO_UDP, p);
 }

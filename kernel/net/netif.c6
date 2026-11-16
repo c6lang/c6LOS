@@ -62,6 +62,33 @@ UINT16 NetCsum(const UINT8 *data, UINT32 len)
     return (UINT16)((~sum) & 0xFFFFu);
 }
 
+/* 带伪首部的校验和（UDP/TCP 用）：src/dst 各 4 字节 + 0 + proto + 段长度。 */
+UINT16 NetCsumPseudo(UINT32 src, UINT32 dst, UINT8 proto, const UINT8 *seg, UINT32 len)
+{
+    UINT32 sum = 0u;
+    UINT32 i = 0u;
+    UINT16 c = 0u;
+
+    sum = sum + (((src >> 16) & 0xFFFFu)) + (src & 0xFFFFu);
+    sum = sum + (((dst >> 16) & 0xFFFFu)) + (dst & 0xFFFFu);
+    sum = sum + (UINT32)proto;
+    sum = sum + len;
+    i = 0u;
+    while (i + 1u < len) {
+        sum = sum + ((((UINT32)seg[i]) << 8) | ((UINT32)seg[i + 1u]));
+        i = i + 2u;
+    }
+    if (i < len) {
+        sum = sum + (((UINT32)seg[i]) << 8);
+    }
+    while ((sum >> 16) != 0u) {
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    }
+    /* 纯补码返回：发送方拿去填，接收方算出来应当是 0。
+     * UDP 要求"算出来是 0 就写全 1"，那是 udp_xmit_ 自己的事。 */
+    return (UINT16)((~sum) & 0xFFFFu);
+}
+
 /* ---- 以太网头 ---- */
 
 /* 在 p 前面压 14 字节以太头（要求 p->off >= 14）。 */
