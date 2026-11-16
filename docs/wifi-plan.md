@@ -10672,3 +10672,37 @@ f[16]=PS|WOE`，然后 `ctx.S` 的 `RESTORE_FRAME` 恢复并 `rfe` 进 `s3_task_
 2. **绕开 windowed 任务**：让 kernel 里只跑 call0 任务，闭源库需要的"任务"用
    **同一个 windowed 任务**（ppTask）+ 我们只做"被动回调"（不再自己建 windowed
    任务）。若库只需要一个 windowed 任务，则根本不需要在两个 windowed 任务之间切换。
+
+### §241 架构调整：**只让库自己的 ppTask 是 windowed 任务**
+
+按 §240 的第 2 条路走了：`s3_win_call_wifi_main` 跳板（call0 → `callx8` 进
+`s3_win_wifi_main`；目标在 flash 里，`call8` 的 128KB 位移够不着，所以用
+`l32r a10, .Lwmain` + `callx8 a10`），测试用例加 `-DS3_WIFI_TASK_CALL0`：
+
+```
+g_next_task_windowed = 0;
+os_task_create("wifi", wifi_call0_task, 0, 3u, 8192u);   /* call0 任务 */
+   └─ wifi_call0_task → s3_win_call_wifi_main() → s3_win_wifi_main()（windowed）
+```
+
+这样系统里**只有一个 windowed 任务**（闭源库自己建的 ppTask），我们自己的任务都是
+call0（call0 代码不轮转窗口），"两个 windowed 任务互相切换"那个还没解决的难题就被
+绕开了。
+
+真板结果（`make ... S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" S3_PHY_VIA_OSI=1 https`）：
+
+```
+T1 call0 任务进入 windowed 主流程
+[wifimain] id=1 tick=0
+W0 phy start / [phy] 跳过手动初始化
+W1 bringup / B1 magic=deadbeaf ver=8 / B2 osi=…
+[lock] / [pp] / [net80211] / [unlock] / [mtxnew] #1 #2 / [semnew] #1
+[task] 库建任务 fn=403815fc id=2 stack=6144 prio=29(->2)     ← ppTask 起来了
+[take] t=1 sem#1 tk=ffffffff
+[give] t=2 sem#1                                             ← 握手完成
+（之后仍无进展：ppTask 给完信号量后没进它的 _queue_recv 循环）
+```
+
+即：架构调整成功（跳板/单 windowed 任务都验证了），但 ppTask 在"给完启动信号量之后"
+仍然卡住。下一步就在这个最小状态上用 JTAG 抓 ppTask 的 PC（它现在只有一个 windowed
+上下文，窗口问题已经排除，剩下的应该是某个 OSI 返回值/初始化没做完）。

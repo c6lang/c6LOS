@@ -22,6 +22,8 @@ extern u32 s3_win_call_flash42(void);
 extern u32 g_next_task_windowed;
 extern void os_icache_enable(void);
 extern unsigned int s3_win_call_phy_enable(void);
+extern unsigned int s3_win_call_wifi_main(void);
+
 extern void port_diag_task(void *arg);
 extern u32 os_flash_mmu_entry(u32 vaddr);
 extern int os_flash_map(u32 flash_off, u32 vaddr, u32 bytes, u32 kind);
@@ -34,6 +36,19 @@ extern const u8 _flash_rodata_start[];
 extern const u8 _flash_rodata_lma[];
 
 static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+/* call0 任务入口：整条 WiFi 主流程经跳板进 windowed（§241） */
+static void wifi_call0_task(void *arg)
+{
+    (void)arg;
+    pstr("T1 call0 任务进入 windowed 主流程\n");
+    (void)s3_win_call_wifi_main();
+    pstr("T2 windowed 主流程返回\n");
+    for (;;) {
+        os_task_delay(100u);
+    }
+}
+
 
 static void phex(u32 v)
 {
@@ -121,9 +136,16 @@ void os_main(void)
     pstr("E1 phy from call0 ok\n");
 #endif
     pstr("M4 task wifi...\n");
+#ifdef S3_WIFI_TASK_CALL0
+    /* §241：wifi 任务本身是 call0，windowed 代码经 s3_win_call_wifi_main 跳板进去，
+     * 这样系统里只有一个 windowed 任务（库自己的 ppTask）。 */
+    g_next_task_windowed = 0u;
+    s3_beacon(2u, (u32)os_task_create("wifi", wifi_call0_task, 0, 3u, 8192u));
+#else
     g_next_task_windowed = 1u;
     s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 8192u));
     g_next_task_windowed = 0u;
+#endif
     pstr("M4 task wifi ok\n");
 
     /* 低优先级监控任务：纯 call0，周期性把诊断环打到串口 */

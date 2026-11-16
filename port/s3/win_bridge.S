@@ -321,6 +321,46 @@ s3_win_call_phy_enable:
     addi    a1, a1, 32
     ret
 
+/* u32 s3_win_call_wifi_main(void) —— call0 任务里跑整条 WiFi 主流程（§241）
+ *
+ * 动机：让**只有闭源库自己那个 ppTask** 是 windowed 任务。我们自己的任务保持
+ * call0（call0 代码不轮转窗口），这样"两个 windowed 任务互相切换"这个还没解决的
+ * 难题就被绕开了 —— 窗口文件只被这一条 windowed 调用链和库自己的任务使用。 */
+    .align  4
+    .literal_position
+    .literal .Lwmain, s3_win_wifi_main
+    .global s3_win_call_wifi_main
+    .type   s3_win_call_wifi_main, @function
+s3_win_call_wifi_main:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    /* s3_win_wifi_main 在 flash 里（0x42xxxxxx），call8 的 128KB 相对位移够不着，
+     * 所以走 callx8（目标地址从字面量表取）。 */
+    l32r    a10, .Lwmain
+    callx8  a10
+    mov     a2, a10
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    ret
+
 /* u32 s3_win_call_phy_cal_word(u32 i) —— 读回校准数据里的一个 32bit 字 */
     .align  4
     .global s3_win_call_phy_cal_word
