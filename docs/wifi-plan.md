@@ -11492,3 +11492,36 @@ volatile 的读被提到了循环外，效果等于 `if (g == 0) { for (;;); }` 
 **下一轮**：用 get_mode/set_mode 这个对照继续二分 —— 比如只调 `esp_wifi_set_mode(0)`
 （NULL 模式，最轻）看崩不崩；崩就说明是"模式切换机制"本身，不崩就说明是 STA 模式
 特有的初始化（那就要盯 `net80211_funcs_init` / `esp_wifi_set_mode_privacy` 那条路）。
+
+### §271 一个重要发现：**只要代码大小变一点，库在 init 里就卡住**
+
+用 `S3_NO_PREEMPT=1` 构建时，基线变得非常稳（连跑 2 次，崩点逐字节相同）：
+
+```
+[wifi] associate ssid=weforpay.com
+..[wifi] set_storage(RAM)=0
+.Wu2.b*** TRAP sp=3fcd8ea0 cause=00000002 pc=3fcb9d4d ...
+```
+
+在这个稳定基线上去做 §270 的二分（只加了一个 `get_mode` + 一次
+`set_mode(0)`，一共几十字节代码），结果**连 `associate ssid` 都打不出来**了：
+
+```
+[semnew] #2 ... t=1
+[lock]   t=1 m#3336896514 p=3fcc3f6c
+[lockok] t=1 pr=0 ok=1          ← 到这里就再也不动了
+```
+
+而且卡住的位置在 **`esp_wifi_init_internal` 内部**，我们新加的那几行代码
+**根本没执行到**。也就是说：这不是"我们加了调用扰动时序"，而是
+**闭源库自己的执行结果跟二进制布局有关**。
+
+排除掉的可能：
+- `tools/chkimg.py` → `OK（2 个 flash 段，文件偏移 == LMA）`，镜像约束没问题；
+- 栈池没有耗尽（没有任何 `[ctx] 栈池不够` 输出，池子 24KB / 实测用量约 18KB）。
+
+下一轮最值得查的一条（纯离线、不用上板）：从 ELF 里把闭源库各段
+（`.flash.text`/`.iram*`/`.dram*`）的 VMA 和长度 dump 出来，看**卡住的构建**和
+**能跑的构建**之间，是否有某个段跨了 64KB 边界 / 落到我们 MMU 表覆盖范围之外。
+代码大小一变就卡，最像"某段代码没被映射进地址空间"这类问题（对应 §202 那套
+flash MMU 约束）。
