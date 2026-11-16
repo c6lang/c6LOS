@@ -106,6 +106,21 @@
 #define LX_SYS_arch_prctl    158
 #define LX_SYS_gettid        186
 #define LX_SYS_getdents64    217
+/* clone(2) 的共享标志（与 Linux 同值，只列用到的） */
+#define LX_CLONE_VM              0x00000100ull
+#define LX_CLONE_FS              0x00000200ull
+#define LX_CLONE_FILES           0x00000400ull
+#define LX_CLONE_SIGHAND         0x00000800ull
+#define LX_CLONE_THREAD          0x00010000ull
+#define LX_CLONE_SETTLS          0x00080000ull
+#define LX_CLONE_PARENT_SETTID   0x00100000ull
+#define LX_CLONE_CHILD_CLEARTID  0x00200000ull
+#define LX_CLONE_CHILD_SETTID    0x01000000ull
+
+#define LX_SYS_sched_yield   24
+#define LX_SYS_madvise       28
+#define LX_SYS_prctl        157
+#define LX_SYS_sched_getaffinity 204
 #define LX_SYS_rt_sigreturn   15
 #define LX_SYS_kill           62
 #define LX_SYS_tgkill         234

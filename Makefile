@@ -1263,6 +1263,25 @@ check-linuxabi-l5: $(SH_IMG)
 	  && echo "PASS: linux-abi L5（fork/execve/pipe/wait4：busybox sh 管道）" \
 	  || { echo "FAIL: linux-abi L5"; exit 1; }
 
+THR_ELF := $(X86)/thread.elf
+THR_IMG := $(X86)/thread-disk.img
+
+$(THR_ELF): tests/linux/thread.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $< -lpthread
+
+$(THR_IMG): $(THR_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(THR_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-l7: $(THR_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(THR_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^thr: 4 threads joined, counter=400, mutex=80" \
+	  && echo "PASS: linux-abi L7（线程：clone/CLONE_VM、futex、pthread 4 线程 + mutex）" \
+	  || { echo "FAIL: linux-abi L7"; exit 1; }
+
 check-linuxabi-l6: $(SIG_IMG)
 	@timeout 60 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(SIG_IMG),if=ide \

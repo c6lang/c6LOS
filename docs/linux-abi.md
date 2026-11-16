@@ -1,8 +1,7 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：L6 已跑通（进程模型 + 信号：`fork`/`execve`/`wait4`/`pipe`/`poll`，
-> `rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`kill`/`rt_sigreturn`，用户态
-> `SIGSEGV` 可被捕获）· L7 线程待做· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：**L0–L7 全梯子已跑通** —— 未修改的动态 `busybox` 能跑 `sh` 管道，信号能
+> 捕获/恢复，`pthread` 4 线程 + mutex 计数正确。Tier 3 完成· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -19,6 +18,7 @@
 | L4 动态链接 + ld.so | **完成** | `make check-linuxabi-l4` → `PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）` |
 | L5 进程模型 | **完成** | `make check-linuxabi-l5` → 未修改的 `busybox sh` 跑出 `GOT:hello-from-pipe`（§0.2） |
 | L6 信号 | **完成** | `make check-linuxabi-l6` → `sig: SIGSEGV caught, back via siglongjmp`（§0.3） |
+| L7 线程 | **完成** | `make check-linuxabi-l7` → `thr: 4 threads joined, counter=400, mutex=80`（§0.4） |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -258,6 +258,46 @@ sig: done
 启动过的用 `(LxFrame *)(kstack_top - 128)`。**任何时候要改"某个不在 CPU 上的
 进程的用户上下文"，都必须先确认那份帧到底在哪儿。**
 
+### 0.4 L7 线程：共享状态怎么放，决定要多写多少代码
+
+pthread 要的内核面其实不大：`clone(CLONE_VM|THREAD|SETTLS|PARENT_SETTID|
+CHILD_CLEARTID)`、每线程的 `%fs`（TLS）、`futex`、以及线程退出时清
+`clear_child_tid` 再唤醒 `pthread_join`。麻烦的是"哪些状态是线程共享的"：
+
+| 状态 | 归属 |
+|---|---|
+| 地址空间 / `brk` / `mmap_top` | 线程组共享 |
+| fd 表 | 组共享（`CLONE_FILES`） |
+| `sigaction` 表 | 组共享（`CLONE_SIGHAND`） |
+| 屏蔽字 / `sigaltstack` / `FS base` / 内核栈 / 陷入帧 / `clear_child_tid` | 每线程 |
+
+这里没有引入新的共享对象，而是让同组任务各存一份，在**切换点**与组长做双向
+同步：让出前写回组长，上 CPU 前从组长取新值（`sync_to_leader_` /
+`sync_from_leader_`）。代价是每次切换多复制 16 个 fd + 32 个 sigaction；
+收益是 fork/exec/wait/信号这些已经跑通的路径**一行都没改** —— 对已经绿了六个
+里程碑的代码，这个交换很划算。
+
+顺带修掉一个潜伏的 bug（这个才是 pthread 一开始必炸的原因）：切换时原来只把
+`g_brk`/`g_mmap_top` 从 PCB 往全局搬，**从不往回存**。单进程时看不出来（没有
+别人动这两个值），但一旦发生切换，切回来就按陈旧值把分配指针往回拽，后续
+`mmap` 与已有映射重叠。现象极具迷惑性：`cr2 == rip`（取指缺页），地址比上一个
+线程栈高出一个栈大小，看起来像"跳到了没映射的地址"。修法是在 `switch_to_`
+让出前先 `c->brk = lx_brk_get(); c->mmap_top = lx_mmap_top_get();`。
+
+实测（`make check-linuxabi-l7`，未修改的 pthread 程序）：
+
+```
+[clone tid=2 tgid=1] … [clone tid=5 tgid=1]
+thr: 4 threads joined, counter=400, mutex=80
+thr: done
+[lx] exit_group(0)
+```
+
+四个线程各自跑在自己的 8MB 栈上、各有 TLS，`mutex` 走 futex，`pthread_join`
+靠 `clear_child_tid` + futex 唤醒收口，最后 `exit_group` 整组退出。
+协作式调度下线程不会被抢占，所以"计数正确"靠的是每个线程一次跑到底 + 共享
+同一份地址空间；抢占要等 `IRQ_USER`（见 §11 的取舍）。
+
 ---
 
 ## 1. 定位：personality，不是"移植 Linux"
@@ -429,7 +469,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L4** ✅ | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation 全交给 `ld.so` | 动态链接（PIE）的 `busybox` 跑起 `ls /` |
 | **L5** ✅ | 进程模型：`fork`、`execve`、`wait4`、`pipe`、`poll`、fd 继承 | 未修改的 `busybox sh` 跑通 `echo … \| while read …` 管道，三进程按序退出（§0.2） |
 | **L6** ✅ | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`kill`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`siglongjmp` 恢复；默认动作下 `wait4` 看到 `WIFSIGNALED`（§0.3） |
-| **L7** | 线程：`clone`、futex 完整、FS base 切换、`pthread` | 静态 `pthread` 程序 4 线程计数正确 |
+| **L7** ✅ | 线程：`clone`、`futex`(WAIT/WAKE)、每线程 FS base、`pthread` | 未修改的 pthread 程序 4 线程 + mutex 计数正确（§0.4） |
 
 每级验收必须在 `make check-linuxabi` 里可复现，且**上一级不退**。
 
@@ -453,7 +493,8 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | L5 待补 | `kill`(62) `select`(23) `waitid`(247) 以及抢占式调度（需 `IRQ_USER`） |
 | L6 信号 ✅ | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `kill`(62) `tgkill`(234)；`#PF`/`#GP`/`#UD`/`#DE`/`#AC` → `SIGSEGV`/`SIGILL`/`SIGFPE`/`SIGBUS` |
 | L6 待补 | `rt_sigtimedwait`(128) `sigsuspend` 语义、`SA_ONSTACK` 真正切到备用栈、`SIGKILL` 的不可捕获语义（现在只拒绝改它的 handler） |
-| L7 线程 | `clone` 完整语义、`futex` 完整、`sched_yield`(24) `gettid`(186) `tgkill`(234) |
+| L7 线程 ✅ | `clone`(56，`CLONE_VM`/`THREAD`/`SETTLS`/`PARENT_SETTID`/`CHILD_CLEARTID`/`SETTID`) `futex`(202，WAIT/WAKE) `set_tid_address`(218) `exit_group`(231) `sched_yield`(24) `sched_getaffinity`(204) `madvise`(28) `prctl`(157) |
+| L7 待补 | 抢占式调度（需 `IRQ_USER`）、`futex` 的 PI/robust 变体、`clone3`(435) |
 
 原则：**未实现的 syscall 返回 `-ENOSYS` 并打一条限速日志**，绝不让用户进程
 把内核卡死或 panic。可观测性优先于"看起来能跑"。

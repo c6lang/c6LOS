@@ -95,6 +95,7 @@ void lx_proc_attach(u64 as, u64 brk)
     p->mmap_top = C6OS_LINUX_MMAP_BASE;
     p->fs_base = 0ull;                    /* 新镜像自己会 arch_prctl 设 TLS */
     lx_sig_reset(p);
+    p->tgid = p->pid;
     p->started = 1u;
     p->kstack_top = (u64)(&g_kstack[g_cur][0]) + LX_KSTACK_SIZE;
     port_user_set_kstack(p->kstack_top);
@@ -110,6 +111,59 @@ static int slot_alloc_(void)
         }
     }
     return -1;
+}
+
+/* ---- L7：线程 -------------------------------------------------------------
+ *
+ * 线程共享地址空间 / brk / mmap_top / fd 表 / sa 表。这里不引入新的共享对象，
+ * 而是让同组任务各存一份，在**切换点**与组长做双向同步：让出前写回组长，
+ * 上 CPU 前从组长取新值。这样 fork/exec/wait/信号那些已经在跑的路径一行不用改，
+ * 也不会出现"某个 syscall 忘了刷"的漏网点。
+ */
+static void sync_to_leader_(LxProc *p)
+{
+    LxProc *lead;
+    u64 k;
+
+    if (p->tgid == p->pid || p->tgid == 0u || p->state == LX_P_FREE) {
+        return;                            /* 自己就是组长 */
+    }
+    lead = lx_proc_find((i64)p->tgid);
+    if (lead == (LxProc *)0 || lead == p || lead->state == LX_P_FREE) {
+        return;
+    }
+    lead->as = p->as;
+    lead->brk = p->brk;
+    lead->mmap_top = p->mmap_top;
+    for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
+        lead->fd[k] = p->fd[k];
+    }
+    for (k = 0ull; k < (u64)LX_NSIG; k++) {
+        lead->sa[k] = p->sa[k];
+    }
+}
+
+static void sync_from_leader_(LxProc *p)
+{
+    LxProc *lead;
+    u64 k;
+
+    if (p->tgid == p->pid || p->tgid == 0u) {
+        return;
+    }
+    lead = lx_proc_find((i64)p->tgid);
+    if (lead == (LxProc *)0 || lead == p || lead->state == LX_P_FREE) {
+        return;
+    }
+    p->as = lead->as;
+    p->brk = lead->brk;
+    p->mmap_top = lead->mmap_top;
+    for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
+        p->fd[k] = lead->fd[k];
+    }
+    for (k = 0ull; k < (u64)LX_NSIG; k++) {
+        p->sa[k] = lead->sa[k];
+    }
 }
 
 static int pick_next_(int from)
@@ -134,7 +188,16 @@ static void switch_to_(int next)
     LxProc *c = cur_();
     u64 prev_sp;
 
+    if (c != (LxProc *)0) {
+        /* 让出前必须把**活**的 brk/mmap_top 存回自己的 PCB —— 否则切回来时
+         * lx_set_as 那几行会用陈旧值把 g_brk/g_mmap_top 还原，后续 mmap 就会
+         * 和已有映射重叠（pthread 的 8MB 栈一出现就必炸）。 */
+        c->brk = lx_brk_get();
+        c->mmap_top = lx_mmap_top_get();
+        sync_to_leader_(c);                /* 再刷给组长（线程共享） */
+    }
     g_cur = next;
+    sync_from_leader_(p);                  /* 上 CPU 前从组长取最新的 */
     p->state = LX_P_RUN;
     lx_set_as(p->as);
     lx_brk_set(p->brk);
@@ -228,6 +291,11 @@ LxProc *lx_proc_find(i64 pid)
             return &g_proc[i];
         }
     }
+    for (i = 0; i < (int)LX_MAX_PROC; i++) {    /* kill(pid) 打的是整个线程组 */
+        if (g_proc[i].state != LX_P_FREE && (i64)g_proc[i].tgid == pid) {
+            return &g_proc[i];
+        }
+    }
     return (LxProc *)0;
 }
 
@@ -250,6 +318,49 @@ void lx_proc_exit_sig(u32 sig)
     lx_proc_exit((u64)sig);
 }
 
+/* 把同组其它线程直接释放（不动 self）。 */
+static void reap_peers_(LxProc *self)
+{
+    int i;
+
+    for (i = 0; i < (int)LX_MAX_PROC; i++) {
+        LxProc *q = &g_proc[i];
+
+        if (q == self || q->state == LX_P_FREE || q->tgid != self->tgid) {
+            continue;
+        }
+        q->state = LX_P_FREE;
+        q->pid = 0u;
+    }
+}
+
+/* 非组长线程退出：只结束自己，清 clear_tid（pthread_join 等的就是它）并叫醒别人。 */
+static void thread_exit_(LxProc *c)
+{
+    u64 ct = c->clear_tid;
+    int i;
+    int next;
+
+    if (ct != 0ull && lx_user_ok(ct, 4ull, C6OS_PROT_W) != 0) {
+        *(u32 *)ct = 0u;
+    }
+    c->clear_tid = 0ull;
+    c->state = LX_P_FREE;
+    c->pid = 0u;
+    for (i = 0; i < (int)LX_MAX_PROC; i++) {
+        if (g_proc[i].state == LX_P_BLOCK) {
+            g_proc[i].state = LX_P_READY;
+        }
+    }
+    next = pick_next_(g_cur);
+    if (next < 0) {
+        port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
+        port_panic_halt();
+    }
+    switch_to_(next);
+    port_panic_halt();
+}
+
 void lx_proc_exit(u64 code)
 {
     LxProc *c = cur_();
@@ -259,6 +370,11 @@ void lx_proc_exit(u64 code)
         port_puts("[lx] exit 但当前没有进程\n");
         port_panic_halt();
     }
+    if (c->tgid != 0u && c->tgid != c->pid) {
+        thread_exit_(c);                   /* 线程退出：整组还在 */
+        return;                            /* 不返回 */
+    }
+    reap_peers_(c);                        /* 组长退出 = 整个线程组没了 */
     {
         u64 i;
 
@@ -338,6 +454,7 @@ u64 lx_proc_fork(LxRegs *r)
     ch->pid = (u32)g_pid_next;
     g_pid_next++;
     ch->ppid = par->pid;
+    ch->tgid = ch->pid;                   /* fork 出来的是新线程组 */
     ch->as = as;
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
@@ -874,4 +991,178 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
         return pipe_write_(p, &p->fd[fd], ubuf, len);
     }
     return lx_console_write(fd, ubuf, len);
+}
+
+/* ---- L7：线程创建 / 退出 / futex ----------------------------------------- */
+
+/* clone(CLONE_VM)：新线程共享页表，只在 clone 给的栈上跑。 */
+u64 lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
+                         u64 ctid, u64 tls)
+{
+    LxProc *par = cur_();
+    LxProc *ch;
+    u32 tid;
+    int slot;
+
+    if (par == (LxProc *)0 || child_stack == 0ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    slot = slot_alloc_();
+    if (slot < 0) {
+        return (u64)0 - LX_EAGAIN;
+    }
+    ch = &g_proc[slot];
+    mem_zero_((u8 *)ch, (u64)sizeof(*ch));
+    ch->pid = (u32)g_pid_next;
+    g_pid_next++;
+    tid = ch->pid;
+    ch->tgid = par->tgid;
+    ch->ppid = par->ppid;
+    ch->as = par->as;                      /* 共享页表：不复制 */
+    ch->brk = par->brk;
+    ch->mmap_top = par->mmap_top;
+    ch->kstack_top = (u64)(&g_kstack[slot][0]) + LX_KSTACK_SIZE;
+    ch->f.r = *r;                          /* 继承父线程的陷入帧 */
+    ch->f.r.rax = 0ull;                    /* 线程里 clone 返回 0 */
+    ch->f.user_rsp = child_stack;          /* 跑在 clone 给的栈上 */
+    ch->state = LX_P_READY;
+    ch->started = 0u;
+    ch->clear_tid = ((flags & LX_CLONE_CHILD_CLEARTID) != 0ull) ? ctid : 0ull;
+    ch->fs_base = ((flags & LX_CLONE_SETTLS) != 0ull) ? tls : par->fs_base;
+    lx_sig_fork(ch, par);                  /* 继承 handler/屏蔽，清挂起 */
+    ch->fs_base = ((flags & LX_CLONE_SETTLS) != 0ull) ? tls : par->fs_base;
+    {
+        u64 k;
+
+        for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
+            ch->fd[k] = par->fd[k];        /* 同一个 fd 表 */
+        }
+    }
+    setup_trampoline_(ch);
+    if (ptid != 0ull && lx_user_ok(ptid, 4ull, C6OS_PROT_W) != 0) {
+        *(u32 *)ptid = tid;
+    }
+    if (((flags & LX_CLONE_CHILD_SETTID) != 0ull) && ctid != 0ull &&
+        lx_user_ok(ctid, 4ull, C6OS_PROT_W) != 0) {
+        *(u32 *)ctid = tid;
+    }
+    lx_proc_yield();                       /* 先让新线程跑一段 */
+    return (u64)tid;
+}
+
+/* exit_group：整组一起死。非组长调用时让组长替全组"死"给父进程看。 */
+void lx_proc_exit_group(u64 code)
+{
+    LxProc *c = cur_();
+    LxProc *lead;
+    int i;
+    int next;
+
+    if (c == (LxProc *)0) {
+        port_panic_halt();
+    }
+    if (c->tgid != 0u && c->tgid != c->pid) {
+        lead = lx_proc_find((i64)c->tgid);
+        if (lead != (LxProc *)0 && lead != c) {
+            lead->code = (i64)code;
+            lead->killed = c->killed;
+            lead->state = LX_P_ZOMBIE;
+            reap_peers_(lead);
+            {
+                LxProc *par = lx_proc_find((i64)lead->ppid);
+
+                if (par != (LxProc *)0) {
+                    par->sig_pending |= 1ull << ((u32)LX_SIGCHLD - 1u);
+                    par->sig_code[LX_SIGCHLD] = (u32)LX_SI_USER;
+                }
+            }
+            wake_(lead->ppid);
+        }
+        c->clear_tid = 0ull;
+        c->state = LX_P_FREE;
+        c->pid = 0u;
+        for (i = 0; i < (int)LX_MAX_PROC; i++) {
+            if (g_proc[i].state == LX_P_BLOCK) {
+                g_proc[i].state = LX_P_READY;
+            }
+        }
+        next = pick_next_(g_cur);
+        if (next < 0) {
+            port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
+            port_panic_halt();
+        }
+        switch_to_(next);
+        port_panic_halt();
+    }
+    reap_peers_(c);
+    lx_proc_exit(code);                    /* 组长：走正常的 ZOMBIE 流程 */
+}
+
+u64 lx_proc_set_tid_address(u64 ptr)
+{
+    LxProc *p = cur_();
+
+    if (p == (LxProc *)0) {
+        return 1ull;
+    }
+    p->set_tid = ptr;
+    p->clear_tid = ptr;                    /* Linux：同时设 clear_child_tid */
+    return (u64)p->pid;
+}
+
+/* futex：只用得到 WAIT/WAKE（pthread 的 join/mutex 全靠它）。
+ * 协作式调度下"唤醒"一律走全表扫；WAIT 时如果已经没有别的可运行任务就直接
+ * 返回（否则会死等一个永远不会来的唤醒，等于把自己挂死）。 */
+u64 lx_futex(u64 uaddr, u32 op, u32 val, u64 utime)
+{
+    u32 cmd = op & 0x7fu;
+    LxProc *p = cur_();
+    int i;
+
+    (void)utime;
+    if (p == (LxProc *)0) {
+        return 0ull;
+    }
+    if (cmd == 0u) {                       /* FUTEX_WAIT */
+        if (lx_user_ok(uaddr, 4ull, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        if (*(const u32 *)uaddr != val) {
+            return (u64)0 - LX_EAGAIN;
+        }
+        if (!others_live_(g_cur)) {
+            return 0ull;
+        }
+        lx_proc_block();
+        return 0ull;
+    }
+    if (cmd == 1u) {                       /* FUTEX_WAKE */
+        u64 n = 0ull;
+
+        for (i = 0; i < (int)LX_MAX_PROC; i++) {
+            if (g_proc[i].state == LX_P_BLOCK) {
+                g_proc[i].state = LX_P_READY;
+                n++;
+            }
+        }
+        return n;
+    }
+    return 0ull;
+}
+
+u32 lx_proc_tgid(void)
+{
+    LxProc *p = cur_();
+
+    if (p == (LxProc *)0) {
+        return 0u;
+    }
+    return (p->tgid != 0u) ? p->tgid : p->pid;
+}
+
+u32 lx_proc_tid(void)
+{
+    LxProc *p = cur_();
+
+    return (p == (LxProc *)0) ? 0u : p->pid;
 }

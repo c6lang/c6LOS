@@ -370,12 +370,20 @@ static void lx_syscall_do(LxRegs *r)
         r->rax = 1ull;
         return;
 
-    case LX_SYS_exit:
-    case LX_SYS_exit_group:
-        port_puts("\n[lx] exit(");
-        put_dec(a0);
-        port_puts(") —— 用户进程正常结束\n");
+    case LX_SYS_exit:                      /* 只结束当前线程 */
+        if (lx_proc_tgid() == lx_proc_tid()) {
+            port_puts("\n[lx] exit(");
+            put_dec(a0);
+            port_puts(") —— 用户进程正常结束\n");
+        }
         lx_proc_exit(a0);                  /* 不返回 */
+        return;
+
+    case LX_SYS_exit_group:                /* 整组退出 */
+        port_puts("\n[lx] exit_group(");
+        put_dec(a0);
+        port_puts(")\n");
+        lx_proc_exit_group(a0);            /* 不返回 */
         return;
 
     case LX_SYS_brk:
@@ -454,7 +462,7 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_set_tid_address:
-        r->rax = 1ull;
+        r->rax = lx_proc_set_tid_address(a0);
         return;
 
     case LX_SYS_set_robust_list:
@@ -512,8 +520,8 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_clone:
-        if (a1 != 0ull) {
-            r->rax = neg(LX_ENOSYS);       /* 非 0 栈 = 线程，L7 再做 */
+        if ((a0 & LX_CLONE_VM) != 0ull) {
+            r->rax = lx_proc_clone_thread(r, a0, a1, a2, a3, a4);
             return;
         }
         r->rax = lx_proc_fork(r);
@@ -615,8 +623,11 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_getpid:
+        r->rax = (u64)lx_proc_tgid();
+        return;
+
     case LX_SYS_gettid:
-        r->rax = 1ull;
+        r->rax = (u64)lx_proc_tid();
         return;
 
     case LX_SYS_uname:
@@ -649,7 +660,26 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_futex:
-        r->rax = 0ull;                     /* L2：单线程，唤醒即成功 */
+        r->rax = lx_futex(a0, (u32)a1, (u32)a2, a3);
+        return;
+
+    case LX_SYS_madvise:
+    case LX_SYS_prctl:
+        r->rax = 0ull;                     /* 只影响性能/命名，忽略 */
+        return;
+
+    case LX_SYS_sched_yield:
+        lx_proc_yield();                   /* 协作式调度：真让一次 CPU */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_sched_getaffinity:
+        if (a2 < 8ull || lx_user_ok(a1, 8ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        *(u64 *)a1 = 1ull;                 /* 单 CPU */
+        r->rax = 8ull;
         return;
 
     default:

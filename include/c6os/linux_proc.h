@@ -61,7 +61,8 @@ typedef struct {
 
 typedef struct LxProc {
     u32 state;
-    u32 pid;
+    u32 pid;                  /* 线程 id（gettid） */
+    u32 tgid;                 /* 线程组 id（= 组长的 pid，即 getpid） */
     u32 ppid;
     u32 pad;
     u64 as;                   /* PML4 物理地址 */
@@ -72,6 +73,8 @@ typedef struct LxProc {
     u64 brk;
     u64 mmap_top;
     u64 fs_base;              /* TLS 基址：切进程时必须跟着换（MSR_FS_BASE 是全局的） */
+    u64 set_tid;              /* set_tid_address / clone 的 CLEARTID 地址 */
+    u64 clear_tid;
     u64 sig_mask;                 /* 屏蔽字（bit sig-1） */
     u64 sig_pending;              /* 挂起（bit sig-1） */
     u64 alt_sp;                   /* sigaltstack */
@@ -102,6 +105,13 @@ u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
 void     lx_proc_exit_sig(u32 sig);
+void     lx_proc_exit_group(u64 code);
+u64      lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
+                              u64 ctid, u64 tls);
+u64      lx_proc_set_tid_address(u64 ptr);
+u64      lx_futex(u64 uaddr, u32 op, u32 val, u64 utime);
+u32      lx_proc_tgid(void);
+u32      lx_proc_tid(void);
 LxProc  *lx_proc_find(i64 pid);
 void     lx_proc_wake(LxProc *p);
 
