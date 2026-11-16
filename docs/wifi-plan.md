@@ -12622,3 +12622,46 @@ g_s3_win_spill_en=1
 **下一轮第一件事**：确认 `s3_timer_irq` 返回 0 的分支是否跳过了
 `port_irq_fill`；如果没跳过，就把它挪到"确实要切换"的分支里。
 这是目前最有希望的一击。
+
+## §306 试过"中断帧里也存 WINDOWSTART/WINDOWBASE"：无效，已回退
+
+按 §305 的推断，给 `port_irq_fill` 补写了帧偏移 68/72
+（`rsr windowstart` / `rsr windowbase`），并在 `RESTORE_FRAME` 里恢复
+"优先用帧里的 WINDOWSTART"。真板结果：
+
+```
+[recv] t=2 qh=3fcc456c tk=ffffffff
+b*** TRAP sp=50000ab0 cause=0 pc=40048c6e ps=00060010 a0=00000000
+```
+
+`sp` 变成了 **RTC 地址 0x50000ab0**（比之前更离谱），崩溃点不变。
+说明这条推断也不是根因，已 `git checkout 510978f -- port/s3/ctx.c port/s3/ctx.S`
+回退，板子重新回到"`[recv]` → `b`"的基线。
+
+### 本轮（第 50~51 轮）净收获
+
+1. §296 修好"任务自己的 WINDOWSTART 被丢弃"（`RESTORE_FRAME`），
+   消除了这条路径上最凶的非法指令崩溃；
+2. §292 的溢出回退让 **IDF bootloader 启动路径**能过 `T1`，
+   从而拿到 **`register_chipv7_phy rc=1`**（射频初始化成功）和
+   `[pp]`/`[net80211]`/`[mtxnew]`/`[semnew]`/`[task]`/`[recv]`
+   一整套库初始化流程；
+3. 明确排除：PHY init data 不一致、WiFi 堆耗尽、DIG_PWC/WIFI_CLK_EN/
+   RST_EN 寄存器差异、ctx sp 越界、ctx 里 a0/EPC 不一致、
+   切换时没 spill 祖先窗口、中断帧没带窗口状态；
+4. 摸清了这条路径对**代码布局极度敏感**（§301），并留下
+   `/tmp/c6good/c6os_bl_recv.bin` 作为基线镜像。
+
+### 目前唯一的墙
+
+闭源库的第一个任务（`fn=0x40381760`）去队列上阻塞、内核完成 2 次任务
+切换之后，闭源/ROM 代码里出现 `cause=0 (非法指令)`、`pc=0x40048c6e`
+（经反汇编确认 **落在 ROM 数据区/指令中间**）。栈本身没跑飞
+（`sp` 始终落在该任务自己的栈区间内）。
+
+下一步建议换思路：与其继续在窗口语义上试，不如
+**让闭源代码只在一个"受控 ABI 环境"里跑**——例如所有 OSI 回调都不真正
+阻塞（`_queue_recv` 用有限自旋 + `os_task_delay` 让出），保证
+windowed 调用链永远不会在"窗口活着"的时候被切走；或者干脆把
+ppTask 这类库任务固定跑在一次 `s3_win_call_wifi_main` 的长调用里，
+不参与我们的抢占式调度。
