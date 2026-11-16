@@ -12257,3 +12257,32 @@ B0 osi0=... B1 slot13=... B2 cfg@...
   窗口状态和我们的 `port_task_switch` 对不上。下一步要么让切换时
   WINDOWBASE/WINDOWSTART 的改动不触发异常（先 `rsil` 回 1），
   要么把"库任务"整个跑在自己的窗口基址上。
+
+## §293 bootloader 路径复现：这次是"栈跑飞"
+
+同一条 bootloader 路径再跑一次（`flashbl.sh`，20 秒抓串口），这次拿到的是
+我们自己 `s3_trap` 打出来的记录（不是二次异常了 —— §292 的回退生效）：
+
+```
+[recv] t=2 qh=3fcc44dc tk=ffffffff
+b*** TRAP sp=3fca0565 cause=00000000 pc=40048c6e ps=00060410 vaddr=00000000 callinc=2 a0=00060000
+```
+
+* `cause=0` = 非法指令，`pc=0x40048c6e` 在 ROM 里（返回地址飞了），
+  `a0=0x00060000` 明显是被当指令地址取了的数据。
+* 关键线索：**`sp=0x3fca0565` 不是 16 字节对齐、而且落在 DRAM 最底部**
+  （DRAM 起于 0x3FCA0000，我们的栈池在 0x3fcbce30，`.bss/.data` 就在这一带）。
+  也就是说栈指针一路往下走穿了，进到数据区。
+* 时序上正好发生在"库创建 `ppTask`（`[task] 库建任务 fn=[give]`）→
+  切到 t=2 → `[recv]` 阻塞"之后，说明闭源协议栈这条调用链比我们给的
+  6144 字节栈深得多（`osi_task_create` 里把库请求的栈抬到 6144，见
+  wifi_glue.c）。
+
+**下一步**（按性价比排序）：
+
+1. 把库任务的栈抬到 12~16 KB，并把 `S3_STACK_POOL` 相应扩大
+   （DRAM 已经紧张，可能需要挪 `g_wifi_heap_mem` 或减小 lwIP 的池）；
+   同时在 `port_task_switch` 里加上"sp 不在自己栈区间内就打印并停机"
+   的断言（§276 那种守卫，但针对 sp 越界），把跑飞的第一现场抓到。
+2. 已经证明 **PHY/射频这块通了**（`register_chipv7_phy rc=1`、
+   `0x6001c08c=03fffa00`），所以后续不必再在 PHY 初始化上花时间。
