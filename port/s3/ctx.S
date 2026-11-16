@@ -36,8 +36,14 @@
      * 归一化的前提是"切走前 w2c 壳已经把祖先窗口 spill 到栈上"，但真板实测
      * 那套 spill + 归一化会让 windowed 任务在切换后 retw 跳飞（§230）。
      * 这里改成每个任务各自保存/恢复 WINDOWSTART（帧偏移 68）。 */
-    l32i    a5, a1, 68
-    beqz    a5, 8f
+    /* 恢复成"只有当前窗口 live"（配合 w2c 壳在切走前已经把祖先窗口 spill 到
+     * 任务栈上的设计）：欠载向量会按 a1 链把祖先窗口 fill 回来。
+     * §230 曾改成"按任务保存/恢复 windowstart"，实测和壳里的 spill 不配对，
+     * 两个 windowed 任务互相切换时会崩（§239），所以这里回到归一化。 */
+    rsr     a4, windowbase
+    movi    a5, 1
+    ssl     a4
+    sll     a5, a5
     wsr     a5, windowstart
     isync
 8:

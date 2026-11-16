@@ -10618,3 +10618,29 @@ f[16]=PS|WOE`，然后 `ctx.S` 的 `RESTORE_FRAME` 恢复并 `rfe` 进 `s3_task_
 一致**；那么更可能是 `s3_task_tramp` 里 `callx8 a12` 时 a12（入口地址）已经不对，
 或者 trampoline 自己的帧没有 `entry`（它是被 `rfe` 直接跳进来的，**没有 entry**，
 却用 `retw`/`callx8` —— 这本身就不合法）。
+
+### §239 最小窗口用例把问题切干净了：**单 windowed 任务 OK，两个就崩**
+
+新增 `tests/t_win1.c6` + `s3_win_hello_task`（只打印 + 周期 delay 的最小 windowed
+任务）和 `s3_w2c_sp_probe`（读当前 sp）。真板结果：
+
+| 用例 | 结果 |
+| --- | --- |
+| **一个** windowed 任务 | ✅ 完美：`[w0] hello … sp=3fcbb250` 然后 `tick 4/8/12/…` 一直跑（说明：新建窗口任务、首次进入、w2c 壳、与 idle 之间来回切换都正常） |
+| **两个** windowed 任务（一个 8KB prio2、一个 4KB prio3） | 两个都打印了 hello（`sp=3fcbb250` / `sp=3fcbc250`，说明**第一次切换成功**），随后 TRAP：`windowbase=11`、`windowstart=0xa00`、`a1=0x303530b2` —— 又是窗口状态错乱 |
+
+顺带确认了一件重要的事：§230 把 `RESTORE_FRAME` 改成"按任务恢复 windowstart"
+**和壳里的 spill 不配对**（两个任务时第二个任务启动就炸）；改回原来的
+"归一化成 `1<<WINDOWBASE`"（配合壳在切走前 spill 祖先窗口）之后，两个任务都能
+启动起来。所以设计上还是"spill + 归一化"这一对，别再动它。
+
+**现在的故障窗口非常小**：两个 windowed 任务来回切几次之后窗口状态就坏。
+下一步就在这个最小用例上做（比 WiFi 好调无数倍）：
+
+1. 在 `port_task_switch` 里把每次切换的 from/to 任务 id、WINDOWSTART、WINDOWBASE、
+   a1 写进 RTC 环（0x50001D00 起），复位后用 JTAG 读，看**第几次切换开始坏**；
+2. 重点怀疑 `s3_w2c_task_delay` 这条壳：它 `entry a1,128` → spill（转窗口）→
+   `addi a1,-64` → `callx0` 内核 → 内核里 `port_task_switch` 保存现场。
+   切回来时 `RESTORE_FRAME` 归一化 WINDOWSTART 后 `rfe` 回到壳里的 `addi a1,a1,64`，
+   接着 `l32i a0` + `retw` —— 这里 `retw` 需要"当前窗口的 a0 帧槽还在"，
+   而归一化 + 欠载 fill 的顺序如果错了，`retw` 就会用错 a0（正是我们看到的症状）。

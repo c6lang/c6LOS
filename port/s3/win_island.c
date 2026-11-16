@@ -8,6 +8,8 @@
 
 /* os_wdt_feed/os_wdt_start 是 call0 的 C 函数，windowed 岛里要经 w2c 壳调（§228） */
 extern void s3_w2c_wdt_feed(void);
+extern unsigned int s3_w2c_sp_probe(void);
+extern unsigned int s3_w2c_task_delay(unsigned int ticks);
 extern void s3_w2c_wdt_start(unsigned int secs);
 
 /* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
@@ -794,6 +796,24 @@ u32 s3_win_wifi_main(void)
     }
 #endif
     return rc;
+}
+
+/* 最小 windowed 任务（§239）：只打印 + 让出 CPU，用来单独验证
+ * "新建 windowed 任务的第一次进入"这条路。 */
+__attribute__((section(".flash.text")))
+void s3_win_hello_task(void *arg)
+{
+    u32 n = 0u;
+
+    ets_printf("[w%u] hello, windowed task (sp=%08x)\n",
+               (unsigned)(u32)arg, (unsigned)s3_w2c_sp_probe());
+    for (;;) {
+        s3_w2c_task_delay(20u);
+        n = n + 1u;
+        if ((n & 0x3u) == 0u) {
+            ets_printf("[w%u] tick %u\n", (unsigned)(u32)arg, (unsigned)n);
+        }
+    }
 }
 
 void s3_win_wifi_main_task(void *arg)

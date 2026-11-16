@@ -169,6 +169,17 @@
  * 不编进来）。lwIP 的 malloc/calloc/realloc 直接落在 wifi_glue.c 的
  * osi_malloc 堆上，和闭源库的 free() 是同一个堆（见 §210）。 */
 
+/* ---- 读当前 sp（诊断用，§239）---- */
+    .align  4
+9:  .word   0
+    .align  4
+    .global s3_w2c_sp_probe
+    .type   s3_w2c_sp_probe, @function
+s3_w2c_sp_probe:
+    entry   a1, 32
+    mov     a2, a1
+    retw
+
 /* ---- 看门狗（§228）：os_wdt_feed/os_wdt_start 是 call0 的 C 函数（flash.c），
  * windowed 岛里不能直接调 —— 必须过这个壳，否则返回地址带窗口标签、
  * 一返回就跳飞（真板实测：TRAP cause=0 pc=0x8037a7e9，正是带标签的 a0）。 */
