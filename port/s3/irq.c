@@ -298,6 +298,7 @@ void *s3_timer_irq(u32 frame_sp)
             ic[1] = ic[1] + 1u;
         }
     }
+#ifndef S3_MINIMAL_ISR
     if (port_cur_ctx() != 0) {
         s3_isr_mark(1u);
         port_irq_fill(frame_sp);
@@ -305,6 +306,9 @@ void *s3_timer_irq(u32 frame_sp)
     } else {
         s3_isr_mark(3u);
     }
+#else
+    (void)frame_sp;
+#endif
     port_isr_enter();
     s3_isr_mark(4u);
     {

@@ -13490,3 +13490,44 @@ B 之后仍然崩的地方很具体：`pc=0x4201062c` = **`s3_win_stress`**、`a
 
 ⇒ 到这个程度可以确认：**WS/WB 的恢复策略不是瓶颈**（怎么改都只会更差）。
 `HEAD` 的"按任务原样恢复 WS"就保留着。
+
+## §358 WiFi 那条链的**无冲突**现场（第一次）
+
+诊断地址搬家、开机清 RTC 之后，一次运行的四份记录（全部可信）：
+
+```
+switch  #1 : EPC=4201854c (os_task_start_core)  PS=00060800  WS=00000200  WB=9
+restore #1 : frame=3fcbedf0  EPC=403797b4 (s3_task_tramp)  PS=00060000  WS=0  WB=0
+trap       : cause=0  epc1=40048c6e (ROM uart_tx_one_char 的 retw.n)
+             ps=00060610  frame_sp=3fcbeaf0  a0=00060400  帧内 PS=00060600(WOE=1,CALLINC=2)
+tramp      : 启动过 2 个任务（wifi 主任务 + ppTask）
+```
+
+`a0=0x00060400` 和帧里的 PS `0x00060600` 长得很像 ⇒ **`a0` 被一个 PS 值顶掉了**，
+这正是"寄存器窗口被填错"的典型现象（`retw.n` 于是 cause=0）。
+
+## §359 关掉定时器中断，这个 TRAP 就**不会出现**
+
+- `-DS3_IRQ_HOLD_OFF`（定时器中断根本不打开）：`trap` 记录区全是噪声 ⇒ **没有 trap**，
+  只是卡住（PC=`40379dd4`）。
+- **最小中断**（`-DS3_MINIMAL_ISR`：ISR 里只做 tick + 重装定时器，不调
+  `port_irq_fill`、不调 hook）：同样**没有 trap**。
+
+⇒ TRAP 是"中断 + `port_irq_fill`"这条路径造出来的，不是纯切换路径。
+但把 `port_irq_fill` 里的两件事分别关掉（`-DS3_NO_ISR_WOE_PATCH` /
+`-DS3_NO_ISR_SP_PATCH`）都不会改变现象 ⇒ 不是单独某一行的错，
+更像是"中断把被打断帧的 PS/ctx 改了"这类**状态耦合**。
+
+另外 `-DS3_NO_WIN_SPILL`（关掉壳里的祖先 spill）也一样不变。
+
+## §360 本轮结论与下一步
+
+1. 我们自己的 windowed 机制（溢出/欠载、阻塞/恢复、深链）在 `t_winabi`
+   里已经分别验证通过；问题集中在"闭源库 + 中断 + 切换"三者叠加。
+2. `port/s3/irq.c` 里新增了三个**开关式**排查点（默认全开，和原来一致）：
+   `S3_MINIMAL_ISR` / `S3_NO_ISR_WOE_PATCH` / `S3_NO_ISR_SP_PATCH`。
+3. 下一步：把中断路径也换成 IDF 的写法 —— 即 `_vec_level1` 里不再手工拼
+   80 字节帧 + 调 C，而是按 IDF 的 `_xt_lowint1` 结构：**先把 16 个寄存器
+   连同 PS/EPC 一起按 IDF 的 `XT_STK` 布局压栈**，C 处理完再按同一布局恢复。
+   我们现在这套帧布局是我们自己发明的，和 IDF/FreeRTOS 的
+   `XT_STK_*` 不是一回事，而闭源库的 ROM 打印链是按 IDF 的假设写的。
