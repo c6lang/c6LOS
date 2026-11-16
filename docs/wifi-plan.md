@@ -10550,3 +10550,42 @@ rotw 3 / rotw 3 / rotw 3 ……（转 16 个窗口一整圈）
 （不依赖硬件溢出向量，见 §235 第 2 条），并且给 w2c 壳加"spill 前校验 a1
 是否落在 g_stack_pool 范围内，越界就只记录不写"的保护，避免一次坏 a1 直接把
 系统打死 —— 先让它能继续跑，再看真正坏在哪里。
+
+### §237 **决定性结论**：windowed 任务支持本身就是坏的（与 WiFi 库无关）
+
+用现成的 windowed ABI 压力用例（`tests/t_winabi.c6`，两个 windowed 任务互相抢占 +
+`_queue_recv` 最小复现）刷进真板：
+
+```
+make C6_ROOT=/home/winger/c6 S3_WIFI_MAIN=tests/t_winabi.c6 wifi
+c6os s3 boot
+[recv] t=2 qh=3fcc0360 tk=0
+*** TRAP
+```
+
+JTAG 读异常现场：`EXCCAUSE=0x14 (20)`、`EXCVADDR=0x00000000`、**`EPC1=0x00000000`**，
+halt 时 `windowbase=13`、`windowstart=0x2a80`、`a1=0xfffffde0`。
+
+也就是：**跳到地址 0 去取指** + 窗口寄存器状态完全错乱。这个用例完全不碰 WiFi 库，
+所以可以确定：
+
+> 我们的 port 对 **windowed 任务**（`g_next_task_windowed=1` 建出来的任务）的
+> 上下文切换/窗口簿记是坏的；之前所有"WiFi 初始化卡住/TRAP"都是它的下游症状。
+> call0 任务一切正常（基线镜像、几十个内核测试都过）。
+
+这也解释了为什么 `S3_NO_WIN_SPILL`、`S3_NO_PREEMPT`、窗口预热这些"外面打补丁"的
+尝试都只是把故障点挪一挪、并不解决。
+
+**下一步（明确且自包含）**：只盯 `t_winabi` 这一个用例，把"两个 windowed 任务
+互相抢占"调通。要检查的点（按怀疑度）：
+
+1. `ctx.S` 的 `port_task_switch`：切走时只存当前窗口的 a0..a15；**windowed 任务的
+   祖先窗口必须在切走前 spill**（§234），否则另一个任务轮转窗口就把它覆盖；
+2. `RESTORE_FRAME` 恢复 `windowstart` 的方式（现在改成按任务保存恢复，§230）是否
+   和"spill 后归属"一致；
+3. `_vec_level1`（trap/中断入口）在 windowed 任务里嵌套时的帧与 `S3Ctx.sp` 的关系；
+4. 新建 windowed 任务的初始帧（`port_task_ctx_create` 里的 `g_stacks`/顶帧布局 +
+   `g_next_task_windowed` 的 ABI 标志）是否让任务第一次 `retw` 就落在正确窗口。
+
+判据：`t_winabi` 能连续跑（`d[1]` 里的轮数持续增长、`d[0]==0xC0DE1234`、
+`d[4]==0xC0DE5678`）且不 TRAP，再回来跑 WiFi 初始化。
