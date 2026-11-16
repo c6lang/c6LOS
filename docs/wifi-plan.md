@@ -12966,3 +12966,44 @@ level-1 handler 是 `call0 s3_timer_irq`（反汇编 `40379d37: call0 40379ac0`�
    把 `W2C`/`_win_*` 兜底全部删掉，让整个系统只有一种调用约定；
 2. **精确定位**：接管 `ets_printf`（ROM 符号是 `PROVIDE` 的，我们给出强定义即可覆盖，
    真身 `0x400005d0`）记录每次调用的返回地址，把"谁在第 N 次打印时进入 ROM"钉死。
+
+## §323 崩溃函数第一次被**点名**：ROM 的 `uart_tx_one_char`
+
+用 JTAG 把 ROM 跳转桩表 dump 出来，配合 IDF 的 `esp32s3.rom.ld` 对齐：
+
+```
+0x400005c0: 40048b3c  a0ffff91  00000009 4004423c  ← ets_is_print_boot / ets_printf 的桩
+0x40000630: ...                                     
+0x40000640: 00000009  40048c30   ← uart_tx_one_char 桩指向的真身
+```
+
+| ROM 符号 | 桩地址 | 真身 | 约定 |
+|---|---|---|---|
+| `ets_printf` | 0x400005d0 | **0x4004423c** | windowed（`entry a1,80`） |
+| `uart_tx_one_char` | 0x40000648 | **0x40048c30** | windowed（`entry a1,32`） |
+| 内部轮询 | — | 0x40048804 | windowed（`entry a1,32`） |
+
+所以 `*** TRAP pc=40048c6e` 就是 **`uart_tx_one_char` 的 `retw.n`**，
+整条 ROM 打印链（printf → putc → uart_tx_one_char → 轮询）**全是 windowed**，
+ROM 内部没有跨 ABI 问题 —— 出问题的只能是"进链之前的窗口账目"。
+
+## §324 又排除两条
+
+| 试的改动 | 结果 |
+|---|---|
+| `RESTORE_FRAME` 把恢复的 `PS.CALLINC`(16:17) 清 0 再 `wsr ps` | 症状完全不变 ⇒ 不是恢复出来的 CALLINC 不对 |
+| 编译加 `-DS3_IRQ_HOLD_OFF`（**定时器中断根本不打开**，没有任何中断/切换） | 症状**一模一样** ⇒ 崩溃与任务切换、与 `RESTORE_FRAME`、与中断路径**全都无关** |
+
+后一条很关键：它把范围压缩到"**纯调用链**"—— 只有我们的 windowed 壳
+（`W2C`/`WIN_SPILL`）、闭源库、ROM、以及**窗口溢出/欠载向量**这几样东西在跑。
+
+## §325 想接管 `ets_printf` 失败了（记下来省得再试）
+
+`esp32s3.rom.ld` 里是**普通符号赋值**（`ets_printf = 0x400005d0;`），不是
+`PROVIDE(...)`，链接脚本里的赋值优先，我们自己定义强符号也覆盖不了 ——
+`nm` 里只会看到 `400005d0 A ets_printf`。所以"给 `ets_printf` 打探针记录调用者"
+这条路走不通（探针文件已删）。要探，只能从 `_vec_exc` 或者窗口向量里做。
+
+顺带记录：`s3_trap` 的现场记录里 `PS` 是 `rsr ps`（**异常处理器的 PS，EXCM=1**），
+不是被中断时的 PS —— 所以 `*** TRAP` 里打印的 `callinc=` 一直不可信，
+别再拿它推结论。
