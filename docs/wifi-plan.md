@@ -11869,3 +11869,51 @@ USB PHY，除非先 `phy_bbpll_en_usb(1)`）。现在 `303a` 不在 `lsusb` 里�
 
 **恢复后要做的第一件事**：重新刷回 `https` 镜像（现在板上是 bisect 镜像，一上电
 又会把 USB 关掉）。
+
+### §284 FE（0x60006000 = DR_REG_FE_BASE，"front end"）这块寄存器窗口在进库之前就是死的
+
+在 `s3_win_phy_enable()` 里加了两行读寄存器（`0x60006174` / `0x60006000`），
+**紧跟在 `s3_win_phy_power_on()` 之后、还没调 `register_chipv7_phy`**：
+
+```
+[phy] FE 0x60006174=00000000 0x60006000=06828040（power_on 之后）
+[phy] calling register_chipv7_phy(mode=0)
+```
+
+对照 IDF 的 `soc/esp32s3/register/soc/reg_base.h`：
+
+| 地址 | 归属 |
+|---|---|
+| `0x60006000` | `DR_REG_FE_BASE`（PHY/RF 前端） |
+| `0x6001CC00` | `DR_REG_NRX_BASE` |
+| `0x6001D000` | `DR_REG_BB_BASE` |
+
+所以 `register_chipv7_phy()` 里 `ram_iq_est_enable()` 死等的是 **FE 的一个状态位**，
+而这块在库执行之前就已经恒 0 了 —— 不是库把它弄坏，是我们**没能把它叫醒**。
+
+已经排除的（都有实测）：
+- 电源域：`RTC_CNTL_DIG_PWC` 的 `WIFI_FORCE_PU` 是 **BIT(18)**（不是 16），实测已为 1；
+  `WIFI_FORCE_PD`=0、`WIFI_PD_EN`=0 ✓
+- 时钟：`SYSTEM_WIFI_CLK_EN = 0xfffce7bf`，IDF 要求的三组掩码
+  `WIFI_BT_COMMON_M=0x78078F`、`PHY_EN_M=0x400000` 全在里面 ✓
+  （S3 的 `SYSTEM_WIFI_CLK_WIFI_EN`/`BT_EN` 在 IDF 头里就是 `0x0`，没有额外位）
+- 隔离/复位：`RTC_CNTL_DIG_ISO` bit28=0 ✓、`SYSCON_WIFI_RST_EN`=0 ✓
+- `S3_PHY_CAL_MODE=2`（`PHY_RF_CAL_NONE`）：照样卡
+- `phy_init_param_set(1)`（IDF 对 combo 片会调）：照样卡
+- `phy_wakeup_init()`：**在它里面就卡住**（连我们的打印都出不来）
+- 去掉 W0 阶段那次提前的 `s3_win_phy_cal()`（`phy_get_rf_cal_version`）：照样卡
+- JTAG `mww 0x60006174 0x10000` 后回读仍是 0 → 这个地址写不进去
+
+**下一步（下一轮从这里接着干）**
+1. 先拿一个"已知能用"的参照物：本机上有现成的 ESP-IDF 工程
+   `/media/winger/inst_26/esp/xiaozhi`（`CONFIG_IDF_TARGET="esp32s3"`，`build/` 里有
+   `xiaozhi.bin`、`flash_args`：bootloader@0x0、ptable@0x8000、app@0x20000）。
+   刷进去跑起来，用 JTAG 读 `0x60006174`/`0x60006000`：
+   - 若 IDF 下这些地址也是 0 → 说明我们对"这个寄存器该是什么"的理解有偏差，
+     该换判据；
+   - 若非 0 → 我们的初始化确实缺一步，逐位对比 IDF 的 `esp_phy_enable()` 侧寄存器。
+   实验完立刻刷回本仓库镜像（`flashmon.sh build/wifi/c6os.bin`）。
+2. 更彻底：把 IDF 的 `components/esp_phy/src/*.c` 编进镜像（nvs/esp_log/esp_timer/
+   efuse 用桩实现替掉），让 PHY 初始化序列**就是 IDF 的**，不再手工复刻。
+3. 备选：`esp_phy_apply_phy_init_data()`（镜像里有，`0x4203fbd0`）在
+   `register_chipv7_phy` 之前先调一次看看。
