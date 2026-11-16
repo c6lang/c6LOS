@@ -213,6 +213,13 @@ void port_linux_arch_init(void)
     }
 }
 
+/* L5：切进程时同时换 syscall 入口用的内核栈和 TSS.RSP0（int 0x80 用后者）。 */
+void port_user_set_kstack(u64 top)
+{
+    x86_kern_stack = top;
+    g_tss.rsp0 = top;
+}
+
 void port_user_set_fsbase(u64 va)
 {
     wrmsr(0xc0000100u, (u32)(va & 0xffffffffull), (u32)(va >> 32));

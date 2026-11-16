@@ -71,7 +71,8 @@ void port_as_activate(u64 as);
 int  port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot);
 int  port_as_unmap(u64 as, u64 vaddr, u64 bytes);
 /* fork 用：复制用户区间（写时复制可后续替换此实现）。返回 0 成功。 */
-int  port_as_copy(u64 dst_as, u64 src_as);
+int  port_as_copy(u64 dst_as, u64 src_as);   /* fork：复制全部用户页 */
+void port_user_set_kstack(u64 top);          /* L5：每进程内核栈 */
 /* 用户指针校验（copy_from_user 的第一道闸）。返回 1 可访问。 */
 int  port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot);
 

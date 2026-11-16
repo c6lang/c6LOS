@@ -1,6 +1,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
+#include "c6os/linux_proc.h"
 
 /* Linux x86-64 系统调用实现（personality 的语义层）。
  *
@@ -53,6 +54,43 @@ void lx_proc_init(u64 as, u64 brk_start)
     g_brk = brk_start;
     g_brk_init = brk_start;
     g_seed = 0x9e3779b9u;
+    lx_proc_attach(as, brk_start);         /* L5：登记成 0 号进程 */
+}
+
+/* ---- 进程切换要用到的状态存取（linux/proc.c 调用） ---- */
+u64  lx_brk_get(void) { return g_brk; }
+void lx_brk_set(u64 v) { g_brk = v; }
+u64  lx_mmap_top_get(void) { return g_mmap_top; }
+void lx_mmap_top_set(u64 v) { g_mmap_top = v; }
+void lx_set_as(u64 as) { g_as = as; port_as_activate(as); }
+
+/* 从用户态读一个 NUL 结尾的字符串；返回长度，<0 是 -errno。 */
+i64 lx_user_cstr(u64 upath, char *dst, u64 max)
+{
+    u64 i;
+
+    if (max == 0ull) {
+        return (i64)0 - (i64)LX_EINVAL;
+    }
+    for (i = 0ull; i + 1ull < max; i++) {
+        if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
+            return (i64)0 - (i64)LX_EFAULT;
+        }
+        dst[i] = *(const char *)(upath + i);
+        if (dst[i] == 0) {
+            return (i64)i;
+        }
+    }
+    dst[max - 1ull] = 0;
+    return (i64)(max - 1ull);
+}
+
+static u64 sys_write(u64 fd, u64 buf, u64 len);
+
+/* 管道写之外的写路径（控制台）最终落到 sys_write。 */
+u64 lx_console_write(u64 fd, u64 ubuf, u64 len)
+{
+    return sys_write(fd, ubuf, len);
 }
 
 u64 lx_proc_brk(void)
@@ -267,7 +305,7 @@ static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     return sys_mmap2(addr, len, prot, flags, fd, off);
 }
 
-void lx_syscall(LxRegs *r)
+static void lx_syscall_do(LxRegs *r)
 {
     u64 nr = r->rax;
     u64 a0 = r->rdi;
@@ -283,18 +321,10 @@ void lx_syscall(LxRegs *r)
         return;
 
     case LX_SYS_write:
-        if (a0 > 2ull) {
-            r->rax = neg(LX_EBADF);        /* 只读 initramfs：写路径留给 L5 */
-            return;
-        }
-        r->rax = sys_write(a0, a1, a2);
+        r->rax = lx_proc_write(a0, a1, a2);
         return;
     case LX_SYS_read:
-        if (a0 > 2ull) {
-            r->rax = lx_fs_read(a0, a1, a2);
-            return;
-        }
-        r->rax = 0ull;                     /* stdin 还没接键盘：EOF */
+        r->rax = lx_proc_read(a0, a1, a2);
         return;
 
     case LX_SYS_open:
@@ -303,7 +333,7 @@ void lx_syscall(LxRegs *r)
         return;
 
     case LX_SYS_close:
-        r->rax = lx_fs_close(a0);
+        r->rax = lx_proc_close(a0);
         return;
 
     case LX_SYS_lseek:
@@ -345,7 +375,7 @@ void lx_syscall(LxRegs *r)
         port_puts("\n[lx] exit(");
         put_dec(a0);
         port_puts(") —— 用户进程正常结束\n");
-        port_panic_halt();
+        lx_proc_exit(a0);                  /* 不返回 */
         return;
 
     case LX_SYS_brk:
@@ -441,6 +471,72 @@ void lx_syscall(LxRegs *r)
         r->rax = sys_getrandom(a0, a1, a2);
         return;
 
+    case LX_SYS_fork:
+    case LX_SYS_vfork:
+        r->rax = lx_proc_fork(r);
+        return;
+
+    case LX_SYS_clone:
+        if (a1 != 0ull) {
+            r->rax = neg(LX_ENOSYS);       /* 非 0 栈 = 线程，L7 再做 */
+            return;
+        }
+        r->rax = lx_proc_fork(r);
+        if (r->rax != 0ull && (i64)r->rax > 0) {
+            if (a2 != 0ull && lx_user_ok(a2, 4ull, C6OS_PROT_W) != 0) {
+                *(u32 *)a2 = 0u;
+            }
+            if (a3 != 0ull && lx_user_ok(a3, 4ull, C6OS_PROT_W) != 0) {
+                *(u32 *)a3 = 0u;
+            }
+        }
+        return;
+
+    case LX_SYS_execve:
+        r->rax = lx_proc_execve(a0, a1, a2, r);
+        return;
+
+    case LX_SYS_wait4:
+        r->rax = lx_proc_wait4((i64)a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_pipe:
+    case LX_SYS_pipe2:
+        r->rax = lx_proc_pipe2(a0, a1);
+        return;
+
+    case LX_SYS_dup:
+        r->rax = lx_proc_dup(a0);
+        return;
+
+    case LX_SYS_dup2:
+        r->rax = lx_proc_dup2(a0, a1);
+        return;
+
+    case LX_SYS_getppid:
+        if (lx_cur_proc() != (LxProc *)0) {
+            r->rax = (u64)lx_cur_proc()->ppid;
+        } else {
+            r->rax = 0ull;
+        }
+        return;
+
+    case LX_SYS_rt_sigaction:
+    case LX_SYS_rt_sigprocmask:
+    case LX_SYS_sigaltstack:
+    case LX_SYS_setpgid:
+    case LX_SYS_setsid:
+    case LX_SYS_umask:
+    case LX_SYS_chdir:
+    case LX_SYS_fcntl:
+        /* L5 先把进程模型跑通；真正的信号投递是 L6，chdir/fcntl 是 L6+ */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_getpgrp:
+        r->rax = 1ull;
+        return;
+
     case LX_SYS_getuid:
     case LX_SYS_geteuid:
     case LX_SYS_getgid:
@@ -507,4 +603,11 @@ void lx_syscall(LxRegs *r)
         r->rax = neg(LX_ENOSYS);
         return;
     }
+}
+
+/* 系统调用出口：所有处理完（含阻塞返回）之后统一让出一次 CPU。 */
+void lx_syscall(LxRegs *r)
+{
+    lx_syscall_do(r);
+    lx_sched_tick();
 }

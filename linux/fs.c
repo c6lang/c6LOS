@@ -1,6 +1,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
+#include "c6os/linux_proc.h"
 
 /* 只读 initramfs（标准 newc cpio，和 Linux 的 initramfs 同格式）+ fd 表 +
  * 文件类系统调用。
@@ -11,9 +12,6 @@
 
 #define FS_MAX_FILES 64u
 #define FS_NAME      64u
-#define FD_NONE      0xffffffffffffffffull
-#define FD_CONSOLE   0xfffffffffffeull
-#define FD_ROOT      0xfffffffffffdull
 
 typedef struct {
     char name[FS_NAME];
@@ -22,15 +20,10 @@ typedef struct {
     u32  mode;
 } LxNode;
 
-typedef struct {
-    u64 pos;
-    u64 node;                              /* FD_NONE 空；FD_CONSOLE 控制台 */
-    u32 is_dir;
-} LxFd;
-
 static LxNode g_node[FS_MAX_FILES];
 static u32    g_nodes;
-static LxFd   g_fd[C6OS_LINUX_MAX_FD];
+static LxFile g_fdt0[C6OS_LINUX_MAX_FD];
+static LxFile *g_fd = g_fdt0;
 static u64    g_fs_pa;
 
 
@@ -245,15 +238,32 @@ static int in_dir(const char *name, const char *dir)
 
 /* ---- fd 表 ---- */
 
-static LxFd *fd_get(u64 fd)
+static LxFile *fd_get(u64 fd)
 {
     if (fd >= (u64)C6OS_LINUX_MAX_FD) {
         return 0;
     }
-    if (g_fd[fd].node == FD_NONE) {
+    if (g_fd[fd].node == LX_FD_NONE) {
         return 0;
     }
     return &g_fd[fd];
+}
+
+/* L5：fd 表跟着进程走。单进程的 L2/L3/L4 目标继续用默认表 g_fdt0。 */
+void lx_fs_set_fdtab(LxFile *t)
+{
+    g_fd = (t != (LxFile *)0) ? t : g_fdt0;
+}
+
+/* execve 用：把路径换成节点号；<0 表示不存在。 */
+i64 lx_fs_lookup(const char *path)
+{
+    const char *s = strip_(path);
+
+    if (s[0] == '\0') {
+        return 0;
+    }
+    return (i64)fs_find(s);
 }
 
 static u64 fd_alloc(void)
@@ -261,11 +271,11 @@ static u64 fd_alloc(void)
     u64 i;
 
     for (i = 3ull; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-        if (g_fd[i].node == FD_NONE) {
+        if (g_fd[i].node == LX_FD_NONE) {
             return i;
         }
     }
-    return FD_NONE;
+    return LX_FD_NONE;
 }
 
 void lx_fs_fd_reset(void)
@@ -273,13 +283,14 @@ void lx_fs_fd_reset(void)
     u64 i;
 
     for (i = 0; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-        g_fd[i].node = FD_NONE;
+        g_fd[i].node = LX_FD_NONE;
         g_fd[i].pos = 0ull;
         g_fd[i].is_dir = 0u;
+        g_fd[i].kind = LX_FD_FILE;
     }
-    g_fd[0].node = FD_CONSOLE;
-    g_fd[1].node = FD_CONSOLE;
-    g_fd[2].node = FD_CONSOLE;
+    g_fd[0].node = LX_FD_CONSOLE;
+    g_fd[1].node = LX_FD_CONSOLE;
+    g_fd[2].node = LX_FD_CONSOLE;
 }
 
 /* ---- stat / dirent ---- */
@@ -364,12 +375,13 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
     s = strip_(path);
     if (s[0] == '\0') {                            /* "/" 根目录 */
         fd = fd_alloc();
-        if (fd == FD_NONE) {
+        if (fd == LX_FD_NONE) {
             return (u64)0 - 24;
         }
-        g_fd[fd].node = FD_ROOT;
+        g_fd[fd].node = LX_FD_ROOT;
         g_fd[fd].pos = 0ull;
         g_fd[fd].is_dir = 1u;
+        g_fd[fd].kind = LX_FD_FILE;
         return fd;
     }
     idx = fs_find(s);
@@ -377,12 +389,13 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         return (u64)0 - LX_ENOENT;
     }
     fd = fd_alloc();
-    if (fd == FD_NONE) {
+    if (fd == LX_FD_NONE) {
         return (u64)0 - 24;                      /* EMFILE */
     }
     g_fd[fd].node = (u64)idx;
     g_fd[fd].pos = 0ull;
     g_fd[fd].is_dir = is_dir(s) ? 1u : 0u;
+    g_fd[fd].kind = LX_FD_FILE;
     return fd;
 }
 
@@ -395,7 +408,7 @@ u64 lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode)
 /* 从文件读，不动 fd 位置（pread64、以及 mmap 的文件内容拷贝都用它）。 */
 static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
     u32 idx;
     u64 left;
     u64 n;
@@ -409,7 +422,7 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     if (f->is_dir != 0u) {
         return (u64)0 - 21;                      /* EISDIR */
     }
-    if (f->node == FD_CONSOLE) {
+    if (f->node == LX_FD_CONSOLE) {
         return 0ull;                             /* 还没有键盘输入：EOF */
     }
     idx = (u32)f->node;
@@ -446,7 +459,7 @@ u64 lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off)
 
 u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
     u64 n;
 
     if (f == 0) {
@@ -461,7 +474,7 @@ u64 lx_fs_read(u64 fd, u64 ubuf, u64 len)
 
 u64 lx_fs_fd_size(u64 fd)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
 
     if (f == 0 || f->node >= (u64)g_nodes) {
         return 0ull;
@@ -487,12 +500,12 @@ u64 lx_fs_pa_of(const char *path)
 
 u64 lx_fs_close(u64 fd)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
 
     if (f == 0 || fd <= 2ull) {
         return (u64)0 - LX_EBADF;
     }
-    f->node = FD_NONE;
+    f->node = LX_FD_NONE;
     f->pos = 0ull;
     f->is_dir = 0u;
     return 0ull;
@@ -500,14 +513,14 @@ u64 lx_fs_close(u64 fd)
 
 u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
     u64 base;
     u64 np;
 
-    if (f == 0 || f->node == FD_CONSOLE) {
+    if (f == 0 || f->node == LX_FD_CONSOLE) {
         return (u64)0 - LX_EBADF;
     }
-    if (f->node == FD_ROOT) {
+    if (f->node == LX_FD_ROOT) {
         return 0ull;
     }
     if (whence == 0ull) {
@@ -529,19 +542,19 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
 
 u64 lx_fs_fstat(u64 fd, u64 ustat)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
     u32 idx;
 
     if (f == 0) {
         return (u64)0 - LX_EBADF;
     }
-    if (f->node == FD_CONSOLE) {
+    if (f->node == LX_FD_CONSOLE) {
         if (fill_stat(ustat, 0u, 0ull, 0020620u) != 0) {
             return (u64)0 - LX_EFAULT;
         }
         return 0ull;
     }
-    if (f->node == FD_ROOT) {
+    if (f->node == LX_FD_ROOT) {
         if (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) {
             return (u64)0 - LX_EFAULT;
         }
@@ -641,7 +654,7 @@ u64 lx_fs_access(u64 upath, u64 mode)
 /* getdents64：Linux 的 dirent64 布局，名字以 NUL 结尾，记录 8 字节对齐。 */
 u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
 {
-    LxFd *f = fd_get(fd);
+    LxFile *f = fd_get(fd);
     u8 rec[512];
     u64 used = 0;
     u32 idx;
@@ -653,7 +666,7 @@ u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
     if (f->is_dir == 0u) {
         return (u64)0 - 20;                      /* ENOTDIR */
     }
-    dir = (f->node == FD_ROOT) ? "" : fs_node_name((u32)f->node);
+    dir = (f->node == LX_FD_ROOT) ? "" : fs_node_name((u32)f->node);
     for (;;) {
         const char *nm;
         u32 ino;

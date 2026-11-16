@@ -474,9 +474,72 @@ int port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot)
     return 1;
 }
 
+/* fork：把 src_as 里所有用户页（PTE_U）复制到 dst_as。
+ *
+ * 只复制 4KB 叶子且带用户位的页：内核低端 0..4MB 的 identity 与 DMAP 都是
+ * 2MB 页 + supervisor，既不该也不能复制。子进程拿到的是独立的物理页，
+ * 所以父子写同一份数据不会互相踩（代价是 fork 变慢，写时复制留到后面）。 */
 int port_as_copy(u64 dst_as, u64 src_as)
 {
-    (void)dst_as;
-    (void)src_as;
-    return -1;                            /* L5：fork 写时复制在这里落地 */
+    u64 *p4;
+    u64 i4;
+
+    if (dst_as == 0ull || src_as == 0ull) {
+        return -1;
+    }
+    p4 = tbl(src_as);
+    for (i4 = 0; i4 < 512ull; i4++) {
+        u64 *p3;
+        u64 i3;
+
+        if ((p4[i4] & PTE_P) == 0ull) {
+            continue;
+        }
+        p3 = tbl(p4[i4]);
+        for (i3 = 0; i3 < 512ull; i3++) {
+            u64 *p2;
+            u64 i2;
+
+            if ((p3[i3] & PTE_P) == 0ull || (p3[i3] & PTE_PS) != 0ull) {
+                continue;
+            }
+            p2 = tbl(p3[i3]);
+            for (i2 = 0; i2 < 512ull; i2++) {
+                u64 *p1;
+                u64 i1;
+
+                if ((p2[i2] & PTE_P) == 0ull || (p2[i2] & PTE_PS) != 0ull) {
+                    continue;
+                }
+                p1 = tbl(p2[i2]);
+                for (i1 = 0; i1 < 512ull; i1++) {
+                    u64 e = p1[i1];
+                    u64 va;
+                    u64 npa;
+                    u8 *src;
+                    u8 *dst;
+                    u32 k;
+
+                    if ((e & PTE_P) == 0ull || (e & PTE_U) == 0ull) {
+                        continue;
+                    }
+                    va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
+                    npa = port_phys_alloc();
+                    if (npa == 0ull) {
+                        return -2;
+                    }
+                    src = (u8 *)port_phys_map(e & PTE_ADDR);
+                    dst = (u8 *)port_phys_map(npa);
+                    for (k = 0; k < 4096u; k++) {
+                        dst[k] = src[k];
+                    }
+                    if (map4k(dst_as, va, npa,
+                              (e & 0xfffull) | (e & PTE_NX)) != 0) {
+                        return -3;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
 }

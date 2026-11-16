@@ -1,6 +1,7 @@
 # 可配置 Linux ELF 二进制兼容层（Tier 3）
 
-> 状态：L4 已跑通（动态链接；未修改的动态 PIE `busybox` 执行 `ls /` 成功）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
+> 状态：L4 已跑通（动态链接；未修改的动态 PIE `busybox` 执行 `ls /` 成功）；
+> L5 进程模型进行中（`fork`/`pipe`/`wait4` 已跑通，`execve` 有已定位的遗留问题，见 §0.2）· 关联 [architecture.md](architecture.md) §1 修订 · [toolchain.md](toolchain.md) · [todo.md](todo.md)
 >
 > 目标：在**带 MMU 与特权级**的移植层上，用 `C6OS_LINUX_ABI` 打开原生 x86-64 Linux ELF
 > 二进制兼容（静态/动态、进程、信号、线程）；在无 MMU 目标（ESP32-S3）上该特性
@@ -15,6 +16,7 @@
 | L2 syscall 通道 + ELF64 静态加载 | **完成** | `make check-linuxabi-l2` → `PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）` |
 | L3 initramfs + 文件语义 | **完成** | `make check-linuxabi-l3` → `PASS: linux-abi L3（initramfs + 文件语义）` |
 | L4 动态链接 + ld.so | **完成** | `make check-linuxabi-l4` → `PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）` |
+| L5 进程模型 | **部分** | `fork`+`pipe`+`wait4`+退出码已通（§0.2）；`execve` 能装载并运行新镜像，但之后父进程恢复会缺页，未收口 |
 
 L1 实测输出（qemu-system-x86_64，`build/x86/user-disk.img`）：
 
@@ -152,6 +154,63 @@ L2 修掉的 L1 简化：
 
 这三条都是"内核看起来完全正常、用户态静默跑飞"的类型，所以异常桩（上面第
 三条硬件事实）在 L2 阶段就必须有：没有它，任何内核 trap 都是整机消失。
+
+### 0.2 L5 进程模型：已完成部分与已知问题
+
+**设计取舍：协作式调度。** ring3 的 `RFLAGS.IF=0`（L2 起就没给用户态开中断，
+因为 `IRQ_USER` 还没做），所以用户态不会被打断，进程切换只发生在**系统调用边界**：
+`lx_syscall` 返回前调一次 `lx_sched_tick()`。阻塞式 syscall（`read` 空管道、
+`wait4` 无子进程）走 `lx_proc_block()` → `resched_()`；对端 `write`/`close`/`exit`
+再 `wake_()`/`wake_all_()`。这样在没有定时器的前提下就能跑出真正的多进程，
+代价是 CPU 密集进程不会被抢占 —— 等 L6/L7 把用户态中断接上再换成抢占式。
+
+每个进程一块**静态** 8KB 内核栈（`g_kstack[LX_MAX_PROC][8192]`，8 个进程共
+64KB `.bss`），切换只用 `lx_ctx_switch(&old->ksp, new->ksp)` 保存/恢复 callee
+寄存器，不做任何分配 —— 上下文切换路径里不能有"可能失败"的操作。
+
+**已验证**（qemu，`fork`+`pipe`+`wait4` 的测试程序，动态链接、未修改的 Linux ELF）：
+
+```
+[user] fork/pipe 测试
+[child] 写管道 hello-pipe
+[lx] exit(7)
+[parent] parent got: hello-pipe
+[parent] child exit=7
+[parent] parent done
+```
+
+即：fd 继承、管道读写与 EOF（引用计数）、`exit` 状态码、`wait4` 回收、僵尸槽位
+释放都对。`dup`/`dup2`/`getppid`/`setsid` 等周边 syscall 一并补齐。
+
+**已知问题（未收口）：子进程 `execve` 之后，父进程恢复运行时在 libc 内部取数缺页。**
+现象：`pipe()` → `fork()` → 子进程 `dup2(fd[1],1)` → `execl("/bin/busybox","ls","/")`。
+新的镜像**装载并运行成功**（`ls /` 的输出、`exit(0)` 都正常），但父进程从
+`lx_proc_block()` 恢复后、还在 libc 里就 `#PF`：
+
+```
+vec=14 err=0x0005 cr2=0x7fefffe056c8  pid=1
+rip=0x7fefffef4e8f（在父进程自己的 libc 代码段内，可执行）
+```
+
+已排除/已确认的事实（下一轮直接从这儿接）：
+
+- 父进程的 AS 没有被 `execve` 改掉：`lx_proc_execve` 里走的是
+  `port_as_create()` 新 AS，随后 `lx_set_as()` + `cur_()->as = 新 AS`；
+  父进程 `p->as` 不变，切换回来也 `port_as_activate` 了它自己的 CR3。
+- `port_as_copy`（fork 的地址空间复制）会完整遍历 4 级表，只复制 `PTE_U` 的
+  4KB 叶子，块内实测复制 577 页；没有出现分配失败。
+- 父进程 libc 的真实基址是 **0x7FEFFFE1B000**（ld.so 的无地址 `mmap` 由内核从
+  `C6OS_LINUX_MMAP_BASE` 向下分配得到），其文件映射、`MAP_FIXED` 代码段
+  （base+0x26000）、bss（base+0x61000）全部就位。而故障地址
+  `0x7FEFFFE056C8` 落在**基址以下 0x15A38**，只可能来自"用另一个基址算出来的
+  重定位值"（例如 0x7FEFFFE00000）。
+- 因此嫌疑集中在：`fork` 之后子进程 `execve` 期间，**父进程 libc 的 GOT 页与
+  子进程新映射的某个页框重叠**（PMM 双分配）或子进程的重定位写到了共享页框上。
+  下一步是在 `port_phys_alloc` 里加"已分配帧"影子表，比较 fork 复制出来的父进程
+  页框与 execve 新映射的页框是否有交集。
+
+调试过程中新增的两个能力已保留在代码里（不含临时打印）：`port_as_copy()`
+（整地址空间复制）与 `port_as_activate()` 之外的 `lx_ctx_switch()` 汇编切换点。
 
 ---
 
@@ -322,7 +381,7 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | **L2** ✅ | `syscall` 通道、最小 syscall 集、`copy_from_user`、ELF64 静态加载器 | 加载**未修改的 Linux 静态 ELF**，它自己打印的那行字出现在串口上，并以 `exit_group(0)` 结束 |
 | **L3** ✅ | initramfs（newc cpio）+ fd 表 + `openat`/`read`/`fstat`/`getdents64`/`lseek` | 未修改的静态 Linux 程序用 `opendir`/`readdir`/`open`/`read` 列出并读出 initramfs 里的文件 |
 | **L4** ✅ | 动态链接：`PT_INTERP`、`ld.so`、`mmap` 文件映射、`AT_BASE`/`AT_ENTRY`、relocation 全交给 `ld.so` | 动态链接（PIE）的 `busybox` 跑起 `ls /` |
-| **L5** | 进程模型：`fork`(CoW)、`execve`、`wait4`、`pipe`、fd 继承 | `sh -c 'a | b'` 管道通，`fork` 子进程退出码正确 |
+| **L5** 🚧 | 进程模型：`fork`、`execve`、`wait4`、`pipe`、fd 继承 | 已通：`fork`+`pipe`+`wait4`+退出码；未收口：子进程 `execve` 后父进程恢复（§0.2） |
 | **L6** | 信号：`rt_sigaction`/`rt_sigprocmask`/`sigaltstack`/`rt_sigreturn` 帧精确复刻 | 用户态 `SIGSEGV` 被捕获、`longjmp` 恢复 |
 | **L7** | 线程：`clone`、futex 完整、FS base 切换、`pthread` | 静态 `pthread` 程序 4 线程计数正确 |
 
@@ -344,7 +403,9 @@ struct OsProc {                 /* 进程：地址空间 + 资源 */
 | L3 待补 | `ioctl`(16) `readlink`(89) `getuid`(102) `dup`(32) `pipe2`(293)（随 L4/L5 补齐） |
 | L4 动态 ✅ | `mmap` 文件映射(9) `pread64`(17) `writev`(20) `fstat`→`newfstatat(AT_EMPTY_PATH)` `ioctl`(16) `getuid`/`getgid`/`geteuid`/`getegid` `setuid`/`setgid` `time`(201) |
 | L4 待补 | `fcntl`(72) `poll`(7) `epoll_create1`(291) `readlink`(89) `dup`(32)（随 L5 补齐） |
-| L5 进程 | `clone`(56) `fork`(57) `vfork`(58) `execve`(59) `wait4`(61) `pipe2`(293) `dup2`(33) `getppid`(110) `chdir`(80) `getcwd`(79) `kill`(62) |
+| L5 进程 ✅ | `fork`(57) `vfork`(58) `clone`(56，仅 `fork` 语义) `wait4`(61) `pipe`(22) `pipe2`(293) `dup`(32) `dup2`(33) `close`(3，管道引用计数) `getppid`(110) `setpgid`(109) `getpgrp`(111) `setsid`(112) `umask`(95) `chdir`(80) `fcntl`(72，空实现) |
+| L5 🚧 | `execve`(59)：新镜像装载与运行都正常，但之后**父进程**恢复时缺页（§0.2，未收口） |
+| L5 待补 | `kill`(62) `poll`(7) 以及抢占式调度（需 `IRQ_USER`） |
 | L6 信号 | `rt_sigaction`(13) `rt_sigprocmask`(14) `rt_sigreturn`(15) `sigaltstack`(131) `rt_sigtimedwait`(128) |
 | L7 线程 | `clone` 完整语义、`futex` 完整、`sched_yield`(24) `gettid`(186) `tgkill`(234) |
 

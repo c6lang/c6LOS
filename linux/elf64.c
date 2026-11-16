@@ -256,7 +256,8 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
     return 0;
 }
 
-static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
+static int build_stack(u64 as, const char *path, const char *const *argv,
+                       u32 argc, u64 run_entry, u64 at_entry,
                        u64 at_base, u64 phdr, u64 phnum, u64 phentsize,
                        u64 *out_rsp)
 {
@@ -271,6 +272,7 @@ static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
     u64 va_execfn;
     u64 va_rand;
     u64 va_arg1;
+    u64 va_argv[16];
     u64 nargv;
     u64 fixed;
     u64 i;
@@ -293,11 +295,23 @@ static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
         }
     }
 
-    va_argv0 = push_str(buf, &w, va_base, path);
-    va_arg1 = 0ull;
-    if (g_arg1 != 0) {
-        va_arg1 = push_str(buf, &w, va_base, g_arg1);
+    if (argc == 0u || argv == (const char *const *)0) {
+        argc = 1u;
     }
+    if (argc > 16u) {
+        argc = 16u;
+    }
+    nargv = (u64)argc;
+    for (i = 0; i < nargv; i++) {
+        const char *a = argv[i];
+
+        if (a == (const char *)0) {
+            a = path;
+        }
+        va_argv[i] = push_str(buf, &w, va_base, a);
+    }
+    va_argv0 = va_argv[0];
+    va_arg1 = (nargv > 1ull) ? va_argv[1] : 0ull;
     va_plat = push_str(buf, &w, va_base, "x86_64");
     va_execfn = push_str(buf, &w, va_base, path);
     w -= 16ull;
@@ -309,7 +323,6 @@ static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
     /* 固定部分：envp 结尾(8) + argv 结尾(8) + argv[0](8) + argc(8) + auxv。
      * 若 argc 落不到 16 字节边界，只在**字符串与 auxv 之间**垫 8 字节：
      * 垫在 envp 与 auxv 之间会被 glibc 当成 AT_NULL，auxv 整个读空。 */
-    nargv = (g_arg1 != 0) ? 2ull : 1ull;
     fixed = 8ull * (3ull + nargv);      /* argc + argv[] + argv NULL + envp NULL */
     if (((va_base + w - (fixed + 16ull * (NAUX + 1ull))) & 15ull) != 0ull) {
         push8(buf, &w, 0ull);
@@ -335,8 +348,10 @@ static int build_stack(u64 as, const char *path, u64 run_entry, u64 at_entry,
 
     push8(buf, &w, 0ull);                      /* envp 结尾 */
     push8(buf, &w, 0ull);                      /* argv 结尾 */
-    if (nargv == 2ull) {
-        push8(buf, &w, va_arg1);               /* argv[1] */
+    i = nargv;
+    while (i > 1ull) {
+        i--;
+        push8(buf, &w, va_argv[i]);            /* argv[n-1] .. argv[1] */
     }
     push8(buf, &w, va_argv0);                  /* argv[0] */
     push8(buf, &w, nargv);                     /* argc */
@@ -383,7 +398,9 @@ static u64 elf_interp(u64 img_pa, u64 img_size, char *out, u64 cap)
     return 0ull;
 }
 
-int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
+int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
+                  const char *const *argv, u32 argc,
+                  u64 *o_entry, u64 *o_rsp, u64 *o_brk)
 {
     u64 e = 0ull;
     u64 ph = 0ull;
@@ -424,13 +441,36 @@ int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
         }
     }
 
-    lx_proc_init(as, brk);
-    lx_fs_fd_reset();
-    if (build_stack(as, path, (ibase != 0ull) ? ie : e, e, ibase, ph, pn, pe,
-                    &g_exec_rsp) != 0) {
+    if (build_stack(as, path, argv, argc, (ibase != 0ull) ? ie : e, e, ibase,
+                    ph, pn, pe, o_rsp) != 0) {
         return -4;
     }
-    g_exec_entry = (ibase != 0ull) ? ie : e;
+    *o_entry = (ibase != 0ull) ? ie : e;
+    if (o_brk != (u64 *)0) {
+        *o_brk = brk;
+    }
+    return 0;
+}
+
+/* 首次装载（L2..L4 以及 L5 的 0 号进程）：装载 + 登记进程 + 重置 fd 表。 */
+int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
+{
+    const char *argv0[2];
+    u64 entry = 0ull;
+    u64 rsp = 0ull;
+    u64 brk = 0ull;
+
+    argv0[0] = path;
+    argv0[1] = g_arg1;
+    if (lx_exec_build(as, img_pa, img_size, path, argv0,
+                      (g_arg1 != (const char *)0) ? 2u : 1u,
+                      &entry, &rsp, &brk) != 0) {
+        return -2;
+    }
+    lx_proc_init(as, brk);                 /* 登记 0 号进程，brk 来自新映像 */
+    lx_fs_fd_reset();
+    g_exec_entry = entry;
+    g_exec_rsp = rsp;
     return 0;
 }
 

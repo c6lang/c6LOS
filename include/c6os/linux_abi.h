@@ -29,12 +29,50 @@
 #define LX_SYS_munmap         11
 #define LX_SYS_brk            12
 #define LX_SYS_ioctl          16
+#define LX_SYS_pipe           22
+#define LX_SYS_dup            32
+#define LX_SYS_dup2           33
+#define LX_SYS_rt_sigaction   13
+#define LX_SYS_rt_sigprocmask 14
+#define LX_SYS_clone          56
+#define LX_SYS_fork           57
+#define LX_SYS_vfork          58
+#define LX_SYS_execve         59
+#define LX_SYS_wait4          61
+#define LX_SYS_fcntl          72
+#define LX_SYS_chdir          80
+#define LX_SYS_umask          95
+#define LX_SYS_getppid       110
+#define LX_SYS_setpgid       109
+#define LX_SYS_getpgrp       111
+#define LX_SYS_setsid        112
+#define LX_SYS_sigaltstack   131
+#define LX_SYS_pipe2         293
 #define LX_SYS_pread64        17
 #define LX_SYS_readv          19
 #define LX_SYS_writev         20
 #define LX_SYS_access         21
 #define LX_SYS_exit           60
 #define LX_SYS_ioctl          16
+#define LX_SYS_pipe           22
+#define LX_SYS_dup            32
+#define LX_SYS_dup2           33
+#define LX_SYS_rt_sigaction   13
+#define LX_SYS_rt_sigprocmask 14
+#define LX_SYS_clone          56
+#define LX_SYS_fork           57
+#define LX_SYS_vfork          58
+#define LX_SYS_execve         59
+#define LX_SYS_wait4          61
+#define LX_SYS_fcntl          72
+#define LX_SYS_chdir          80
+#define LX_SYS_umask          95
+#define LX_SYS_getppid       110
+#define LX_SYS_setpgid       109
+#define LX_SYS_getpgrp       111
+#define LX_SYS_setsid        112
+#define LX_SYS_sigaltstack   131
+#define LX_SYS_pipe2         293
 #define LX_SYS_getuid        102
 #define LX_SYS_getgid        104
 #define LX_SYS_setuid        105
@@ -76,6 +114,12 @@
 #define LX_EINVAL  22
 #define LX_ENOSYS  38
 #define LX_ENOTTY  25
+#define LX_ENOEXEC 8
+#define LX_ECHILD  10
+#define LX_EAGAIN  11
+#define LX_EPIPE   32
+#define LX_EBUSY   16
+#define LX_EMFILE  24
 #define LX_ESRCH   3
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
@@ -111,6 +155,9 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
  * c6 侧只需要：lx_exec_prepare → lx_exec_entry/lx_exec_rsp → port_user_enter。 */
 int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path);
 void lx_exec_arg1(const char *a);
+int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
+                  const char *const *argv, u32 argc,
+                  u64 *o_entry, u64 *o_rsp, u64 *o_brk);
 u64 lx_exec_entry(void);
 u64 lx_exec_rsp(void);
 

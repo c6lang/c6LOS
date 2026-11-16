@@ -966,7 +966,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
               $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
-              $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o
+              $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
+              $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/proc.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
@@ -977,7 +978,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
-              $(X86S_DIR)/obj/fs.o
+              $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/proc.o
 endif
 
 x86: caps-check-x86 $(X86)/disk.img
@@ -1137,6 +1138,10 @@ $(X86S_DIR)/obj/elf64.o: linux/elf64.c
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
 $(X86S_DIR)/obj/fs.o: linux/fs.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/proc.o: linux/proc.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 

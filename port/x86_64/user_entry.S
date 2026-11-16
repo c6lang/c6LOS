@@ -102,6 +102,10 @@ x86_syscall_entry:
     pushq %r15
     movq %rsp, %rdi                      /* &LxRegs */
     call x86_syscall_dispatch
+/* 返回用户态的唯一出口：RSP 指向一个 LxFrame（15 个通用寄存器 + 用户 RSP）。
+ * 系统调用返回与 x86_resume_user 共用这段，保证只有一份恢复逻辑。 */
+.globl x86_ret_to_user
+x86_ret_to_user:
     popq %r15
     popq %r14
     popq %r13
@@ -124,6 +128,42 @@ x86_syscall_entry:
     pushq $0x2b                          /* CS  = 用户代码 | 3 */
     pushq %rcx                           /* RIP */
     iretq
+
+/* ---- L5：协作调度 ---------------------------------------------------------
+ *
+ * lx_ctx_switch(&save_sp, new_sp)：保存 callee-saved 到当前栈，把 RSP 存进
+ * *save_sp，再换到 new_sp 继续。首次运行的子进程用 x86_resume_user 当"返回
+ * 地址"，从 LxFrame 恢复寄存器后 iretq —— 这样新进程不需要伪造整条 C 调用链。
+ */
+.globl lx_ctx_switch
+lx_ctx_switch:                       /* rdi = &save_sp, rsi = new_sp */
+    pushq %rbp
+    pushq %rbx
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq %rsp, (%rdi)
+    movq %rsi, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbx
+    popq %rbp
+    retq
+
+.globl x86_resume_user
+x86_resume_user:
+    movq x86_resume_frame(%rip), %rsp
+    jmp x86_ret_to_user
+
+.section .data
+.align 8
+.globl x86_resume_frame
+x86_resume_frame:
+    .quad 0
+.text
 
 /* ---- 异常（0..31）：观测优先 ----------------------------------------------
  *
