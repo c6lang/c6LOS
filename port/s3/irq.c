@@ -277,6 +277,20 @@ void *s3_timer_irq(u32 frame_sp)
         g_hook();
     }
     port_isr_exit();
+#ifdef S3_NO_PREEMPT
+    /* 关掉"定时器抢占切换"（§235）。
+     *
+     * 原因：Xtensa 只有 4 个窗口，windowed 调用链在深度 ≤3 时祖先窗口还活在
+     * 寄存器文件里；在中断里直接切走 = 让另一个任务去轮转窗口文件 ⇒ 回来时
+     * 祖先窗口已被覆盖，`retw` 用错 a0（真板上表现为 cause=0/29、a0 垃圾、
+     * a1 变成 0x3fcb95f2 这种值）。
+     *
+     * 关掉抢占后，所有切换都只发生在**显式阻塞点**（sem/queue pend、delay），
+     * 而那些调用都经过 port/s3/w2c.S 的壳 —— 壳在进内核前会把祖先窗口
+     * spill 到任务自己的栈上（WIN_SPILL），所以寄存器文件在切换那一刻是干净的。
+     * 代价：任务是协作式的（不会时间片轮转），我们的任务都会阻塞，够用。 */
+    return 0;
+#else
     {
         void *cur = port_cur_ctx();
         void *next = 0;
@@ -293,4 +307,5 @@ void *s3_timer_irq(u32 frame_sp)
         port_set_cur_ctx(next);
         return next;
     }
+#endif
 }

@@ -10486,3 +10486,51 @@ WINDOWSTART 归一化成 `1<<WINDOWBASE`**，这样寄存器文件里不留任�
 各自帧的下方）。可以把它抽成可复用的宏，参数化成"用哪个 a1 作为链头"。
 真板验证顺序：只跑一个 windowed 任务（应当已经能跑）→ 两个 windowed 任务互相
 抢占（`s3_win_stress`）→ 再跑 WiFi。
+
+### §235 关掉抢占也没用；故障点钉在 `WIN_SPILL` 的窗口轮转上
+
+新增开关 `S3_NO_PREEMPT=1`（`s3_timer_irq` 不再做定时抢占切换，只在显式阻塞点
+切换）。真板实测：**还是同样的故障**：
+
+```
+[task] 库建任务 fn=… id=2 stack=6144 prio=29(->2)
+[take] t=1 sem#1 tk=ffffffff
+[give] t=2 sem#1                        ← ppTask 给了信号量
+（之后无进展）
+```
+
+JTAG 现场（这次的 ppTask 栈在 0x3fcc0430）：
+
+```
+EXCCAUSE = 3   (LoadStoreError)
+EXCVADDR = 0x40043ca4   ← ROM 里的地址（把 ROM 当地址写了）
+EPC1     = 0x42014415   ← s3_w2c_current_task 里，也就是 w2c 壳的 WIN_SPILL 段
+```
+
+也就是说：**故障发生在 `WIN_SPILL` 里**。看 `port/s3/w2c.S` 的实现就明白了：
+它并不是"按 a1 链走"，而是走
+
+```
+rsr ps → 置 PS.WOE=1, EXCM=0, INTLEVEL=7
+rotw 3 / rotw 3 / rotw 3 ……（转 16 个窗口一整圈）
+```
+
+靠**轮转触发硬件窗口溢出向量**把每个窗口 spill 到它自己的栈帧上（这正是
+`xthal_window_spill` 的做法）。这条路径要求"寄存器文件里每个窗口的 a1 都是合法
+栈指针"—— 而真板实测有窗口的 a1 是 `0x40043ca4` 这种 ROM 地址，于是溢出向量
+按那个地址 spill 就 LoadStoreError。
+
+`0x40043ca4` 是 ROM 里的地址、`a0=0x40043cc4` 也是 ROM —— 说明当时寄存器文件里
+还残留着**进入我们代码之前（ROM/bootloader 阶段）的窗口状态**，或者某个 ROM
+函数留下的窗口没有被正确"归位"。§202 里 `start.S` 已经做过一次 WINDOWSTART 归一，
+但那只保证"哪个窗口算 live"，并不能清掉窗口**寄存器内容**（a0..a15 仍是 ROM 的
+残值）。
+
+下一步（明确、可执行）：
+
+1. 在 `start.S` 归一化 WINDOWSTART 之后，**把寄存器文件清零**（连续 `rotw` 一圈，
+   每个窗口把 a0..a15 写 0，最后转回原窗口），保证没有任何 ROM 残留进入内核；
+2. 或者改成"不用 rotw 轮转"的 spill：直接按 a1 链手工 spill（`entry` 帧里
+   调用者的 a1 在 `[frame+4]`，call8 窗口要写 4 个寄存器到 `caller_a1-16`，
+   call12 写 12 个到 `caller_a1-48`），完全不依赖硬件溢出向量，也就不受
+   寄存器文件里其它窗口内容的影响 —— 这条路更可控，建议优先。
