@@ -24,8 +24,17 @@
 
 ### 非目标
 
-LiteOS-A 的进程/MMU/POSIX、文件系统、动态加载、网络中间件；内核内的 `@T` GC、
-`async/co`、闭包、`f".."`；Wi-Fi/BLE/音频（属应用层，二期）。
+默认形态下仍然是非目标：LiteOS-A 的进程/MMU/POSIX、文件系统、动态加载、网络中间件；
+内核内的 `@T` GC、`async/co`、闭包、`f".."`；Wi-Fi/BLE/音频（属应用层，二期）。
+
+> **修订（Linux ABI personality）**：进程地址空间 / ELF 动态加载 / POSIX 不再是绝对的
+> 非目标，而是由 `C6OS_LINUX_ABI` 门禁的**可配置 personality**，只在具备
+> `MMU|USER|IRQ_USER` 能力的移植层（x86-64 裸机）上参与编译；ESP32-S3 上恒关，且
+> 相关代码**不在编译单元列表里**（不是 `#if 0`）。设计与验收见
+> [linux-abi.md](linux-abi.md)。
+>
+> 这同时修订了 §1 的"单地址空间"表述：**默认单地址空间；打开 personality 时内核
+> 同时支持两种执行域**（内核任务 / 用户任务），两者共用同一调度器与优先级模型。
 
 ---
 

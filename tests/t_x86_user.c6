@@ -1,0 +1,84 @@
+/* L1 验收：x86-64 上真正进入 ring3、经 int 0x80 回到内核并退出。
+ *
+ * 这条用例验证的是 personality 的地基：
+ *   PMM → 每个进程独立页表 → 内核直接映射窗口 → 用户段/ TSS →
+ *   iretq 进入 ring3 → 中断门回到 ring1... 内核栈 → iretq 返回。
+ *
+ * 完整 Linux ELF 加载在 L2；这里用一段手工机器码证明通路成立。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/linux_abi.h"
+
+extern u8 _user_blob_start[];
+extern u8 _user_blob_end[];
+
+void os_main(void)
+{
+    u64 as = 0u;
+    u64 code_pa = 0u;
+    u64 stack_pa = 0u;
+    u64 n = 0u;
+    u64 i = 0u;
+    u8 *p = 0;
+
+    port_init();
+    port_puts("c6os linux-abi L1: ring3 bring-up\n");
+
+    port_mmu_init();
+    if (port_phys_total_kb() == 0u) {
+        port_puts("FAIL: no usable RAM (E820 missing?)\n");
+        return;
+    }
+    port_puts("mmu: ok\n");
+
+    port_linux_arch_init();
+    port_puts("arch: gdt/tss/int80 ok\n");
+
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: port_as_create\n");
+        return;
+    }
+    lx_proc_init(as, 0x402000u);        /* 系统调用层需要知道当前地址空间 */
+    code_pa = port_phys_alloc();
+    stack_pa = port_phys_alloc();
+    if (code_pa == 0u || stack_pa == 0u) {
+        port_puts("FAIL: port_phys_alloc\n");
+        return;
+    }
+    if (port_as_map(as, 0x400000u, code_pa, 4096u,
+                    C6OS_PROT_R | C6OS_PROT_W | C6OS_PROT_X) != 0) {
+        port_puts("FAIL: map code\n");
+        return;
+    }
+    if (port_as_map(as, 0x401000u, stack_pa, 4096u, C6OS_PROT_R | C6OS_PROT_W) != 0) {
+        port_puts("FAIL: map stack\n");
+        return;
+    }
+
+    p = (u8 *)port_phys_map(code_pa);
+    n = (u64)_user_blob_end - (u64)_user_blob_start;
+    i = 0u;
+    while (i < n) {
+        p[i] = _user_blob_start[i];
+        i++;
+    }
+    port_puts("blob loaded\n");
+
+    /* 用户指针校验应当通过（栈页可写、可读） */
+    if (port_as_user_range_ok(as, 0x401000u, 4096u, C6OS_PROT_R | C6OS_PROT_W) == 0) {
+        port_puts("FAIL: range_ok\n");
+        return;
+    }
+    /* 内核区不应对用户可访问 */
+    if (port_as_user_range_ok(as, 0x20000u, 16u, C6OS_PROT_R) != 0) {
+        port_puts("FAIL: kernel not protected\n");
+        return;
+    }
+
+    port_puts("entering ring3 @0x400000 ...\n");
+    port_user_enter(as, 0x400000u, 0x401800u, 0u);
+
+    port_puts("FAIL: returned from ring3 (不应发生)\n");
+}

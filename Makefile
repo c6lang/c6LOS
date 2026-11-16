@@ -17,6 +17,19 @@ S3_CDEFS ?=
 # idf_shim.c 的 ABI：默认 windowed（要和闭源库一致）；做对照实验时可设 call0
 S3_SHIM_ABI ?= windowed
 
+# ---- Linux ELF 二进制兼容层（personality，见 docs/linux-abi.md）----------
+# 默认关闭：kernel/linux/ 不参与任何目标的编译，镜像尺寸零影响。
+LINUX_ABI ?= 0
+# 各 port 的能力位（include/c6os/caps.h）：MMU|USER|IRQ_USER = 7
+CAPS_X86  := 7
+CAPS_S3   := 0
+CAPS_RV32 := 0
+
+# 构建期门禁：配置与硬件能力矛盾时立刻失败，不产出半成品镜像。
+caps-check-%:
+	@eval "CAPS=\$$CAPS_$$(echo '$*' | tr 'a-z' 'A-Z')"; \
+	 tools/chk-caps.sh '$*' "$${CAPS:-0}" '$(LINUX_ABI)'
+
 # 我们自己的代码是 call0，闭源库是 windowed：两边不能共用同一个 memset。
 # 库的 memset/memcpy/... 由 port/s3/wifi_glue.c（-mabi=windowed）提供；
 # 我们自己的单元统一把这些名字重定向到 c6_*（rt/c6rt.c 里的 call0 实现）。
@@ -84,7 +97,7 @@ endif
 
 all: s3
 
-s3: $(BUILD)/c6os.bin
+s3: caps-check-s3 $(BUILD)/c6os.bin
 
 S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 
@@ -925,13 +938,20 @@ toolchain-info:
 
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
-X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1
+X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI)
 X86IRFLAGS := --target=x86_64-unknown-linux-gnu -ffreestanding -mno-sse -mno-sse2
 X86S_NAME  ?= sched
 X86S_MAIN  ?= tests/t_x86_sched.c6
 X86S_DIR   := $(X86)/$(X86S_NAME)
 X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
               kernel/timer.c6 kernel/log.c6 kernel/panic.c6 kernel/timeout.c6
+
+# personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
+# 免得带入 port_cur_ctx 之类的调度钩子。
+ifneq ($(filter user elf fs dyn,$(X86S_NAME)),)
+X86S_C6    := $(X86S_MAIN)
+endif
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
@@ -939,7 +959,31 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/kprintf.o \
               $(X86S_DIR)/obj/libc.o
 
-x86: $(X86)/disk.img
+# Linux ABI personality 的宿主只要 port 层 + MMU/特权级单元（不含调度器）。
+ifeq ($(X86S_NAME),user)
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
+              $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
+              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
+              $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
+              $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
+              $(X86S_DIR)/obj/proc.o
+endif
+
+# L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
+ifneq ($(filter elf fs dyn,$(X86S_NAME)),)
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
+              $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
+              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
+              $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
+              $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
+              $(X86S_DIR)/obj/proc.o
+endif
+
+x86: caps-check-x86 $(X86)/disk.img
 
 run-x86: x86
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/disk.img,if=ide \
@@ -1066,6 +1110,220 @@ $(X86S_DIR)/obj/libc.o: rt/x86_libc.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+# ---- Linux ABI personality（x86-64 宿主，L1）----------------------------
+$(X86S_DIR)/obj/mmu.o: port/x86_64/mmu.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/linux.o: port/x86_64/linux.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/user_entry.o: port/x86_64/user_entry.S
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -c -o $@ $<
+
+$(X86S_DIR)/obj/userblob.o: port/x86_64/userblob.S
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -c -o $@ $<
+
+$(X86S_DIR)/obj/ata.o: port/x86_64/ata.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/sys.o: linux/sys.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/elf64.o: linux/elf64.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/fs.o: linux/fs.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/proc.o: linux/proc.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/sig.o: linux/sig.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+x86-user: caps-check-x86
+	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
+		$(X86)/user-disk.img
+
+run-x86-user: x86-user
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/user-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L1 验收：真跑一遍"进 ring3 → int 0x80 → 退出"通路，按输出判定。
+check-linuxabi: x86-user
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/user-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| grep -q "hello from ring3" \
+	  && echo "PASS: linux-abi L1（ring3 + int 0x80）" \
+	  || { echo "FAIL: linux-abi L1"; exit 1; }
+
+# ---- L2：未修改的 Linux 用户态二进制（宿主 gcc 静态链接，内核侧零改动）----
+APP_C   := tests/linux/hello.c
+APP_ELF := $(X86)/app.elf
+
+$(APP_ELF): $(APP_C)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- L3：initramfs（newc cpio）+ 文件语义 ----
+LS_SRC := tests/linux/ls.c
+LS_ELF := $(X86)/ls.elf
+FS_IMG := $(X86)/fs.img
+FSROOT := $(X86)/fsroot
+
+$(LS_ELF): $(LS_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
+	@rm -rf $(FSROOT)
+	@mkdir -p $(FSROOT)/bin $(FSROOT)/etc
+	printf 'c6os 1.0\n' > $(FSROOT)/etc/version
+	printf 'hello from the c6LOS initramfs\n' > $(FSROOT)/hello.txt
+	cp $(LS_ELF) $(FSROOT)/bin/ls
+	python3 tools/mk-initramfs.py $@ $(FSROOT)
+
+# ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
+DYN_ELF := $(X86)/busybox
+DYNFS   := $(X86)/dynfs.img
+DYNROOT := $(X86)/dynroot
+LD_SO   := /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+LIBC6   := /usr/lib/x86_64-linux-gnu/libc.so.6
+LIBRES  := /usr/lib/x86_64-linux-gnu/libresolv.so.2
+
+$(DYN_ELF): /usr/bin/busybox
+	@mkdir -p $(dir $@)
+	cp /usr/bin/busybox $@
+
+$(DYNFS): $(DYN_ELF) tools/mk-initramfs.py
+	@rm -rf $(DYNROOT)
+	@mkdir -p $(DYNROOT)/bin $(DYNROOT)/lib64 $(DYNROOT)/lib/x86_64-linux-gnu
+	cp $(LD_SO)  $(DYNROOT)/lib64/ld-linux-x86-64.so.2
+	cp $(LIBC6)  $(DYNROOT)/lib/x86_64-linux-gnu/libc.so.6
+	cp $(LIBRES) $(DYNROOT)/lib/x86_64-linux-gnu/libresolv.so.2
+	cp $(DYN_ELF) $(DYNROOT)/bin/busybox
+	python3 tools/mk-initramfs.py $@ $(DYNROOT)
+
+x86-dyn: caps-check-x86
+	$(MAKE) X86S_NAME=dyn X86S_MAIN=tests/t_x86_dyn.c6 LINUX_ABI=1 \
+		$(X86)/dyn-disk.img
+
+run-x86-dyn: x86-dyn
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/dyn-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L4 验收：宿主上那个**动态链接的 PIE** busybox 被装载、ld.so 自己把 libc.so
+# mmap 进来并做完重定位，然后 busybox 打印它自己的输出。
+check-linuxabi-l4: x86-dyn
+	@timeout 30 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/dyn-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^lib64\$$" \
+	  && echo "PASS: linux-abi L4（未修改的动态 busybox 执行 ls / 成功）" \
+	  || { echo "FAIL: linux-abi L4"; exit 1; }
+
+# ---- L5/L6 验收载荷：都跑在动态镜像之上（initramfs 里已经有 libc/ld.so/busybox） ----
+SH_ELF  := $(X86)/shpipe.elf
+SH_IMG  := $(X86)/shpipe-disk.img
+SIG_ELF := $(X86)/sig.elf
+SIG_IMG := $(X86)/sig-disk.img
+
+$(SH_ELF): tests/linux/shpipe.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(SH_IMG): $(SH_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SH_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+$(SIG_ELF): tests/linux/sig.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(SIG_IMG): $(SIG_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SIG_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-l5: $(SH_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SH_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^GOT:hello-from-pipe" \
+	  && echo "PASS: linux-abi L5（fork/execve/pipe/wait4：busybox sh 管道）" \
+	  || { echo "FAIL: linux-abi L5"; exit 1; }
+
+THR_ELF := $(X86)/thread.elf
+THR_IMG := $(X86)/thread-disk.img
+
+$(THR_ELF): tests/linux/thread.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $< -lpthread
+
+$(THR_IMG): $(THR_ELF) $(X86)/dyn-disk.img
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(THR_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-l7: $(THR_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(THR_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^thr: 4 threads joined, counter=400, mutex=80" \
+	  && echo "PASS: linux-abi L7（线程：clone/CLONE_VM、futex、pthread 4 线程 + mutex）" \
+	  || { echo "FAIL: linux-abi L7"; exit 1; }
+
+check-linuxabi-l6: $(SIG_IMG)
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SIG_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | grep -q "^sig: SIGSEGV caught, back via siglongjmp" \
+	  && echo "PASS: linux-abi L6（信号：handler/屏蔽/SIGSEGV+siglongjmp/默认动作）" \
+	  || { echo "FAIL: linux-abi L6"; exit 1; }
+
+x86-fs: caps-check-x86
+	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/fs-disk.img
+
+run-x86-fs: x86-fs
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/fs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L3 验收：用户程序自己 opendir/readdir/open/read，按它读到的内容判定。
+check-linuxabi-l3: x86-fs
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/fs-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| grep -q "hello from the c6LOS initramfs" \
+	  && echo "PASS: linux-abi L3（initramfs + 文件语义）" \
+	  || { echo "FAIL: linux-abi L3"; exit 1; }
+
+x86-elf: caps-check-x86
+	$(MAKE) X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(X86)/elf-disk.img
+
+run-x86-elf: x86-elf
+	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# L2 验收：qemu 里跑未修改的 Linux 静态 ELF，用**它自己**打的那行字判定。
+check-linuxabi-l2: x86-elf
+	@timeout 20 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/elf-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| grep -q "hi from an unmodified Linux x86-64 ELF" \
+	  && echo "PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）" \
+	  || { echo "FAIL: linux-abi L2"; exit 1; }
+
 $(X86S_DIR)/stage2.elf: $(X86)/stage2.o $(X86S_OBJ) port/x86_64/stage2.ld
 	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ \
 		$(X86)/stage2.o $(X86S_OBJ)
@@ -1086,10 +1344,32 @@ $(X86S_DIR)/flat.elf: $(X86S_DIR)/stage1.o port/x86_64/stage1.ld
 $(X86S_DIR)/flat.bin: $(X86S_DIR)/flat.elf
 	llvm-objcopy -O binary $< $@
 
-$(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin
-	dd if=/dev/zero of=$@ bs=1M count=1 status=none
+# elf/fs 目标把用户态 ELF 写进 LBA 1024；fs 再在 LBA 2048 放 initramfs。
+ifeq ($(X86S_NAME),elf)
+DISK_DEPS  := $(APP_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(APP_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),fs)
+DISK_DEPS  := $(LS_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(LS_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),dyn)
+DISK_DEPS  := $(DYN_ELF) $(DYNFS)
+DISK_MB    := 16
+DISK_APP   = dd if=$(DYN_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(DYNFS) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else
+DISK_DEPS  :=
+DISK_MB    := 1
+DISK_APP   := @true
+endif
+
+$(X86)/$(X86S_NAME)-disk.img: $(X86)/boot16.bin $(X86S_DIR)/flat.bin $(DISK_DEPS)
+	dd if=/dev/zero of=$@ bs=1M count=$(DISK_MB) status=none
 	dd if=$(X86)/boot16.bin of=$@ conv=notrunc status=none
 	dd if=$(X86S_DIR)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
+	$(DISK_APP)
 
 
 # ---- rv32 参考目标（c6 -> LLVM IR，qemu-riscv32 user-mode） ----
