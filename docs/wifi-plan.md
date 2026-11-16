@@ -11917,3 +11917,55 @@ USB PHY，除非先 `phy_bbpll_en_usb(1)`）。现在 `303a` 不在 `lsusb` 里�
    efuse 用桩实现替掉），让 PHY 初始化序列**就是 IDF 的**，不再手工复刻。
 3. 备选：`esp_phy_apply_phy_init_data()`（镜像里有，`0x4203fbd0`）在
    `register_chipv7_phy` 之前先调一次看看。
+
+### §285 ★参照实验：刷一个**能正常跑 WiFi 的 IDF 固件**，用 JTAG 抓同一批寄存器对比
+
+用的参照物是本机现成的 ESP-IDF 工程 `/media/winger/inst_26/esp/xiaozhi`
+（`CONFIG_IDF_TARGET="esp32s3"`，`build/flash_args`：bootloader@0x0、ptable@0x8000、
+app@0x20000；**不刷 8MB 的 assets 分区**，省时间也不影响 PHY）：
+
+```
+cd /media/winger/inst_26/esp/xiaozhi/build
+sudo -n esptool --chip esp32s3 -p /dev/ttyACMx --before default-reset \
+     --after watchdog-reset write-flash 0x0 bootloader/bootloader.bin \
+     0x8000 partition_table/partition-table.bin 0x20000 xiaozhi.bin
+```
+跑 14s 后 JTAG `halt` 读（PC=0x40382D7E，WiFi 已经起来）：
+
+| 寄存器 | IDF 正常系统 | 我们（卡在 `ram_iq_est_enable` 时） |
+|---|---|---|
+| `0x60026014` SYSCON_WIFI_CLK_EN | `0xffffdfdf` | `0xfffce7bf`（改了以后 `0xffffffff`） |
+| `0x60026018` SYSCON_WIFI_RST_EN | `0x00003e08` | `00000000` |
+| `0x60008090` RTC_CNTL_DIG_PWC | `0x00000000` | `0x00545010` |
+| `0x60006174` FE（被轮询的状态位） | **0** | 0 |
+| `0x6001c08c` FE 隔壁那个"计数器" | **0x03fff9f3**（在走） | **0** |
+
+**两条关键结论**：
+1. `0x60006174` 在**正常系统里也是 0** —— 所以它根本不是"PHY 死没死"的判据（§284 的
+   推断作废）。`ram_iq_est_enable()` 那个循环真正的出口是**另一个**：
+   `0x6001c08c[18:12] > 69`。
+2. 那个"计数器"在 IDF 下是活的（`0x03fff9f3`），在我们镜像里恒 0。它才是分水岭。
+
+**试过但没用的**：
+- 把 `SYSCON_WIFI_CLK_EN` 写成 `0xffffffff`（比参照的 `0xffffdfdf` 还全）→ `0x6001c08c`
+  仍然 0，而且 **JTAG 写 `0x6001c08c` 也写不进去**（`mww` 后回读仍 0）⇒ 这块不是
+  "少一个 SYSCON 时钟位"，是整个块没被打开。
+- 把 PHY 初始化挪到 `esp_wifi_init_internal()` 之后（IDF 的天然顺序：
+  init → esp_phy_enable）→ 依然卡在同一个 PC；而且在 init 内部被 OSI `_phy_enable`
+  回调进来时，`0x6001c08c` 也还是 0。
+- 顺序改成"先只上电（power_on+bbpll+romfuncs）→ bringup → 完整 PHY 初始化"也一样。
+- （都试完已回退，`win_island.c` 保持 §280 提交时的样子。）
+
+**判断**：`0x6001c000` 那块（IDF 的 `reg_base.h` 里**没有**它，夹在 LEDC 0x60019000 和
+NRX 0x6001CC00 之间，就是 WiFi MAC）的时钟不是 SYSCON 给的，八成来自 **PHY/BB PLL**，
+也就是 `register_chipv7_phy()` 自己后面的 `rf_init`/`bb_init` 才会打开 —— 于是
+"要先有它才能过 IQ 估计"成了鸡生蛋问题。IDF 能过，说明它有一条我们没复刻的路径
+把这块提前点亮。
+
+**下一轮方向（按性价比）**
+1. 反汇编 `wifi_init_process`（`0x420368e0`，`esp_wifi_init_internal` 的实际实现）
+   找它有没有写 `0x6001cxxx` / `0x60026xxx`；有就直接搬过来。
+2. 或者干脆把 IDF 的 `esp_phy` 源码编进镜像（nvs/esp_log/esp_timer/efuse 打桩），
+   让整条 PHY 初始化就是 IDF 的，彻底不再手工复刻（§284 的备选方案，仍然是最终解）。
+3. 参照物实验的套路很好用（刷 IDF 工程 → JTAG 读 → 立刻刷回本仓库镜像），
+   以后**任何**"我们 vs 正常系统"的寄存器差异都可以这样拿，比继续猜快得多。
