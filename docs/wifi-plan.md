@@ -13075,3 +13075,24 @@ f[0](a0)=00060900   f[16](帧里的PS)=00060f00   f[15](EPC)=40048c6e
 
 风险提示：走 1 之后窗口溢出/欠载向量变成**唯一**的窗口机制（全 windowed 调用链
 比现在深得多），§326 说的"四个向量必须严格对称"会变成硬要求。
+
+## §330 "ISR 里 spill 被打断的窗口链" —— 试了，反而更早崩，已回滚
+
+思路（§329 的推论）：异常不轮转窗口，所以从 ISR 里 `callx8 s3_win_spill`
+看到的"祖先窗口"正是被打断的那条链；spill 完 `WINDOWSTART` 就只剩当前窗口一位，
+和 `RESTORE_FRAME` 的"单窗口"假设一致。为此还要临时把 `PS.EXCM` 清掉
+（EXCM=1 时 call8 不轮转/不溢出）并把 INTLEVEL 提到 15。
+
+真板结果：**退化**——原来能顺利跑完 `[phy] register_chipv7_phy rc=1`，加了这一步
+之后直接卡在 `[phy] calling register_chipv7_phy(mode=0)` 就 TRAP 了。
+说明在 ISR 里对闭源库的活窗口做显式 spill 会破坏库自己的寄存器保存（它和
+`W2C` 壳里的 `WIN_SPILL` 会互相踩同一批溢出槽）。**已回滚**（`irq.S` 恢复到最后
+一次提交的状态，仍保留 §326 的 ovf12/unf12 兜底）。
+
+顺带确认（本轮查证的库可用性，避免重复造轮子）：
+- **DHCP**：`port/s3/lwip/lwipopts.h` 里 `LWIP_DHCP 1` 已经打开，DHCP 客户端
+  直接用 lwIP 自带的 `dhcp.c`，不需要自己写。
+- **TLS**：IDF 源码树里有完整的 mbedTLS
+  （`$IDF/components/mbedtls/mbedtls/library/`），能拿 xtensa 工具链直接编；
+  现有 `net/tls12_*.c6` 是之前的极简实现。等 WiFi 关联这段通了，优先评估
+  直接用 mbedTLS（DRAM/IRAM 预算允许的话），不再自己维护 TLS 状态机。

@@ -348,6 +348,14 @@ int os_task_block_wait(void) {
     if (g_cur == 0) {
         return -1;
     }
+#ifdef S3_NO_SWITCH
+    /* §330 实验：阻塞时**不切换**，只打一个 'S' 然后原地打转。
+     * 用来判定"崩溃是否由 切走→切回 这条路径引起"。 */
+    port_putc('S');
+    for (;;) {
+        port_putc('.');
+    }
+#endif
     port_task_yield();
     return g_cur->wait_result;
 }
