@@ -1533,6 +1533,42 @@ x86-iso: caps-check-x86
 	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		$(if $(ISO_ROOTFS),--rootfs $(ISO_ROOTFS),) -o $(ISO_IMG)
 
+# ---- M11-3：docker 镜像 → ISO（内核 + 镜像 rootfs + 可写数据盘）----
+DOCKER_APP  := $(X86)/docker-app.elf
+DOCKER_ISO  := $(X86)/docker.iso
+DOCKER_DATA := $(X86)/docker-data.img
+DOCKER_ROOT := $(X86)/docker-root
+
+$(DOCKER_APP): tests/linux/docker_app.c
+	@mkdir -p $(X86)
+	gcc -static -nostdlib -fno-builtin -fno-stack-protector -Os -s -o $@ $<
+
+x86-docker-iso: caps-check-x86 $(CD0_BIN) $(DOCKER_APP)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_docker.c6 LINUX_ABI=1 C6OS_VFS=1 $(ISO_KER)
+	@rm -rf $(DOCKER_ROOT)
+	@mkdir -p $(DOCKER_ROOT)/bin
+	cp $(DOCKER_APP) $(DOCKER_ROOT)/bin/app
+	python3 tools/mkdockeriso.py --rootfs $(DOCKER_ROOT) --cmd /bin/app \
+		--boot $(CD0_BIN) --kernel $(ISO_KER) --data $(DOCKER_DATA) -o $(DOCKER_ISO)
+
+run-x86-docker-iso: x86-docker-iso
+	qemu-system-x86_64 -m 256M -cdrom $(DOCKER_ISO) -boot d \
+		-drive format=raw,file=$(DOCKER_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot
+
+check-docker-iso: x86-docker-iso
+	@timeout 90 qemu-system-x86_64 -m 256M -cdrom $(DOCKER_ISO) -boot d \
+		-drive format=raw,file=$(DOCKER_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-docker-iso.log | grep -q "^PASS: docker M11-3" \
+	  && echo "PASS: docker M11-3（docker 镜像 → ISO → 跑起来 + 写 /data）" \
+	  || { echo "FAIL: docker M11-3"; tail -30 /tmp/check-docker-iso.log; exit 1; }
+	@7z l $(DOCKER_DATA) 2>/dev/null | grep -qi "OUT.TXT" \
+	  && echo "PASS: docker M11-3 宿主侧（数据盘里有镜像程序写的 OUT.TXT）" \
+	  || { echo "FAIL: docker M11-3 宿主侧"; 7z l $(DOCKER_DATA) | tail -12; exit 1; }
+
 # ---- M11-2：可读写硬盘（FAT16 写）----
 x86-fatw: caps-check-x86
 	$(MAKE) X86S_NAME=fatw X86S_MAIN=tests/t_fat_write.c6 C6OS_VFS=1 \

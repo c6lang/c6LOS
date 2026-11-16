@@ -100,7 +100,11 @@ e820_done:
     movl %eax, blocks_left
     movl magic+16, %eax
     movl %eax, dst_pa
+    movb $'A', %al
+    call put_chr
     call load_payload
+    movb $'K', %al
+    call put_chr
 
     /* rootfs 载荷（块数 0 就跳过） */
     movl magic+20, %eax
@@ -111,7 +115,13 @@ e820_done:
     jz no_rootfs
     movl magic+28, %eax
     movl %eax, dst_pa
-    call load_payload_hi
+    cmpl $0x00100000, %eax
+    jae 1f
+    call load_payload               /* 目标在 1MB 以下：实模式逐块直读就够 */
+    jmp 2f
+1:
+    call load_payload_hi            /* 目标在 1MB 以上：unreal mode 搬运 */
+2:
 no_rootfs:
     movw $msg_loaded, %si
     call print
@@ -154,33 +164,19 @@ enter32:
 
     .code16                        /* 下面的辅助例程都是 16 位 */
 
-/* ---- 读载荷：cur_lba / blocks_left / dst_pa 是入参，会被改写 ----
- * 先试"一次读完"（BIOS 的 DAP 块数是 16 位，110KB 也就 54 块）；
- * 有的 BIOS 对多块 CD 读不感冒，失败就退化成一次一块。 */
+/* ---- 读载荷（< 1MB）：cur_lba / blocks_left / dst_pa 是入参，会被改写 ----
+ * 一次一块（2048 字节）。试过"一次读完/multi-block"：SeaBIOS 的 ATAPI 读
+ * 第二次调用会挂住（第一块成功、第二块 DRQ 等不到），所以老老实实逐块读。 */
 load_payload:
     movl dst_pa, %eax
     shrl $4, %eax                   /* 物理地址 → 段 */
     movw %ax, dap+6
-    movw $0, dap+4        /* 只清 offset，别把 segment 一起写了 */
-    movw blocks_left, %ax
-    movw %ax, dap+2
-    movl cur_lba, %eax
-    movl %eax, dap+8
-    movl $0, dap+12
-    movb drive, %dl
-    movw $dap, %si
-    movb $0x42, %ah
-    sti
-    int $0x13
-    jc slow
-    ret
-slow:
-    movw $1, dap+2                  /* 一次一块（2048 字节） */
-    movw $0, dap+4        /* 只清 offset，别把 segment 一起写了 */
+    movw $0, dap+4
 1:
     movl blocks_left, %eax
     testl %eax, %eax
     jz 9f
+    movw $1, dap+2
     movl cur_lba, %eax
     movl %eax, dap+8                /* 64 位 LBA 的低半 */
     movl $0, dap+12
@@ -190,37 +186,24 @@ slow:
     sti
     int $0x13
     jc fail
-    /* 推进：LBA+1，目标段 +0x80（2048/16），块数 -1 */
     addl $1, cur_lba
-    addw $0x0080, dap+6
+    addw $0x0080, dap+6             /* 目标段 +2048/16 */
     subl $1, blocks_left
     jmp 1b
 9:
     ret
-fail:
-    movw $fail_msg, %si
-    call print
-1:
-    hlt
-    jmp 1b
 
-/* ---- 读大于 1MB 的载荷：每次 32 块（64KB）读到 0x80000 暂存区，
- *      再进 unreal mode 用 32 位寻址搬到 dst_pa ----
- * int 13h 的 DAP 只有"段:偏移"，实模式到不了 1MB 以上；unreal mode 让
- * ds/es 的缓存描述符保持 4GB 限长，回到实模式后用 32 位寄存器寻址搬运。
- * 每一块（64KB）进出一次 unreal mode，BIOS 调用始终在干净的实模式段下做。 */
+/* ---- 读大于 1MB 的载荷：逐块读进 0x80000 暂存区，再进 unreal mode
+ *      用 32 位寻址搬到 dst_pa ----
+ * int 13h 的 DAP 只有"段:偏移"，实模式到不了 1MB 以上；unreal mode 让 ds/es
+ * 的缓存描述符保持 4GB 限长，回到实模式后用 32 位寄存器寻址搬运。
+ * 每块进出一次 unreal mode，BIOS 调用始终在干净的实模式段下做。 */
 load_payload_hi:
 1:
     movl blocks_left, %eax
     testl %eax, %eax
     jz 9f
-    movl $32, %ecx
-    cmpl %ecx, %eax
-    jae 2f
-    movl %eax, %ecx
-2:
-    movl %ecx, chunk
-    movw %cx, dap+2
+    movw $1, dap+2
     movw $0, dap+4
     movw $0x8000, dap+6             /* 暂存区 0x80000 */
     movl cur_lba, %eax
@@ -235,18 +218,24 @@ load_payload_hi:
     call unreal_on
     movl $0x00080000, %esi
     movl dst_pa, %edi
-    movl chunk, %ecx
-    shll $11, %ecx                  /* 字节数 */
+    movl $2048, %ecx
     call copy_flat
     call unreal_off
-    movl chunk, %eax
-    addl %eax, cur_lba
-    subl %eax, blocks_left
-    shll $11, %eax
-    addl %eax, dst_pa
+    movb $'h', %al
+    call put_chr
+    addl $1, cur_lba
+    subl $1, blocks_left
+    addl $2048, dst_pa
     jmp 1b
 9:
     ret
+
+fail:
+    movw $fail_msg, %si
+    call print
+1:
+    hlt
+    jmp 1b
 
 /* 进 unreal mode：ds/es 保留 4GB 限长的数据段描述符缓存。
  * 关键：不玩"清 PE 之后再远跳"——那一步要 16 位编码的 EA 才能被实模式正确译码，

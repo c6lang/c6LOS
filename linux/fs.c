@@ -57,16 +57,32 @@ static u64 vfs_dir_slot_(const char *abspath)
     return 0ull;
 }
 
-/* 注意：传进来的是 strip_() 之后的路径（已去掉前导 '/'）。 */
+/* 注意：传进来的是 strip_() 之后的路径（已去掉前导 '/'）。
+ * M11-3 起不再写死 "/tmp"：只要挂载表认这个路径（/tmp 的 ramfs、/data 的 fatfs、
+ * 以及以后任何新挂载），就交给 VFS；没挂载的还走只读 initramfs。 */
 static int vfs_owns_(const char *path)
 {
-    if (os_str_eq(path, "tmp") == 1) {
+    char full[LOS_FS_PATH_MAX] = {0};
+    char rel[LOS_FS_PATH_MAX] = {0};
+    u32 mnt = 0u;
+    u64 n = 0u;
+
+    if (os_str_eq(path, "tmp") == 1 || os_str_prefix(path, "tmp/") == 1) {
         return 1;
     }
-    if (os_str_prefix(path, "tmp/") == 1) {
-        return 1;
+    while (path[n] != '\0') {
+        n++;
     }
-    return 0;
+    if (n + 2u > (u64)sizeof(full)) {
+        return 0;
+    }
+    full[0] = '/';
+    (void)os_str_cpy((char *)&full[1], path, (u32)sizeof(full) - 2u);
+    if (os_vfs_lookup((const char *)&full[0], &mnt, (char *)&rel[0],
+                      (u32)sizeof(rel)) != 0) {
+        return 0;
+    }
+    return 1;
 }
 
 static u64 vfs_err_(int rc)

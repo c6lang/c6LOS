@@ -434,3 +434,81 @@ PASS: fat M11-2（/data 可读写：创建/写/读回/追加/截断/目录/删�
    `fatw-disk.img` 再重建，保证可重复。
 4. **M9-3 的"FAT 只读"断言作废**：`tests/t_vfs.c6` 里原来用
    `LOS_FsOpen(..., O_RDWR) < 0` 证明只读，M11-2 之后这条必然失败，改成验能打开。
+
+### M11-3（docker 镜像 → ISO → 跑起来）已完成
+
+**做了什么**：
+
+- `tools/mkdockeriso.py`：镜像 → ISO 的一条龙。
+  - 三种输入：`--rootfs DIR`（`docker export | tar -x` 的产物）、`--from-tar`
+    （单个 rootfs tar）、`--from-save`（`docker save` 整包：读 `manifest.json`
+    拿 `Config` 里的 `Entrypoint`/`Cmd`，再按 `Layers` 顺序叠加）。
+  - **whiteout 扁平化**：`.wh.名字` 删对应路径，`.wh..wh..opq` 清空所在目录；
+    构建期就把 overlay 语义消解掉，运行期不需要 overlay。
+  - 符号链接摊平成普通文件（没有真正的 link 语义，先这样）。
+  - 往 rootfs 写 `/etc/c6os.cmd`（`ENTRYPOINT`/`CMD` 或 `--cmd` 覆盖）。
+  - 调 `mk-initramfs.py` 打 newc cpio → 调 `mkiso.py` 生成 ISO（内核 + rootfs）
+    → 调 `mkfat.py` 造可写数据盘。
+- `tests/linux/docker_app.c`：镜像里的"应用"。**不用 libc**（`-nostdlib` 直接
+  `syscall`），编出来 9 KB：open → write → close → open → read → exit_group。
+  这样 rootfs 小到能整段放在 1MB 以下，引导块不用切 unreal mode。
+- `tests/t_iso_docker.c6`：容器的 init。挂 `/`（镜像 rootfs，romfs）+ `/data`
+  （FAT16）→ 打印 `/etc/c6os.cmd` → 把 `/bin/app` 读进 `0x04000000` →
+  `port_as_create`/`lx_exec_prepare`/`port_user_enter` 进 ring3。
+- `linux/fs.c`：`vfs_owns_()` 从"只认 /tmp"改成**问挂载表**
+  （`os_vfs_lookup` 认就交给 VFS），`/data` 这样的新挂载不用再改这里。
+- `linux/sys.c`：`LX_SYS_open` 参数顺序修正（见下）。
+- `port/x86_64/cd0.S`：载荷目标 < 1MB 时走实模式逐块直读，≥ 1MB 才走 unreal mode。
+
+**验收**：
+
+```
+$ make check-docker-iso
+PASS: docker M11-3（docker 镜像 → ISO → 跑起来 + 写 /data）
+PASS: docker M11-3 宿主侧（数据盘里有镜像程序写的 OUT.TXT）
+
+# 客户机内：
+c6os docker M11-3: 从 ISO 起一套镜像
+  rootfs: pa=589824 len=9692 cpio=070701
+  / = 镜像 rootfs（romfs），/data = FAT16 数据盘
+  probe /data/probe.txt rc=0
+  /etc/c6os.cmd: /bin/app
+  /bin/app size=9080
+elf: 主程序已装载
+  elf 就绪，进用户态（镜像程序开始跑）
+PASS: docker M11-3（镜像里的程序跑起来，写 /data/out.txt 并读回）
+[lx] exit_group(0)
+```
+
+宿主侧把数据盘整个用 `7z l` 列一遍，能看到 `OUT.TXT`——程序写的文件真的在盘上。
+
+**坑（这一节最长，都是真踩的）**：
+
+1. **`mkfat.py` 第二个参数是 KB**，不是字节也不是扇区。传了 8388608 直接炸。
+2. **rootfs 不能落在内核 .bss 区间**：`_start64` 一上来 `rep stosb` 清
+   `__bss_start..__bss_end`（现在到 `0x72684`）。第一次把 rootfs 放 `0x60000`，
+   引导阶段读进去了、内核一清 .bss 就全变 0，表现为"长度前缀 = 0"。改到
+   `0x0090000`（.bss 之后、`0x9F000` 之前），并让 `mkdockeriso.py` 检查放不放得下。
+3. **SeaBIOS 的 ATAPI 读不能连读多块**：`int 13h AH=42h` 一次读 54 块返回 CF，
+   一次读 32 块第一块成功、**第二次调用直接挂死**（DRQ 等不到）。最终内核载荷、
+   rootfs 全部改成**一次一块（2048 字节）**逐块读；原来那段"先试多块、失败回退"
+   的优化删掉了。
+4. **`load_payload` 重写时把 `fail:` 标签弄丢了**，`ld` 报
+   `undefined reference to 'fail'`——汇编里 `jc fail` 是 rel8 跳转，标签没了就成
+   未定义符号。
+5. **unreal mode 多次进出还没修好**：>1MB 的载荷按块"读一块→切 unreal 搬一块→
+   切回来"时，第二块的 `int 13h` 挂死（第一块成功）。M11-3 用"rootfs 放 1MB
+   以下"绕开，`load_payload_hi` 保留给以后大 rootfs 用，属于已知限制
+   （见 §6 风险表）。
+6. **`LX_SYS_open` 一直是错的**：`sys.c` 把 `open` 和 `openat` 都按
+   `openat(dirfd, path, flags, mode)` 派发，而 `open(path, flags, mode)` 少了
+   dirfd——glibc 的 `open()` 走的是 `openat`，所以 M9 那套 libc 程序从没踩到。
+   这次裸 syscall 一用就露馅，补成 `lx_fs_openat(AT_FDCWD, path, flags, mode)`。
+7. **`vfs_owns_()` 只认 `/tmp`**：Linux ABI 判断"这个路径归不归 VFS"是硬编码的，
+   `/data` 挂了也进不去。改成查挂载表。
+8. **`-nostdlib` 还要加 `-fno-builtin`**：自己写的 `slen()` 被 GCC 认成 `strlen`
+   习惯用法，直接换成对 `strlen` 的调用，链接期报 undefined。
+9. **数据盘起始 LBA 两套**：`fatw` 变体把 FAT 镜像 `dd` 到 LBA 16384（盘上还有
+   initramfs），M11-3 的数据盘是**整块一个 FAT 卷**（LBA 0）。挂载参数别抄错。
+10. **程序不能用 `return` 从 `_start` 返回**（没有返回地址，直接 sig=11），
+    必须 `exit_group`。

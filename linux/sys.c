@@ -328,6 +328,12 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_open:
+        /* open(path, flags, mode)：老 syscall。glibc 走的是 openat，
+         * 所以这条一直到 M11-3 的裸 syscall 程序才被踩到——参数顺序不同，
+         * 这里按 dirfd=AT_FDCWD 转给共用的实现。 */
+        r->rax = lx_fs_openat((u64)0 - 100ull, a0, a1, a2);
+        return;
+
     case LX_SYS_openat:
         r->rax = lx_fs_openat(a0, a1, a2, a3);
         return;

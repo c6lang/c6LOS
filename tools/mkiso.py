@@ -173,6 +173,8 @@ def main():
     ap.add_argument("--boot", required=True, help="cd0.bin（<=2048 字节）")
     ap.add_argument("--kernel", required=True, help="内核载荷 flat.bin")
     ap.add_argument("--rootfs", default=None, help="rootfs.cpio（可选）")
+    ap.add_argument("--rootfs-dst", default="0x00800000",
+                    help="rootfs 载入的物理地址（<1MB 时引导块走逐块直读）")
     ap.add_argument("-o", "--out", required=True)
     args = ap.parse_args()
 
@@ -202,9 +204,10 @@ def main():
 
     off = find_magic(boot)
     if off > 0:
-        struct.pack_into("<IIIIII", boot, off,
+        rdst = int(args.rootfs_dst, 0) if rootfs else 0
+    struct.pack_into("<IIIIII", boot, off,
                          lba_kernel, ker_blocks, KERNEL_DST,
-                         lba_rootfs, root_blocks, ROOTFS_DST if rootfs else 0)
+                         lba_rootfs, root_blocks, rdst)
 
     # 根目录：. / .. / 文件
     ents = dirrec(lba_rootdir, BLOCK, True, b"\x00")
@@ -252,7 +255,7 @@ def main():
           (lba_kernel, ker_blocks, len(kernel), KERNEL_DST))
     if rootfs:
         print("  rootfs: lba=%d blocks=%d (%d B) -> 0x%08X" %
-              (lba_rootfs, root_blocks, len(rootfs), ROOTFS_DST))
+              (lba_rootfs, root_blocks, len(rootfs), rdst))
     else:
         print("  rootfs: 无")
     print("  pathL=%d pathM=%d rootdir=%d" % (lba_path_l, lba_path_m, lba_rootdir))
