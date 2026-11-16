@@ -194,6 +194,10 @@ W2C_DEFS :=
 ifneq ($(S3_W2C_MIN),)
 W2C_DEFS += -DS3_W2C_MIN
 endif
+# S3_W2C_SAVEALL=1：壳保存/恢复全部 a0..a15（§245，理论正确版）
+ifneq ($(S3_W2C_SAVEALL),)
+W2C_DEFS += -DS3_W2C_SAVEALL
+endif
 
 $(BUILD)/obj/w2c.o: port/s3/w2c.S
 	@mkdir -p $(BUILD)/obj

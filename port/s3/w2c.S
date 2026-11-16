@@ -101,13 +101,49 @@
      * [a1-64, a1) 里，之后内核的调用帧从 a1-64 往下长，两者不重叠。
      * 这是本轮的关键顺序：**先 spill、再把 sp 降下去调内核**。
      * 反过来（先降 sp 再 spill）槽位就会落在内核帧里，等于踩内核的局部量。 */
-#ifdef S3_W2C_MIN
-    /* 极简版（§231）：不做任何窗口操作，只借 entry 的 32 字节帧保存带窗口
-     * 标签的 a0，然后 callx0 进 call0 内核函数、取回 a0、retw。
-     * 动机：真板上 W2C+WIN_SPILL 版本在 ppTask 上下文里出现过
-     *   EXCCAUSE=3 LoadStoreError, EXCVADDR=0x40043ca4(ROM), EPC 在壳里,
-     *   halt 时 windowbase=13 / windowstart=0xa002（明显是坏的窗口状态）。
-     * 既然 spill 那套从没在真板上验证过，先退回最小实现看还炸不炸。 */
+#ifdef S3_W2C_SAVEALL
+    /* 保存全部 16 个寄存器（§245）——这一版是理论正确的：
+     *
+     * 我们这层壳是 **windowed** 函数（被闭源库用 call8 调），却要 `callx0` 进
+     * **call0** 的内核函数。call0 调用**不轮转窗口**，被调方可以随手把 a0..a15
+     * 里的 caller-saved 全部改掉；而 windowed 的调用者（库）依赖窗口机制来保存
+     * 它自己的寄存器，根本没料到同一个窗口里的 a4..a15 会被人从背后改掉。
+     * 之前只存了 a0（或 a0+a12..a15），于是 `osi_semphr_take` 这种回调返回时
+     * `retw.n` 用的 a0 已经变成栈地址了（真板 §242/§243 的症状）。
+     * 这里把 a0..a15 全存全取，壳就变成"对调用者完全透明"的函数。
+     * 帧：entry 已经存了 a0..a3 到 [a1+0..12]，我们把 a4..a15 存到
+     * [a1+16..]（entry 帧 64 字节：16 个槽）。 */
+    entry   a1, 64
+    s32i    a4,  a1, 16
+    s32i    a5,  a1, 20
+    s32i    a6,  a1, 24
+    s32i    a7,  a1, 28
+    s32i    a8,  a1, 32
+    s32i    a9,  a1, 36
+    s32i    a10, a1, 40
+    s32i    a11, a1, 44
+    s32i    a12, a1, 48
+    s32i    a13, a1, 52
+    s32i    a14, a1, 56
+    s32i    a15, a1, 60
+    l32r    a8, 9b
+    callx0  a8
+    l32i    a4,  a1, 16
+    l32i    a5,  a1, 20
+    l32i    a6,  a1, 24
+    l32i    a7,  a1, 28
+    l32i    a8,  a1, 32
+    l32i    a9,  a1, 36
+    l32i    a10, a1, 40
+    l32i    a11, a1, 44
+    l32i    a12, a1, 48
+    l32i    a13, a1, 52
+    l32i    a14, a1, 56
+    l32i    a15, a1, 60
+    l32i    a0,  a1, 0
+    retw                    /* retw 会自己用 [a1+4] 里的值恢复调用者的 a1 */
+#elif defined(S3_W2C_MIN)
+    /* 极简版（§231）：只保存 a0。 */
     entry   a1, 32
     s32i    a0, a1, 0
     l32r    a8, 9b

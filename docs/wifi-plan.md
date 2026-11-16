@@ -10761,3 +10761,39 @@ make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_
 
 结论：诊断代码要写得极少（只用 `ets_printf`，不要额外函数调用），
 核心问题仍然是 windowed 函数之间的 `call8`/`retw` 窗口配对。
+
+### §244 真板 WiFi 账号已配置（不进版本库）
+
+用户给了路由器：**SSID `weforpay.com`，密码 `weforpay`**。别在命令行上跟引号搏斗
+（`make S3_WIFI_SSID='"x"'` 经过 shell 会掉引号，编译期报 `'x' undeclared`），
+改成走本地头文件：
+
+```
+port/s3/wifi_creds_local.h          # 已加进 .gitignore
+    #define S3_WIFI_SSID "weforpay.com"
+    #define S3_WIFI_PASS "weforpay"
+```
+
+`port/s3/wifi_creds.h` 里用 `__has_include("wifi_creds_local.h")` 自动包含。
+验证：`grep -c weforpay build/wifi/c6os.bin` == 2。
+
+### §245 试了"壳保存全部 a0..a15"（S3_W2C_SAVEALL=1）：更早炸，已回退
+
+理论：壳是 windowed 函数，却 `callx0` 进 call0 内核；call0 不轮转窗口，被调方可以
+把同一窗口里 a0..a15 的 caller-saved 全改掉，而 windowed 调用者没料到 → `retw`
+用错 a0（§242 的症状）。所以试着把 a0..a15 全存全取（64 字节 entry 帧正好放得下）。
+
+真板结果：**更早炸**（`pc=0x42013f54`、`a0=0x3fcb938c`、`ws=6`，第一个 windowed
+调用就失败），所以这个改动本身有 bug（注意 `retw` 会用 [a1+4] 自动恢复调用者 a1，
+不能自己再 `l32i a1, a1, 4`——已修但仍不行）。留作开关，默认关闭。
+
+**当前最佳仍是**（§242）：
+
+```
+make C6_ROOT=/home/winger/c6 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" \
+     S3_PHY_VIA_OSI=1 S3_NO_WIN_SPILL=1 https
+```
+
+ppTask 能进 `_queue_recv` 循环，随后在 `osi_semphr_take` 的 `retw.n`
+（`pc=0x4037c280`、`a0` 是栈地址、`ws=0x06`）炸。下一步要么把 SAVEALL 调试正确
+（它理论上是解），要么回到"归一化+spill"那一对语义上整体做对。
