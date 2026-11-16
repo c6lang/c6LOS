@@ -11755,3 +11755,37 @@ wifi|Password length matches WPA2 standards, authmode threshold changes from OPE
   `[lockok]`"。放在 windowed 岛的 TU 里、`.text`/`.bss` 与 `wifi_glue.c` 无关才行。
 - 往自己 cfg 的第 148 字节写 1 **无效**：`wifi_set_config_process` 里的 a5 是库
   自己那份内部 config，不是我们传进去的那块（§279 实验）。
+
+### §281 新的顶头问题：`register_chipv7_phy()` 卡在 `ram_iq_est_enable()` 的硬件轮询上
+
+`esp_wifi_set_config` 已经能过（§280），`esp_wifi_start()` 进来后首件大事就是
+OSI 的 `_phy_enable` → 我们的 `s3_win_phy_enable()` → `register_chipv7_phy(mode=0)`，
+**卡住不返回**（串口停在 `[phy] calling register_chipv7_phy(mode=0)`，等了 45s 也没
+后文，说明不是"慢"）。
+
+JTAG（跑到卡住 → 杀监视进程 → `ocboot.sh` → `resume`/等/`halt`）读到：
+
+```
+Target halted, PC=0x420547FD        → ram_iq_est_enable+0xad
+420547f8: memw ; l32i a3, a10, 0            ; a10 = 0x60006174（字面量 0x4205474c）
+420547fd: bnone a3, a9, 420547e5            ; a9  = 0x00010000（字面量 0x4204dca8）
+420547e5: memw ; l32i a3, a11, 0            ; a11 = 0x6001c08c
+          extui a3, a3, 12, 7 ; bltu a12(69), a3, 出去
+```
+
+也就是说它**死等 `0x60006174` 的 bit16**（"IQ 估计完成"），备用出口是
+`0x6001c08c[18:12] > 69`，两个条件都不来 → 纯硬件条件不满足，不是软件超时逻辑。
+
+含义：PHY/BB 的时钟或 RF 供电没真正打开（读回恒 0），或者我们多调的那句
+`phy_bbpll_en_usb(1)`（§205 为了保住 USB-PHY 加的）在**这个上下文里**反而破坏了
+BBPLL/I2C 状态。
+
+**下一步（按代价排序）**
+1. 卡住时 JTAG 读 `0x60006174` / `0x6001c08c`，确认是"恒 0"还是"bit16 不来"。
+2. 试 `S3_PHY_CAL_MODE=2`（`PHY_RF_CAL_NONE`）看是否绕开 IQ 估计。
+3. 试**不调** `phy_bbpll_en_usb(1)`（只在 `register_chipv7_phy` 之后再补一次），
+   对比是否还卡在同一个 PC —— 这是 §205 折衷方案的反向验证。
+4. 历史证据：`S3_PHY_BISECT=1` 的 `make bringup` 镜像里这一步是**能过的**
+   （文档里 `[phy] register_chipv7_phy rc=0` 就是那么来的），所以分歧点一定在
+   "bisect 路径 vs 正常路径"的调用顺序/上下文差异上，值得先把 bisect 的 6 个
+   子步骤和 `s3_win_phy_enable()` 逐句对照一遍。
