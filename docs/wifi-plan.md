@@ -13036,3 +13036,42 @@ _win_ovf12:
   **两边兜底触发条件不同步时会存/取到不同地址** —— 这是下一个要处理的疑点：
   要么把兜底去掉（改用官方向量 + 在任务启动时就把 `[sp-12]` 写成合法值），
   要么让 ovf/unf 的兜底严格对称。
+
+## §327 现场里能确定的东西（这一轮把数据补全了）
+
+从 RTC `0x50000140`（`s3_trap` 在**打印之前**落的现场）读出来的九个字，按代码
+布局是 `cause, vaddr, pc, ps(rsr ps), frame_sp, f[0], f[1], f[15](=EPC), f[16](=PS)`：
+
+```
+cause=0  vaddr=0  pc=40048c6e  ps=00060f10  frame_sp=3fcbeaf0
+f[0](a0)=00060900   f[16](帧里的PS)=00060f00   f[15](EPC)=40048c6e
+```
+
+- 帧里的 PS = `0x00060f00` ⇒ **WOE=1(bit18)、EXCM=0、CALLINC=2(bit17:16)、INTLEVEL=0**。
+  `rsr ps` 那个 `0x00060f10` 只是多了 EXCM=1（异常处理器自己的 PS），以后只看帧里的。
+- 所以 `retw` 变非法**不是** WOE=0，也**不是** EXCM=1 ⇒ 只剩 `n==0`（a0 没有窗口标签）
+  或 `m!=n`（CALLINC 与 a0 标签不一致）两种。帧里 `a0=0x00060900` 的 bit31:30 = 0
+  ⇒ **就是 `n==0`：a0 被写成了一个没有标签的值**（而且这个值恰好长得很像 PS）。
+- `uart_tx_one_char` 自己的 prologue 是 `entry a1,32; call8 0x400442a4 ...`，
+  `call8` 会把 CALLINC 置 1 —— 而现场是 2，说明**进入它的那次调用用的是 call12**
+  （ROM 的 vprintf 用 `callx12` 调 putc1 钩子是可能的），或者中途有人改了 PS。
+
+## §328 反查"windowed 代码有没有直接调 call0 函数"——干净
+
+把 `wifi_glue.c` / `win_island.c` 里所有 `os_* / port_* / c6_*` 调用点列出来逐个查：
+- `port_cur_ctx()` 只有声明，实际用的是 `s3_w2c_current_task()` 壳（注释里已经写明原因）；
+- `c6_lwip_*` / `c6_log_fmt` / `c6_ok_str` / `c6_wpa_crypto_*` 要么是 wifi_glue.c 自己
+  的 static 函数，要么（`c6_lwip_start`）本身就是 `entry a1,64` 的 **windowed** 代码；
+- 没有发现"windowed 代码直接 call8 进 call0 函数"的漏网之鱼。
+
+## §329 下一步的取舍（两条路，准备动手的是第 1 条）
+
+1. **统一成 windowed 全量构建**（`S3_ABI=windowed`）：内核 `.c6` 生成的 C 也用
+   windowed 编，`s3_w2c_*` 这层壳通过头文件 `#define` 直接映射到真函数（同一 ABI，
+   壳就不需要了）；`irq.S`/`ctx.S` 里已经有 `#ifdef __XTENSA_CALL0_ABI__` 的另一半
+   分支（`call8` + 置 WOE）可以直接用上。跨 ABI 这一整类问题就消失了。
+2. 继续在 call0 内核 + windowed 库这套混合架构上抠：目前只剩"a0 被写成无标签值"
+   这一条线索，还要找出是谁写的。
+
+风险提示：走 1 之后窗口溢出/欠载向量变成**唯一**的窗口机制（全 windowed 调用链
+比现在深得多），§326 说的"四个向量必须严格对称"会变成硬要求。
