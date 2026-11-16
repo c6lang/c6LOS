@@ -258,6 +258,19 @@ s3_asm_flash_42:
     movi    a2, 42
     retw
 
+/* int s3_wpa_cb_stub(void) —— 窗口化的"空回调"桩：返回 0。
+ * 闭源 WiFi 库的 WPA 回调表（g_cnxMgr+0x1b4）里全是函数指针，我们注册的
+ * 全零表会让它 callx8 到 NULL（§279）。把每个槽都填成这个桩，唯独把
+ * `+0x48` 那一格留 0（`sta_is_wpa3_enabled()` 是把它当布尔量读的，非 0 就
+ * 会以为要上 WPA3/SAE）。 */
+    .align  4
+    .global s3_wpa_cb_stub
+    .type   s3_wpa_cb_stub, @function
+s3_wpa_cb_stub:
+    entry   a1, 16
+    movi    a2, 0
+    retw
+
     .section .text, "ax", @progbits
 /* u32 s3_win_call_flash42(void) —— 从 call0 调上面那个 flash 里的手写函数 */
     .align  4

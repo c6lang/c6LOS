@@ -11714,3 +11714,44 @@ sp 指到别的栈上，一路弹栈弹进数据区，最后跳到 `task.c6` 的
 都能解析），下一轮可以直接查"是谁写 `g_cnxMgr+0x1b4`"（按符号名找
 `esp_wifi_start` / `wifi_init_*` / `net80211_*` 里对 0x1b4 的 store），
 把那条初始化路径补上；或者反过来先把 `esp_wifi_start()` 提前/单独跑一次验证。
+
+### §280 ★★突破：注册 WPA 回调表（每格填"返回 0"的窗口化桩）—— `esp_wifi_set_config` 第一次返回 0
+
+承接 §277。`g_cnxMgr+0x1b4` 是 IDF 里由 wpa_supplicant 调
+`esp_wifi_register_wpa_cb_internal()` 塞进去的 **WPA 回调表**。我们注册全零表后
+`sta_is_wpa3_enabled()` 的空指针没了，但库里紧接着 `callx8` 一个槽 →
+`pc=00000000`（cause=0x14、`a0=820342bd` = `ieee80211_ioctl_process+0x62`）。
+
+所以最终做法（`port/s3/win_bridge.S` + `port/s3/win_island.c`）：
+
+1. 在 flash 段手写一个窗口化叶子函数 `s3_wpa_cb_stub`：`entry a1,16 / movi a2,0 / retw`。
+2. 在**windowed 岛**里（不是 `wifi_glue.c`——那个 TU 一动就换分支，§271/§279）
+   把 24 个字的回调表**每一格都填成 `s3_wpa_cb_stub`**，
+   **只把 word 18（+0x48）留 0**，因为那一格库是当**布尔量**读的（§277）。
+3. `esp_wifi_register_wpa_cb_internal(&表)` → 返回 0。
+
+真板实测：
+
+```
+[wifi] register_wpa_cb=0
+[wifi] set_mode(STA)=0
+wifi|Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2
+[wifi] set_config=0                       ← ★ 从来没成功过
+[phy] OSI _phy_enable 回调进入              ← esp_wifi_start() 已经在跑 PHY 初始化
+[phy] g_phyFuns=0x3fcef3d8
+[phy] calling register_chipv7_phy(mode=0)  ← 现在卡/慢在这一步
+```
+
+也就是说：§259 以来"闭源库任一调用即崩"的整条路彻底通了，现在站在
+`esp_wifi_start()` 的 PHY 初始化里。
+
+**下一步**：`register_chipv7_phy(mode=0)` 之后要么需要更多 OSI 回调（`_phy_*`、
+定时器、`_rtc_*`），要么耗时超过监视窗口；先加更长窗口 + 在 `_phy_enable`
+后面加信标，看它是"慢"还是"卡"。
+
+**注意（踩过的坑）**：
+- 这一步**不能**用 `wifi_glue.c` 里的静态数组做回调表：多 24 个字的 .bss 会让
+  堆基址/代码布局变化，实测直接退化成"卡在 `esp_wifi_init_internal` 的
+  `[lockok]`"。放在 windowed 岛的 TU 里、`.text`/`.bss` 与 `wifi_glue.c` 无关才行。
+- 往自己 cfg 的第 148 字节写 1 **无效**：`wifi_set_config_process` 里的 a5 是库
+  自己那份内部 config，不是我们传进去的那块（§279 实验）。

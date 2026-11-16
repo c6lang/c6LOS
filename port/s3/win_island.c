@@ -751,6 +751,25 @@ u32 s3_win_wifi_main(void)
         WSTAGE(0x1010u);
         /* 关联 + 等 IP（阶段信标：0x1021 关联中、0x1022 关联成功、0x1023 拿到 IP） */
         {
+            /* §279：闭源库的 `sta_is_wpa3_enabled()` 会解引用 `g_cnxMgr+0x1b4`
+             * （IDF 里由 wpa_supplicant 调 `esp_wifi_register_wpa_cb_internal()`
+             * 填的 WPA 回调表）。我们没有 supplicant → NULL → cause=0x1c。
+             * 这里注册一个全零表：`*(cb+0x48)==0` ⇒ 它返回"非 WPA3"，正是我们要的。
+             * **故意放在这个 TU（windowed 岛）里**：wifi_glue.c 的 .text/.bss
+             * 一点不动，避免 §271 那种"改几十字节就换分支"的坑。 */
+            extern int esp_wifi_register_wpa_cb_internal(void *cb);
+            /* 每个槽都填"返回 0"的窗口化桩（否则库里 callx8 到 NULL，§279），
+             * 只有 +0x48（word 18）留 0 —— 那一格是被当布尔量读的。 */
+            extern int s3_wpa_cb_stub(void);
+            static u32 s_wpa_cb_zero[24];
+            {
+                u32 k = 0u;
+
+                for (k = 0u; k < 24u; k++) { s_wpa_cb_zero[k] = (u32)(void *)s3_wpa_cb_stub; }
+                s_wpa_cb_zero[18] = 0u;
+            }
+            ets_printf("[wifi] register_wpa_cb=%d\n",
+                       esp_wifi_register_wpa_cb_internal((void *)s_wpa_cb_zero));
             extern u32 s3_wifi_associate(const char *ssid, const char *pass);
             extern int s3_wifi_wait_connected(int ms);
             extern int c6_lwip_wait_ip(int ms);
