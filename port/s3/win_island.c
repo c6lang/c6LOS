@@ -6,6 +6,10 @@
 #include "c6os/flash.h"
 #include "wifi_creds.h"
 
+/* os_wdt_feed/os_wdt_start 是 call0 的 C 函数，windowed 岛里要经 w2c 壳调（§228） */
+extern void s3_w2c_wdt_feed(void);
+extern void s3_w2c_wdt_start(unsigned int secs);
+
 /* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
 extern u32 s3_w2c_current_task(void);
 extern u32 s3_w2c_tick_get(void);
@@ -327,6 +331,18 @@ int s3_win_phy_step(int step)
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
+/* 给 OSI 的 `_phy_enable` 槽位（slot 53）用：IDF 的 esp_adapter.c 里就是
+ * `._phy_enable = esp_phy_enable_wrapper`（→ esp_phy_enable(PHY_MODEM_WIFI)），
+ * 也就是说**PHY 使能是 WiFi 库自己在合适的时机回调我们的**，而不是我们提前手动做。
+ * 详见 docs/wifi-plan.md §228。 */
+int s3_win_phy_enable(void);     /* 定义在下面 */
+
+int s3_win_phy_enable_hook(void)
+{
+    ets_printf("[phy] OSI _phy_enable 回调进入\n");
+    return s3_win_phy_enable();
+}
+
 /* 正常路径：**必须**和 bisect_run() 的子步骤顺序完全一致。
  *
  * 这里曾经和诊断路径不一致（少了 power_on、少了 phy_bbpll_en_usb、函数表用的是
@@ -376,6 +392,7 @@ int s3_win_phy_enable(void)
     }
     ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
 
+    ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
     /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
      *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
      *    IDF 的 S3 流程从不调它，我们也不调 —— 少一个"自己发明的调用"。 */
@@ -484,7 +501,7 @@ u32 s3_win_phy_bisect(void)
             s = s + 1u;
             continue;
         }
-        os_wdt_feed();                         /* 每步都从满 8s 开始计时 */
+        s3_w2c_wdt_feed();                         /* 每步都从满 8s 开始计时 */
         bisect_or(BISECT_HUNG, 1u << s);       /* 先进"挂死候选"，跑完再清 */
         ets_printf("[bisect]   step %u enter\n", (unsigned)s);
         {
@@ -694,17 +711,21 @@ u32 s3_win_wifi_main(void)
     }
     ets_printf("[wifimain] bisect passed, normal flow\n");
 #endif
-    WSTAGE(0x1001u); os_wdt_feed();
+    WSTAGE(0x1001u); s3_w2c_wdt_feed();
     s3_win_log("W0 phy start\n");
-    WSTAGE(0x1002u); os_wdt_feed();
+    WSTAGE(0x1002u); s3_w2c_wdt_feed();
     (void)s3_win_phy_cal();
-    WSTAGE(0x1003u); os_wdt_feed();
+    WSTAGE(0x1003u); s3_w2c_wdt_feed();
+#ifndef S3_PHY_VIA_OSI
     (void)s3_win_phy_enable();
-    WSTAGE(0x1004u); os_wdt_feed();
+#else
+    ets_printf("[phy] 跳过手动初始化：交给 OSI _phy_enable 回调\n");
+#endif
+    WSTAGE(0x1004u); s3_w2c_wdt_feed();
     s3_win_log("W1 bringup\n");
-    WSTAGE(0x1005u); os_wdt_feed();
+    WSTAGE(0x1005u); s3_w2c_wdt_feed();
     rc = s3_wifi_bringup();
-    WSTAGE(0x1006u); os_wdt_feed();
+    WSTAGE(0x1006u); s3_w2c_wdt_feed();
     s3_win_log("W2 bringup returned\n");
 #ifdef S3_WITH_LWIP
     /* §210/§215：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调），

@@ -752,6 +752,27 @@ static u32 osi_task_ms_to_tick(u32 ms)
 static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); return 31u; }
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
 static void osi_task_delay(u32 ticks) { s3_w2c_task_delay(ticks); }
+
+/* ---- PHY 使能/关闭（§228）------------------------------------------------
+ * IDF 的 OSI 表把这两个槽位接到 esp_phy_enable/disable(PHY_MODEM_WIFI)，也就是
+ * "WiFi 库自己在合适时机回调我们做 PHY 初始化"。我们之前把这槽位留空、改成自己
+ * 在 bringup 之前手动调 register_chipv7_phy —— 实测那条路会在库里忙等死转
+ * （卡在 set_chan_freq_hw_init 之后的 RF 等待里）。
+ * 现在改回 IDF 的语义：库回调时再做。 */
+extern int s3_win_phy_enable_hook(void);
+
+static int osi_phy_enable(void)
+{
+    HIT_OF(_phy_enable);
+    return (s3_win_phy_enable_hook() == 0) ? 0 : -1;
+}
+
+static int osi_phy_disable(void)
+{
+    HIT_OF(_phy_disable);
+    return 0;
+}
+
 static void osi_wifi_rtc_enable_iso(void)
 {
     volatile u32 *iso = (volatile u32 *)0x60008094u;   /* RTC_CNTL_DIG_ISO */
@@ -1209,6 +1230,8 @@ void s3_wifi_osi_init(void)
     OSI_SET(_wifi_int_restore, osi_wifi_int_restore);
     OSI_SET(_event_post,      osi_event_post);
     OSI_SET(_task_delay,      osi_task_delay);
+    OSI_SET(_phy_enable,      osi_phy_enable);
+    OSI_SET(_phy_disable,     osi_phy_disable);
     OSI_SET(_wifi_rtc_enable_iso,  osi_wifi_rtc_enable_iso);
     OSI_SET(_wifi_rtc_disable_iso, osi_wifi_rtc_disable_iso);
 

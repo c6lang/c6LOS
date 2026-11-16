@@ -1624,6 +1624,16 @@ $(WIFI_DIR)/obj/c6_https_demo.o: port/s3/c6_https_demo.c
 # 没传就不定义，交给 port/s3/wifi_creds.h 里的默认（空串 = 跳过关联）
 WIFI_CREDS = $(if $(S3_WIFI_SSID),-DS3_WIFI_SSID=$(S3_WIFI_SSID)) \
              $(if $(S3_WIFI_PASS),-DS3_WIFI_PASS=$(S3_WIFI_PASS))
+# PHY 校准模式（win_island.c 的 S3_PHY_CAL_MODE）：0=PARTIAL（默认）1=NONE 2=FULL。
+# 排查"register_chipv7_phy 挂死"时可以用 make ... S3_PHY_CAL_MODE=1 换个路径试试。
+ifneq ($(S3_PHY_CAL_MODE),)
+WIFI_CDEFS += -DS3_PHY_CAL_MODE=$(S3_PHY_CAL_MODE)
+endif
+# S3_PHY_VIA_OSI=1：不在 bringup 之前手动做 PHY 初始化，改成让 WiFi 库通过
+# OSI 的 _phy_enable 回调我们（IDF 的做法，§228）
+ifneq ($(S3_PHY_VIA_OSI),)
+WIFI_CDEFS += -DS3_PHY_VIA_OSI
+endif
 HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS $(WIFI_CREDS)
 https:
 	@rm -rf $(WIFI_DIR)
