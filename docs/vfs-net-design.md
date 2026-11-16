@@ -577,3 +577,37 @@ ping 本机走环回、ping 不可达地址的 `-EHOSTUNREACH` 与丢包计数�
    `tx=118136` 变 `111511051100511200511`：把"数字转字符串"写成
    `port_puts(&b[n])`，它从第 n 个字符一直打到 NUL。逐字符 `port_putc(b[n])`
    才对（`tests/t_ping.c6`、`t_net.c6` 都改了）。
+
+### M10-3（UDP + SAL socket 面）已完成
+
+`kernel/net/udp.c6` + `kernel/net/sal_udp.c6`，`C6OS_NET=0` 时不编译。
+
+- `udp.c6`：8 个 socket 槽，每槽一条 4 深的数据报队列（存载荷 + 来源）；
+  `UdpSockOpen/Close/Bind/Connect/Send/SendTo/Recv/RecvFrom/Poll`；
+  校验和按 RFC 768 算伪首部，结果为 0 时按规范写 `0xFFFF`；
+  `UdpInput()` 按目的端口投递，端口没人监听就丢并计 `rx_dropped`；
+  目的 IP 是自己时直接进对端队列（环回），不发到网线上。
+- `sal_udp.c6`：把上面这套包成 `SalProto`（domain=AF_INET、type=SOCK_DGRAM、
+  proto=IPPROTO_UDP），`SalUdpInit()` 注册；`listen/accept` 返
+  `-EOPNOTSUPP`（UDP 没有这两个动作）；`recvfrom` 回填 `LosSockAddr`。
+- `ip.c6`：`IPPROTO_UDP` 分派到 `UdpInput`。
+- **SAL 的 `priv` 语义改了**：原来是"槽位号"，现在是**协议侧句柄**
+  （`socket()` 的返回值）。这样协议栈不需要再维护一张"SAL 槽 → 自己的句柄"
+  的映射表，`priv` 转成 `UINT64` 就是自己的下标；`(VOID *)0` 也是合法句柄。
+
+验收：`make check-udp` —— qemu 真跑两段：
+1. 环回：两个 SAL socket 绑 7777/7778，`sendto` → `poll` → `recvfrom`，
+   验端口占用 `-EADDRINUSE`、`listen/accept` 的 `-EOPNOTSUPP`、
+   `recvfrom` 空队列 `-EAGAIN`、`from` 的端口/IP 回填、close 幂等；
+2. 真网络：向 10.0.2.3:53（slirp 的 DNS）发 `example.com` 的 A 记录查询，
+   轮询收包，验事务 ID `0xABCD`、QR 位、ancount>0，打印
+   `PASS: net M10-3（UDP + SAL socket 面，slirp DNS 往返）`。
+
+两个坑：
+
+1. **`SalSend` 成功返回 0，不是字节数** —— 底层 `IpOutput` 成功就是 0（包已
+   交给协议栈/驱动），我一开始按"返回长度"去断言，白等了好几万次重发。
+   要"发出去多少"就得自己返回 `len`，但那样 `IpOutput` 的错误码就没地方放了。
+2. **第一个 UDP 包会撞上 ARP 未解析** —— `IpOutput` 在 ARP 表里查不到下一跳时
+   返回 `-EHOSTUNREACH` 并丢包（这是设计好的：不排队等 ARP）。测试里要么先
+   `ArpResolve` 预热，要么看到 `-113` 就 poll 一下重发。

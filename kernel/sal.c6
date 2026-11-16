@@ -153,7 +153,7 @@ INT32 SalSocket(INT32 domain, INT32 type, INT32 proto)
         }
     }
     if (sd < 0) {
-        (void)p->close((VOID *)(UINT64)sd);
+        (void)p->close((VOID *)(UINT64)rc);
         return sal_err_(LOS_SAL_E_MFILE);
     }
     g_socks[sd].used = 1u;
@@ -161,7 +161,7 @@ INT32 SalSocket(INT32 domain, INT32 type, INT32 proto)
     g_socks[sd].type = type;
     g_socks[sd].proto = proto;
     g_socks[sd].ops = p;
-    g_socks[sd].priv = (VOID *)(UINT64)sd;
+    g_socks[sd].priv = (VOID *)(UINT64)rc;   /* 协议侧句柄 */
     g_socks[sd].last_errno = 0;
     return sd;
 }

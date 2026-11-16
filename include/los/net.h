@@ -115,6 +115,22 @@ UINT32 ArpCacheCount(VOID);
 INT32 IpOutput(LosNetIf *nif, UINT32 dst, UINT8 proto, LosNetBuf *p);
 INT32 IpInput(LosNetIf *nif, LosNetBuf *p);
 
+/* ---- UDP（kernel/net/udp.c6） ---- */
+
+INT32  UdpSockOpen(VOID);
+INT32  UdpSockClose(INT32 ud);
+INT32  UdpSockBind(INT32 ud, UINT16 port);
+INT32  UdpSockConnect(INT32 ud, UINT32 ip, UINT16 port);
+INT32  UdpSockSend(INT32 ud, const VOID *buf, UINT32 len);
+INT32  UdpSockSendTo(INT32 ud, UINT32 ip, UINT16 port, const VOID *buf, UINT32 len);
+INT32  UdpSockRecv(INT32 ud, VOID *buf, UINT32 max);
+INT32  UdpSockRecvFrom(INT32 ud, VOID *buf, UINT32 max, UINT32 *ip, UINT16 *port);
+INT32  UdpSockPoll(INT32 ud, UINT32 events);
+INT32  UdpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
+
+/* 把 UDP 注册到 SAL（kernel/net/sal_udp.c6） */
+INT32  SalUdpInit(VOID);
+
 /* ---- ICMP ---- */
 
 INT32  IcmpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
