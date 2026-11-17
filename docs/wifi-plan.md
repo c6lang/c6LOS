@@ -17614,3 +17614,49 @@ IDF 参考工程环境：venv + core requirements + esp-rom-elfs 已装好；
 装好后烧官方 station 例程做真板对照，直接看 0x60033d14 与扫描结果。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §523 官方 IDF station 例程真板对照：硬件完全正常，差异在启动初始化
+
+成功装好 IDF v6.0.1 主机环境（venv + core reqs + esp-rom-elfs + 用本机
+xtensa 16.1.0 工具链 + `IDF_MAINTAINER=1` 绕过版本检查 +
+`CONFIG_LIBC_PICOLIBC_NEWLIB_COMPATIBILITY=n` 绕过 picolibc 头冲突），
+编译并烧录了官方 `examples/wifi/getting_started/station`：
+
+```text
+I (559) wifi:connected with weforpay.com, aid = 2, channel 6, 40U,
+             bssid = dc:d8:7c:5a:7a:46
+I (559) wifi:security: WPA2-PSK, phy: bgn, rssi: -54
+I (1599) esp_netif_handlers: sta ip: 192.168.68.120, mask: 255.255.255.0
+I (1599) wifi station: got ip:192.168.68.120
+```
+
+⇒ **硬件/天线/路由器全部正常**；问题 100% 在我们直接 flash 启动缺少的初始化。
+
+### 官方固件运行态 vs 我们的运行态（同一块板）
+
+```
+寄存器          官方 IDF            我们 c6LOS
+0x60033d14     0x00000001          0x00000000   ← hal_init 等的握手位
+0x6002600c     0x10000004          0x10000002   (BB_CFG)
+0x60026014     0xff87d850          0xfffce7bf   (WIFI_CLK_EN)
+0x60026018     0x00003e08          0x00000000   (WIFI_RST_EN)
+0x60008000     0x1c008080          0x1c00a080   (OPTIONS0, 差 bit13)
+0x60008094     0x00000080          0xaa805080   (DIG_ISO)
+0x60008054     0x003c0700          0x00000000   (RTC_STORE1)
+0x60033c34     0x19a8f9e0          0x00000000   (MAC 配置，我们没初始化完)
+```
+
+A/B：JTAG 在 hal_init 停住时把上述 IDF 值全部写进去，bit0 仍然为 0、
+程序仍然停在 hal_init ⇒ 不是这几个寄存器本身，而是二级 bootloader
+（rtc_clk_init / BBPLL / 模拟校准）做的更底层初始化。
+
+### 下一步
+
+方向转为：**让 c6LOS 经过 IDF 二级 bootloader 启动**（已有
+`/tmp/idf_station/build/bootloader/bootloader.bin`），即构造一个合法的 ESP
+app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替我们完成
+全部模拟/RF 初始化，再跳到 c6LOS。
+
+目标未达成，goal 保持 active。
