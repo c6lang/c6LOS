@@ -14429,3 +14429,16 @@ M1..M5 → T1 call0 任务进入 windowed 主流程 → [wifimain] id=1
 2. 读 `0x50001A00`（阻塞记录）看是谁在等什么；
 3. 如果库任务确实进了但立刻阻塞，就是 OSI 的 sem/queue 语义还没对上
    （`g_dbg_sync` 打开看 `[take]`/`[give]` 配对）。
+
+## §411 手动推进 WINDOWSTART 代替 `call8` —— 失败，已回滚
+
+`s3_task_tramp` 里用 `callx8` 进 windowed 入口。`call8` 的语义不只是
+"编码 CALLINC"，还会**把 WINDOWSTART 推进一格**；`callx8` 不做这一步。
+于是被调用者拿到的"自己的 a1"还是 tramp 的 a1，第一条 `s32i a0, a1, 0`
+就写到 `0xffffffe0`（真板实测）。
+
+试着手动补这一步（`WS += 1<<WB` 再 `wsr`，用 `g_ctx_tmp_sp` 护 a1）：
+**崩在 `ctx.S` 内部**（`a1=0`、`a0=1` = 我们的 `movi`），已回滚。
+
+⇒ `wsr windowstart` 在 tramp 这个位置同样会毁掉 a1，
+**和 §387-§391 在 RESTORE_FRAME 里遇到的是同一个问题**。
