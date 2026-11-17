@@ -1615,6 +1615,21 @@ u32 s3_wifi_bringup(void)
     /* 库的 wifi_log 先看它自己的 g_log_level，默认级别会把错误信息过滤掉，
      * 调高之后 init 失败的原因才会通过 _log_writev 送到串口。 */
     { extern int g_log_level; g_log_level = 4; }
+    /* §425 ★ 清 ROM 变量 `s_wifi_queue`（`rom/esp32s3.rom.ld` 里的**绝对
+     * 地址**定义：0x3fcef918）。
+     *
+     * 这个地址不在 link.ld 的 DRAM 区域里（上界 0x3FCEF000），也**不在
+     * `.bss`**，所以复位后**保留上一轮的值**。真板实测：复位后它还是上一轮
+     * 的堆指针 0x3fcc45b0 ⇒ libpp 打出
+     *   `create wifi task: queue not null`
+     * 然后拿这个**已失效**的指针去 delete/复用 ⇒
+     *   `TRAP cause=0x1c(StoreProhibited) vaddr=0x18 a4=0`
+     * 清成 0 之后库会走"创建新队列"的正常路径。
+     *
+     * 注意：**不能一次性清整片 0x3FCEF800..0x3FCF0000**（试过，直接退化成
+     * `TRAP pc=0x4004eabc`，ROM 自己的状态也在那 2KB 里）。只能一个一个来，
+     * 只清我们确认需要的。 */
+    { extern void *s_wifi_queue; s_wifi_queue = 0; }
 
     ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
                (u32)g_osi_calls[0], (u32)(void *)g_wifi_osi_funcs._version,

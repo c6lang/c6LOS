@@ -14720,3 +14720,68 @@ M1..M5 ✓ → [wifimain] id=1 → W0 phy → register_chipv7_phy rc=0/1 → W1 
    `S3_PHY_VIA_OSI` 已经把这个开关写好了（`win_island.c`），
    但它现在**没有真正阻止 PHY 提前初始化**——因为 `s3_win_phy_cal()`
    （W0 阶段）本身就会调 `register_chipv7_phy`。要一起处理。
+
+## §425 ★★ ROM 变量区跨复位不初始化 —— `s_wifi_queue` 带着上一轮的失效指针
+
+### 发现
+`port/s3/rom/esp32s3.rom.ld` 里有 **146 个变量是绝对地址定义**：
+
+```
+s_wifi_queue  = 0x3fcef918;
+g_osi_funcs_p = 0x3fcef940;
+...
+```
+全部落在 **0x3fcef81c .. 0x3fcefffc**（约 2KB）。而 `link.ld` 的 DRAM 区域
+上界正好是 **`0x3FCEF000`** ⇒ 这 2KB
+
+* 不在 `.bss` 里 ⇒ 我们的启动清零碰不到
+* 不在 bootloader 加载的段里 ⇒ 复位也不会重写
+
+⇒ **复位后原封不动地保留上一轮的值**。JTAG 实测：
+
+```
+复位后 0x3fcef918 (s_wifi_queue)  = 0x3fcc45b0   ← 上一轮的堆指针，早就失效
+写 0xcafebabe 再读回             = 0xcafebabe   ← 区域本身可读写，没问题
+0x3fcef940 (g_osi_funcs_p)       = 0x3fcc3cb4   ← 同样有效指针
+```
+
+libpp 拿到非空的 `s_wifi_queue` 就打出
+`create wifi task: queue not null`，然后拿这个**已失效**的指针去 delete /
+复用 ⇒ `TRAP cause=0x1c(StoreProhibited) vaddr=0x18 a4=0`。
+
+### 试过：清整片 2KB（失败）
+在 `start.S` 的清 bss 之后加 `0x3FCEF800..0x3FCF0000` 全清零
+⇒ **退化**成 `TRAP sp=3fcd8ed0 cause=0x1c pc=0x4004eabc`（ROM 自己的状态也在
+那 2KB 里）。已回滚。
+
+### 修法：一个一个清，只清确认需要的
+在 `s3_wifi_bringup()` 开头：
+
+```c
+{ extern void *s_wifi_queue; s_wifi_queue = 0; }
+```
+（`rom.ld` 里是绝对符号，C 里这样写会生成 `l32r + s32i`，直接落到
+`0x3fcef918`，正是想要的位置。）
+
+### 真板结果 —— 又前进一大截
+```
+[pp] pp rom version ✓ → [net80211] net80211 rom version ✓ → [unlock] ✓
+→ （不再有 "queue not null"）
+→ [semnew] #2 ✓
+→ [task] 库建任务 fn=40381b10 id=3 stack=6144
+→ [give] t=3 sem#2 ✓
+→ [wifimain] id=1 tick=30      ← ★ s3_win_wifi_main **第二次**被进入
+→ W0 phy start → register_chipv7_phy
+→ TRAP cause=0x02(IllegalInstruction) pc=0x3fcef000 vaddr=0x3fcef000 a0=0x80035810
+```
+
+### 下一步（新线索，优先级最高）
+**`[wifimain] id=1` 出现了两次**（tick 分别是 0 和 30）。任务入口
+`s3_win_wifi_main_task` 是 `rc = s3_win_wifi_main(); ... for(;;)`，
+正常绝不会重入 ⇒ **任务被切走再切回来时，PC 回到了函数开头**，
+即 `port_task_switch` 的恢复帧不对。
+
+`cause=0x02 pc=0x3fcef000`（正好是 DRAM 上界）也印证"返回地址被写坏"。
+
+要查：`port_task_switch` 保存/恢复时 `c->sp` 是否真的指向这次保存的帧
+（之前的观察：`ctx[0].sp` 指向的是一段普通函数帧、不是切换帧）。
