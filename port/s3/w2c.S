@@ -528,23 +528,26 @@ s3_win_spill:
  * 纯跳转、不改 CALLINC，于是 CALLINC=2 一路带到真实实现的
  * `entry a1, 80`。参数 a2..a7 在 call8 前后是重叠的，不需要搬。 */
     .align 4
+15: .word   0x50001FF0            /* §475：壳保存 a1/a0 的固定槽（+0=a1，+4=a0）*/
+    .align 4
 14: .word   ets_printf
 
     .align 4
     .global s3_ets_printf
     .type   s3_ets_printf, @function
 s3_ets_printf:
+    /* §475 ★ 修正：`callx8` 之后**任何 aN 都不能假设不变**。
+     * 用固定 RTC 槽（0x50001FF0）保存 a1/a0，前后都靠 `l32r` 取绝对地址，
+     * 完全不依赖寄存器在窗口轮转后的稳定性。
+     * 代价：`s3_trap` 打印时会与普通调用共用这个槽（嵌套），
+     * 只影响打印，不影响正确性。 */
+    l32r    a8, 15b
+    s32i    a1, a8, 0
+    s32i    a0, a8, 4
     addi    a1, a1, -64            /* 给 callx8 的硬件溢出槽留空间 */
-    s32i    a0, a1, 0
-    /* §475 ★ `callx8` 期间硬件会把 caller 的 a12..a15 溢出到栈、返回时
-     * 由 `retw` 恢复，所以 a12 在 `callx8` **返回之后**仍是这里写进去的值。
-     * 而 `a1` 不能假设不变 —— `_win_ovf8` 的兜底逻辑会把它换成溢出槽地址，
-     * 于是 `l32i a0, a1, 0` 读到的是 `callx8` 设的返回地址（`0x8...`），
-     * `ret` 拿它当 CALLINC=0 的地址用 → `cause=0x14` 取指禁止。 */
-    mov     a12, a1
     l32r    a8, 14b
     callx8  a8
-    mov     a1, a12                /* ★ 用备份的 a1，别信 callx8 之后的 a1 */
-    l32i    a0, a1, 0
-    addi    a1, a1, 64
+    l32r    a8, 15b
+    l32i    a1, a8, 0               /* 还原 a1 */
+    l32i    a0, a8, 4               /* 还原 call0 的返回地址 */
     ret

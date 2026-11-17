@@ -429,8 +429,10 @@ s3_win_call_wifi_main:
      * 这一步和 §412/§413 在 ctx.S 里踩的是同一个坑；那边跳板之后不再依赖
      * 窗口状态所以侥幸没事，这里必须显式把 CALLINC 恢复成 2。 */
     mov     a8, a2
-    callx8  a8
-    mov     a2, a10
+    /* §476 ★★★ 必须是 `callx0`：目标 `s3_win_wifi_main` 是
+    /* call0 编译的普通 C 函数，它用 `ret`；`callx8` 会把 a0 设成 CALLINC=2
+    /* ⇒ 目标一返回就非法。真板：cause=0x14、pc=a0=0x8037b1bc。 */
+    callx0  a8
     l32i    a0, a1, 0
     retw
 

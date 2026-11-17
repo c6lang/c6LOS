@@ -16550,3 +16550,63 @@ cause=0x14 (InstFetchProhibited)  pc=a0=0x8037b1bc  ps=0x00060610
 **注意**：崩溃性质已经从 `cause=0`（窗口账目错）变成
 `cause=0x14`（壳自己取指跳飞），说明 §473/§474 修掉的**是**真问题，
 现在只剩壳这一层。
+
+## §476 ★★★ 最终根因：windowed 壳用 `callx8` 调了 **call0 的 C 函数**
+
+`port/s3/win_bridge.S` 的 `.Lwmain_stub` 原来是：
+
+```
+.Lwmain_stub:
+    entry   a1, 16
+    s32i    a0, a1, 0
+    mov     a8, a2
+    callx8  a8          ← 错
+    mov     a2, a10     ← 也是 call8 那一套
+    l32i    a0, a1, 0
+    retw
+```
+
+目标是 `port/s3/win_island.c:712` 的 **`s3_win_wifi_main`** —— 普通 C 函数，
+按本仓统一约定用 **call0** 编译 ⇒ 返回指令是 **`ret`**。
+`ret` 要求 `a0` 的高两位（CALLINC）= 0，而 `callx8` 恰恰把 `a0` 设成
+`0x8xxxxxxx`（CALLINC=2）—— 目标一返回就 **非法/取指禁止**。
+
+真板症状与现场完全对上：
+
+```
+*** TRAP sp=3fcbed40 cause=00000014 pc=8037b1bc ps=00060610
+        vaddr=8037b1bc callinc=00000002 a0=8037b1bc
+```
+
+`0x8037b1bc` = `0x4037b1bc | 0x80000000`，而 `0x4037b1bc` 正是
+`s3_win_call_wifi_main + 0x68` = 这条 `callx8` 的返回地址。
+`cause=0x14` 是 `InstFetchProhibitedCause` —— `ret` 跳去了 `0x0037b1bc`。
+
+改为 `callx0 a8`，并且**不要**再 `mov a2, a10`（call0 的返回值就在 `a2`，
+`mov a2,a10` 是 call8 那一套的写法）。
+
+### 效果
+
+改完实测串口：
+
+```
+M5 tasks ok, starting scheduler
+T1 call0 任务进入 windowed 主流程
+[wifimain] id=1 tick=1
+```
+
+**`*** TRAP` 消失** —— 之前每一轮都必然出现的异常崩溃不再发生。
+
+## 本轮累计修掉的四个真 bug
+
+| # | 位置 | 问题 |
+|---|---|---|
+| §469 | `wifi_glue.c` `osi_task_create` | 库任务栈 6144 太小，`a7`（callee-saved）被栈溢出写成 `0xc4b00000` |
+| §470/§471 | `ctx.S` / `irq.S` 的 `wsr windowbase` | 只查了 `<16`，漏了"必须 4 的倍数"，`0xa` 能通过 |
+| §473 | `ctx.S` `port_task_switch` | **从未保存 PS 到帧偏移 64**，`RESTORE_FRAME` 拿栈垃圾当 PS 做 `rfe` |
+| §474 | `w2c.S` / `win_bridge.S` | 多个 call0 ↔ windowed 边界跨越错误（`ets_printf` 无壳、`callx8` 调 call0 函数） |
+
+诊断方法上的三条教训（都已写进前面的小节）：
+读 TRAP 先读 `0x50000140`（§466）；`cause=0x1c` 时别信 `epc1`（§468）；
+判"地址是否合法"直接用 `0x40000000 <= v < 0x44000000`，别拿
+`v & 0x3FFFFFFF` 当判据（两次白查）。
