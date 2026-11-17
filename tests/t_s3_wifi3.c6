@@ -143,7 +143,18 @@ void os_main(void)
     s3_beacon(2u, (u32)os_task_create("wifi", wifi_call0_task, 0, 3u, 8192u));
 #else
     g_next_task_windowed = 1u;
-    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 8192u));
+    /* §449：栈从 8192 抬到 16384。
+     *
+     * 真板实测 `ctx[0]`（就是这个任务）的 `sp = 0x3fcc0300`，而它的栈区间是
+     * `[0x3fcbced0, 0x3fcbeed0)` —— **超出栈顶 0x1430 = 5168 字节**，已经压进了
+     * `ctx[1]`（库任务）的栈区。于是两个任务的帧互相踩，双双阻塞在
+     * `osi_queue_recv`（`wait_kind=6 = Q_WAIT_GET`，且 `wait_obj` 都指向
+     * 同一个库内部对象 `0x3fcc75b4`），调度器只能在 `port_idle` 里空转。
+     *
+     * 溢出源是 `s3_wifi_bringup()` 里那次 `esp_wifi_init_internal()` ——
+     * 库在这个调用里跑得很深。8192 + 5168 > 13360，取 16384 留出余量。
+     * 栈池同步从 36864 抬到 45056（16384 + 6144*4 = 40960，再留 4096 余量）。 */
+    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 16384u));
     g_next_task_windowed = 0u;
 #endif
     pstr("M4 task wifi ok\n");
