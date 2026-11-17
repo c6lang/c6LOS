@@ -576,6 +576,21 @@ static u64 fd_alloc(void)
     return fd;
 }
 
+/* 填一个刚 alloc 出来的槽：node/is_dir/kind 之外，把 open(2) 的 flags 记成
+ * "文件状态标志"（F_GETFL 要看得见 O_APPEND/O_NONBLOCK/访问模式），
+ * O_CLOEXEC 记成 fd 标志（F_GETFD 要看得见），execve 时据此关 fd。 */
+static void fd_set(u64 fd, u64 node, u32 is_dir, u32 kind, u64 flags)
+{
+    LxFile *e = &g_fd[fd];
+
+    e->node = node;
+    e->pos = 0ull;
+    e->is_dir = is_dir;
+    e->kind = kind;
+    e->oflags = (u32)(flags & (u64)(LX_O_ACCMODE | LX_O_APPEND | LX_O_NONBLOCK));
+    e->flags = ((flags & (u64)LX_O_CLOEXEC) != 0ull) ? (u32)LX_FD_CLOEXEC : 0u;
+}
+
 void lx_fs_fd_reset(void)
 {
     u64 i;
@@ -656,7 +671,6 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
     u64 fd;
 
     (void)dirfd;
-    (void)flags;
     if (lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
         return (u64)0 - LX_EFAULT;
     }
@@ -689,10 +703,7 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         if (fd == LX_FD_NONE) {
             return (u64)0 - 24;
         }
-        g_fd[fd].node = LX_FD_ROOT;
-        g_fd[fd].pos = 0ull;
-        g_fd[fd].is_dir = 1u;
-        g_fd[fd].kind = LX_FD_FILE;
+        fd_set(fd, LX_FD_ROOT, 1u, LX_FD_FILE, flags);
         return fd;
     }
 #if C6OS_VFS
@@ -713,10 +724,7 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
                 g_dpath[(u32)(slot - LX_VDIR_BASE)][0] = '\0';
                 return (u64)0 - 24ull;
             }
-            g_fd[fd].node = slot;
-            g_fd[fd].pos = 0ull;
-            g_fd[fd].is_dir = 1u;
-            g_fd[fd].kind = LX_FD_VFS;
+            fd_set(fd, slot, 1u, LX_FD_VFS, flags);
             return fd;
         }
         vfd = vfs_open_(vpath, flags);
@@ -731,10 +739,7 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         if ((u32)vfd < (u32)OS_MAX_FILES) {
             (void)os_str_cpy(g_vpath[vfd], vpath, (u32)LOS_FS_PATH_MAX);
         }
-        g_fd[fd].node = (u64)vfd;
-        g_fd[fd].pos = 0ull;
-        g_fd[fd].is_dir = (u32)vfs_is_dir_(vpath);
-        g_fd[fd].kind = LX_FD_VFS;
+        fd_set(fd, (u64)vfd, (u32)vfs_is_dir_(vpath), LX_FD_VFS, flags);
         return fd;
     }
 #endif
@@ -746,10 +751,7 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
     if (fd == LX_FD_NONE) {
         return (u64)0 - 24;                      /* EMFILE */
     }
-    g_fd[fd].node = (u64)idx;
-    g_fd[fd].pos = 0ull;
-    g_fd[fd].is_dir = is_dir(s) ? 1u : 0u;
-    g_fd[fd].kind = LX_FD_FILE;
+    fd_set(fd, (u64)idx, is_dir(s) ? 1u : 0u, LX_FD_FILE, flags);
     return fd;
 }
 

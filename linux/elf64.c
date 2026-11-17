@@ -70,7 +70,10 @@ typedef struct {
 #define NAUX 16ull         /* 下面实际压入的 auxv 对数（不含结尾的 AT_NULL） */
 
 #define STACK_PAGES 32ull
-#define STACK_BUF   4096ull
+/* 栈顶用于 argv/envp/auxv 的窗口。以前是 4KB，等于"命令行和环境变量加起来
+ * 不能超过 4KB"——一条长一点的 `sh -c` 或 JAVA_TOOL_OPTIONS 就装不下。
+ * 现在给 64KB，缓冲本身走内核堆（内核栈只有 8KB，放不下）。 */
+#define STACK_BUF   65536ull
 #define INTERP_MAX  128ull
 
 static u64 g_exec_entry;
@@ -93,6 +96,10 @@ static u64 push_str(u8 *b, u64 *w, u64 va_base, const char *s)
     u64 pad = (n + 7ull) & ~7ull;
     u64 i;
 
+    if (*w < pad) {                 /* 参数区放不下：置 0 让调用者判失败 */
+        *w = 0ull;
+        return 0ull;
+    }
     *w -= pad;
     for (i = 0; i < pad; i++) {
         b[*w + i] = 0;
@@ -107,6 +114,10 @@ static void push8(u8 *b, u64 *w, u64 v)
 {
     u64 i;
 
+    if (*w < 8ull) {
+        *w = 0ull;
+        return;
+    }
     *w -= 8ull;
     for (i = 0; i < 8ull; i++) {
         b[*w + i] = (u8)((v >> (8ull * i)) & 0xffull);
@@ -262,34 +273,52 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
     return 0;
 }
 
+/* 建初始栈：把 argv/envp 字符串、指针数组、auxv 按 Linux 的布局摆到栈顶窗口里。
+ *
+ * M14-1 的三处改动：
+ *   1. 窗口从 4KB 拉到 64KB，缓冲从内核栈搬进内核堆（内核栈只有 8KB）；
+ *   2. envp 真的压栈（以前是 `(void)uenvp`，等于所有子进程都没有环境变量）；
+ *   3. 指针数组本身也从堆里来，argc/envc 只受 LX_ARG_MAX 限制，不再是 16 项。 */
 static int build_stack(u64 as, const char *path, const char *const *argv,
-                       u32 argc, u64 run_entry, u64 at_entry,
+                       u32 argc, const char *const *envp, u32 envc,
+                       u64 run_entry, u64 at_entry,
                        u64 at_base, u64 phdr, u64 phnum, u64 phentsize,
                        u64 *out_rsp)
 {
     u64 top = C6OS_LINUX_STACK_TOP;
     u64 base = top - STACK_PAGES * PAGE;
     u64 frames[STACK_PAGES];
-    u8 buf[STACK_BUF];
+    u8 *buf;
+    u64 *va_argv;
+    u64 *va_envp;
     u64 va_base = top - STACK_BUF;
     u64 w = STACK_BUF;
     u64 va_argv0;
     u64 va_plat;
     u64 va_execfn;
     u64 va_rand;
-    u64 va_arg1;
-    u64 va_argv[16];
     u64 nargv;
+    u64 nenv;
     u64 fixed;
     u64 i;
+    int ret = -1;
     u8 *pg;
+
+    buf = (u8 *)port_kmalloc(STACK_BUF);
+    va_argv = (u64 *)port_kcalloc((u64)LX_ARG_MAX + 1ull, 8ull);
+    va_envp = (u64 *)port_kcalloc((u64)LX_ARG_MAX + 1ull, 8ull);
+    if (buf == (u8 *)0 || va_argv == (u64 *)0 || va_envp == (u64 *)0) {
+        ret = -5;
+        goto out;
+    }
 
     for (i = 0; i < STACK_PAGES; i++) {
         u64 pa = port_phys_alloc();
         u64 k;
 
         if (pa == 0ull) {
-            return -1;
+            ret = -1;
+            goto out;
         }
         frames[i] = pa;
         pg = (u8 *)port_phys_map(pa);
@@ -297,21 +326,23 @@ static int build_stack(u64 as, const char *path, const char *const *argv,
             pg[k] = 0;
         }
         if (port_as_map(as, base + i * PAGE, pa, PAGE, C6OS_PROT_R | C6OS_PROT_W) != 0) {
-            return -2;
+            ret = -2;
+            goto out;
         }
     }
     /* 栈 VMA：页现在是预映射的；LX_VM_STACK 是为了让缺页路径知道"落在栈
      * 下方的地址是合法增长"，不是野指针（M13-2b-3 起按需扩栈）。 */
     if (lx_vma_add(as, base, top, C6OS_PROT_R | C6OS_PROT_W,
                    LX_VM_STACK | LX_VM_ANON, 0ull) != 0) {
-        return -3;
+        ret = -3;
+        goto out;
     }
 
     if (argc == 0u || argv == (const char *const *)0) {
         argc = 1u;
     }
-    if (argc > 16u) {
-        argc = 16u;
+    if (argc > LX_ARG_MAX) {
+        argc = LX_ARG_MAX;
     }
     nargv = (u64)argc;
     for (i = 0; i < nargv; i++) {
@@ -322,20 +353,43 @@ static int build_stack(u64 as, const char *path, const char *const *argv,
         }
         va_argv[i] = push_str(buf, &w, va_base, a);
     }
+    if (envp == (const char *const *)0) {
+        envc = 0u;
+    }
+    if (envc > LX_ARG_MAX) {
+        envc = LX_ARG_MAX;
+    }
+    nenv = (u64)envc;
+    for (i = 0; i < nenv; i++) {
+        const char *e = envp[i];
+
+        va_envp[i] = push_str(buf, &w, va_base, (e != (const char *)0) ? e : "");
+    }
+    if (w == 0ull) {
+        ret = -6;                    /* 字符串区放不下 */
+        goto out;
+    }
     va_argv0 = va_argv[0];
-    va_arg1 = (nargv > 1ull) ? va_argv[1] : 0ull;
     va_plat = push_str(buf, &w, va_base, "x86_64");
     va_execfn = push_str(buf, &w, va_base, path);
+    if (w < 16ull) {
+        ret = -6;
+        goto out;
+    }
     w -= 16ull;
     va_rand = va_base + w;
     for (i = 0; i < 16ull; i++) {
         buf[w + i] = (u8)(0xa5u + (u8)i * 7u);
     }
 
-    /* 固定部分：envp 结尾(8) + argv 结尾(8) + argv[0](8) + argc(8) + auxv。
-     * 若 argc 落不到 16 字节边界，只在**字符串与 auxv 之间**垫 8 字节：
+    /* 固定部分：argc + argv[] + argv NULL + envp[] + envp NULL + auxv。
+     * 若落不到 16 字节边界，只在**字符串与 auxv 之间**垫 8 字节：
      * 垫在 envp 与 auxv 之间会被 glibc 当成 AT_NULL，auxv 整个读空。 */
-    fixed = 8ull * (3ull + nargv);      /* argc + argv[] + argv NULL + envp NULL */
+    fixed = 8ull * (3ull + nargv + nenv);   /* argc + argv[]+NULL + envp[]+NULL */
+    if (w < fixed + 16ull * (NAUX + 1ull) + 8ull) {
+        ret = -6;
+        goto out;
+    }
     if (((va_base + w - (fixed + 16ull * (NAUX + 1ull))) & 15ull) != 0ull) {
         push8(buf, &w, 0ull);
     }
@@ -359,6 +413,11 @@ static int build_stack(u64 as, const char *path, const char *const *argv,
     PUSH_AUX(AT_PHDR, phdr);                         /* 主程序的 phdr */
 
     push8(buf, &w, 0ull);                      /* envp 结尾 */
+    i = nenv;
+    while (i > 0ull) {
+        i--;
+        push8(buf, &w, va_envp[i]);            /* envp[n-1] .. envp[0] */
+    }
     push8(buf, &w, 0ull);                      /* argv 结尾 */
     i = nargv;
     while (i > 1ull) {
@@ -367,14 +426,34 @@ static int build_stack(u64 as, const char *path, const char *const *argv,
     }
     push8(buf, &w, va_argv0);                  /* argv[0] */
     push8(buf, &w, nargv);                     /* argc */
+    if (w == 0ull) {
+        ret = -6;
+        goto out;
+    }
 
-    pg = (u8 *)port_phys_map(frames[STACK_PAGES - 1ull]);
-    for (i = 0; i + w < STACK_BUF; i++) {
-        pg[w + i] = buf[w + i];
+    /* 窗口跨多页：按虚拟地址逐页拷，不能只往最后一页写。 */
+    for (i = w; i < STACK_BUF; i++) {
+        u64 va = va_base + i;
+        u64 pi = (va - base) / PAGE;
+        u64 po = (va - base) % PAGE;
+
+        pg = (u8 *)port_phys_map(frames[pi]);
+        pg[po] = buf[i];
     }
 
     *out_rsp = va_base + w;
-    return 0;
+    ret = 0;
+out:
+    if (buf != (u8 *)0) {
+        port_kfree((void *)buf);
+    }
+    if (va_argv != (u64 *)0) {
+        port_kfree((void *)va_argv);
+    }
+    if (va_envp != (u64 *)0) {
+        port_kfree((void *)va_envp);
+    }
+    return ret;
 }
 
 /* 读 PT_INTERP（解释器路径）到内核缓冲。返回长度，0 表示静态链接。 */
@@ -412,6 +491,7 @@ static u64 elf_interp(u64 img_pa, u64 img_size, char *out, u64 cap)
 
 int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
                   const char *const *argv, u32 argc,
+                  const char *const *envp, u32 envc,
                   u64 *o_entry, u64 *o_rsp, u64 *o_brk)
 {
     u64 e = 0ull;
@@ -449,8 +529,8 @@ int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
         }
     }
 
-    if (build_stack(as, path, argv, argc, (ibase != 0ull) ? ie : e, e, ibase,
-                    ph, pn, pe, o_rsp) != 0) {
+    if (build_stack(as, path, argv, argc, envp, envc, (ibase != 0ull) ? ie : e,
+                    e, ibase, ph, pn, pe, o_rsp) != 0) {
         return -4;
     }
     *o_entry = (ibase != 0ull) ? ie : e;
@@ -472,6 +552,7 @@ int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
     argv0[1] = g_arg1;
     if (lx_exec_build(as, img_pa, img_size, path, argv0,
                       (g_arg1 != (const char *)0) ? 2u : 1u,
+                      (const char *const *)0, 0u,
                       &entry, &rsp, &brk) != 0) {
         return -2;
     }
@@ -496,6 +577,7 @@ int lx_exec_preparev(u64 as, u64 img_pa, u64 img_size, const char *path,
         return -1;
     }
     if (lx_exec_build(as, img_pa, img_size, path, argv, argc,
+                      (const char *const *)0, 0u,
                       &entry, &rsp, &brk) != 0) {
         return -2;
     }

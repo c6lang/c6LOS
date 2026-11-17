@@ -9,8 +9,7 @@
 #include <c6os/linux_proc.h>
 #include <c6os/port.h>
 
-#define LX_ARG_MAX    4096u
-#define LX_ARG_BYTES  131072ull       /* Linux 的单个参数字符串上限是 128KB */
+/* LX_ARG_MAX / LX_ARG_BYTES 见 linux_abi.h（elf64.c 压栈时也用同一份）。 */
 
 /* 管道（M13-3c）：对象在 kernel heap，环形缓冲区按需从 4KB 长到 64KB。
  * Linux 的策略就是"写多少给多少、上限 pipe-max-size"，我们照这个做：
@@ -102,6 +101,7 @@ LxProc *lx_cur_proc(void)
 
 static void pipe_drop_(LxFile *fe);
 static void pipe_ref_(const LxFile *fe);
+static u64  n_(u64 v);             /* 负 errno（定义在本文件后部） */
 
 static void mem_zero_(u8 *p, u64 n)
 {
@@ -211,6 +211,8 @@ void lx_proc_attach(u64 as, u64 brk)
         p->pid = (u32)g_pid_next;
         g_pid_next++;
         p->ppid = 0u;
+        p->pgid = p->pid;                  /* 首个进程自成一个进程组和会话 */
+        p->sid = p->pid;
         /* fd 表销毁时逐槽通知管道减 readers/writers：fdt 不认识管道，走钩子。 */
         lx_fdtab_set_free_hook(pipe_drop_);
     }
@@ -471,6 +473,83 @@ void lx_proc_wake(LxProc *p)
     }
 }
 
+/* ---- 进程组 / 会话（M14-1c，修 B1）---------------------------------------
+ *
+ * B1 的原文是"setpgid 和 chdir 共用一个 case，setpgid() 实际执行
+ * chdir(pid 的指针)"。补 pgid/sid 两个字段之后，getpgrp/getpgid 也不再是
+ * 硬编码的 1 —— 那是为了骗过 ash 的 job control 写的，一旦有人真的 setsid
+ * 就会自相矛盾。 */
+
+u64 lx_proc_getpgrp(void)
+{
+    LxProc *p = cur_();
+
+    return (p != (LxProc *)0) ? (u64)p->pgid : 1ull;
+}
+
+u64 lx_proc_getpgid(i64 pid)
+{
+    LxProc *p;
+
+    if (pid == 0) {
+        p = cur_();
+    } else {
+        p = lx_proc_find(pid);
+    }
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_ESRCH);
+    }
+    return (u64)p->pgid;
+}
+
+u64 lx_proc_setpgid(i64 pid, i64 pgid)
+{
+    LxProc *self = cur_();
+    LxProc *p;
+
+    if (self == (LxProc *)0) {
+        return n_((u64)LX_ESRCH);
+    }
+    if (pid == 0) {
+        p = self;
+    } else {
+        p = lx_proc_find(pid);
+    }
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_ESRCH);
+    }
+    if (p->sid == p->pid) {
+        return n_((u64)LX_EPERM);          /* 会话首进程不能再改自己的进程组 */
+    }
+    if (pgid == 0) {
+        p->pgid = p->pid;                  /* 0 = 自己带一个组 */
+        return 0ull;
+    }
+    if (pgid < 0) {
+        return n_((u64)LX_EINVAL);
+    }
+    if ((u64)pgid != (u64)p->pid && lx_proc_find(pgid) == (LxProc *)0) {
+        return n_((u64)LX_EPERM);          /* 目标组不存在 */
+    }
+    p->pgid = (u32)pgid;                   /* 线程组（tgid）不受影响 */
+    return 0ull;
+}
+
+u64 lx_proc_setsid(void)
+{
+    LxProc *p = cur_();
+
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_ESRCH);
+    }
+    if (p->sid == p->pid) {
+        return n_((u64)LX_EPERM);          /* 已经是会话首进程 */
+    }
+    p->sid = p->pid;
+    p->pgid = p->pid;
+    return (u64)p->pid;
+}
+
 /* 信号导致的终止：状态字是信号号（wait4 侧按 WIFSIGNALED 解释）。 */
 void lx_proc_exit_sig(u32 sig)
 {
@@ -634,6 +713,8 @@ u64 lx_proc_fork(LxRegs *r)
     g_pid_next++;
     ch->ppid = par->pid;
     ch->tgid = ch->pid;                   /* fork 出来的是新线程组 */
+    ch->pgid = par->pgid;                 /* fork 继承进程组与会话（Linux 语义） */
+    ch->sid = par->sid;
     ch->as = as;
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
@@ -728,54 +809,133 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
 
 /* ---- execve -------------------------------------------------------------- */
 
-/* 从用户态读 argv：指针数组 + 字符串一起搬进内核缓冲。 */
-static u32 read_argv_(u64 uargv, char **argv, char *buf, u64 bufbytes)
+/* 从用户态读一个字符串向量（argv 或 envp）：指针数组 + 字符串一起搬进内核缓冲。
+ * `*off` 是缓冲里已用字节数，argv 和 envp 共用一个缓冲时接着往后放。 */
+static u32 read_vec_(u64 uvec, char **vec, char *buf, u64 bufbytes, u64 *off)
 {
     u64 i;
-    u64 off = 0ull;
 
-    if (uargv == 0ull) {
+    if (uvec == 0ull) {
         return 0u;
     }
     for (i = 0; i < (u64)LX_ARG_MAX; i++) {
         u64 up;
         i64 n;
 
-        if (port_as_user_range_ok(cur_()->as, uargv + i * 8ull, 8ull,
+        if (port_as_user_range_ok(cur_()->as, uvec + i * 8ull, 8ull,
                                   C6OS_PROT_R) == 0) {
             break;
         }
-        up = *(u64 *)(uargv + i * 8ull);
+        up = *(u64 *)(uvec + i * 8ull);
         if (up == 0ull) {
             break;
         }
-        if (off >= bufbytes) {
+        if (*off >= bufbytes) {
             break;
         }
-        n = lx_user_cstr(up, buf + off, bufbytes - off);
+        n = lx_user_cstr(up, buf + *off, bufbytes - *off);
         if ((i64)n < 0) {
             break;
         }
-        argv[i] = buf + off;
-        off += (u64)n + 1ull;
+        vec[i] = buf + *off;
+        *off += (u64)n + 1ull;
     }
     return (u32)i;
+}
+
+/* execve 的 fd 语义：只关 FD_CLOEXEC 的那些，其余（含管道、重定向）跨 exec 保留。
+ * 内核堆里的管道要连带减引用计数，所以这个扫描必须在 proc.c 里做——
+ * fdt 不认识管道，fs.c 也不该认识。 */
+static void cloexec_close_(LxProc *p)
+{
+    u32 i;
+
+    if (p == (LxProc *)0 || p->fd == (LxFdTab *)0) {
+        return;
+    }
+    for (i = 0u; i < p->fd->cap; i++) {
+        LxFile *e = &p->fd->ent[i];
+
+        if (e->node == LX_FD_NONE || (e->flags & LX_FD_CLOEXEC) == 0u) {
+            continue;
+        }
+        if (e->kind != LX_FD_FILE) {
+            pipe_drop_(e);
+        }
+        lx_fdtab_release(e);
+    }
+}
+
+/* shebang（`#!/bin/sh`）：Alpine 里大量脚本靠它，缺了等于所有 shell 脚本
+ * 都跑不起来。返回 0 = 是脚本且已把解释器填进 interp（可带一个可选参数），
+ * -1 = 不是脚本。只认第一行的 `#!`，和 Linux 的 prep_binprm 一致。 */
+static int shebang_(u64 img_pa, u64 img_size, char *interp, u64 icap,
+                    char *opt, u64 ocap)
+{
+    const u8 *img = (const u8 *)port_phys_map(img_pa);
+    u64 i = 2ull;
+    u64 n = 0ull;
+    u64 o = 0ull;
+
+    if (img_size < 4ull || img[0] != '#' || img[1] != '!') {
+        return -1;
+    }
+    while (i < img_size && (img[i] == ' ' || img[i] == '\t')) {
+        i++;
+    }
+    while (i < img_size && img[i] != ' ' && img[i] != '\t' && img[i] != '\n') {
+        if (n + 1ull >= icap) {
+            return -1;
+        }
+        interp[n] = (char)img[i];
+        n++;
+        i++;
+    }
+    if (n == 0ull) {
+        return -1;
+    }
+    interp[n] = '\0';
+    while (i < img_size && (img[i] == ' ' || img[i] == '\t')) {
+        i++;
+    }
+    while (i < img_size && img[i] != '\n') {
+        if (o + 1ull >= ocap) {
+            return -1;
+        }
+        opt[o] = (char)img[i];
+        o++;
+        i++;
+    }
+    while (o > 0ull && (opt[o - 1ull] == ' ' || opt[o - 1ull] == '\r')) {
+        o--;
+    }
+    opt[o] = '\0';
+    return 0;
 }
 
 u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
 {
     char path[128];
-    char *buf;
-    char **argv;
-    u64 as;
+    char interp[128];
+    char opt[128];
+    char *buf = (char *)0;
+    char **argv = (char **)0;
+    char **envp = (char **)0;
+    u64 as = 0ull;
     u64 entry = 0ull;
     u64 rsp = 0ull;
     u64 brk = 0ull;
+    u64 off = 0ull;
+    u64 ipa = 0ull;
+    u64 isz = 0ull;
     i64 n;
     i64 idx;
     u32 argc;
+    u32 envc;
+    u32 base_argc;
+    u32 i2;
+    u64 rc;
 
-    (void)uenvp;
     n = lx_user_cstr(upath, path, (u64)sizeof(path));
     if (n <= 0) {
         return (u64)0 - LX_EFAULT;
@@ -784,42 +944,77 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     if (idx < 0) {
         return (u64)0 - LX_ENOENT;
     }
-    /* argv 走内核堆：Linux 允许 128KB 的参数区，放内核栈上会直接压穿 8KB 栈。 */
+    /* argv/envp 都走内核堆：Linux 允许 128KB 的参数区，放内核栈上会直接压穿。 */
     buf = (char *)port_kmalloc(LX_ARG_BYTES);
     argv = (char **)port_kcalloc((u64)LX_ARG_MAX + 1ull, 8ull);
-    if (buf == (char *)0 || argv == (char **)0) {
-        if (buf != (char *)0) {
-            port_kfree((void *)buf);
-        }
-        if (argv != (char **)0) {
-            port_kfree((void *)argv);
-        }
-        return (u64)0 - LX_ENOMEM;
+    envp = (char **)port_kcalloc((u64)LX_ARG_MAX + 1ull, 8ull);
+    if (buf == (char *)0 || argv == (char **)0 || envp == (char **)0) {
+        rc = (u64)0 - LX_ENOMEM;
+        goto fail;
     }
-    argc = read_argv_(uargv, argv, buf, LX_ARG_BYTES);
+    argc = read_vec_(uargv, argv, buf, LX_ARG_BYTES, &off);
+    envc = read_vec_(uenvp, envp, buf, LX_ARG_BYTES, &off);
     if (argc == 0u) {
         argv[0] = path;
         argc = 1u;
     }
     argv[argc] = (char *)0;
+    envp[envc] = (char *)0;
+    if (uenvp == 0ull) {
+        envp[0] = (char *)0;
+        envc = 0u;
+    }
+
+    ipa = lx_fs_node_data_pa((u32)idx);
+    isz = lx_fs_node_size((u32)idx);
+    /* #! 脚本：argv 变成 [interp, opt, path, argv[1..]]（Linux 的写法），
+     * 映像换成解释器自己的。 */
+    if (shebang_(ipa, isz, interp, (u64)sizeof(interp),
+                 opt, (u64)sizeof(opt)) == 0) {
+        i64 iidx = lx_fs_lookup(interp);
+
+        if (iidx < 0) {
+            rc = (u64)0 - LX_ENOENT;
+            goto fail;
+        }
+        if ((u64)argc + 3ull > (u64)LX_ARG_MAX) {
+            rc = (u64)0 - LX_E2BIG;
+            goto fail;
+        }
+        base_argc = argc;
+        for (i2 = base_argc; i2 > 1u; i2--) {   /* 原 argv[1..] 往后挪 */
+            argv[i2 + 2u] = argv[i2 - 1u];
+        }
+        argv[0] = interp;
+        argv[1] = (opt[0] != '\0') ? opt : path;
+        argv[2] = path;
+        argc = base_argc + ((opt[0] != '\0') ? 2u : 1u);
+        argv[argc] = (char *)0;
+        ipa = lx_fs_node_data_pa((u32)iidx);
+        isz = lx_fs_node_size((u32)iidx);
+    }
+
     as = port_as_create();
     if (as == 0ull) {
-        port_kfree((void *)buf);
-        port_kfree((void *)argv);
-        return (u64)0 - LX_ENOMEM;
+        rc = (u64)0 - LX_ENOMEM;
+        goto fail;
     }
-    if (lx_exec_build(as, lx_fs_node_data_pa((u32)idx),
-                      lx_fs_node_size((u32)idx), path,
-                      (const char *const *)argv, argc, &entry, &rsp,
-                      &brk) != 0) {
+    if (lx_exec_build(as, ipa, isz, path,
+                      (const char *const *)argv, argc,
+                      (const char *const *)envp, envc,
+                      &entry, &rsp, &brk) != 0) {
         port_as_destroy(as);
-        port_kfree((void *)buf);
-        port_kfree((void *)argv);
-        return (u64)0 - LX_ENOEXEC;
+        as = 0ull;
+        rc = (u64)0 - LX_ENOEXEC;
+        goto fail;
     }
     port_kfree((void *)buf);              /* 新栈上已经拷好了副本 */
     port_kfree((void *)argv);
-    /* 换掉整个地址空间；fd 表按 Linux 语义保留（CLOEXEC 还没实现）。 */
+    port_kfree((void *)envp);
+    buf = (char *)0;
+    argv = (char **)0;
+    envp = (char **)0;
+    cloexec_close_(cur_());               /* Linux：跨 exec 只保留非 CLOEXEC 的 fd */
     {
         u64 old_as = cur_()->as;
 
@@ -851,6 +1046,21 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     r->rax = 0ull;
     ((LxFrame *)r)->user_rsp = rsp;
     return 0ull;
+
+fail:
+    if (as != 0ull) {
+        port_as_destroy(as);
+    }
+    if (buf != (char *)0) {
+        port_kfree((void *)buf);
+    }
+    if (argv != (char **)0) {
+        port_kfree((void *)argv);
+    }
+    if (envp != (char **)0) {
+        port_kfree((void *)envp);
+    }
+    return rc;
 }
 
 /* ---- fd 与管道 ----------------------------------------------------------- */
@@ -1005,9 +1215,11 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     u64 wfd;
     u32 pair[2];
 
-    (void)flags;
     if (p == (LxProc *)0) {
         return n_((u64)LX_EINVAL);
+    }
+    if ((flags & ~(u64)(LX_O_CLOEXEC | LX_O_NONBLOCK)) != 0ull) {
+        return n_((u64)LX_EINVAL);          /* pipe2 只接受这两位 */
     }
     if (port_as_user_range_ok(p->as, ufds, 8ull, C6OS_PROT_W) == 0) {
         return n_((u64)LX_EFAULT);
@@ -1018,10 +1230,8 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     }
     /* 先占位再要第二个：alloc 靠"node != LX_FD_NONE"判断空闲，不占位的话
      * 第二次扫描会从 3 号重新开始，把同一个槽发两遍（管道两端变成同一个 fd）。 */
+    lx_fdtab_release(&p->fd->ent[rfd]);
     p->fd->ent[rfd].node = LX_FD_ROOT;
-    p->fd->ent[rfd].pos = 0ull;
-    p->fd->ent[rfd].is_dir = 0u;
-    p->fd->ent[rfd].kind = LX_FD_FILE;
     wfd = lx_fdtab_alloc(p->fd);
     if (wfd == LX_FD_NONE) {                   /* 装不下第二个：把第一个还回去 */
         p->fd->ent[rfd].node = LX_FD_NONE;
@@ -1045,6 +1255,14 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     wf->pos = 0ull;
     wf->is_dir = 0u;
     wf->kind = LX_FD_PIPE_W;
+    if ((flags & (u64)LX_O_CLOEXEC) != 0ull) {
+        rf->flags = (u32)LX_FD_CLOEXEC;
+        wf->flags = (u32)LX_FD_CLOEXEC;
+    }
+    if ((flags & (u64)LX_O_NONBLOCK) != 0ull) {
+        rf->oflags = (u32)LX_O_NONBLOCK;
+        wf->oflags = (u32)LX_O_NONBLOCK;
+    }
     pair[0] = (u32)rfd;
     pair[1] = (u32)wfd;
     *(u32 *)ufds = pair[0];
@@ -1112,6 +1330,163 @@ u64 lx_proc_dup2(u64 oldfd, u64 newfd)
     *nf = *of;
     pipe_ref_(nf);
     return newfd;
+}
+
+/* dup3：dup2 + 只接受 O_CLOEXEC；oldfd == newfd 要报 EINVAL（dup2 则直接成功）。 */
+u64 lx_proc_dup3(u64 oldfd, u64 newfd, u64 flags)
+{
+    LxProc *p = cur_();
+    u64 r;
+
+    if ((flags & ~(u64)LX_O_CLOEXEC) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (oldfd == newfd) {
+        return n_((u64)LX_EINVAL);
+    }
+    r = lx_proc_dup2(oldfd, newfd);
+    if ((i64)r < 0) {
+        return r;
+    }
+    if ((flags & (u64)LX_O_CLOEXEC) != 0ull) {
+        p = cur_();
+        if (p != (LxProc *)0 && lx_fdtab_get(p->fd, newfd) != (LxFile *)0) {
+            p->fd->ent[newfd].flags |= (u32)LX_FD_CLOEXEC;
+        }
+    }
+    return r;
+}
+
+/* fcntl：以前一律返回 0（假成功），后果是 O_NONBLOCK / FD_CLOEXEC 全部被丢掉，
+ * socketpair 与管道上的非阻塞语义静默失效。这里按 Linux 的 5 条常用命令做真语义。 */
+u64 lx_proc_fcntl(u64 fd, u64 cmd, u64 arg)
+{
+    LxProc *p = cur_();
+    LxFile *fe;
+
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    switch (cmd) {
+    case 0ull:                                  /* F_DUPFD：最小的 >= arg 的空槽 */
+    {
+        u64 cand;
+
+        if (lx_fdtab_grow(p->fd, arg + 1ull) != 0) {
+            return n_((u64)LX_EMFILE);
+        }
+        for (cand = arg; cand < (u64)p->fd->cap; cand++) {
+            if (p->fd->ent[cand].node == LX_FD_NONE) {
+                return lx_proc_dup2(fd, cand);
+            }
+        }
+        return n_((u64)LX_EMFILE);
+    }
+    case 1ull:                                  /* F_GETFD */
+        fe = lx_fdtab_get(p->fd, fd);
+        if (fe == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        return (u64)(u32)fe->flags;
+    case 2ull:                                  /* F_SETFD */
+        fe = lx_fdtab_get(p->fd, fd);
+        if (fe == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        fe->flags = (u32)(arg & (u64)LX_FD_CLOEXEC);
+        return 0ull;
+    case 3ull:                                  /* F_GETFL */
+        fe = lx_fdtab_get(p->fd, fd);
+        if (fe == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        return (u64)(u32)fe->oflags;
+    case 4ull:                                  /* F_SETFL：只有这三位可改 */
+        fe = lx_fdtab_get(p->fd, fd);
+        if (fe == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        fe->oflags = (u32)((fe->oflags & (u32)LX_O_ACCMODE) |
+                          (u32)(arg & (u64)(LX_O_APPEND | LX_O_NONBLOCK)));
+        return 0ull;
+    case 1030ull:                               /* F_DUPFD_CLOEXEC */
+    {
+        u64 r = lx_proc_fcntl(fd, 0ull, arg);
+
+        if ((i64)r >= 0 && lx_fdtab_get(p->fd, r) != (LxFile *)0) {
+            p->fd->ent[r].flags |= (u32)LX_FD_CLOEXEC;
+        }
+        return r;
+    }
+    default:
+        return n_((u64)LX_EINVAL);
+    }
+}
+
+/* readv / writev：iov 是 {base,len} 的数组。逐项走同一套分发，所以管道、
+ * 控制台、VFS 文件的行为与 read/write 完全一致。 */
+u64 lx_proc_readv(u64 fd, u64 uiov, u64 cnt)
+{
+    LxProc *p = cur_();
+    u64 i;
+    u64 total = 0ull;
+
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    if (cnt > 1024ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (cnt != 0ull && port_as_user_range_ok(p->as, uiov, cnt * 16ull,
+                                             C6OS_PROT_R) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    for (i = 0ull; i < cnt; i++) {
+        u64 base = *(const u64 *)(uiov + i * 16ull);
+        u64 len = *(const u64 *)(uiov + i * 16ull + 8ull);
+        u64 r = lx_proc_read(fd, base, len);
+
+        if ((i64)r < 0) {
+            return (total != 0ull) ? total : r;
+        }
+        total += r;
+        if (r < len) {
+            break;                  /* 短读：够一次返回了 */
+        }
+    }
+    return total;
+}
+
+u64 lx_proc_writev(u64 fd, u64 uiov, u64 cnt)
+{
+    LxProc *p = cur_();
+    u64 i;
+    u64 total = 0ull;
+
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    if (cnt > 1024ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (cnt != 0ull && port_as_user_range_ok(p->as, uiov, cnt * 16ull,
+                                             C6OS_PROT_R) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    for (i = 0ull; i < cnt; i++) {
+        u64 base = *(const u64 *)(uiov + i * 16ull);
+        u64 len = *(const u64 *)(uiov + i * 16ull + 8ull);
+        u64 r = lx_proc_write(fd, base, len);
+
+        if ((i64)r < 0) {
+            return (total != 0ull) ? total : r;
+        }
+        total += r;
+        if (r < len) {
+            break;
+        }
+    }
+    return total;
 }
 
 /* ---- 读写：控制台 / 文件 / 管道 ------------------------------------------ */

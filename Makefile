@@ -959,8 +959,16 @@ toolchain-info:
 
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
+# -MMD -MP：让每个 .o 旁边落一份 .d，记录它包含了哪些头文件。
+# 没有这个的话，改一个结构体（比如 LxProc 加字段）只会重编直接依赖它的 .c，
+# 用过旧布局的 .o 会继续留在 obj 里，最后表现成"代码看着对、跑起来随机崩"。
+# 这类幽灵 bug 排查成本极高，两行 make 就能杜绝。
+# 注意不能在这里写 -MF：-MMD 的默认 .d 名字是按**目标文件**取的
+# （obj/proc.o → obj/proc.d），换成 $(@:.o=.d) 在这里展开时 $@ 还是空的。
+X86CDEPFLAGS := -MMD -MP
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
-              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS)
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS) \
+              $(X86CDEPFLAGS)
 # c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
 # 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
 # （≈127.5KB），M9 的 VFS 一加就爆。这里统一开 -O1。
@@ -1898,9 +1906,13 @@ check-linuxabi-l3: x86-fs
 	  && echo "PASS: linux-abi L3（initramfs + 文件语义）" \
 	  || { echo "FAIL: linux-abi L3"; exit 1; }
 
+# 固定参数（X86S_NAME/X86S_MAIN/LINUX_ABI）走 env：命令行传的变量会进
+# MAKEOVERRIDES 再经 MAKEFLAGS 传给子 make，等于"强制覆盖"——子 make 里这些
+# 变量就成了不可被 Makefile 修改的 override，任何依赖它们的条件分支都会错乱。
+# 走 env 则子 make 是普通默认值，Makefile 里的 := / += 全都照常生效。
 x86-elf: caps-check-x86
-	$(MAKE) X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
-		$(X86)/elf-disk.img
+	X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/elf-disk.img
 
 run-x86-elf: x86-elf
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
@@ -2376,3 +2388,7 @@ wifi:
 		s3
 wififlash: wifi
 	./tools/flashmon.sh build/wifi/c6os.bin 15
+
+# ---- 头文件依赖（见 X86CDEPFLAGS） ------------------------------------------
+# 放在最后：此时所有 obj 目录规则都已定义，-include 只是把 .d 读进来当普通规则。
+-include $(wildcard $(X86)/*/obj/*.d)

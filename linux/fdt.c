@@ -35,7 +35,21 @@ static void ent_reset_(LxFile *e, u32 n)
         e[i].pos = 0ull;
         e[i].is_dir = 0u;
         e[i].kind = LX_FD_FILE;
+        e[i].flags = 0u;
+        e[i].oflags = 0u;
     }
+}
+
+/* 关掉一个槽：清全部字段，避免"上一个 fd 的 O_NONBLOCK / CLOEXEC 传染给
+ * 下一个拿到这个槽的 open"。 */
+void lx_fdtab_release(LxFile *e)
+{
+    e->node = LX_FD_NONE;
+    e->pos = 0ull;
+    e->is_dir = 0u;
+    e->kind = LX_FD_FILE;
+    e->flags = 0u;
+    e->oflags = 0u;
 }
 
 static LxFdTab *tab_new_(u32 cap)
@@ -111,7 +125,7 @@ void lx_fdtab_unref(LxFdTab *t)
             g_free_hook != (void (*)(LxFile *))0) {
             g_free_hook(&t->ent[i]);
         }
-        t->ent[i].node = LX_FD_NONE;
+        lx_fdtab_release(&t->ent[i]);
     }
     port_kfree(t->ent);
     port_kfree(t);

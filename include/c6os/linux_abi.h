@@ -12,6 +12,12 @@
  * 描述 ILP32/LP64 混合的 ABI 表，正是 architecture.md §3 警告的那类风险。
  * 规则：linux/ 下的文件只有在 C6OS_LINUX_ABI=1 时才进入编译单元列表。 */
 
+/* execve 的参数区上限（Linux 的 ARG_MAX 语义：指针个数与总字节两个维度）。
+ * 这两个值同时被 linux/proc.c（读用户 argv/envp）和 linux/elf64.c（压栈）用，
+ * 放在这里避免两处各写一份而漂移。 */
+#define LX_ARG_MAX    4096u
+#define LX_ARG_BYTES  131072ull       /* 单个参数字符串上限 128KB（同 Linux） */
+
 /* mmap 的标志（只列用到的） */
 #define LX_AT_EMPTY_PATH  0x1000ull
 #define LX_AT_SYMLINK_NOFOLLOW 0x100ull
@@ -65,6 +71,7 @@
 #define LX_POLLNVAL 0x0020
 #define LX_SYS_pread64        17
 #define LX_SYS_readv          19
+#define LX_SYS_dup3          292
 #define LX_SYS_writev         20
 #define LX_SYS_access         21
 #define LX_SYS_exit           60
@@ -203,6 +210,7 @@
 #define LX_EBUSY   16
 #define LX_EMFILE  24
 #define LX_ESRCH   3
+#define LX_E2BIG   7
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {
@@ -242,6 +250,7 @@ int lx_exec_preparev(u64 as, u64 img_pa, u64 img_size, const char *path,
 void lx_exec_arg1(const char *a);
 int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
                   const char *const *argv, u32 argc,
+                  const char *const *envp, u32 envc,
                   u64 *o_entry, u64 *o_rsp, u64 *o_brk);
 u64 lx_exec_entry(void);
 u64 lx_exec_rsp(void);

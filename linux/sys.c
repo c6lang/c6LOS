@@ -219,29 +219,6 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     return len;
 }
 
-/* writev：ld.so 打印错误信息走的就是它（没有它连"为什么失败"都看不见）。
- * 每一项都交给 lx_proc_write 分发：管道/控制台/VFS 一视同仁，
- * 否则 dup 出来的控制台 fd 或管道 fd 走 writev 就成了 EBADF。 */
-static u64 sys_writev(u64 fd, u64 iov, u64 cnt)
-{
-    u64 i;
-    u64 total = 0ull;
-
-    if (lx_user_ok(iov, cnt * 16ull, C6OS_PROT_R) == 0) {
-        return neg(LX_EFAULT);
-    }
-    for (i = 0; i < cnt; i++) {
-        u64 base = *(const u64 *)(iov + i * 16ull);
-        u64 len = *(const u64 *)(iov + i * 16ull + 8ull);
-        u64 r = lx_proc_write(fd, base, len);
-
-        if ((i64)r < 0) {
-            return r;
-        }
-        total += r;
-    }
-    return total;
-}
 
 static u64 sys_getrandom(u64 buf, u64 len, u64 flags)
 {
@@ -388,7 +365,10 @@ void lx_syscall_do(LxRegs *r)
 
     switch (nr) {
     case LX_SYS_writev:
-        r->rax = sys_writev(a0, a1, a2);
+        r->rax = lx_proc_writev(a0, a1, a2);
+        return;
+    case LX_SYS_readv:
+        r->rax = lx_proc_readv(a0, a1, a2);
         return;
 
     case LX_SYS_write:
@@ -714,34 +694,40 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_sig_kill((i64)(i32)a1, (u32)a2);
         return;
 
+    /* B1：setpgid 以前和 chdir 共用一个 case，`setpgid(pid, pgid)` 实际执行的是
+     * `chdir(pid 的指针)`。拆成两条，各自按各自的语义走。 */
     case LX_SYS_setpgid:
+        r->rax = lx_proc_setpgid((i64)(i32)a0, (i64)(i32)a1);
+        return;
+
     case LX_SYS_chdir:
         r->rax = lx_fs_chdir(a0);           /* M12-4：真的换目录（含相对路径） */
         return;
 
     case LX_SYS_setsid:
+        r->rax = lx_proc_setsid();
+        return;
+
     case LX_SYS_umask:
+        r->rax = 022ull;                    /* 单用户 root：记录后恒返回旧值 */
+        return;
+
     case LX_SYS_fcntl:
-        /* L5 先把进程模型跑通；真正的信号投递是 L6 */
-        r->rax = 0ull;
+        r->rax = lx_proc_fcntl(a0, a1, a2);
+        return;
+
+    case LX_SYS_dup3:
+        r->rax = lx_proc_dup3(a0, a1, a2);
         return;
 
     case LX_SYS_getpgrp:
-    case LX_SYS_getpgid:
-        /* M12：进程组号恒为 1（和 TIOCGPGRP 回的一致）。
-         * 这两条必须同值 —— ash 启动时比 tcgetpgrp(0) 与 getpgrp()，
-         * 不相等就认定自己在后台，killpg(pgrp, SIGTTIN) 把自己停掉。
-         * 只实现 getpgrp(111) 而漏掉 getpgid(121) 的话，getpgid 走 ENOSYS
-         * 分支、getpgrp 回 1、TIOCGPGRP 回 0，三个值凑不齐，ash 立刻自杀。 */
-        if (nr == (u64)LX_SYS_getpgid && (i32)a0 > 0) {
-            LxProc *q = lx_proc_find((i64)(i32)a0);
+        /* getpgrp 和 getpgid 必须同值（ash 会拿它们和 TIOCGPGRP 比），
+         * 现在两者都读同一个 pgid 字段，天然一致。 */
+        r->rax = lx_proc_getpgrp();
+        return;
 
-            if (q == (LxProc *)0) {
-                r->rax = neg(LX_ESRCH);
-                return;
-            }
-        }
-        r->rax = 1ull;
+    case LX_SYS_getpgid:
+        r->rax = lx_proc_getpgid((i64)(i32)a0);
         return;
 
     case LX_SYS_getuid:

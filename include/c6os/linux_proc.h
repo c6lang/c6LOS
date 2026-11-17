@@ -43,11 +43,28 @@ typedef struct LxFrame {
     u64    user_rsp;
 } LxFrame;
 
+/* fd 标志（fcntl F_GETFD/F_SETFD） */
+#define LX_FD_CLOEXEC   0x01u
+
+/* open 状态标志里被内核真正用到的位（fcntl F_GETFL/F_SETFL） */
+#define LX_O_ACCMODE    0x03u
+#define LX_O_RDONLY     0x00u
+#define LX_O_WRONLY     0x01u
+#define LX_O_RDWR       0x02u
+#define LX_O_CREAT      0x040u
+#define LX_O_TRUNC      0x200u
+#define LX_O_APPEND     0x400u
+#define LX_O_NONBLOCK   0x800u
+#define LX_O_DIRECTORY  0x10000u
+#define LX_O_CLOEXEC    0x80000u
+
 typedef struct LxFile {
     u64 node;                 /* 文件节点号 / 管道号 / 特殊 fd 标记 */
     u64 pos;                  /* 文件读写位置 */
     u32 is_dir;
     u32 kind;                 /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
+    u32 flags;                /* FD_CLOEXEC 等 fd 标志 */
+    u32 oflags;               /* O_APPEND / O_NONBLOCK / 访问模式 */
 } LxFile;
 
 /* 动态 fd 表（linux/fdt.c，M13-3a）。
@@ -70,6 +87,7 @@ void     lx_fdtab_unref(LxFdTab *t);
 int      lx_fdtab_grow(LxFdTab *t, u64 need);
 u64      lx_fdtab_alloc(LxFdTab *t);          /* 无空闲槽返回 LX_FD_NONE */
 LxFile  *lx_fdtab_get(LxFdTab *t, u64 fd);    /* 越界/空槽返回 0 */
+void     lx_fdtab_release(LxFile *e);         /* 清空一个槽（fd 关闭时用） */
 /* 表销毁前通知每个非空槽（管道要减 readers/writers）。fdt 不认识管道，走钩子。 */
 void     lx_fdtab_set_free_hook(void (*fn)(LxFile *f));
 
@@ -115,6 +133,8 @@ typedef struct LxProc {
     LxSigAction sa[LX_NSIG];
     char cwd[96];                 /* 当前目录（不带前导 '/'，空串=根）：必须跟进程走 */
     LxFdTab *fd;                  /* 动态 fd 表：线程组共享，fork 时复制 */
+    u32 pgid;                     /* 进程组（B1：以前 setpgid 跟 chdir 共用一个 case） */
+    u32 sid;                      /* 会话 */
 } LxProc;
 
 /* 进程表与调度（linux/proc.c） */
@@ -131,6 +151,14 @@ u64      lx_proc_pipe2(u64 ufds, u64 flags);
 u64      lx_proc_close(u64 fd);
 u64      lx_proc_dup(u64 oldfd);
 u64      lx_proc_dup2(u64 oldfd, u64 newfd);
+u64      lx_proc_dup3(u64 oldfd, u64 newfd, u64 flags);
+u64      lx_proc_fcntl(u64 fd, u64 cmd, u64 arg);
+u64      lx_proc_readv(u64 fd, u64 uiov, u64 cnt);
+u64      lx_proc_writev(u64 fd, u64 uiov, u64 cnt);
+u64      lx_proc_setpgid(i64 pid, i64 pgid);
+u64      lx_proc_getpgid(i64 pid);
+u64      lx_proc_setsid(void);
+u64      lx_proc_getpgrp(void);
 u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
