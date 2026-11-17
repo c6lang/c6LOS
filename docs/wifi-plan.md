@@ -16037,3 +16037,102 @@ ctx 指针闸门   : 命中 0xBAD7 —— 但这是**误报**：判据写的是"
 - 稳妥起见，构建命令前面加一句
   `[ -x /home/winger/c6/tcc/c6 ] || (cd /home/winger/c6/tcc && make c6)`
   就能免疫这个外部清理。
+
+## §462 ★★★ 任务表找到了：死锁是纯逻辑层（两个任务都在 block_wait）
+
+### 任务表的真实位置（此前一直找错）
+
+`kernel/task.c6:12` 是 `static OsTask g_tasks[C6OS_MAX_TASKS]`，全零初始化，
+**但 `.c6` 编译器把它放进 `.data` 而不是 `.bss`**
+（`objdump -h build/wifi/obj/task.o` → `text 9514 / data 1927 / bss 0`）。
+
+tcc 的 `c99` 后端把整个文件的静态数据打包成一个匿名字节数组：
+
+```c
+static __c99_unused unsigned char __c99_d2[1876] = {0,...};   /* c99/task.c:70 */
+```
+
+`g_tasks` 就在 `__c99_d2 + 0`，紧跟其后 `+1792`（=16×112）是 `g_next_id`。
+用 `nm -a -S build/wifi/c6os.elf | grep c99_d2` 挑**大小为 0x754(1876)** 的那个：
+
+```
+3fcb971d 00000754 d __c99_d2      ← 就是这个 = &g_tasks
+```
+
+**踩过的两个坑**（以后别再踩）：
+1. `.data` 段 VMA 是 **`0x3fca0000`**（不是 `0x3fcbb700`，那是 `.bss`）。
+2. `0x3fcb971d` **未 4 字节对齐**（mod 4 = 1）⇒ 按 4 字节步进扫描
+   `0xC6A50001` **永远扫不到**（magic 落在 0x...39，也是 mod 4 = 1）。
+   必须按字节或先定位 `__c99_d2` 再按偏移读。
+
+### tcc 的 OsTask 布局（与 `include/c6os/task.h` 的 gcc 布局不同）
+
+tcc 认定 `sizeof(OsTask) = 112`（gcc 是 96）。实测偏移：
+
+| 偏移 | 字段 |
+|---|---|
+| +0 | `ctx` |
+| +8 | `arg`（库任务 = 入口函数地址 `0x40381c2c`） |
+| +24 | `id` |
+| +28 | `magic` = `0xC6A50001` |
+| +32 | `stack_size` |
+| +36 | `slice` |
+| +44 | `prio/base/state/core` 打包（低字节起） |
+| +48 | `wait_kind` |
+| +56 | `wait_obj` |
+
+`task.h:23` 的注释 "magic 仅 c6 侧访问；C 侧走 os_task_info" 说的就是这件事：
+**C 侧不能直接读 `OsTask`**，两边布局本来就不同。
+
+### 死锁现场（真板实测）
+
+两个真实任务（`g_tasks[0]` id=1 wifimain、`g_tasks[1]` id=2 库的 ppTask）：
+
+| 任务 | ctx | state | wait_kind | wait_obj | 帧 sp | 帧里 EPC |
+|---|---|---|---|---|---|---|
+| id=1 wifimain | `0x3fcc6ed0` | 4 BLOCKED | 1（对象等待） | `0x3fcc8c70` | `0x3fcbe940` | **`0x42018088`** |
+| id=2 ppTask | `0x3fcc6f1c` | 2 RUNNING | 6（Q_WAIT_GET） | `0` | `0x3fcc0300` | **`0x42018088`** |
+
+- **两个任务的 EPC 都是 `0x42018088`** = `os_task_block_wait` 里
+  `callx0 port_task_yield` 的返回点 ⇒ 双双阻塞在 `block_wait`，
+  这是**纯逻辑层死锁**，与寄存器/窗口/栈（§457/§460 已修好）无关。
+- 两者窗口寄存器都满足不变式：WS=`0x4000`/WB=14、WS=`0x400`/WB=10，
+  `(WS>>WB)&1 == 1` ✔
+
+### 两个等待对象的状态（关键矛盾）
+
+**`wait_obj = 0x3fcc8c70` 是我们的 `OsSem`**（`kernel/sem.c6:4` `SEM_MAGIC 0xC6E50001`，
+名字 ASCII `"SEM1"`）：
+
+```
++0 = 0  +4 count = 1  +8 magic = c6e50001  +16 "SEM1"  +20 max = 2
+```
+⇒ **信号量 count=1（可用！）却有任务在等它** ⇒ 要么 count=1 是初始值
+（`os_sem_init(s,1,2)`，那么 `os_sem_pend` 的 `if (count>0)` 应当立刻成功），
+要么 post 时 `os_task_wake_first` 没找到等待者（`sem.c6:68`）。
+
+**`xphyQueue`（ROM 全局 `0x3fcef904`）指向我们的 `WQ @ 0x3fcc85b0`**：
+
+```
+self=0x3fcc85b0  buf=0x3fcc85f0  item_size=0(cap=8)  head=200  tail=0
+count=1  q.magic=51e5c6a5  waiters_get=0  waiters_put=0  WQ.magic=51554531("QUE1")
+```
+⇒ **有 1 条消息待取、但 `waiters_get=0`（没有任何人在这个队列上登记等待）**，
+同时 `item_size=0` 且 `head=200` 越界（cap=8）—— 这个队列结构本身是坏的。
+（`osi_queue_recv_body` 在 `q==0 || magic 不符` 时是 `return 0`，不会阻塞，
+所以 ppTask 的 `wait_obj=0` 不可能来自队列接收的 NULL 检查。）
+
+### 附：诊断区地址冲突（下次先修这个）
+
+`kernel/task.c6` 的 `os_task_block_prepare` 把诊断写到 **`0x50001A00`**
+（按 `id&3` 分槽：`[0]=obj [1]=kind [2]=epc [3]=timeout`），
+而 `port/s3/ctx.S` §452 的 yield 轨迹**也用 `0x50001A00`**（8 项×8 字节 + 索引 `0x50001A40`）。
+两者完全重叠，实测读出来是混合垃圾（槽 2 里同时出现 ctx 指针和 sem 指针）。
+**修掉这个冲突（把 block 诊断挪到 `0x50001C00` 之类）之后，才能可靠地看到
+"每个任务最后一次阻塞在什么对象上"。**
+
+### 已排除
+
+- `glue_ret0`（36 个未实现 OSI 的统一桩，`0x4037b800`）在真板上
+  **24 次采样 0 命中** ⇒ 未实现的 OSI **确实不在关键路径上**
+  （`wifi_glue.c:1451` 的静态统计结论是对的，`_timer_*` 不是死锁原因）。
