@@ -512,3 +512,70 @@ PASS: docker M11-3（镜像里的程序跑起来，写 /data/out.txt 并读回�
    initramfs），M11-3 的数据盘是**整块一个 FAT 卷**（LBA 0）。挂载参数别抄错。
 10. **程序不能用 `return` 从 `_start` 返回**（没有返回地址，直接 sig=11），
     必须 `exit_group`。
+
+### M12（真实 Alpine minirootfs）已完成
+
+M11-3 跑的是自造的 9 KB 程序。M12 换真的：Alpine 3.20 官方 minirootfs，
+`/bin/busybox` 是**动态 PIE**（808712 B，`INTERP=/lib/ld-musl-x86_64.so.1`），
+解释器 649832 B，cpio 514 个成员、334 个符号链接。
+
+**做了什么**：
+
+- `Makefile`：`x86-alpine` / `run-x86-alpine` / `check-alpine`。minirootfs（3.5 MB）
+  只在缓存里没有时从 `dl-cdn.alpinelinux.org` 下到 `build/x86/alpine/`；解开 →
+  newc cpio → `mkiso.py` 打 ISO；`mkfat.py` 造 8 MB FAT16 当 `/data`。
+- `tests/t_iso_alpine.c6`：minirootfs 挂 `/`、FAT16 挂 `/data`，`lx_tty_init()` 把
+  0/1/2 变成串口终端，再 `lx_exec_preparev(..., kAv, 3)` 跑 `/bin/sh -c '<脚本>'`。
+  脚本四件事：写终端、`uname -a`、`ls /`、写 `/data` 再读回。
+- `linux/tty.c`（新）：串口行规程。串口是轮询的，所以走"每次系统调用入口
+  `lx_tty_pump()` 泵一次 + `read` 阻塞轮询"；输出侧要应答 `ESC[6n`（busybox ash
+  靠它测光标位置），不回的话 ash 不吐提示符。
+- `linux/sys.c`：把 ash 真跑起来缺的系统调用补齐 —— `stat(4)`/`lstat(6)`、
+  `nanosleep(35)`、`clock_gettime(228)`、`getpgid(121)`、`ioctl(TIOCGPGRP/TIOCGWINSZ)`。
+- `linux/fs.c`：`FS_MAX_FILES` 64 → 1024、`FS_NAME` 64 → 96、加 `FS_LINK_MAX`；
+  路径归一化（`norm_()` 塌掉 `.`/`..`/重复斜杠）+ 符号链接解析 —— 发行版 rootfs 的
+  链接目标里有 `..`，不归一化就拼出查不到的路径。
+- `tools/mk-initramfs.py`：悬空符号链接不再 `FileNotFoundError`（按 `S_IFLNK` 写）。
+- `port/x86_64/cd0.S`：3.84 MB 的 cpio 放不到 1 MB 以下，走 unreal mode 的
+  `load_payload_hi`，一次一块 2048 字节。
+
+**验收**：
+
+```
+$ make check-alpine
+PASS: alpine M12（Alpine minirootfs 从 ISO 起起来：sh -c 脚本跑完 + 写 /data）
+PASS: alpine M12 宿主侧（数据盘里有 m12.txt）
+```
+
+串口上依次是：
+
+```
+alpine-M12-alive
+Linux c6los 6.1.0-c6los #1 x86_64 Linux
+bin  etc  lib  ...  usr
+m12ok
+alpine-M12-done
+```
+
+**坑：c6 的静态指针初始化器是空的（这次出在编译器上）**
+
+M12 一开始卡在"脚本一个字都不输出"。查下来是 busybox 拿到的 `argv[1]` 不是 `-c`：
+c6 的 LLVM IR 后端把数据段发射成一串字节，**指针槽留 0**，再靠挂在
+`llvm.global_ctors` 上的 `@__llvm_init` 在启动时补。带 C 运行时的程序看不出问题；
+c6LOS 的内核不跑构造函数（没有 crt），所以
+
+```c
+static const char *const av[] = { "/bin/sh", "-c", script };
+```
+
+这三个槽永远指向地址 0，取出来是野指针。必然踩到它的正是"函数内 static 的
+argv 表"这种写法。
+
+修在编译器侧（c6 `07d73b8`）：带重定位的数据段发射成 LLVM 的 **packed struct**，
+指针槽是 `ptrtoint` 的真静态初始化，目标文件里就是普通重定位，加载即有效。
+wasm 例外 —— wasm 没有函数符号的绝对地址，后端直接拒绝静态初始化器里的
+`ptrtoint`（`Unsupported expression in static initializer`），那边保持构造函数
+路径。回归用例在 c6 仓库：`tests/llvm/static_data.c6` + `regression.sh
+llvm-static-data`，不带任何 C 运行时链接一个裸 `_start`，验文件作用域与函数内
+static 两种指针表。M12 这边就改回原生的 `static const char *const kAv[] = {...}`，
+`lx_exec_prepare_sh` 那个包装函数随之删掉 —— 它当初存在只是为了绕开这个 bug。

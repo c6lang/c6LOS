@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1029,7 +1029,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o
 endif
 
 ifeq ($(C6OS_NET),1)
@@ -1203,6 +1203,10 @@ $(X86S_DIR)/obj/fs.o: linux/fs.c
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
 $(X86S_DIR)/obj/proc.o: linux/proc.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/tty.o: linux/tty.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
@@ -1568,6 +1572,72 @@ check-docker-iso: x86-docker-iso
 	@7z l $(DOCKER_DATA) 2>/dev/null | grep -qi "OUT.TXT" \
 	  && echo "PASS: docker M11-3 宿主侧（数据盘里有镜像程序写的 OUT.TXT）" \
 	  || { echo "FAIL: docker M11-3 宿主侧"; 7z l $(DOCKER_DATA) | tail -12; exit 1; }
+
+# ---- M12：真实 Alpine minirootfs（musl 动态链接）从 ISO 起起来，串口当终端 ----
+ALPINE_DIR  := $(X86)/alpine
+ALPINE_VER  ?= 3.20.0
+ALPINE_BASE ?= https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/x86_64
+ALPINE_TGZ  := $(ALPINE_DIR)/alpine-minirootfs-$(ALPINE_VER)-x86_64.tar.gz
+ALPINE_ROOT := $(ALPINE_DIR)/root
+ALPINE_CPIO := $(ALPINE_DIR)/full.cpio
+ALPINE_DATA := $(ALPINE_DIR)/data.img
+ALPINE_ISO  := $(ALPINE_DIR)/alpine.iso
+
+# 3.5MB 的 tarball：只在缓存里没有时下。也可以手工把 tarball 放进
+# $(ALPINE_DIR)，免得每次 CI 都去连 CDN。
+$(ALPINE_TGZ):
+	@mkdir -p $(ALPINE_DIR)
+	curl -fL --retry 2 --connect-timeout 20 -o $@.part \
+		$(ALPINE_BASE)/$(notdir $@)
+	@mv $@.part $@
+
+$(ALPINE_ROOT)/bin/busybox: $(ALPINE_TGZ)
+	@rm -rf $(ALPINE_ROOT)
+	@mkdir -p $(ALPINE_ROOT)
+	tar -xzf $(ALPINE_TGZ) -C $(ALPINE_ROOT)
+
+# 514 个成员、334 个符号链接（/bin/sh → busybox、/lib/ld-musl-x86_64.so.1）
+$(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox tools/mk-initramfs.py
+	@mkdir -p $(ALPINE_DIR)
+	python3 tools/mk-initramfs.py $@ $(ALPINE_ROOT)
+
+# 8MB FAT16，给客户机当 /data 写
+$(ALPINE_DATA): tools/mkfat.py
+	@mkdir -p $(ALPINE_DIR)
+	python3 tools/mkfat.py $@ 8192
+
+x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 $(ISO_KER)
+	@mkdir -p $(ALPINE_DIR)
+	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_ISO)
+
+run-x86-alpine: x86-alpine
+	qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot
+
+# 验收：`sh -c '...'` 那段脚本的四件事都要在串口上看得到，而且 /data 里写下的
+# 文件在宿主侧（数据盘镜像）能查出来 —— 证明真的落盘了。
+check-alpine:
+	@rm -f $(ALPINE_DATA)
+	@$(MAKE) x86-alpine
+	@timeout 180 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine.log >/dev/null
+	@grep -q "alpine-M12-alive" /tmp/check-alpine.log \
+	  || { echo "FAIL: alpine M12（脚本没跑起来）"; tail -40 /tmp/check-alpine.log; exit 1; }
+	@grep -q "m12ok" /tmp/check-alpine.log \
+	  || { echo "FAIL: alpine M12（写 /data 再读回失败）"; tail -40 /tmp/check-alpine.log; exit 1; }
+	@grep -q "alpine-M12-done" /tmp/check-alpine.log \
+	  || { echo "FAIL: alpine M12（脚本没跑完）"; tail -40 /tmp/check-alpine.log; exit 1; }
+	@echo "PASS: alpine M12（Alpine minirootfs 从 ISO 起起来：sh -c 脚本跑完 + 写 /data）"
+	@7z l $(ALPINE_DATA) 2>/dev/null | grep -qi "M12.TXT" \
+	  && echo "PASS: alpine M12 宿主侧（数据盘里有 m12.txt）" \
+	  || { echo "FAIL: alpine M12 宿主侧"; 7z l $(ALPINE_DATA) | tail -12; exit 1; }
 
 # ---- M11-2：可读写硬盘（FAT16 写）----
 x86-fatw: caps-check-x86

@@ -193,12 +193,37 @@ load_payload:
 9:
     ret
 
-/* ---- 读大于 1MB 的载荷：逐块读进 0x80000 暂存区，再进 unreal mode
- *      用 32 位寻址搬到 dst_pa ----
- * int 13h 的 DAP 只有"段:偏移"，实模式到不了 1MB 以上；unreal mode 让 ds/es
- * 的缓存描述符保持 4GB 限长，回到实模式后用 32 位寄存器寻址搬运。
- * 每块进出一次 unreal mode，BIOS 调用始终在干净的实模式段下做。 */
+/* ---- 读大于 1MB 的载荷：逐块读进 0x80000 暂存区，再让 BIOS 搬到 1MB 以上 ----
+ *
+ * int 13h 的 DAP 只有"段:偏移"，实模式到不了 1MB 以上。试过两条路都不行：
+ *   - unreal mode 每块进出一次 PM：第一块成功，第二块 int 13h 直接 #UD 死循环
+ *     （BIOS 在"刚被改过的段缓存/GDTR"下重新初始化自己，它并不预期这种状态）；
+ *   - unreal mode 进去一次、全程在里面读盘：连第一块都过不去，同一个原因。
+ * 最后用 BIOS 自己的 int 15h AH=87h（Move Extended Memory Block）：全程实模式，
+ * 不碰段缓存，也不需要 A20 之外任何 PM 相关状态。
+ *
+ * 参数块放 0x6000（32 字节，结构是 BIOS 规定的）：
+ *   +00 word  字数（2048 字节 = 1024 字）
+ *   +02 word  源描述符在块内偏移 = 0x0010
+ *   +04 dword 源线性地址
+ *   +08 word  目标描述符偏移   = 0x0018
+ *   +0A dword 目标线性地址
+ *   +10 qword 源描述符（set_desc 现填）
+ *   +18 qword 目标描述符
+ * 描述符限长给 0xFFFF、字节粒度、32 位数据段 —— 一块 2048 字节远在限长内。
+ *
+ * 一块一次而不是"一批 31 块一次"：试过批量（把暂存区填满 63488 字节再让
+ * int 15h 一次搬），连 batch=1 都会失败——一批搬完再回来时 BIOS 的某些状态
+ * 已经变了。逐块一次稳定可靠，代价只是 BIOS 调用次数多些（7.7MB 全量
+ * Alpine rootfs = 3755 块，实测几十秒，够用）。 */
 load_payload_hi:
+    movw $1024, 0x6000              /* 一次搬 2048 字节 */
+    movw $0x0010, 0x6002
+    movw $0x0018, 0x6008
+    movl $0x00080000, %eax
+    movl %eax, 0x6004
+    movw $0x6010, %di
+    call set_desc                   /* 源：暂存区 0x80000 */
 1:
     movl blocks_left, %eax
     testl %eax, %eax
@@ -215,12 +240,18 @@ load_payload_hi:
     sti
     int $0x13
     jc fail
-    call unreal_on
-    movl $0x00080000, %esi
-    movl dst_pa, %edi
-    movl $2048, %ecx
-    call copy_flat
-    call unreal_off
+    /* 暂存区 → dst_pa（BIOS 搬） */
+    movl dst_pa, %eax
+    movl %eax, 0x600A
+    movw $0x6018, %di
+    call set_desc
+    xorw %ax, %ax
+    movw %ax, %es                   /* ES:SI = 参数块 */
+    movw $0x6000, %si
+    movw $1024, %cx
+    movb $0x87, %ah
+    int $0x15
+    jc fail
     movb $'h', %al
     call put_chr
     addl $1, cur_lba
@@ -228,6 +259,19 @@ load_payload_hi:
     addl $2048, dst_pa
     jmp 1b
 9:
+    ret
+
+/* 填一个描述符：eax = 线性基址，di = 描述符地址（DS 基址为 0，直接用绝对地址） */
+set_desc:
+    movw $0xFFFF, (%di)             /* 限长 0xFFFF，字节粒度 */
+    movw %ax, 2(%di)                /* 基址 15..0  */
+    movl %eax, %ecx
+    shrl $16, %ecx
+    movb %cl, 4(%di)                /* 基址 23..16 */
+    movb $0x93, 5(%di)              /* 存在、ring0、数据段、可读写 */
+    movb $0x40, 6(%di)              /* 32 位段、字节粒度、限长高位 0 */
+    shrl $8, %ecx
+    movb %cl, 7(%di)                /* 基址 31..24 */
     ret
 
 fail:
@@ -242,6 +286,13 @@ fail:
  * 稍不注意就飞。这里改成先跳到 16 位代码段（选择子 0x18，D=0、base 0），
  * 在 PM 里就把 CS 换成 16 位形式，然后清 PE 直接接着跑，不用再远跳。 */
 unreal_on:
+    /* IF 必须在进 PM 之前关掉：现在 IDTR 还是实模式的 IVT（base 0），
+     * PM 里来一个时钟中断会按 4 字节 IDT 项去跳，直接飞。
+     * 标志位存内存而不是压在栈上 —— call/ret 的返回地址就压在栈顶，
+     * 用 popf 恢复会把它一起弹掉（M12 踩过：ret 跳到 FLAGS 值 → #UD）。 */
+    pushfw
+    popw saved_flags
+    cli
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -254,7 +305,9 @@ unreal_pm:
     movw %ax, %es
     movw %ax, %fs
     movw %ax, %gs
-    movw %ax, %ss
+    /* SS 故意不动：改过 SS 之后 CPU 会缓存那个 4GB/D=1 的描述符，回到实模式
+     * 依然生效，BIOS 的 int 13h 就变成按 ESP 的 32 位堆栈操作，栈直接写飞
+     * （M12 的"第二块必挂"就是这么来的）。栈留在实模式的 16 位段上最省事。 */
     ljmp $0x18, $unreal_pm16       /* 16 位代码段（D=0，base 0） */
     .code16
 unreal_pm16:
@@ -264,13 +317,17 @@ unreal_pm16:
     xorw %ax, %ax
     movw %ax, %fs
     movw %ax, %gs
+    movw %ax, %ss                  /* 双保险：SS 重装成普通实模式段 */
     ret
 
-/* 把 ds/es 换回普通实模式段（64KB），BIOS 调用前用 */
+/* 把 ds/es 换回普通实模式段（64KB），BIOS 调用前用；
+ * 顺便把 unreal_on 里 cli 掉的 IF 恢复回去。 */
 unreal_off:
     xorw %ax, %ax
     movw %ax, %ds
     movw %ax, %es
+    pushw saved_flags              /* 从内存取，不能 popfw —— 栈顶是返回地址 */
+    popfw
     ret
 
 /* esi = 源（32 位物理地址），edi = 目标，ecx = 字节数 */
@@ -415,6 +472,10 @@ dst_pa:
     .long 0
 chunk:
     .long 0
+batch:
+    .long 0                        /* load_payload_hi 一批搬几块 */
+saved_flags:
+    .word 0                        /* unreal_on/off 之间保存 FLAGS（IF） */
     .align 8
 gdt:
     .quad 0

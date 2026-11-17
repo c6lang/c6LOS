@@ -474,11 +474,34 @@ int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path)
     return 0;
 }
 
+/* M12：完整 argv 版本。让 init 能直接跑 `sh -c '...'` —— 交互式 shell 要等
+ * 串口输入，在自动化验收里没法复现；带 -c 的固定脚本则完全确定。
+ * 必须在 lx_exec_prepare 之前调（它内部会重置 fd 表、登记 0 号进程）。 */
+int lx_exec_preparev(u64 as, u64 img_pa, u64 img_size, const char *path,
+                     const char *const *argv, u32 argc)
+{
+    u64 entry = 0ull;
+    u64 rsp = 0ull;
+    u64 brk = 0ull;
+
+    if (argc == 0u || argv == (const char *const *)0) {
+        return -1;
+    }
+    if (lx_exec_build(as, img_pa, img_size, path, argv, argc,
+                      &entry, &rsp, &brk) != 0) {
+        return -2;
+    }
+    lx_proc_init(as, brk);
+    lx_fs_fd_reset();
+    g_exec_entry = entry;
+    g_exec_rsp = rsp;
+    return 0;
+}
+
 u64 lx_exec_entry(void)
 {
     return g_exec_entry;
 }
-
 u64 lx_exec_rsp(void)
 {
     return g_exec_rsp;

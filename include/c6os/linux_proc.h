@@ -139,4 +139,15 @@ void lx_set_as(u64 as);
 u64  lx_console_write(u64 fd, u64 ubuf, u64 len);
 void lx_fs_set_fdtab(LxFile *t);                  /* linux/fs.c */
 
+/* ---- 串口控制台的行规程（linux/tty.c，M12）----------------------------
+ * 默认关着：fd 0 以前是"永远 EOF"，L2..L6 的既有验收（busybox sh 的管道
+ * 那套）依赖这个行为。要让 0 号 fd 变成真终端，init 里显式调 lx_tty_init()。 */
+void lx_tty_init(void);
+u32  lx_tty_enabled(void);
+u32  lx_tty_pump(void);                           /* 泵一次串口，返回吃到的字节数 */
+u32  lx_tty_ready(void);                          /* 有整行可读 / 有 EOF 挂起 */
+u64  lx_tty_read(u64 ubuf, u64 len, void (*yield_fn)(void));
+u64  lx_tty_write(u64 ubuf, u64 len);             /* 输出侧：应答 ESC[6n 等 DSR */
+i64  lx_tty_ioctl(u64 fd, u64 req, u64 arg);
+
 #endif

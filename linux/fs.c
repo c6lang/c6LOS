@@ -10,8 +10,14 @@
  * 任何 Linux 都能生成（`find | cpio -o -H newc`），L4 的 ld.so/libc.so 直接
  * 从宿主拷进来即可。目录语义只做只读 + 扁平表，L5 的写路径留给 tmpfs。 */
 
-#define FS_MAX_FILES 64u
-#define FS_NAME      64u
+/* 全量 Alpine minirootfs 有 518 个 cpio 成员（目录 + 文件 + 符号链接），
+ * 原来的 64 只够放一个小镜像；1024 给发行版根文件系统留够余量。
+ * LxNode 88 字节，1024 项 = 88KB，全部落在 .bss 里（不占载荷）。 */
+#define FS_MAX_FILES 1024u
+#define FS_NAME      96u
+/* 符号链接最多跟几层。Alpine 的 /etc/ssl1.1/certs -> /etc/ssl/certs 与
+ * /etc/ssl/certs 之间互相指向，必须有上限，否则解析会转圈。 */
+#define FS_LINK_MAX  8u
 
 typedef struct {
     char name[FS_NAME];
@@ -263,7 +269,62 @@ u32 lx_fs_nodes(void)
     return g_nodes;
 }
 
-static int fs_find(const char *path)
+/* 路径归一化：把 "." / ".." / 重复斜杠塌掉（in → out，out 不带前导 '/'）。
+ * 发行版的符号链接目标里有 ".."，不归一化就会拼出查不到的路径。 */
+static int norm_(const char *in, char *out, u64 cap)
+{
+    u64 w = 0;
+    u64 i = 0;
+
+    while (in[i] != '\0') {
+        u64 start;
+        u64 len;
+        u64 k;
+
+        while (in[i] == '/') {
+            i++;
+        }
+        if (in[i] == '\0') {
+            break;
+        }
+        start = i;
+        while (in[i] != '\0' && in[i] != '/') {
+            i++;
+        }
+        len = i - start;
+        if (len == 1u && in[start] == '.') {
+            continue;
+        }
+        if (len == 2u && in[start] == '.' && in[start + 1u] == '.') {
+            while (w > 0u && out[w - 1u] != '/') {       /* 退一级 */
+                w--;
+            }
+            if (w > 0u) {
+                w--;
+            }
+            continue;
+        }
+        if (w > 0u) {
+            if (w + 1u >= cap) {
+                return -1;
+            }
+            out[w] = '/';
+            w++;
+        }
+        if (w + len >= cap) {
+            return -1;
+        }
+        for (k = 0; k < len; k++) {
+            out[w] = in[start + k];
+            w++;
+        }
+    }
+    out[w] = '\0';
+    return 0;
+}
+
+/* 纯查表，不跟符号链接 */
+static int fs_find_raw(const char *path)
 {
     u32 i;
 
@@ -273,6 +334,92 @@ static int fs_find(const char *path)
         }
     }
     return -1;
+}
+
+/* 查表 + 解析符号链接（保持 shortname 风格的 follow_symlinks）。
+ *
+ * 发行版的根文件系统里符号链接是主力：/bin/sh、/lib/libc.musl-x86_64.so.1、
+ * /etc/ssl1.1/certs …… Alpine minirootfs 里有 334 个。链接目标就存在 cpio 的
+ * 数据区（mode 是 S_IFLNK，数据是目标字符串），和 Linux 的 initramfs 一模一样，
+ * 所以这里按 Linux 的语义解析：绝对目标从根重来，相对目标拼到链接所在目录上，
+ * 最多跟 FS_LINK_MAX 层（防环，Alpine 的 /etc/ssl1.1/certs -> /etc/ssl/certs
+ * 就有一对互相指向的）。 */
+static int fs_find(const char *path)
+{
+    char cur[FS_NAME] = {0};
+    char nxt[FS_NAME * 2u] = {0};
+    u32 depth = 0u;
+
+    if (norm_(path, (char *)&cur[0], (u64)sizeof(cur)) != 0) {
+        return -1;
+    }
+    for (;;) {
+        int i = fs_find_raw((const char *)&cur[0]);
+        const u8 *src;
+        u64 m;
+        u64 n;
+        u64 k;
+
+        if (i < 0) {
+            return -1;
+        }
+        m = (u64)g_node[(u32)i].mode;
+        if ((m & 0170000ull) != 0120000ull) {
+            return i;                                  /* 不是符号链接 */
+        }
+        if (depth >= FS_LINK_MAX) {
+            return -1;
+        }
+        depth++;
+        n = g_node[(u32)i].size;
+        src = (const u8 *)port_phys_map(g_fs_pa + g_node[(u32)i].off);
+        if (n == 0ull || n >= (u64)sizeof(nxt) - 2ull) {
+            return -1;
+        }
+        if (src[0] == '/') {                           /* 绝对目标 */
+            if (n >= (u64)sizeof(nxt)) {
+                return -1;
+            }
+            for (k = 0; k < n; k++) {
+                nxt[k] = (char)src[k];
+            }
+            nxt[n] = '\0';
+        } else {                                       /* 相对目标 */
+            u64 last = 0ull;
+            u64 has = 0ull;
+            u64 w = 0ull;
+
+            k = 0ull;
+            while (cur[k] != '\0') {
+                if (cur[k] == '/') {
+                    last = k;
+                    has = 1ull;
+                }
+                k++;
+            }
+            if (last + n + 2ull > (u64)sizeof(nxt)) {
+                return -1;
+            }
+            k = 0ull;
+            while (k < last) {
+                nxt[w] = cur[k];
+                w++;
+                k++;
+            }
+            if (has != 0ull) {
+                nxt[w] = '/';
+                w++;
+            }
+            for (k = 0ull; k < n; k++) {
+                nxt[w] = (char)src[k];
+                w++;
+            }
+            nxt[w] = '\0';
+        }
+        if (norm_((const char *)&nxt[0], (char *)&cur[0], (u64)sizeof(cur)) != 0) {
+            return -1;
+        }
+    }
 }
 
 static const char *fs_node_name(u32 i)
@@ -584,6 +731,13 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     }
 #endif
     if (f->node == LX_FD_CONSOLE) {
+        /* M12：console 节点的读以前恒为 EOF。tty 打开之后它就是真终端——
+         * 注意这里**不能**只在 fd 0 上判断：ash 启动时会把 stdin dup 成别的
+         * fd 再用（`exec 3<&0` 那类），那些 fd 的 node 同样是 LX_FD_CONSOLE。
+         * 只看 fd 号的话它们会拿到 EOF，ash 认为输入结束直接 exit_group(0)。 */
+        if (lx_tty_enabled() != 0u) {
+            return lx_tty_read(dst, len, lx_proc_yield);
+        }
         return 0ull;                             /* 还没有键盘输入：EOF */
     }
     idx = (u32)f->node;

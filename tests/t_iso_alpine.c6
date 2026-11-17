@@ -1,0 +1,213 @@
+/* tests/t_iso_alpine.c6 —— M12：Alpine（musl 动态链接）容器的 init
+ *
+ * 和 M11-3 的 t_iso_docker.c6 是同一套流程，但这次跑的是**真实的发行版根
+ * 文件系统**，而且要跑到底：
+ *
+ *   1. rootfs（cpio）有 7.8MB——引导块必须能把它搬到 0x00800000
+ *      （走 int 15h AH=87h 那条路，unreal mode 走不通，见 cd0.S 的注释）；
+ *   2. 文件系统里的符号链接是真链接（cpio 的 S_IFLNK 条目），/bin/sh 就是
+ *      -> /bin/busybox。这里故意走 /bin/sh 而不是 /bin/busybox，顺便验收
+ *      fs_find 的链接解析；
+ *   3. 串口接上行规程（lx_tty_init），0 号 fd 变成真终端，于是 busybox sh
+ *      认为自己交互式（tcgetattr 成功）并打印提示符，能读命令。
+ *
+ * 之后 libc.musl 的映射、重定位、符号解析全是 ld.so 自己的事——
+ * 内核不为动态链接写一行代码（M9-L4 定下的规矩，这里原样复用）。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "c6os/port.h"
+#include "c6os/vfs.h"
+#include "c6os/linux_abi.h"
+#include "c6os/linux_proc.h"      /* lx_tty_init 等行规程声明（M12） */
+#include "los/los_typedef.h"
+#include "los/los_fs.h"
+#include "los/los_block.h"
+
+#define BOOTINFO_PA    0x7000u
+#define BOOTINFO_MAGIC 0x53493643u
+#define FAT_LBA        0u
+
+static OsFsPart g_part = {0};
+
+/* 交给 Alpine /bin/sh 的脚本，作为 `sh -c` 的第三个 argv。
+ *
+ * argv 不再需要包装函数：c6 现在把"指针数组 + 字符串字面量/具名数组"的
+ * 静态初始化生成对了。以前这类全局量里的指针槽是 0，靠挂在 global_ctors 上
+ * 的构造函数在启动时补 —— 裸内核不跑构造函数，于是取出来是野指针，busybox
+ * 拿到的 argv[1] 不是 "-c"，退回"从 stdin 读脚本"卡在串口上。这张表能生效
+ * 本身就是那次修复的端到端检验（kernel 里没有 C 运行时）。
+ * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
+static const char kScript[] =
+    "echo alpine-M12-alive; "
+    "uname -a; "
+    "ls /; "
+    "echo m12ok > /data/m12.txt; "
+    "cat /data/m12.txt; "
+    "echo alpine-M12-done";
+
+/* argv 表：静态指针数组，加载即有效，不依赖任何构造函数 */
+static const char *const kAv[] = { "/bin/sh", "-c", kScript };
+
+static void put_u32(UINT32 v)
+{
+    char b[12] = {0};
+    UINT32 i = 0u;
+    UINT32 n = 0u;
+
+    if (v == 0u) {
+        port_putc((INT32)'0');
+        return;
+    }
+    while (v > 0u && i < 10u) {
+        b[i] = (CHAR)('0' + (CHAR)(v % 10u));
+        v = v / 10u;
+        i++;
+    }
+    n = i;
+    while (n > 0u) {
+        n--;
+        port_putc((INT32)b[n]);
+    }
+}
+
+static INT32 blk_rd_cb(UINT32 d, UINT32 blk, UINT32 cnt, VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_read(blk, cnt, (u64)buf);
+}
+
+static INT32 blk_wr_cb(UINT32 d, UINT32 blk, UINT32 cnt, const VOID *buf)
+{
+    (void)d;
+    return (INT32)port_ata_write(blk, cnt, (u64)buf);
+}
+
+void os_main(void)
+{
+    volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
+    u64 as = 0u;
+    u32 magic = 0u;
+    u32 rpa = 0u;
+    u32 rlen = 0u;
+    u64 fsz = 0u;
+    u64 spa = 0u;
+    u64 ssz = 0u;
+    u64 bpa = 0u;
+    u64 bsz = 0u;
+    const u8 *base = (const u8 *)0;
+    INT32 rc = 0;
+    UINT32 i = 0u;
+
+    port_init();
+    port_mmu_init();
+    port_puts("c6os alpine M12: 从 ISO 起 Alpine（musl 动态链接）\n");
+
+    magic = bi[0];
+    rpa = bi[5];
+    rlen = bi[6];
+    if (magic != BOOTINFO_MAGIC || rpa == 0u || rlen < 512u) {
+        port_puts("FAIL: alpine M12（引导信息块/rootfs 不对）\n");
+        return;
+    }
+    port_phys_reserve((u64)rpa, (u64)rlen);
+
+    base = (const u8 *)port_phys_map((u64)rpa);
+    i = 0u;
+    while (i < 8u) {
+        fsz = fsz | ((u64)base[i] << (u64)(8u * i));
+        i++;
+    }
+    port_puts("  rootfs: pa=");
+    put_u32(rpa);
+    port_puts(" len=");
+    put_u32((u32)fsz);
+    port_puts(" cpio=");
+    i = 0u;
+    while (i < 6u) {
+        port_putc((INT32)base[512u + i]);
+        i++;
+    }
+    port_puts("\n");
+    if (fsz < 64u || (u64)fsz > (u64)rlen) {
+        port_puts("FAIL: alpine M12（rootfs 长度前缀不对）\n");
+        return;
+    }
+
+    /* 1. rootfs 交给 Linux ABI 的文件系统解析器（ld.so 要按路径从里面找） */
+    if (lx_fs_init((u64)rpa + 512ull, fsz) != 0) {
+        port_puts("FAIL: alpine M12（cpio 解析失败）\n");
+        return;
+    }
+    port_puts("  fs: initramfs 已挂载，节点数=");
+    put_u32(lx_fs_nodes());
+    port_puts("\n");
+
+    /* 2. 符号链接：/bin/sh -> /bin/busybox，两者查出来的应该是同一份数据 */
+    bpa = lx_fs_pa_of("/bin/busybox");
+    bsz = lx_fs_size_of("/bin/busybox");
+    spa = lx_fs_pa_of("/bin/sh");
+    ssz = lx_fs_size_of("/bin/sh");
+    port_puts("  /bin/busybox pa=");
+    put_u32((u32)bpa);
+    port_puts(" size=");
+    put_u32((u32)bsz);
+    port_puts("\n");
+    port_puts("  /bin/sh      pa=");
+    put_u32((u32)spa);
+    port_puts(" size=");
+    put_u32((u32)ssz);
+    port_puts("（符号链接）\n");
+    if (bsz < 64u || bpa == 0u) {
+        port_puts("FAIL: alpine M12（镜像里没有 /bin/busybox）\n");
+        return;
+    }
+    if (spa != bpa || ssz != bsz) {
+        port_puts("FAIL: alpine M12（/bin/sh 的符号链接没解析到 /bin/busybox）\n");
+        return;
+    }
+    if (lx_fs_size_of("/lib/ld-musl-x86_64.so.1") < 64u) {
+        port_puts("FAIL: alpine M12（镜像里没有 musl 的 ld.so）\n");
+        return;
+    }
+
+    /* 3. 可写数据盘 → /data（容器里能落盘） */
+    rc = (INT32)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
+    if (rc < 0) {
+        port_puts("FAIL: alpine M12（注册 ata0）\n");
+        return;
+    }
+    g_part.lba = FAT_LBA;
+    rc = (INT32)LOS_FsMount("ata0", "/data", "fatfs", &g_part);
+    if (rc != 0) {
+        port_puts("FAIL: alpine M12（/data 挂载 rc=");
+        put_u32((u32)(0 - rc));
+        port_puts("）\n");
+        return;
+    }
+    port_puts("  /data = FAT16 数据盘（可写）\n");
+
+    /* 4. 串口接上行规程：0 号 fd 变真终端，sh 才会认自己交互式 */
+    lx_tty_init();
+    port_puts("  tty: 串口行规程已开（0/1/2 是终端）\n");
+
+    /* 5. 进用户态跑 /bin/sh（动态 PIE：先跑 ld-musl，再把控制权交给 busybox）
+     *
+     * 用 `sh -c '脚本'` 而不是裸 `sh`：裸 sh 要等串口输入，自动化验收里没法
+     * 复现——失败时只能看到"什么都没发生"。带 -c 的固定脚本走的是完全同一条
+     * 装载 / 动态链接 / 系统调用路径，但输出确定。
+     * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
+    port_linux_arch_init();
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: alpine M12（port_as_create）\n");
+        return;
+    }
+    if (lx_exec_preparev(as, spa, ssz, "/bin/sh", kAv, 3u) != 0) {
+        port_puts("FAIL: alpine M12（lx_exec_preparev）\n");
+        return;
+    }
+    port_puts("  elf 就绪，进用户态（Alpine 的 /bin/sh -c）\n");
+    port_user_enter(as, lx_exec_entry(), lx_exec_rsp(), 0u);
+    port_puts("FAIL: alpine M12（从用户态返回，不应发生）\n");
+}

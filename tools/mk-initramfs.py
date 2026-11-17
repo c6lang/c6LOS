@@ -10,6 +10,12 @@
   magic "070701" 之后 13 个 8 字节十六进制字段，
   mode 在偏移 14，filesize 在 54，namesize 在 94，名字从 110 开始，
   名字与数据都按 4 字节对齐。
+
+符号链接按规范打成 **S_IFLNK 条目**，内容是链接目标字符串（Linux 也是这么
+干的：initramfs 里的符号链接存在 cpio 数据区里，由 VFS 的 follow_link 解析）。
+发行版根文件系统里符号链接极多（Alpine minirootfs 有 334 个，`/bin/sh`、
+`/lib/libc.musl-x86_64.so.1` 都是），既不能跳过（跳过了 sh 就不可用），
+也不能摊平成副本（体积翻倍且语义不同：改 busybox 后副本不会跟着变）。
 """
 import os
 import struct
@@ -39,18 +45,30 @@ def main() -> int:
             items.append((rel.replace(os.sep, "/"), "dir", dirpath))
         for f in filenames:
             p = os.path.join(dirpath, f)
+            kind = "link" if os.path.islink(p) else "file"
             items.append(
-                (os.path.relpath(p, root).replace(os.sep, "/"), "file", p)
+                (os.path.relpath(p, root).replace(os.sep, "/"), kind, p)
             )
+        # os.walk 默认会把符号链接指向的目录当目录继续走（Alpine 里有环：
+        # /etc/ssl1.1/certs -> /etc/ssl/certs）。链接本身已经作为 link 条目
+        # 收进来了，不该再展开——否则既重复又可能无限递归。
+        dirnames[:] = [d for d in dirnames
+                       if not os.path.islink(os.path.join(dirpath, d))]
     items.sort(key=lambda t: t[0])
 
     blobs = []
     ino = 1
     total = 0
+    nlink = 0
     for name, kind, path in items:
         ino += 1
         if kind == "dir":
             blobs.append(entry(name, ino, 0o040755, 0))
+        elif kind == "link":
+            data = os.readlink(path).encode()
+            blobs.append(entry(name, ino, 0o120777, len(data)) + data)
+            blobs[-1] += b"\0" * ((4 - len(data) % 4) % 4)
+            nlink += 1
         else:
             with open(path, "rb") as fh:
                 data = fh.read()

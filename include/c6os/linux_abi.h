@@ -14,6 +14,7 @@
 
 /* mmap 的两个标志（只用到这两个） */
 #define LX_AT_EMPTY_PATH  0x1000ull
+#define LX_AT_SYMLINK_NOFOLLOW 0x100ull
 #define LX_MAP_FIXED      0x10ull
 #define LX_MAP_ANONYMOUS  0x20ull
 
@@ -22,7 +23,11 @@
 #define LX_SYS_write           1
 #define LX_SYS_open            2
 #define LX_SYS_close           3
+#define LX_SYS_stat            4
 #define LX_SYS_fstat           5
+#define LX_SYS_lstat           6
+#define LX_SYS_nanosleep      35
+#define LX_SYS_clock_gettime 228
 #define LX_SYS_lseek           8
 #define LX_SYS_mmap            9
 #define LX_SYS_mprotect       10
@@ -46,6 +51,7 @@
 #define LX_SYS_setpgid       109
 #define LX_SYS_getpgrp       111
 #define LX_SYS_setsid        112
+#define LX_SYS_getpgid       121     /* ash 的 job control 用它，必须和 getpgrp 同值 */
 #define LX_SYS_sigaltstack   131
 #define LX_SYS_pipe2         293
 
@@ -78,6 +84,7 @@
 #define LX_SYS_setpgid       109
 #define LX_SYS_getpgrp       111
 #define LX_SYS_setsid        112
+#define LX_SYS_getpgid       121     /* ash 的 job control 用它，必须和 getpgrp 同值 */
 #define LX_SYS_sigaltstack   131
 #define LX_SYS_pipe2         293
 
@@ -226,6 +233,9 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
 /* 一步做完"装载主程序 + 解释器（若有）+ 建栈 + 登记进程"。
  * c6 侧只需要：lx_exec_prepare → lx_exec_entry/lx_exec_rsp → port_user_enter。 */
 int lx_exec_prepare(u64 as, u64 img_pa, u64 img_size, const char *path);
+/* 同上，但带完整 argv —— 用来跑 `sh -c '脚本'` 这类不依赖交互的确定性入口。 */
+int lx_exec_preparev(u64 as, u64 img_pa, u64 img_size, const char *path,
+                     const char *const *argv, u32 argc);
 void lx_exec_arg1(const char *a);
 int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
                   const char *const *argv, u32 argc,

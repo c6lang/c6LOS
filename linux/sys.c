@@ -170,6 +170,12 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     if (lx_user_ok(buf, len, C6OS_PROT_R) == 0) {
         return neg(LX_EFAULT);
     }
+    /* M12：tty 开着时输出要经过它 —— busybox 的 lineedit 会写 ESC[6n 问光标
+     * 位置，必须由终端从输入方向回 ESC[1;1R，否则程序一直等、最后退出。
+     * 没开 tty 就是原来的逐字节直写。 */
+    if (lx_tty_enabled() != 0u) {
+        return lx_tty_write(buf, len);
+    }
     for (i = 0; i < len; i++) {
         port_putc((int)(*(const u8 *)(buf + i)));
     }
@@ -352,6 +358,18 @@ static void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_newfstatat:
         r->rax = lx_fs_statat(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_stat:
+        /* M12：老的 stat(path, buf)（x86_64 上是 4 号）。musl 编的是
+         * newfstatat，但 Alpine 里的 busybox 是**静态老版本调用**混着用，
+         * ash 的 lineedit 初始化时就会踩到；不认的话它直接 ENOSYS 退出。
+         * 语义就是 newfstatat(AT_FDCWD, path, buf, 0)。 */
+        r->rax = lx_fs_statat((u64)0 - 100ull, a0, a1, 0ull);
+        return;
+
+    case LX_SYS_lstat:
+        r->rax = lx_fs_statat((u64)0 - 100ull, a0, a1, LX_AT_SYMLINK_NOFOLLOW);
         return;
 
     case LX_SYS_getdents64:
@@ -604,6 +622,20 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_getpgrp:
+    case LX_SYS_getpgid:
+        /* M12：进程组号恒为 1（和 TIOCGPGRP 回的一致）。
+         * 这两条必须同值 —— ash 启动时比 tcgetpgrp(0) 与 getpgrp()，
+         * 不相等就认定自己在后台，killpg(pgrp, SIGTTIN) 把自己停掉。
+         * 只实现 getpgrp(111) 而漏掉 getpgid(121) 的话，getpgid 走 ENOSYS
+         * 分支、getpgrp 回 1、TIOCGPGRP 回 0，三个值凑不齐，ash 立刻自杀。 */
+        if (nr == (u64)LX_SYS_getpgid && (i32)a0 > 0) {
+            LxProc *q = lx_proc_find((i64)(i32)a0);
+
+            if (q == (LxProc *)0) {
+                r->rax = neg(LX_ESRCH);
+                return;
+            }
+        }
         r->rax = 1ull;
         return;
 
@@ -617,7 +649,13 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_ioctl:
-        /* 没有真终端：一律 ENOTTY，ls 会退回单列输出 */
+        /* M12：init 调过 lx_tty_init() 之后，0/1/2 是一个真串口终端
+         * （TCGETS 给出 38400 8N1 + ICANON/ECHO，isatty() 才会认账）；
+         * 没开就还是老行为——一律 ENOTTY，ls 退回单列输出。 */
+        if (a0 <= 2ull && lx_tty_enabled() != 0u) {
+            r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
+            return;
+        }
         r->rax = neg(LX_ENOTTY);
         return;
 
@@ -626,6 +664,55 @@ static void lx_syscall_do(LxRegs *r)
             *(u64 *)a0 = 1700000000ull;
         }
         r->rax = 1700000000ull;            /* 没有 RTC：给个固定时刻 */
+        return;
+
+    case LX_SYS_nanosleep:
+        /* M12：busybox 的 lineedit 初始化时发 ESC[6n 问光标位置；终端不回话就
+         * 靠这个超时兜底，再按默认 80 列继续。以前返回 ENOSYS，ash 直接退出。
+         * 没有真时钟可用，就按请求时长忙等（上限 1 秒，别让用户等太久）。 */
+        if (lx_user_ok(a0, 16ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        {
+            i64 sec = *(const i64 *)a0;
+            i64 nsec = *(const i64 *)(a0 + 8ull);
+            u64 ms;
+
+            if (sec < 0 || nsec < 0) {
+                r->rax = neg(LX_EINVAL);
+                return;
+            }
+            ms = (u64)sec * 1000ull + (u64)nsec / 1000000ull;
+            if (ms > 1000ull) {
+                ms = 1000ull;              /* 上限：这只是个超时兜底 */
+            }
+            if (ms > 0ull) {
+                port_delay_ms((u32)ms);
+            }
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_clock_gettime:
+        /* 同理：nanosleep 的超时逻辑和 busybox 的时间戳都要它。
+         * 返回"单调递增的假时钟"，精度到毫秒，起点固定在 1700000000。 */
+        if (lx_user_ok(a1, 16ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        {
+            u64 now = port_cycles() / 1000000ull;      /* 假设 ~1GHz 量级的 TSC */
+
+            if (a0 == 1ull) {                          /* CLOCK_MONOTONIC */
+                *(u64 *)a1 = (i64)(now / 1000ull);
+                *(u64 *)(a1 + 8ull) = (i64)((now % 1000ull) * 1000000ull);
+            } else {                                   /* CLOCK_REALTIME */
+                *(u64 *)a1 = (i64)(1700000000ull + now / 1000ull);
+                *(u64 *)(a1 + 8ull) = (i64)((now % 1000ull) * 1000000ull);
+            }
+        }
+        r->rax = 0ull;
         return;
 
     case LX_SYS_getpid:
@@ -702,6 +789,9 @@ void lx_syscall(LxRegs *r)
 {
     LxProc *p = lx_cur_proc();
 
+    if (lx_tty_enabled() != 0u) {
+        (void)lx_tty_pump();             /* 串口是轮询的：系统调用就是我们的"中断" */
+    }
     lx_syscall_do(r);
     /* L6：系统调用返回前投递挂起的信号（把 iret 帧改成"进 handler"）。
      * 系统调用帧就是完整 LxFrame（LxRegs 是它的第一个成员）。 */

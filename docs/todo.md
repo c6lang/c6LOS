@@ -271,6 +271,24 @@ GPIO9 软件翻转能数到 99，测量链路正常），所以 `port/s3/panel.c
 - `make check-fat-write` —— M11-2：`/data`（FAT16）建/写/删/同步，宿主挂载后内容一致；
 - `make check-docker-iso` —— M11-3：docker 镜像 → ISO，起机跑镜像 ENTRYPOINT，往 `/data` 写，宿主校验。
 
+## M12 真实 Alpine minirootfs 从 ISO 起起来（musl 动态链接）
+
+M11-3 跑的是自造的 9 KB 程序。M12 换真的：Alpine 3.20 官方 minirootfs 当 ISO 的
+rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`），按
+`sh -c '脚本'` 跑起来，串口就是它的终端，`/data` 是可写 FAT16。
+细节见 `docs/m11-docker-iso-design.md` §9 M12。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| ✅ M12-0 Alpine minirootfs 上 ISO | `Makefile` 的 `x86-alpine`/`run-x86-alpine`/`check-alpine`（minirootfs 按需下到 `build/x86/alpine/`）；`tests/t_iso_alpine.c6`；`linux/tty.c` 串口行规程（轮询泵 + 阻塞 read + 应答 `ESC[6n`）；`fs.c` 节点数 64→1024、路径归一化与符号链接解析；`mk-initramfs.py` 支持悬空链接；`cd0.S` 大载荷走 unreal mode | `make check-alpine` → `PASS: alpine M12` |
+| ✅ M12-1 c6 静态指针初始化器 | 编译器 bug：数据段的指针槽留 0、靠 `@__llvm_init` 启动时补，裸内核不跑构造函数就永远是 0（`sh -c` 的 argv 表是野指针，busybox 拿不到 `-c`）。修在 c6 `07d73b8`：带重定位的段发射成 packed struct 的静态初始化，wasm 仍走构造函数 | c6 仓库 `regression.sh llvm-static-data` |
+| M12-2（延伸，未做） | 交互式 shell（真正的 `sh`，等串口输入）；`sendfile`（`nr=40` 仍是 ENOSYS）；`ls /` 的 ANSI 颜色直接透传，没做终端能力判定 | — |
+
+**M12 验收**：
+
+- `make check-alpine` —— Alpine minirootfs 从 ISO 起机，`sh -c` 脚本跑完（`uname -a`、
+  `ls /`、写 `/data` 再读回），且宿主侧在数据盘镜像里能看到 `m12.txt`。
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |

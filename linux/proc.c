@@ -950,6 +950,11 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
         return pipe_read_(p, &p->fd[fd], ubuf, len);
     }
     if (fd <= 2ull) {
+        /* M12：init 显式开了行规程之后，fd 0 才是真终端（阻塞读一行）；
+         * 没开就还是老行为——永远 EOF，L2..L6 的验收依赖这个。 */
+        if (fd == 0ull && lx_tty_enabled() != 0u) {
+            return lx_tty_read(ubuf, len, lx_proc_yield);
+        }
         return 0ull;                       /* stdin 还没接键盘：EOF */
     }
     return lx_fs_read(fd, ubuf, len);
@@ -1006,6 +1011,13 @@ static u16 poll_events_(LxProc *p, i32 fd)
         }
         return ev;
     }
+    if (f->node == LX_FD_CONSOLE && lx_tty_enabled() != 0u) {
+        /* M12：真终端 —— 只有真有整行可读时才算"可读"，
+         * 否则 select/poll 会立刻返回然后 read 又阻塞住。
+         * 按 **node** 而不是 fd 号判断：ash 会把 stdin dup 成别的 fd 再用，
+         * 那些 fd 也是终端（以前只看 fd == 0，dup 出来的会被当成"永久就绪"）。 */
+        return (lx_tty_ready() != 0u) ? (u16)LX_POLLIN : (u16)0;
+    }
     return (u16)LX_POLLIN;        /* 普通文件 / console：不阻塞 */
 }
 
@@ -1022,20 +1034,33 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
     for (;;) {
         u64 i;
         i64 cnt = 0;
+        u32 tty = 0u;                  /* 这轮轮询里有没有终端 fd */
 
         for (i = 0ull; i < nfds; i++) {
             u8 *e = (u8 *)(ufds + i * 8ull);
-            u16 rev = poll_events_(p, *(i32 *)e);
+            i32 fd = *(i32 *)e;
+            u16 rev;
 
+            if (fd >= 0 && fd < (i32)C6OS_LINUX_MAX_FD &&
+                p->fd[fd].node == LX_FD_CONSOLE && lx_tty_enabled() != 0u) {
+                tty = 1u;
+            }
+            rev = poll_events_(p, fd);
             *(u16 *)(e + 6ull) = rev;
             if (rev != 0u) {
                 cnt++;
             }
         }
-        if (cnt > 0 || timeout == 0 || rounds >= 4096u || !others_live_(g_cur)) {
+        /* !others_live_ 那条快捷路径是给"协作式调度 + 管道"设计的：没人能
+         * 再往管道里写数据了，就地返回免得死等。但终端不适用 —— 输入来自
+         * 串口，不来自别的进程，正是要在这里空转泵串口。M12 之前 ash 在这
+         * 里拿到 0（"没有 fd 就绪"），当成 stdin EOF 直接 exit_group(0)。 */
+        if (cnt > 0 || timeout == 0 || rounds >= 4096u ||
+            (tty == 0u && !others_live_(g_cur))) {
             return cnt;
         }
         rounds++;
+        (void)lx_tty_pump();           /* 轮询式串口：每一轮都是一次机会 */
         lx_proc_block();
     }
 }
