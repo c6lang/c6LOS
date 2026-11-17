@@ -1676,7 +1676,7 @@ https:
 		S3_SKIP_C6="" \
 		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
 		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
-		S3_CDEFS="$(HTTPS_CDEFS)" S3_STACK_TOP=0x3FCD9000 \
+		S3_CDEFS="$(HTTPS_CDEFS) $(S3_CDEFS)" S3_STACK_TOP=0x3FCD9500 \
 		S3_MAIN=$(S3_WIFI_MAIN) \
 		$(WIFI_DIR)/obj/c6_https_demo.o $(TLS_DIR)/libtls.a \
 		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(TLS_DIR)/libtls.a $(WIFI_DIR)/obj/c6_https_demo.o $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \

@@ -14908,3 +14908,98 @@ s32i    a1, a3, 64
 `irq.c` 的 `#ifndef S3_NO_PREEMPT` 分支里调用。也就是说 `g_s3_cur` 只能靠
 `port_task_switch` 自己维护 —— 这正是上面这个 bug 一开始没被发现的原因：
 两条更新路径，一条是空的、另一条写错了地方。
+
+## §430 `port_task_yield` 恢复的必须是**自己**的帧
+
+`port_task_yield` 保存那半边是对的（`s32i a1, a4, 64`，`a4 = g_s3_cur[core]`），
+但恢复那半边从 `g_sched[core].sp` 读 —— 那是"最近一次 `port_task_switch`
+外出的 sp"，属于**别的**任务。§429 把 switch 的写入挪走后这里更明显。
+改成 `l32i a1, a4, 64`（`a4` 保存前就已经是当前任务的 ctx）。
+
+## §431 栈池 24576 → 26624：闭源库要建 **3 个** 6144 字节任务
+
+真板诊断 `0x50000BE0` 精确读出：`需要=6144 已用=20480 池大小=24576`。
+
+闭源库会建 ppTask / wifi task / net80211 三个 6144 的任务，加上我们自己的
+wifi 主任务 8192：
+
+```
+8192 + 6144*3 = 26624 > 24576
+```
+
+于是第三次 `_task_create` 失败，库打印
+`[v1]wifi|create wifi task: failed to create task`，
+`esp_wifi_init_internal` 返回 **257 (0x101 = ESP_ERR_INVALID_ARG)**。
+
+改成 26624 后第 4 个任务建成功（`[task] 库建任务 … stack=6144` + `[give] t=4 sem#3`）。
+
+## §432 ★★ 真根因：**主栈只剩 146 字节**，一直在往 `.bss` 里写
+
+这一条是这轮最要命的。
+
+`https` 目标传 `S3_STACK_TOP=0x3FCD9000`，`_stack_limit = _bss_end + 0x800`。
+而 `port/s3/wifi_glue.c` 里
+
+```c
+static u32 g_wifi_heap_mem[16384];      /* 64KB */
+```
+
+把 `.bss` 顶到 `_bss_end = 0x3fcd8c6e`。于是：
+
+```
+主栈可用 = 0x3FCD9000 - 0x3fcd8c6e - 0x800 = 0x92 = 146 字节
+```
+
+**146 字节连一次 `port_task_switch` 的帧都放不下。**
+真板实测 `port_task_switch` 的外出 sp 是 **`0x3fcd9390`** —— 已经**低于**
+`_stack_limit(0x3fcd946e)`，也就是说主流程从很早开始就在往 `.bss` 里压栈，
+把自己进程内的全局变量（任务表、ctx、堆指针……）踩烂。任何怪现象都出得来。
+
+### 修法
+`g_wifi_heap_mem` 64KB → **32KB**（`[16384]` → `[8192]`）。
+
+| | 修之前 | 修之后 |
+|---|---|---|
+| `_bss_end` | `0x3fcd8c6e` | **`0x3fcd0c6e`** |
+| `_stack_limit` | `0x3fcd946e` | **`0x3fcd146e`** |
+| 主栈可用 | **146 字节** | **32914 字节** ✓ |
+
+### 诊断位置的两个坑（记下来免得再踩）
+1. **`0x50000460`** 被 `RESTORE_FRAME` 的恢复环（`0x50000400`）写穿
+   —— 读出来是 PS/WINDOWSTART 的值（§427）。
+2. **`0x50001D00`** 被 `console.c` 的 `port_snapshot()` 占用，
+   `sn[0] = 0x5A5A5A5A` —— 我一度把它当成"ctx 指针是 5a5a5a5a"的证据，
+   实际那是快照魔数（§433）。
+3. RTC 在崩溃复位后会被 `start.S` 整片清掉，**诊断数据活不过一次崩溃**。
+   要跨崩溃只能靠串口。
+
+## §434 当前剩余问题：`[wifimain]` 每 ~13 tick 周期性重入
+
+修完 §429~§432 之后仍然存在：
+
+```
+[wifimain] id=1 tick=0
+W1 bringup → [wifi] init 前状态=1 → [task] 库… → [give] t=2 sem#1
+.bbbbbbbb…(120 个 b)
+[wifimain] id=1 tick=18     ← 重入
+W1 bringup → [wifi] init 前状态=2  ← 状态被第二次 PHY/init 污染
+```
+
+**已排除**：
+* 不是 `port_task_switch` 没保存 —— §429 已修，且实测 `switch 次数 = 1`
+* 不是 `port_task_yield` —— §430 已修，且实测 `yield 次数 = 1`
+* `ctx[0].sp` 仍等于 `port_task_ctx_create` 造的 `top`，
+  `EPC = 0x403798c2 = s3_task_tramp` ⇒ **这个任务的帧确实一次都没被保存过**
+
+**矛盾点**：`switch` 只发生 1 次、`yield` 只发生 1 次，但重入 4 次
+⇒ **重入既不经过 switch 也不经过 yield**。
+
+**下轮从这里入手**：
+1. 查 `[give] t=2 sem#1` 之后那串 `b`（120 个）是谁打的 —— 它紧贴在重入前面，
+   很可能就是"任务被重新拉起"的那条路径（`kernel/task.c6` 的调度主循环）。
+2. `t->state` 是否被误设成 `OS_TASK_DEAD` → `port_task_ctx_free(t->ctx)`
+   → `g_ctx[0].stack = 0` → 下一次 `os_task_create` 复用该槽并**重置
+   `c->sp = top`**，于是从 `s3_task_tramp` 重新开始。
+   注意现在 `ctx[0].stack` 非 0（8192），但那是**最后一次**分配的结果，
+   中间可能被 free 过又建回来。
+   下轮在 `port_task_ctx_free` 里加串口打印就能确认。

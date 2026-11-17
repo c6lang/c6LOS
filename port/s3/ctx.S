@@ -5,6 +5,7 @@
     .align 4
     .literal_position
     .literal .Lg_sched, g_sched
+    .literal .Lrtc_cs,  0x50001E80
     .literal .Lg_cur,   g_s3_cur
     .literal .Lprid_base, g_prid_base
     .literal .Lrtc_dbg, 0x50000A00
@@ -381,6 +382,15 @@ port_task_switch:
     l32i    a3, a3, 0
     beqz    a3, 81f
     s32i    a1, a3, 64
+    /* §433 诊断：记录每次 switch 保存的 (ctx, 帧sp) 与次数，写到 RTC
+     * 0x50001D00（[0]=ctx [4]=sp [8]=次数）。用来分清"保存没发生"与
+     * "保存了但恢复用错了 sp"。 */
+    l32r    a6, .Lrtc_cs
+    s32i    a3, a6, 0
+    s32i    a1, a6, 4
+    l32i    a5, a6, 8
+    addi    a5, a5, 1
+    s32i    a5, a6, 8
 81:
     /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
     l32r    a14, .Ldbg2
@@ -487,12 +497,13 @@ port_task_yield:
     s32i    a4, a14, 16
     s32i    a1, a14, 20
 
-    l32r    a3, .Lg_sched
-    movi    a6, 76
-    mull    a5, a11, a6
-    add     a3, a3, a5
-    l32i    a1, a3, 64
-    mov     a4, a3
+    /* §430：**yield 恢复的是自己**，所以要读自己那个 ctx 的 sp。
+     *
+     * 原来从 `g_sched[core].sp` 读 —— 那是"最近一次 `port_task_switch`
+     * 外出的 sp"，属于**别的**任务。§429 把 switch 的写入挪走后这里更明显：
+     * 会恢复到一个空槽/垃圾 sp。`a4` 在保存之前就已经是
+     * `g_s3_cur[core]`（当前任务的 ctx），用它。 */
+    l32i    a1, a4, 64
     RESTORE_FRAME
 1:
 #ifdef __XTENSA_CALL0_ABI__

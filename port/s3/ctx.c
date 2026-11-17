@@ -30,7 +30,17 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
  * + 监视任务 2KB ≈ 18KB，24KB 与"原来 3×8KB"的 bss 占用完全一样（不涨 DRAM），
  * 但把"最多 3 个任务"变成了"最多 8 个任务、按需切栈"。
  * 注意：任务不会被删除，所以这里不做回收（和之前一样）。 */
-#define S3_STACK_POOL    24576u
+/* §431：24576 已经不够了 —— 闭源库会建 **3 个** 6144 字节的任务
+ * （ppTask / wifi task / net80211），加上我们自己的 wifi 主任务 8192：
+ *   8192 + 6144*3 = 26624 > 24576
+ * 于是第三次 `_task_create` 直接失败，库打印
+ *   `create wifi task: failed to create task`
+ * 并让 `esp_wifi_init_internal` 返回 257 (ESP_ERR_INVALID_ARG)。
+ * 真板诊断 `0x50000BE0`：需要=6144 已用=20480 池大小=24576。
+ *
+ * 26624 正好是上面那个和；`.bss` 剩下的 2048 字节刚好够（`_stack_limit`
+ * 还会再验一遍，超了链接期就报 "S3 BSS/stack collision"）。 */
+#define S3_STACK_POOL    26624u
 
 /* 窗口 spill 的总开关（w2c.S 的每个壳在进内核前读它）。
  *   0 = 完全不动窗口状态（和以前的行为一致，保住已通过的 PHY/串口基线）
@@ -112,21 +122,6 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     c->stack = (void *)(g_stack_pool + g_pool_off);
     c->size = want;
     g_pool_off = g_pool_off + want;
-    /* §428：把每次分配的 (槽号, 入口, 请求大小, 实际大小) 记到 RTC 的
-     * **0x50001E00**（§427 确认 0x50000460 已被恢复环写穿）。
-     * 注意：这里**不能**调 ets_printf —— 实测一加就退化成
-     * `TRAP pc=0x40044188`（在 M4 阶段就崩），这个时机串口不安全。 */
-    {
-        volatile u32 *ad = (volatile u32 *)0x50001E00u;
-        u32 n_ = ad[0];
-        if (n_ < 6u) {
-            ad[1u + n_ * 4u] = i + 1u;
-            ad[2u + n_ * 4u] = (u32)entry;
-            ad[3u + n_ * 4u] = stack_size;   /* 调用者**请求**的大小 */
-            ad[4u + n_ * 4u] = want;         /* 实际分配的大小 */
-            ad[0] = n_ + 1u;
-        }
-    }
     /* §379：帧从 `[top-128, top-48)` 开始 —— 必须整体低于 sp-48（溢出槽区）。 */
     top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 128u;
     f = (u32 *)top;

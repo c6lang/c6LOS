@@ -56,7 +56,16 @@ static u32 glue_ret0(void)
 /* 堆内存放在 **BSS 静态数组**里：由 IDF bootloader 统一清零、不会和
  * .data/.bss 里的其它符号重叠（之前硬编码 0x3FCB8000 正好压在 _bss 段里，
  * 一分配就踩坏内核全局变量）。 */
-static u32 g_wifi_heap_mem[16384];      /* 64KB */
+/* §432：**从 64KB 降到 32KB**。
+ *
+ * 原来 64KB 把 `.bss` 顶到 `_bss_end = 0x3fcd8c6e`，而 https 目标的
+ * `_stack_top = 0x3FCD9500`、`_stack_limit = _bss_end + 0x800`，
+ * 于是**主栈只剩 146 字节**。真板实测 `port_task_switch` 的外出 sp 是
+ * `0x3fcd9390` —— 已经低于 `_stack_limit`，从头就在往 `.bss` 里写。
+ * 全局变量被自己踩烂，什么怪现象都出得来。
+ *
+ * 32KB 之后 `_bss_end = 0x3fcd0c6e`，主栈有 ~32KB，恢复正常。 */
+static u32 g_wifi_heap_mem[8192];       /* 32KB */
 #define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
 #define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 
