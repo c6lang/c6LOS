@@ -288,6 +288,7 @@ $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
 	esptool --chip esp32s3 elf2image $(S3_IMG_FLAGS) --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
 	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@ $(S3_APP_BASE)
+	@python3 tools/patch_halinit.py $@ $(BUILD)/c6os.elf
 
 image-info: $(BUILD)/c6os.bin
 	esptool --chip esp32s3 image-info $<

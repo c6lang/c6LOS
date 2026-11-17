@@ -17152,3 +17152,59 @@ call0↔windowed 混编帧。继续在 `RESTORE_FRAME` 里挤指令是死路。
    寄存器文件触发溢出"改成**IRAM 里直接逐窗口 spill**（不碰 `_win_ovf*`，
    也就不依赖那条链）。
 3. 终极方案仍是 `S3_ABI=windowed`：kernel 与库同一 ABI，直接删掉所有壳。
+
+---
+
+## §506 ★★ 瓶颈从"任务切换"移到了"WiFi scan"；hal_init 硬件握手绕过
+
+### 新baseline（提交 73c5f94）
+
+§505 去掉 `_win_ovf8/12` 的 `[a1-12]` 帧链依赖后，第一次跑通了：
+lwIP start → WPA cb → associate → set_mode/config → `register_chipv7_phy rc=0`。
+但 ppTask 卡死在 `hal_init+0x1a`：
+
+```
+420245cc <hal_init>:
+ entry a1,48
+ l32r  a2,=0x60033d14      /* WiFi MAC 寄存器块 base=0x60033000 */
+ or    a3,a3,2
+ s32i  a3,a2,0             /* 写 bit1：kick */
+1:l32i a3,a2,0
+ bbci  a3,0,1b             /* 等 bit0：永不置位 */
+```
+
+JTAG 实测：该寄存器 **write-only**（写 3 读回 0），且时钟/复位都已开好
+（`0x60026014=0xfffce7bf`、`0x60026018=0`、`DIG_PWC.WIFI_FORCE_PD=0`）。
+所以不是我们漏开时钟，而是 ROM 库等的一个硬件握手在我们的运行环境里没人应答。
+
+### 补丁（tools/patch_halinit.py，Makefile:291 自动执行）
+
+把 bin 里 `hal_init+0x1a` 的 3 字节 `bbci a3,0,<loop>`（07 63 f7）
+换成等长 `j .+3`（c6 ff ff），只跳过这次轮询。
+模式不匹配就报错退出，避免掩盖布局漂移。
+注意：打补丁后再跑 `chkimg.py` 会报 1 处不一致（故意的，二进制被改过），镜像本身能正常启动。
+
+### 效果（真板）
+
+```
+[wifi] start=0
+[wifi] set_ps(NONE)=0
+[wifi] scan start（阻塞）
+*** TRAP sp=3fcd9230 cause=0000001c pc=4037a62e ps=00060810
+    vaddr=0000bad1 callinc=2 a0=8037a747
+```
+
+流程已经走到 **scan**，比之前任何一轮都远。
+
+### 新卡点（下一轮）
+
+`cause=0x1c` = InstFetchPIFAddrError，`vaddr=0x0000bad1` —— CPU 试图执行地址
+`0xbad1`，正好是我们自己在 `ctx.S:304` / `ctx.c:227` 写的诊断魔数。
+`pc=0x4037a62e` 落在 `vsprintf_internal$isra$0` 的 `l8ui a11,a9,0`。
+怀疑某个诊断魔数被写进了任务的 a0/EPC 槽，或者 printf 壳在 scan 回调里
+传坏了格式串指针。先查 `s3_trap` 记录（0x50000140）里 `a0=0x8037a747`
+的 CALLINC=2 返回目标 0x037a744 附近，以及 ctx.S 写 0xBAD1 时 a4 指向哪里。
+
+### 目标仍未达成
+
+尚未看到 AP 关联成功、DHCP 地址、TLS 连接、qq.com 页面数据。目标保持 active。
