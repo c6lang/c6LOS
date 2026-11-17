@@ -314,6 +314,22 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 | M18 网络 | socket 族接 SAL、AF_UNIX、阻塞语义、TCP 完善、DNS、epoll 集成 | `check-linuxabi-m18`：wget/nc/nslookup |
 | M19 验收矩阵 | musl libc-test 子集、busybox applet 矩阵、Alpine 包冒烟 | `check-linuxabi-m19` 报告 |
 
+## OCI 变现主线：镜像 → 微虚机 + runtime shim（O1–O6）
+
+设计见 `docs/oci-microvm-design.md`。定位：**容器照旧、镜像照旧，换掉"跑它的是什么"**；
+namespace/cgroup/overlayfs/seccomp 明确不做，隔离边界交给 VMM。与 M13–M19 正交：
+T 线（linux-abi-complete）决定"镜像里的程序能跑多远"，O 线决定"镜像怎么变成一台机器、客户怎么用"。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| ✅ O0 设计稿 | 商业靶心与三条候选路取舍、bzImage 引导契约、镜像容器格式、可写语义、I/O 与设备模型、shim 支持度矩阵、O1–O6 里程碑 | `docs/oci-microvm-design.md` |
+| O1 bzImage 壳 | `port/x86_64/bzkern.S`（最小合法 bzImage：setup header + 32 位入口）+ `boot_params` 解析（e820/cmdline/mem → `0x7000`）+ 心跳行；`make x86-bz` | `make check-oci-boot`：`qemu -M microvm -kernel c6os-bz.bin`（无 BIOS、无 cdrom）起机并打印 `c6os bzkern: e820=` |
+| O2 shim v0 | `tools/c6r.py`：OCI bundle → cpio → qemu microvm → 串口流 → `C6EXIT` 解析；容器模式 pid1（不吞信号、退出即关机）；`/etc/c6os.json` manifest | `make check-oci-runtime`：不依赖 docker daemon，自造 bundle 断言 stdout + 退出码（含 `exit 7`）；`make run-oci-docker` 手工验 `docker run --runtime=c6r` |
+| O3 设备面与持久化 | virtio-blk（mmio）+ >32 MB 只读 FAT 卷；virtio-net + `ip=` + slirp `hostfwd`；`--writable` 构建期重映射；摘要缓存（判据：缓存命中 create ≤ 20 ms，达不到才换 Go）| `make check-oci-dev`：大 rootfs 从只读卷起机、guest ping + 内核 TCP、`--writable` 重启后还在 |
+| O4 生命周期 | ctl 通道（第二串口/vsock）+ SIGTERM 优雅退出 + 超时强杀；`-i`/`-t`；`C6READY`/`C6LOGLEVEL` 控制行 | `make check-oci-lifecycle`：stop 3 s 内优雅退出，无 handler 5 s 强杀 |
+| O5 后端矩阵与性能 | `--backend qemu-microvm\|cloud-hypervisor\|firecracker`；`tools/perf-oci.sh` 冷启动预算（端到端 ≤120 ms，fc 类 ≤60 ms）| `make check-oci-backends`、`make perf-oci` |
+| O6 生态接口 | `containerd-shim-c6-v2`（ttrpc create/start/delete/kill/stats，exec 明确拒绝）+ K8s `RuntimeClass: c6` | `make check-oci-containerd`（有 containerd 手工验，否则 mock ttrpc 自测）|
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |
