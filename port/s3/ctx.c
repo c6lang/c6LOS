@@ -122,6 +122,9 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         f[i] = 0u;
         i++;
     }
+    /* §372：帧自描述 —— 偏移 76 = 恢复这个帧之后的 sp。新建的帧就是
+     * 80 字节（RESTORE_FRAME 以前写死 80），显式写出来以免以后又对不上。 */
+    f[19] = top + 80u;
     f[1] = (u32)entry;                 /* a2 */
     f[3] = g_next_task_windowed;       /* a4：入口的 ABI 标志 */
     g_next_task_windowed = 0;

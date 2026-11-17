@@ -356,6 +356,12 @@ _vec_level1:
     movi    a3, -32
     and     a2, a2, a3
     s32i    a2, a1, 64
+    /* §372：帧自描述。本帧在 [sp-128, sp-4)，所以恢复后的 sp = 帧 + 128。
+     * 以前这里没有这个槽，`RESTORE_FRAME` 一律 `addi a1, a1, 80`，而
+     * `port_irq_fill` 恰好把 c->sp 记成这个 128 字节的帧 ⇒ 被中断过的任务
+     * 恢复后 sp 低 48 字节。 */
+    addi    a2, a1, 128
+    s32i    a2, a1, 76
 
     /* level-1 定时器中断的 EXCCAUSE 为 4；其它异常走陷阱打印。 */
     rsr     a3, exccause
@@ -406,7 +412,10 @@ _vec_level1:
     l32i    a13, a1, 48
     l32i    a14, a1, 52
     l32i    a15, a1, 56
-    addi    a1, a1, 128         /* §361：回到被打断的 sp */
+    /* §372：sp 由帧自己给出（偏移 76）—— 本帧是 128 字节，但"从 ISR 切到
+     * 另一个任务"时 a1 指向的是 port_task_switch 存的 80 字节帧，写死 128
+     * 就会弹错。自加载写法两种情形都对（a1 是旧基址，a0..a15 已恢复好）。 */
+    l32i    a1, a1, 76
     rfe
 
     .section .text, "ax", @progbits
