@@ -82,13 +82,12 @@ _start:
      * EXCM=1、EPC1 在 ROM、RTC 0x50000124 标记 0x0F = double exception 向量）。
      * 我们还没有任何 WiFi/BT 中断服务程序，先全局屏蔽；将来闭源库要用时
      * 它会自己把这些源重新打开。 */
-    /* §510 实验：不再屏蔽源 1/4..7。§290 的 pending 中断是二级 bootloader
-     * 路径特有的；我们现在直接从 flash 启动，而闭源库并没有通过 OSI 槽位
-     * 重新打开这些源（set_isr 环是空的），WiFi MAC 中断永远到不了 CPU，
-     * 表现就是 scan_start=12300 超时。先放开看看。 */
+    /* §515：JTAG 实测 INTR_STATUS_0=0xf2（源 1/4..7 一直挂起），
+     * 但 intenable=0x40 —— ROM 只开了定时器。§510 的"不屏蔽"只是保留原状，
+     * 没有真正打开 WiFi MAC(NMI, 源 1)。显式 OR 进 bit1，让 MAC 中断能进向量表。 */
     rsr     a2, intenable
-    movi    a3, -1
-    and     a2, a2, a3
+    movi    a3, 2
+    or      a2, a2, a3
     wsr     a2, intenable
     rsync
 

@@ -17424,3 +17424,39 @@ $ command -v idf.py → 缺失（tools/idf.py 在，但依赖不全）
 `Haven't to connect...`，说明它的状态机在跑但收不到扫描结果）。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §515 显式打开 WiFi MAC 中断源：确认不是中断掩码问题
+
+JTAG 实测（重启后、scan 阶段）：
+
+```
+INTR_STATUS_0(0x60010000) = 0x000000f2   /* 源 1/4..7 一直挂起 */
+intenable                 = 0x00000040   /* 只有定时器（源 6）开 */
+```
+
+§510 的"不屏蔽"只保留了 ROM 原值，没有真正打开源 1。改成显式 OR bit1
+后，`intenable=0x00000042` ✓，源 1 确实开起来了。
+
+但真板结果**没有任何变化**：
+```
+[wifi] scan_start=0 → scan_get_ap_num=0 num=0
+[wifi] connect=0 / 关联超时
+```
+⇒ 中断掩码不是扫描失败的原因；MAC 在硬件层面根本没收 beacon。
+（而且 `_vec_lvl6` 闪灯死循环也没有出现，说明源 1 并没有真的触发。）
+
+PHY 侧已核对：`s3_phy_init_data[128]` 与 IDF `esp32s3/phy_init_data.c`
+逐字节一致；`SYSCON_WIFI_CLK_EN`=0x60026014、`WIFI_BT_COMMON_M`=0x78078F
+与 IDF 头完全一致；完整校准 mode=2 也试过。
+
+### 现在剩下的可能
+
+- `hal_init` 的 `0x60033d14` bit0 很可能就是 MAC 硬件 ready/仲裁位；
+  二进制补丁只跳过了等待，没让硬件进入可收发状态。**不打补丁时握手永不完成**
+  （即使 PHY retry rc=0），说明确实缺一步硬件初始化。
+- 需要在库初始化之前补上 IDF 里 `esp_wifi_init` 做而我们没做的某一步
+  （可能是 `esp_phy_enable` 的完整时序，或 WiFi MAC 复位/天线配置）。
+
+目标未达成，goal 保持 active。
