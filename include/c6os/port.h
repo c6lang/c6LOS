@@ -78,6 +78,11 @@ void port_as_set_free_hook(void (*fn)(u64 as));
 /* 建立/拆除映射。paddr==0 表示分配新物理页（匿名映射）；同一 VA 覆盖映射会
  * 先释放旧页框（MAP_FIXED 语义）。 */
 int  port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot);
+/* 惰性匿名页：分配 + 清零 + 挂一页。清零必须在挂表之前（PORT_AS_MAP 分配路径
+ * 不清零，用户态会看到上一个进程的数据）。 */
+int  port_as_map_zero(u64 as, u64 vaddr, u32 prot);
+/* 当前 CR3 的 AS 句柄（异常处理里定位缺页属于谁）。 */
+u64  port_as_current(void);
 int  port_as_unmap(u64 as, u64 vaddr, u64 bytes);
 /* 改已映射页的权限（mprotect）：W/NX 立刻写回 PTE，不重新分配页框。 */
 int  port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot);

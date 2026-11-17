@@ -109,6 +109,15 @@ int lx_user_ok(u64 va, u64 len, u32 prot)
     if (va + len < va) {
         return 0;
     }
+    if (port_as_user_range_ok(g_as, va, len, prot) != 0) {
+        return 1;
+    }
+    /* 惰性匿名页还没有 PTE：只要 VMA 承诺过这段地址，先把页补上再交给页表
+     * 检查。否则内核 copy_to/from_user 会对"还没被碰过的 malloc 缓冲"误判
+     * EFAULT（RSI 回归里 wait 写 status 就是这么坏的）。 */
+    if (lx_vma_fault_range(g_as, va, va + len, prot) != 0) {
+        return 0;
+    }
     return port_as_user_range_ok(g_as, va, len, prot);
 }
 
@@ -156,6 +165,13 @@ static int brk_extend(u64 want)
 
     if (to > from) {
         if (port_as_map(g_as, from, 0ull, to - from, C6OS_PROT_R | C6OS_PROT_W) != 0) {
+            return -1;
+        }
+        /* 堆也进 VMA：munmap/mprotect/栈增长都要看到它，否则堆上的 mprotect
+         * 会被当成"未映射区间"而返回 ENOMEM。 */
+        lx_vma_remove(g_as, from, to);
+        if (lx_vma_add(g_as, from, to, C6OS_PROT_R | C6OS_PROT_W, LX_VM_HEAP,
+                       0ull) != 0) {
             return -1;
         }
     }
@@ -233,6 +249,17 @@ static u64 sys_brk(u64 want)
     if (want < g_brk_init) {
         return g_brk;                      /* 不允许降到映像内 */
     }
+    if (want < g_brk) {                    /* 收缩：Linux 会真把页还回去 */
+        u64 from = (want + 4095ull) & ~4095ull;
+        u64 to = (g_brk + 4095ull) & ~4095ull;
+
+        if (to > from) {
+            lx_vma_remove(g_as, from, to);
+            (void)port_as_unmap(g_as, from, to - from);
+        }
+        g_brk = want;
+        return g_brk;
+    }
     if (brk_extend(want) != 0) {
         return g_brk;
     }
@@ -269,11 +296,11 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     }
     if ((flags & LX_MAP_FIXED) != 0ull && at != 0ull) {
         lx_vma_remove(g_as, at, at + n);   /* 覆盖映射：旧记账先作废 */
+        (void)port_as_unmap(g_as, at, n);  /* 惰性映射下旧页不会自己消失 */
     }
     if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
-        if (port_as_map(g_as, at, 0ull, n, perm) != 0) {
-            return neg(LX_ENOMEM);
-        }
+        /* 惰性：只记账，第一次访问由 #PF 补零页（M13-2b-3）。malloc 的 arena、
+         * 线程栈这类大 mmap 不再一上来就把物理页吃光。 */
     } else {
         /* 文件映射（MAP_PRIVATE）：逐页"分配页框 → 从 initramfs 拷内容 → 挂页表"。
          * 次序很重要：先挂页表再写用户地址，在 TLB 里还是旧页框的情况下会把
@@ -315,6 +342,9 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 
         if ((flags & LX_MAP_SHARED) != 0ull) {
             vf |= LX_VM_SHARED;
+        }
+        if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
+            vf |= LX_VM_LAZY;              /* 页在第一次访问时才补 */
         }
         if (lx_vma_add(g_as, at, at + n, (u32)perm, vf, off) != 0) {
             return neg(LX_ENOMEM);         /* 区间冲突/记账 OOM */
@@ -461,7 +491,6 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_mprotect:
         {
             u64 end = a0 + ((a1 + 4095ull) & ~4095ull);
-            int mrc;
 
             /* 先过 VMA：Linux 对"保护一段没映射的地址"返回 ENOMEM。只改页表
              * 而不管记账，会让后续 munmap/栈增长按旧属性判断。 */
@@ -469,12 +498,20 @@ void lx_syscall_do(LxRegs *r)
                 r->rax = neg(LX_ENOMEM);
                 return;
             }
-            mrc = port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
+            /* 再改已存在的 PTE。惰性页没有 PTE 可改：VMA 记账成功就算成功，
+             * 页会在缺页时按新 prot 生成（Linux 对未触碰页同样不做事）。 */
+            (void)port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
                                   (u32)a2);
-
-            /* 未映射/参数越界在 Linux 是 ENOMEM；权限位本身只取 R/W/X */
-            r->rax = (mrc == 0) ? 0ull : neg(LX_ENOMEM);
+            r->rax = 0ull;
         }
+        return;
+
+    case LX_SYS_msync:
+        /* 匿名页没有回写后端：整段在 VMA 内就算成功，否则 ENOMEM（Linux 语义）。
+         * 文件映射的脏页回写等 M15 的页缓存落地后再补。 */
+        r->rax = (lx_vma_covered(g_as, a0,
+                                 a0 + ((a1 + 4095ull) & ~4095ull)) != 0)
+                 ? 0ull : neg(LX_ENOMEM);
         return;
 
     case LX_SYS_poll:

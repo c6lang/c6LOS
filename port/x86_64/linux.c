@@ -2,6 +2,7 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
+#include "c6os/linux_vma.h"
 
 extern void x86_timer_entry(void);
 extern void port_linux_timer_init(void);
@@ -83,10 +84,18 @@ int x86_exc_dump(LxRegs *r, u64 cr2)
 {
     u64 *p = (u64 *)r + 15ull;
 
-    /* 先看是不是 COW 写缺页：ring3 直接写、内核写用户缓冲都会到这里。
+    /* #PF 分两类：
+     *   present + 写（err bit0=1）→ COW 私有化（port_pf_resolve）
+     *   not-present（bit0=0）    → 惰性匿名页首访 / 栈向下增长（lx_vma_fault）
      * 修好就原样 iretq 重试那条指令（不看 CPL：内核写用户页同样会缺页）。 */
     if (p[0] == 14ull && lx_cur_proc() != (LxProc *)0) {
-        if (port_pf_resolve(cr2, (u32)p[1]) != 0) {
+        u32 e = (u32)p[1];
+
+        if ((e & 1u) != 0u) {
+            if (port_pf_resolve(cr2, e) != 0) {
+                return 1;
+            }
+        } else if (lx_vma_fault(port_as_current(), cr2) != 0) {
             return 1;
         }
     }

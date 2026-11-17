@@ -90,6 +90,101 @@ LxVma *lx_vma_find(u64 as, u64 va)
     return (LxVma *)0;
 }
 
+/* 整段 [start,end) 是否都被 VMA 覆盖（mprotect/msync 的前置条件）。 */
+int lx_vma_covered(u64 as, u64 start, u64 end)
+{
+    VmaEnt *e = ent_get(as, 0);
+    LxVma *c;
+    u64 at = start;
+
+    if (e == (VmaEnt *)0 || end <= start) {
+        return 0;
+    }
+    c = e->head;
+    while (at < end && c != (LxVma *)0) {
+        if (at >= c->start && at < c->end) {
+            at = c->end;
+        }
+        c = c->next;
+    }
+    return (at >= end) ? 1 : 0;
+}
+
+/* 栈向下增长：va 落在某个栈 VMA 下方的增长窗口里就返回它。 */
+static LxVma *stack_growable(u64 as, u64 va)
+{
+    VmaEnt *e = ent_get(as, 0);
+    LxVma *c;
+    u64 pg = va & ~4095ull;
+
+    if (e == (VmaEnt *)0) {
+        return (LxVma *)0;
+    }
+    c = e->head;
+    while (c != (LxVma *)0) {
+        u64 floor = (c->start > LX_VM_STACK_GAP) ?
+                    (c->start - LX_VM_STACK_GAP) : 0ull;
+
+        if ((c->flags & LX_VM_STACK) != 0u && pg < c->start && pg >= floor) {
+            return c;
+        }
+        c = c->next;
+    }
+    return (LxVma *)0;
+}
+
+int lx_vma_fault(u64 as, u64 va)
+{
+    u64 pg = va & ~4095ull;
+    LxVma *v = lx_vma_find(as, va);
+
+    if (v != (LxVma *)0) {
+        if ((v->flags & LX_VM_LAZY) == 0u) {
+            return 0;                     /* 页本该在：真异常，交给信号 */
+        }
+        return (port_as_map_zero(as, pg, v->prot) == 0) ? 1 : 0;
+    }
+    v = stack_growable(as, va);
+    if (v == (LxVma *)0) {
+        return 0;                         /* 野指针/越界：SIGSEGV */
+    }
+    if (port_as_map_zero(as, pg, v->prot) != 0) {
+        return 0;
+    }
+    if (pg < v->start) {
+        v->start = pg;                    /* 栈 VMA 往下长一页 */
+    }
+    return 1;
+}
+
+int lx_vma_fault_range(u64 as, u64 start, u64 end, u32 prot)
+{
+    u64 va;
+
+    if (end <= start) {
+        return 0;
+    }
+    for (va = start & ~4095ull; va < end; va += 4096ull) {
+        LxVma *v = lx_vma_find(as, va);
+
+        if (v == (LxVma *)0) {
+            if (lx_vma_fault(as, va) == 0) {
+                return -1;
+            }
+            continue;
+        }
+        if ((v->flags & LX_VM_LAZY) != 0u) {
+            if ((v->prot & prot) != prot) {
+                return -1;                /* 权限不足：让上层给 EFAULT */
+            }
+            if (port_as_map_zero(as, va, v->prot) != 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int lx_vma_add(u64 as, u64 start, u64 end, u32 prot, u32 flags, u64 off)
 {
     VmaEnt *e = ent_get(as, 1);

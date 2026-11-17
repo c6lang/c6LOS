@@ -10,6 +10,7 @@
 
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/linux_vma.h"
 
 #define TEST_VA      0x00400000ull
 #define TEST_PAGES   64ull
@@ -168,6 +169,44 @@ void os_main(void)
             }
             port_kfree(a);
             port_kfree(b);
+        }
+    }
+
+    /* M13-2b-3：惰性 VMA 只占触碰页；AS 销毁后页表/页/节点一起归还。 */
+    if (fail == 0u) {
+        u64 as = port_as_create();
+        u64 kb0 = 0ull;
+        u64 kb1 = 0ull;
+        u64 kb2 = 0ull;
+
+        if (as == 0ull) {
+            fail = 18u;
+        } else {
+            lx_vma_init();
+            kb0 = port_phys_free_kb();
+            if (lx_vma_add(as, TEST_VA, TEST_VA + 64ull * 1024ull * 1024ull,
+                           C6OS_PROT_R | C6OS_PROT_W,
+                           LX_VM_ANON | LX_VM_LAZY, 0ull) != 0) {
+                fail = 19u;
+            } else if (lx_vma_fault(as, TEST_VA) != 1) {
+                fail = 20u;
+            } else if (lx_vma_fault(as, TEST_VA + TEST_PAGE) != 1) {
+                fail = 21u;
+            } else if (lx_vma_covered(as, TEST_VA, TEST_VA + TEST_PAGE) == 0) {
+                fail = 22u;
+            } else {
+                kb1 = port_phys_free_kb();
+                /* 64MB 的 VMA 只补了 2 页：降幅必须远小于 64MB */
+                if (kb0 > kb1 && kb0 - kb1 > 64ull) {
+                    fail = 23u;
+                }
+            }
+            port_as_unref(as);             /* 销毁：VMA 链/页表/页一起还 */
+            kb2 = port_phys_free_kb();
+            /* slab 页不还（故意的），留 32KB 余量给节点/表页缓存 */
+            if (fail == 0u && kb2 + 32ull < kb0) {
+                fail = 24u;
+            }
         }
     }
 

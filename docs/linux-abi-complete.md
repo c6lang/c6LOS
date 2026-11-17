@@ -465,3 +465,24 @@ bug 的表象是"某个共享库偶尔加载失败"，不顺着 VMA 链看根本
 make 轮次里出现早期 #DE 崩溃，未能复现（同一镜像随后 13/13 通过），记为环境
 抖动，若再出现按 §6 风险项单独跟踪。
 
+### M13-2b-3 按需分页与验收
+
+- `port_as_map_zero(as, va, prot)`：分配→清零→挂表。清零必须在挂表之前
+  （`port_as_map` 的分配路径不清零，漏了就是"新进程读到上一个进程的数据"）。
+- 惰性 anon mmap：`sys_mmap2` 对 `MAP_ANONYMOUS` 只记账（`LX_VM_LAZY`），
+  物理页等第一次访问；MAP_FIXED 覆盖时显式 `port_as_unmap` 旧页。
+- 缺页分两类：`x86_exc_dump` 里 #PF 的 err bit0=1 走 COW（`port_pf_resolve`），
+  bit0=0 走 `lx_vma_fault`（惰性首访补零页 / 栈 VMA 下方 8MB 窗口内向下增长）；
+  两者都不接管就照旧 `lx_sig_deliver_exc`，SIGSEGV 语义不变。
+- `munmap` 先作废 VMA 再还页；`brk` 收缩真还页；`mprotect` 对惰性页只改 VMA
+  （没有 PTE 可改也算成功）；`msync` 匿名页按 VMA 覆盖返回 0/ENOMEM。
+- `lx_user_ok`：页表检查失败后先 `lx_vma_fault_range` 把惰性页补上再复查，
+  否则内核 `copy_to_user` 会把"还没被碰过的 malloc 缓冲"误判成 EFAULT。
+- 验收：新目标 `check-linuxabi-m13c`（`tests/linux/vma.c`）—— 256MB 惰性 mmap
+  成功、零页初值、未触碰页 mprotect 两次成功、msync、munmap 后立刻再映射
+  256MB、4.8MB 深递归（初始栈只有 128KB）不崩。`check-linuxabi-m13` 另加内核侧
+  记账：64MB 惰性 VMA 只补 2 页 → `free_kb` 降幅 ≤ 64KB；AS 销毁后回升。
+- 回归：L2/L4/L5/L6/L7/L8/M9/M13/M13b 全 PASS。期间 L8 与 M13b 各出现过一次
+  早期 #DE 崩溃（vec=0、ring0、rip 在 0x23xxx），单独重跑即过，未能复现；
+  先按环境抖动记录，若再出现按 §6 风险项抓栈跟踪。
+

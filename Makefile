@@ -1040,7 +1040,7 @@ ifeq ($(X86S_NAME),mem)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_MMU_OBJ)
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/vma.o
 endif
 
 ifeq ($(C6OS_NET),1)
@@ -1397,6 +1397,27 @@ check-linuxabi-m13b: $(COW_IMG)
 		| grep -q "^PASS: cow" \
 	  && echo "PASS: linux-abi M13-2a（COW fork：48MB×6 次 fork + 写隔离）" \
 	  || { echo "FAIL: linux-abi M13-2a"; tail -20 /tmp/check-m13b.log; exit 1; }
+
+# ---- M13-2b：惰性 mmap / 栈向下增长 / munmap 真回收 -------------------------
+VMA_ELF := $(X86)/vma.elf
+VMA_IMG := $(X86)/vma-disk.img
+
+$(VMA_ELF): tests/linux/vma.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(VMA_IMG): $(VMA_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(VMA_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m13c: $(VMA_IMG)
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(VMA_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13c.log \
+		| grep -q "^PASS: vma" \
+	  && echo "PASS: linux-abi M13-2b（惰性 mmap/栈增长/munmap 回收）" \
+	  || { echo "FAIL: linux-abi M13-2b"; tail -20 /tmp/check-m13c.log; exit 1; }
 
 check-linuxabi-l5: $(SH_IMG)
 	@timeout 60 qemu-system-x86_64 -m 256M \

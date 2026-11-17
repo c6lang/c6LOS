@@ -37,6 +37,14 @@ typedef struct LxVma {
 void   lx_vma_init(void);
 /* 找到包含 va 的 VMA；没有返回 0。 */
 LxVma *lx_vma_find(u64 as, u64 va);
+/* [start,end) 是否被 VMA 整段覆盖（mprotect/msync 用）。 */
+int    lx_vma_covered(u64 as, u64 start, u64 end);
+/* 缺页补页：惰性 anon 页 / 栈向下增长。返回 1 = 页已就位，原指令可重试；
+ * 0 = 这不是"VMA 承诺过的地址"，交给信号/异常路径。 */
+int    lx_vma_fault(u64 as, u64 va);
+/* 内核 copy_*_user 前的补页：把区间内的惰性页补上。0 成功，-1 有页不在 VMA
+ * 或权限不足。 */
+int    lx_vma_fault_range(u64 as, u64 start, u64 end, u32 prot);
 /* 登记 [start,end)：与已有区间重叠返回 -1；相邻且属性相同的匿名段自动合并。 */
 int    lx_vma_add(u64 as, u64 start, u64 end, u32 prot, u32 flags, u64 off);
 /* 删/拆区间（不碰页表；调用者负责 port_as_unmap）。 */

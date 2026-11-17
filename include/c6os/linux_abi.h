@@ -127,6 +127,7 @@
 #define LX_CLONE_CHILD_SETTID    0x01000000ull
 
 #define LX_SYS_sched_yield   24
+#define LX_SYS_msync         26
 #define LX_SYS_madvise       28
 #define LX_SYS_prctl        157
 #define LX_SYS_sched_getaffinity 204

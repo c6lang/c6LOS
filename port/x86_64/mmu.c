@@ -779,6 +779,34 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
     return 0;
 }
 
+/* 惰性匿名页：分配→清零→挂表。清零必须在这里做：port_as_map 的分配路径不清零
+ * （它也可能是 MAP_FIXED 换页），漏了就是"新进程读到别人数据"的信息泄漏。
+ * 只挂一页，失败时自己还帧（port_as_map 对给定 paddr 的失败不负责回收）。 */
+int port_as_map_zero(u64 as, u64 vaddr, u32 prot)
+{
+    u64 pa = port_phys_alloc();
+    u8 *p;
+    u64 i;
+
+    if (pa == 0ull) {
+        return -1;
+    }
+    p = (u8 *)port_phys_map(pa);
+    for (i = 0ull; i < PAGE_SZ; i++) {
+        p[i] = 0u;
+    }
+    if (port_as_map(as, vaddr, pa, PAGE_SZ, prot) != 0) {
+        port_phys_put(pa);
+        return -2;
+    }
+    return 0;
+}
+
+u64 port_as_current(void)
+{
+    return cur_as_();
+}
+
 int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
 {
     u64 off = 0;
