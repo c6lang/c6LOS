@@ -53,11 +53,12 @@ _vecbase:
  */
     .align 4
 _win_ovf4:
+    bltui   a5, 0x100, 2f
     s32e    a0, a5, -16
     s32e    a1, a5, -12
     s32e    a2, a5,  -8
     s32e    a3, a5,  -4
-    rfwo
+2:  rfwo
 
     .align 4
 _win_unf4:
@@ -69,45 +70,38 @@ _win_unf4:
 
     .align 4
 _win_ovf8:
+    /* §505：不用 [a1-12] 链。真板 `a9` 有效（前四条 store 都过），
+     * 但链上的 a0 是垃圾，第 5 条 store 就 StoreProhibited 双异常。
+     * 8 个寄存器全部落到 [a9-32,a9) —— 被溢出那一帧的窗口保存区。 */
+    bltui   a9, 0x100, 2f
     s32e    a0, a9, -16
-    l32e    a0, a1, -12
-    bnez    a0, 1f                  /* §292：上一级 sp 为 0 就回退到本帧 */
-    mov     a0, a9
-1:  s32e    a1, a9, -12
+    s32e    a1, a9, -12
     s32e    a2, a9,  -8
     s32e    a3, a9,  -4
-    s32e    a4, a0, -32
-    s32e    a5, a0, -28
-    s32e    a6, a0, -24
-    s32e    a7, a0, -20
-    rfwo
+    s32e    a4, a9, -32
+    s32e    a5, a9, -28
+    s32e    a6, a9, -24
+    s32e    a7, a9, -20
+2:  rfwo
 
     .align 4
 _win_unf8:
+    /* §505：和新的 ovf8 布局镜像。 */
     l32e    a0, a9, -16
     l32e    a1, a9, -12
-    bnez    a1, 1f
-    mov     a1, a9
-1:  l32e    a2, a9,  -8
-    l32e    a7, a1, -12
-    bnez    a7, 2f
-    mov     a7, a9
-2:  l32e    a3, a9,  -4
-    l32e    a4, a7, -32
-    l32e    a5, a7, -28
-    l32e    a6, a7, -24
-    l32e    a7, a7, -20
+    l32e    a2, a9,  -8
+    l32e    a3, a9,  -4
+    l32e    a4, a9, -32
+    l32e    a5, a9, -28
+    l32e    a6, a9, -24
+    l32e    a7, a9, -20
     rfwu
 
     .align 4
 _win_ovf12:
+    /* §505：同 ovf8，不用 [a1-12] 链。 */
+    bltui   a13, 0x100, 2f
     s32e    a0,  a13, -16
-    l32e    a0,  a1,  -12
-    /* §326：和 §292 给 ovf8 加的是同一件事 —— 上一级 sp 还没写进 [a1-12]
-     * 时它是 0，直接拿它当基址就会往 0-48 = 0xffffffd0 写（真板见过
-     * vaddr=0xffffffd1 的 StoreProhibited）。这里退回本帧的 sp。
-     * 补这条之前，_win_ovf12 是四个窗口向量里唯一没有兜底的一个。 */
-    bnez    a0, 1f
     mov     a0, a13
 1:  s32e    a1,  a13, -12
     s32e    a2,  a13,  -8
@@ -120,27 +114,23 @@ _win_ovf12:
     s32e    a9,  a0,  -28
     s32e    a10, a0,  -24
     s32e    a11, a0,  -20
-    rfwo
+2:  rfwo
 
     .align 4
 _win_unf12:
+    /* §505：和新的 ovf12 布局镜像。 */
     l32e    a0,  a13, -16
     l32e    a1,  a13, -12
-    bnez    a1, 1f
-    mov     a1, a13
-1:  l32e    a2,  a13,  -8
-    l32e    a11, a1,  -12
-    bnez    a11, 2f
-    mov     a11, a13
-2:  l32e    a3,  a13,  -4
-    l32e    a4,  a11, -48
-    l32e    a5,  a11, -44
-    l32e    a6,  a11, -40
-    l32e    a7,  a11, -36
-    l32e    a8,  a11, -32
-    l32e    a9,  a11, -28
-    l32e    a10, a11, -24
-    l32e    a11, a11, -20
+    l32e    a2,  a13,  -8
+    l32e    a3,  a13,  -4
+    l32e    a4,  a13, -48
+    l32e    a5,  a13, -44
+    l32e    a6,  a13, -40
+    l32e    a7,  a13, -36
+    l32e    a8,  a13, -32
+    l32e    a9,  a13, -28
+    l32e    a10, a13, -24
+    l32e    a11, a13, -20
     rfwu
 
 /* level-2..6 的中断：闪背光 N 下（N = 等级）后停住。
@@ -285,6 +275,7 @@ _vec_default:
     s32i    a3, a2, 40
     rsr     a3, excsave1
     s32i    a3, a2, 44
+    s32i    a13, a2, 48          /* §504：_win_ovf12 的 spill 基址就是 a13 */
 1:
     j       1b
 

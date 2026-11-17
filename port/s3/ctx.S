@@ -251,8 +251,8 @@
     bnez    a6, 43f                 /* WINDOWSTART 高位非 0 ⇒ 非法 */
     wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
     isync
-    wsr     a5, windowbase
-    isync
+    /* §504：去掉 `wsr windowbase`（§503-C 实测它本身就是故障点），
+     * 基址由恢复段末尾的 `wsr ps`(OWB) + `rfe` 负责装回。 */
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0               /* 取回帧指针（此时窗口已是本任务的）*/
     j       44f
