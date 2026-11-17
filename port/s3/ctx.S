@@ -28,6 +28,11 @@
      * 它是从一开始就错，还是跑了一段才漂出去的。 */
     .literal .Ltrail,     0x50001A00
     .literal .Ltrail_idx, 0x50001A40
+    /* §455：switch 轨迹（环形 8 项 × 8 字节，每项 = ctx, 恢复的 sp），
+     * 与 §452 的 yield 轨迹交叉比对，用来判定"切到 ctx[N] 的那一刻，
+     * 它的 sp 是不是已经错了"。索引在 0x50001B40。 */
+    .literal .Lsrail,     0x50001B00
+    .literal .Lsrail_idx, 0x50001B40
     .literal .Lwscratch, g_win_scratch
     .literal .Ltmpsp,   g_ctx_tmp_sp
     .literal .Lyl_cnt,  g_yl_cnt
@@ -380,6 +385,39 @@ port_task_switch:
     s32i    a1, a14, 0
     l32i    a4, a1, 4               /* 目标任务 ctx（参数先前存在帧里） */
     s32i    a4, a14, 4
+    /* §454：写 `g_s3_cur` 之前校验 `a4` 是个像样的 ctx 指针。
+     *
+     * §453 证明 `port_task_yield` 里的 `a4` 只可能来自 `g_s3_cur[core]`
+     * （`ctx.S:445-448` 是唯一来源，没有第二个入口），而真板轨迹里出现过
+     * `0x42018088`（代码地址）、`0x00000006`、`0x4037992e` 这些绝不可能是
+     * ctx 的值 ⇒ `g_s3_cur[0]` 确实曾被写成垃圾。全系统里写它的地方只有
+     * 下面这条 `s32i a4, a3, 0`，所以就在这里拦。
+     *
+     * 判据刻意做得很宽（只查两条，避免误报）：
+     *   1. 16 字节对齐 —— `S3Ctx` 是 76 字节但按 4 对齐，实际观测都是 16 对齐；
+     *   2. 高 8 位 == 0x3f —— DRAM 段。这样 `0x42..`（代码）、`0x00..`（小整数）
+     *      都会被抓住，而 `0x3fcc6f1c`（ctx[1]，合法）会放行。
+     * 用 `extui` 取高 8 位而不是 `movi 0x3fca0000`，是因为 `movi` 只装得下
+     * 12 位有符号立即数。
+     * 仍然只记录不修正，只记首次（标志 `0x450C`）。 */
+    extui   a6, a4, 0, 4
+    bnez    a6, 6f
+    extui   a6, a4, 24, 8
+    movi    a7, 0x3f
+    bne     a6, a7, 6f
+    j       7f
+6:
+    l32r    a8, .Lmis
+    l32i    a9, a8, 44
+    movi    a6, 0x450C
+    beq     a9, a6, 7f
+    movi    a6, -17705              /* 0xBAD7 */
+    s32i    a6, a8, 32
+    s32i    a4, a8, 36              /* 那个垃圾 ctx */
+    s32i    a1, a8, 40              /* 当时的帧基址 */
+    movi    a6, 0x450C
+    s32i    a6, a8, 44              /* 标志 */
+7:
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5
@@ -387,6 +425,18 @@ port_task_switch:
     l32i    a1, a4, 64
     l32r    a14, .Ldbg2
     s32i    a1, a14, 8              /* 恢复出来的目标 sp */
+    /* §455：switch 轨迹（环形 8 项）。寄存器纪律同 §452：只用 a8..a10
+     * 和 a15（a15 已存进帧的 56 槽，RESTORE_FRAME 会覆盖它）。 */
+    l32r    a8, .Lsrail
+    l32r    a9, .Lsrail_idx
+    l32i    a10, a9, 0
+    extui   a15, a10, 0, 3
+    slli    a15, a15, 3
+    add     a15, a8, a15
+    s32i    a4, a15, 0              /* 本次切到的 ctx */
+    s32i    a1, a15, 4              /* 从它恢复出来的 sp */
+    addi    a10, a10, 1
+    s32i    a10, a9, 0
     /* §451 恢复前校验：比 yield 那道闸门更靠前，能抓到**第一次越界恢复**。
      *
      * §450 的 yield 闸门第一次命中时 sp 已经是 `0x3fcc2300`，说明在这次 yield
