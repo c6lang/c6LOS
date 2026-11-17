@@ -17823,3 +17823,25 @@ I (321) HS: after-wifi-start: 00000001
 c6LOS 侧 `esp_wifi_start()` 返回 0，但 ROM `ic_mac_init` 没能产生同样
 的硬件效果；其输入 (`g_ic` / 时钟状态 / MAC 电源域) 仍与 IDF 有差异。
 目标未达成，goal 保持 active。
+
+---
+
+## §536 `ic_mac_init` → ROM `hal_mac_init` 的关键写入
+
+反汇编 ROM：
+```
+ic_mac_init(0x40383bc0) -> hal_mac_init(0x40384688)
+hal_mac_init:
+  callx8 pm_get_tx_blocks_retention_mask   (app/lib 侧)
+  a10 &= 0x00ff0000; a10 |= 0x00001000
+  a8 = ~a10
+  a11 = [0x60033ca0]
+  [0x60033ca0] = a8 & a11
+```
+⇒ ROM 会用 `pm_get_tx_blocks_retention_mask()` 的返回值去清
+`0x60033ca0` 的位，这正是 MAC ready 前的最后一步硬件写。
+若 c6LOS 侧该函数返回值不同（或 `0x60033ca0` 初值不同），MAC 就
+一直不 ready。下一步可对比两侧 `pm_get_tx_blocks_retention_mask`
+返回值及 `0x60033ca0` 内容。
+
+目标未达成，goal 保持 active。
