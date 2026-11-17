@@ -893,6 +893,16 @@ void s3_win_stress_task(void *arg)
     volatile u32 *d = (volatile u32 *)0x50000A40u;
 
     (void)arg;
+    {
+        /* §383：**必须显式打开祖先窗口 spill**。
+         * `g_s3_win_spill_en` 只在 `s3_wifi_osi_init()` 里被置 1，而这条
+         * 隔离测试用例根本不走那条路径 ⇒ 一直是 0 ⇒ W2C 壳里的 WIN_SPILL
+         * 被跳过 ⇒ "深递归帧还活着的窗口" 在被切走时**没有被存到栈上**，
+         * 切回来就再也找不回来了（阶段 3c 在 dep=1 就卡死，而 3a/3b 通过，
+         * 正是因为它们切换时窗口已经弹空/还没压深）。 */
+        extern u32 g_s3_win_spill_en;
+        g_s3_win_spill_en = 1u;
+    }
     d[0] = 0xC0DE1234u;              /* 已进入 windowed 任务 */
     d[3] = (u32)s3_wifi_test_recv(1u);   /* 库→_queue_recv 最小复现 */
     d[4] = 0xC0DE5678u;              /* 那条路径没崩 */
@@ -921,10 +931,31 @@ void s3_win_stress_task(void *arg)
     {
         u32 dep;
 
+        /* §382：把阶段 3 拆成三个隔离项，一次上板就能定位：
+         *   d[10] = 3a：深递归**之后**才 delay（递归已经返回、栈已弹空）
+         *   d[11] = 3b：delay **之后**再做深递归
+         *   d[12] = 3c：递归里 delay（原来的 s3_win_stress 形态）
+         * 每一步都写自己的槽，卡在哪一步一眼可见。 */
+        d[10] = 0u;
+        d[11] = 0u;
+        d[12] = 0u;
         for (dep = 1u; dep < 6u; dep++) {
             d[9] = dep;
-            d[7] = d[7] + s3_win_stress(dep, dep);
-            d[9] = 0x100u + dep;      /* 这一级过了 */
+            d[10] = dep;
+            d[7] = d[7] + s3_win_deep12_entry(8u) + s3_win_deep(16u);
+            s3_w2c_task_delay(1u);           /* 3a：递归完再切 */
+            d[10] = 0x100u + dep;
+
+            d[11] = dep;
+            s3_w2c_task_delay(1u);           /* 3b：先切再递归 */
+            d[7] = d[7] + s3_win_deep12_entry(8u) + s3_win_deep(16u);
+            d[11] = 0x200u + dep;
+
+            d[12] = dep;
+            d[7] = d[7] + s3_win_stress(dep, dep);   /* 3c：交互形态 */
+            d[12] = 0x300u + dep;
+
+            d[9] = 0x400u + dep;
         }
     }
     d[8] = 0xAAAA0003u;
