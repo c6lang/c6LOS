@@ -1126,6 +1126,16 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_epoll_wait:
         r->rax = lx_epoll_wait(a0, a1, a2, (i64)a3);
         return;
+    /* M21：timerfd */
+    case LX_SYS_timerfd_create:
+        r->rax = lx_timerfd_create(a0, a1);
+        return;
+    case LX_SYS_timerfd_settime:
+        r->rax = lx_timerfd_settime(a0, a1, a2, a3);
+        return;
+    case LX_SYS_timerfd_gettime:
+        r->rax = lx_timerfd_gettime(a0, a1);
+        return;
 
     /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
     case LX_SYS_socket:

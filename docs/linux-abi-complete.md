@@ -792,8 +792,36 @@ epoll 替代 poll 的路径）还缺 epoll 三件套。M20 复用 M16 的 `poll_
 就绪（一次 wait 返回 2）。验收 `make check-linuxabi-m20` → 39/39 checks
 PASS；全量回归 L2–L8/M9/M14–M19/alpine 无回归。
 
-遗留：ET（EPOLLET）/ONESHOT 语义、epoll_pwait 的信号掩码、timerfd/signalfd、
+遗留：ET（EPOLLET）/ONESHOT 语义、epoll_pwait 的信号掩码、signalfd、
 真 pty、DNS/AF_UNIX —— 后续里程碑。
+
+### M21 timerfd 定时器 fd
+
+事件循环另一块核心：把定时器做成可 poll/read 的 fd。复用 `port_cycles`
+假时钟（与 `clock_gettime`/alarm 同口径，1s=1e9 cycles），不引入新的时钟源：
+
+- `LX_FD_TIMERFD` fd kind + `LxTimerFd` 对象表（`counter/value/interval`），
+  close 时释放槽位。`timerfd_create(283)` 支持 CLOCK_REALTIME/MONOTONIC，
+  CLOEXEC/NONBLOCK 标志同 eventfd。
+- `timerfd_settime(286)` / `gettime(287)`：x86-64 `itimerspec` 32B 布局
+  （`it_interval@0`、`it_value@16`，各 16B timespec），相对/绝对
+  （TFD_TIMER_ABSTIME）两种；周期 timer 到期后自动重 armed。
+- 到期检查 `lx_timerfd_check()` 挂在 `lx_proc_alarm_check()` 的两个调用点
+  （resched_/preempt）；read 到点返回 8B 计数并清零，未到期 NONBLOCK 返
+  EAGAIN、否则阻塞等 `wake_all_`。poll/epoll 经 `poll_events_` 每轮驱动
+  到期检查，单进程无其它唤醒源时自旋到点（不破坏 L2–L6 依赖的 stdin 立即 EOF）。
+
+`tests/linux/m21timerfd.c` 验：单次 30ms 到期 read=1、gettime 停表、
+poll 到期前后 0→1、周期 timer 累计 ≥2 次 + interval 回读、settime 清零停表。
+验收 `make check-linuxabi-m21` → 25/25 checks PASS；全量回归 L2–L8/M9/
+M13–M13d/M14–M20/alpine 无回归。
+
+踩坑两个：① `itimerspec` 的 `it_interval` 在@0、`it_value` 在@16，回写
+时写反导致 interval 回读为 0；② 单进程 poll 在 `others_live_` 为假时直接
+返回 0，timerfd 永远等不到到期——加了"有 timerfd + 有 deadline 才自旋"的
+窄条件，避免影响既有的 stdin 立即 EOF 语义。
+
+遗留：signalfd、真 pty、DNS/getaddrinfo、AF_UNIX —— 后续里程碑。
 
 > 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
 > `timeout` 时若被 SIGKILL，内部 timeout 会残留 qemu 占住 m19-disk.img 锁，

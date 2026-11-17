@@ -67,6 +67,7 @@
 #define LX_FD_PROC    6u   /* procfs 虚拟文件（M17-1）：node = id, pos = 偏移 */
 #define LX_FD_SOCK    7u   /* socket（M18）：node = SAL socket id */
 #define LX_FD_EPOLL   8u   /* epoll（M20）：node = 对象 id */
+#define LX_FD_TIMERFD 9u   /* timerfd（M21）：node = 对象 id */
 
 /* procfs 虚拟文件的 id（fs.c 内部生成内容） */
 #define LX_PROC_meminfo   1u
@@ -259,6 +260,12 @@ u64      lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count);
 u64      lx_epoll_create1(u64 flags);
 u64      lx_epoll_ctl(u64 efd, u64 op, u64 fd, u64 uev);
 u64      lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout);
+/* M21：timerfd */
+u64      lx_timerfd_create(u64 clockid, u64 flags);
+u64      lx_timerfd_settime(u64 fd, u64 flags, u64 unew, u64 uold);
+u64      lx_timerfd_gettime(u64 fd, u64 ucur);
+u64      lx_timerfd_read(u64 fd, u64 ubuf, u64 len);
+void     lx_timerfd_check(void);
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
 void     lx_sched_preempt(void);

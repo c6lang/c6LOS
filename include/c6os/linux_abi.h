@@ -219,6 +219,10 @@
 /* M20：epoll 事件接口 */
 #define LX_SYS_epoll_wait    232
 #define LX_SYS_epoll_ctl     233
+/* M21：timerfd */
+#define LX_SYS_timerfd_create 283
+#define LX_SYS_timerfd_settime 286
+#define LX_SYS_timerfd_gettime 287
 /* M18：socket 族 */
 #define LX_SYS_socket        41
 /* M19：busybox applet 矩阵暴露的缺口 */

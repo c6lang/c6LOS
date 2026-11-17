@@ -635,6 +635,7 @@ void lx_proc_alarm_check(void)
     u64 now = port_cycles();
     u32 i;
 
+    lx_timerfd_check();       /* M21：timerfd 到期与 alarm 共用检查点 */
     for (i = 0u; i < g_proc_cap; i++) {
         LxProc *q = g_proc[i].p;
 
@@ -1922,6 +1923,7 @@ u64 lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count)
 
 static void ep_release_(u64 id);   /* M20：定义在 epoll 块，close 里释放注册表 */
 static u16 poll_events_(LxProc *p, i32 fd);  /* M20：epoll_wait 复用，定义在下方 */
+static void tfd_release_(u64 id);  /* M21：定义在 timerfd 块，close 里释放对象 */
 
 u64 lx_proc_close(u64 fd)
 {
@@ -1940,6 +1942,13 @@ u64 lx_proc_close(u64 fd)
     }
     if (fe->kind == LX_FD_EPOLL) {
         ep_release_(fe->pos);
+        fe->node = LX_FD_NONE;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
+    if (fe->kind == LX_FD_TIMERFD) {
+        tfd_release_(fe->pos);
         fe->node = LX_FD_NONE;
         fe->kind = LX_FD_FILE;
         wake_all_();
@@ -2661,6 +2670,261 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
     }
 }
 
+/* ---- M21：timerfd（复用 port_cycles 假时钟，与 alarm 同口径）----
+ * 全局对象表（类似 eventfd/epoll）。counter 为到期次数；it_value 是下次
+ * 到期的绝对 cycles（0=未 armed）；it_interval 非 0 则周期重 armed。
+ * 到期在 lx_timerfd_check() 里推进，该函数挂在 alarm_check 的两个调用点。 */
+#define LX_TFD_SENTINEL 0xfffffff7ull
+
+typedef struct {
+    u64 counter;
+    u64 value;                  /* 下次到期绝对 cycles，0=未 armed */
+    u64 interval;               /* 周期 cycles，0=单次 */
+    u32 used;
+    u32 flags;
+} LxTimerFd;
+
+static LxTimerFd *g_tfd;
+static u32 g_tfd_cap;
+
+static LxTimerFd *tfd_at_(u64 id)
+{
+    if (g_tfd == (LxTimerFd *)0 || id >= g_tfd_cap || g_tfd[id].used == 0u) {
+        return (LxTimerFd *)0;
+    }
+    return &g_tfd[id];
+}
+
+/* close(fd) 时释放对象；定义在 timerfd 块，由前置声明供 lx_proc_close 调用。 */
+static void tfd_release_(u64 id)
+{
+    LxTimerFd *t = tfd_at_(id);
+
+    if (t != (LxTimerFd *)0) {
+        t->used = 0u;
+    }
+}
+
+static int tfd_grow_(void)
+{
+    u32 ncap = (g_tfd_cap == 0u) ? 8u : g_tfd_cap * 2u;
+    LxTimerFd *ne;
+
+    if (ncap > 1024u) {
+        return -1;
+    }
+    ne = (LxTimerFd *)port_kcalloc((u64)ncap, (u64)sizeof(LxTimerFd));
+    if (ne == (LxTimerFd *)0) {
+        return -1;
+    }
+    if (g_tfd != (LxTimerFd *)0) {
+        u32 i;
+
+        for (i = 0u; i < g_tfd_cap; i++) { ne[i] = g_tfd[i]; }
+        port_kfree((void *)g_tfd);
+    }
+    g_tfd = ne;
+    g_tfd_cap = ncap;
+    return 0;
+}
+
+/* timespec(16B) → cycles；ts=0 表示 0。TV_SEC@0/TV_NSEC@8，1s=1e9 cycles。 */
+static u64 ts_cycles_(u64 uts)
+{
+    i64 sec;
+    i64 nsec;
+
+    if (lx_user_ok(uts, 16ull, C6OS_PROT_R) == 0) {
+        return ~0ull;
+    }
+    sec = *(const i64 *)uts;
+    nsec = *(const i64 *)(uts + 8ull);
+    if (sec < 0 || nsec < 0) {
+        return ~0ull;
+    }
+    return (u64)sec * 1000000000ull + (u64)nsec;
+}
+
+/* 反向：cycles → timespec，写回用户缓冲（16B）。 */
+static void cycles_ts_(u64 uts, u64 cyc)
+{
+    u64 sec = cyc / 1000000000ull;
+    u64 nsec = cyc % 1000000000ull;
+
+    *(i64 *)uts = (i64)sec;
+    *(i64 *)(uts + 8ull) = (i64)nsec;
+}
+
+u64 lx_timerfd_create(u64 clockid, u64 flags)
+{
+    LxProc *p = cur_();
+    u64 fd;
+    u32 i;
+
+    /* 只支持 CLOCK_MONOTONIC(1)/CLOCK_REALTIME(0)，标志同 eventfd */
+    if ((clockid != 0ull && clockid != 1ull) ||
+        (flags & ~(u64)(0x80000ull | 0x800ull)) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    for (i = 0u; i < g_tfd_cap; i++) {
+        if (g_tfd[i].used == 0u) { break; }
+    }
+    if (i >= g_tfd_cap) {
+        if (tfd_grow_() != 0) { return n_((u64)LX_ENOMEM); }
+        for (i = 0u; i < g_tfd_cap; i++) {
+            if (g_tfd[i].used == 0u) { break; }
+        }
+    }
+    if (i >= g_tfd_cap) { return n_((u64)LX_ENOMEM); }
+    fd = lx_fdtab_alloc(p->fd);
+    if (fd == LX_FD_NONE) { return n_((u64)LX_EMFILE); }
+    g_tfd[i].used = 1u;
+    g_tfd[i].counter = 0u;
+    g_tfd[i].value = 0u;
+    g_tfd[i].interval = 0u;
+    g_tfd[i].flags = (u32)flags;
+    {
+        LxFile *ent = &p->fd->ent[fd];
+
+        ent->node = LX_TFD_SENTINEL;
+        ent->pos = (u64)i;
+        ent->is_dir = 0u;
+        ent->kind = LX_FD_TIMERFD;
+        ent->flags = (flags & 0x80000ull) ? LX_FD_CLOEXEC : 0u;
+        ent->oflags = (flags & 0x800ull) ? LX_O_NONBLOCK : 0u;
+    }
+    return fd;
+}
+
+u64 lx_timerfd_settime(u64 fd, u64 flags, u64 unew, u64 uold)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxTimerFd *t;
+    u64 value, interval;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_TIMERFD) {
+        return n_((u64)LX_EBADF);
+    }
+    t = tfd_at_(fe->pos);
+    if (t == (LxTimerFd *)0 || (flags & ~1ull) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (lx_user_ok(unew, 32ull, C6OS_PROT_R) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    value = ts_cycles_(unew + 16ull);       /* it_value */
+    interval = ts_cycles_(unew);            /* it_interval */
+    if (value == ~0ull || interval == ~0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (uold != 0ull) {
+        u64 remain = 0ull;
+
+        if (t->value != 0u) {
+            u64 now = port_cycles();
+            remain = (now < t->value) ? (t->value - now) : 0ull;
+        }
+        if (lx_user_ok(uold, 32ull, C6OS_PROT_W) == 0) {
+            return n_((u64)LX_EFAULT);
+        }
+        cycles_ts_(uold + 16ull, remain);   /* it_value@16 = 剩余 */
+        cycles_ts_(uold, 0ull);             /* it_interval@0 旧值不追，报 0 */
+    }
+    t->counter = 0u;
+    t->interval = interval;
+    if (value == 0ull) {
+        t->value = 0u;
+    } else {
+        /* TFD_TIMER_ABSTIME(1) 时 it_value 是绝对 cycles；否则相对现在 */
+        t->value = (flags & 1ull) ? value : port_cycles() + value;
+    }
+    return 0ull;
+}
+
+u64 lx_timerfd_gettime(u64 fd, u64 ucur)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxTimerFd *t;
+    u64 remain = 0ull;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_TIMERFD) {
+        return n_((u64)LX_EBADF);
+    }
+    t = tfd_at_(fe->pos);
+    if (t == (LxTimerFd *)0 || lx_user_ok(ucur, 32ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    if (t->value != 0u) {
+        u64 now = port_cycles();
+        remain = (now < t->value) ? (t->value - now) : 0ull;
+    }
+    cycles_ts_(ucur + 16ull, remain);   /* it_value@16 */
+    cycles_ts_(ucur, t->interval);      /* it_interval@0 */
+    return 0ull;
+}
+
+/* 到点推进：counter++；周期则把 value 往后推 interval，否则停表。 */
+void lx_timerfd_check(void)
+{
+    u64 now = port_cycles();
+    u32 i;
+
+    if (g_tfd == (LxTimerFd *)0) {
+        return;
+    }
+    for (i = 0u; i < g_tfd_cap; i++) {
+        LxTimerFd *t = &g_tfd[i];
+
+        if (t->used == 0u || t->value == 0u || now < t->value) {
+            continue;
+        }
+        if (t->interval == 0u) {
+            t->value = 0u;
+        } else {
+            do {
+                t->value += t->interval;
+            } while (t->value <= now);
+        }
+        t->counter++;
+        wake_all_();
+    }
+}
+
+u64 lx_timerfd_read(u64 fd, u64 ubuf, u64 len)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxTimerFd *t;
+    u64 v;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_TIMERFD) {
+        return n_((u64)LX_EBADF);
+    }
+    t = tfd_at_(fe->pos);
+    if (t == (LxTimerFd *)0 || lx_user_ok(ubuf, 8ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    lx_timerfd_check();
+    if (t->counter == 0u) {
+        if ((fe->oflags & LX_O_NONBLOCK) != 0u) {
+            return n_((u64)LX_EAGAIN);
+        }
+        /* 阻塞等到到期：复用等待队列，到点后由 lx_timerfd_check 的 wake_all 唤醒 */
+        for (;;) {
+            lx_proc_set_wait(LX_WAIT_PIPE);
+            lx_proc_block();
+            lx_timerfd_check();
+            if (t->counter != 0u) { break; }
+        }
+    }
+    v = t->counter;
+    t->counter = 0u;
+    *(u64 *)ubuf = v;
+    return 8ull;
+}
+
 u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
@@ -2681,6 +2945,9 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     }
     if (fe->kind == LX_FD_EVENTFD) {
         return lx_proc_eventfd_read(fd, ubuf, len);
+    }
+    if (fe->kind == LX_FD_TIMERFD) {
+        return lx_timerfd_read(fd, ubuf, len);
     }
     if (fe->kind == LX_FD_SOCK) {
         return lx_sock_recv(fd, ubuf, len, 0ull);
@@ -2728,6 +2995,11 @@ static u16 poll_events_(LxProc *p, i32 fd)
     if (f->kind == LX_FD_EVENTFD) {
         return (g_efd != (LxEfd *)0 && f->pos < g_efd_cap &&
                 g_efd[f->pos].counter != 0ull) ? (u16)LX_POLLIN : (u16)0;
+    }
+    if (f->kind == LX_FD_TIMERFD) {
+        lx_timerfd_check();
+        return (tfd_at_(f->pos) != (LxTimerFd *)0 &&
+                tfd_at_(f->pos)->counter != 0u) ? (u16)LX_POLLIN : (u16)0;
     }
     if (f->kind == LX_FD_PIPE_R) {
         const LxPipe *pp = pipe_at_(f->node);
@@ -2820,8 +3092,25 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
          * 没人可切时状态就悬在 BLOCK 上，而且再也等不到唤醒。
          * 纯管道才值得真阻塞——但也得先确认还有别人能往管道里写。 */
         if (tty == 0u) {
-            if (!others_live_(g_cur)) {
+            int has_tfd = 0;
+            u64 q;
+
+            /* 单进程：若有 timerfd 且带 deadline，自旋到点（没有别的进程
+             * 能 wake 我们，timerfd 到期由 poll_events_ 每轮驱动）。否则
+             * 立刻返回，避免协作调度里死等（L2–L6 依赖 stdin 立即 EOF）。 */
+            for (q = 0ull; q < nfds; q++) {
+                i32 qfd = *(i32 *)(ufds + q * 8ull);
+                const LxFile *qe = lx_fdtab_get(p->fd, (u64)qfd);
+
+                if (qe != (LxFile *)0 && qe->kind == LX_FD_TIMERFD) {
+                    has_tfd = 1;
+                }
+            }
+            if (!others_live_(g_cur) && !(has_tfd && have_deadline)) {
                 return cnt;
+            }
+            if (!others_live_(g_cur)) {
+                continue;                  /* 有 timerfd：自旋等到点 */
             }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
