@@ -17483,3 +17483,35 @@ IDF `esp_wifi_bt_power_domain_on()` 的顺序是：
 硬件状态；或者查 S3 的 WiFi MAC 寄存器资料确认 0xD14 的 bit0 定义。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §517 反汇编 hal_init：bit1 是请求、bit0 是硬件应答；公开资料无定义
+
+`hal_init` 完整开头（objdump）：
+
+```
+420245cf  l32r a2, 0x60033d14
+420245d4  memw
+420245d7  l32i a3, a2, 0
+420245d9  or   a3, a3, 2          /* 置 bit1（请求） */
+420245df  memw
+420245e4  l32i a3, a2, 0
+420245e6  bbci a3, 0, 420245e1    /* 等 bit0=1（应答） */
+420245e9  之后: 0x60033c34=0, 0x60033c40=~0,
+               call8 mac_txrx_init → hal_mac_rx_set_policy ×4
+               → mac_rxbuf_init → hal_last_rxbuf_init
+               → hal_mac_rate_autoack_init → hal_mac_disable_low_rate
+               → hal_crypto_init → hal_attenna_init
+```
+
+⇒ 每轮写 bit1、读 bit0，是典型的 **request/acknowledge 硬件握手**；
+bit0 是只读状态位（JTAG `mww 3` 读回仍 0），必须由某个硬件条件置位。
+它没被满足时，后面整串 MAC 初始化（含 `hal_attenna_init`）都没跑过。
+
+公开查证：Web 搜索 + Espressif 头文件 + S3 TRM 均无 `0x60033d14` 的 bit 定义；
+第三方 S3 WiFi MAC 反演头文件只定义了 `WIFI_TX_CONFIG=0x60033d04`、
+`WIFI_TX_PLCP0=0x60033d08`，0xD14 落在 TX 配置区但无名字。
+⇒ 只能靠硬件实测找置位条件。
+
+目标未达成，goal 保持 active。
