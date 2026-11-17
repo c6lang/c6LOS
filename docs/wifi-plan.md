@@ -17089,3 +17089,66 @@ vecdef: cause=0x1d  va=0xfffffff9  epc1=0x40379764  ← RESTORE_FRAME 的 `wsr w
    绕开 `_win_ovf*`/`_win_unf*` 这一整条脆弱链路。
 3. 或者干脆**让 kernel 与库都跑 windowed**（`S3_ABI=windowed`，Makefile:18），
    消掉交叉 ABI 的壳 —— 这才是根上的解决办法，代价是要重写 ctx.S/w2c.S。
+
+---
+
+## §503 A/B（这次看**陷阱记录**，不只看串口）：三条路都还是冻机
+
+上一节 §500 只用串口行数判断好坏，是**错的指标** —— 不同修法会让任务卡在
+不同地方，串口自然不一样，不代表没再陷异常。这轮每次都同时读
+`0x50000100` 的陷阱记录。
+
+### A：§489 基线（当前提交）
+
+```
+串口:  bWu1bu1Wu2.b
+vecdef: cause=0x1d va=0xfffffff9 epc1=0x40379764（`wsr windowbase`）
+        ps=0x6091f a0=0x3fcbcdf4 a1=0xa wb=0xa ws=0x400 depc=0x40378438(_win_ovf12)
+```
+
+**注意 `WS=0x400`、`WB=0xa` 是合法对** —— `(0x400>>10)&1==1` ✓。
+⇒ **§491 的"不变式被破坏"理论是错的**，之前把它当成根因带偏了好几轮。
+
+（顺带纠正：陷阱记录里的 `a0/a1` 是**异常入口 `rotw -1` 之后**的影子值，
+对应故障现场的 `a4/a5`，不是真的 a0/a1。所以 `a1=0xa` 只是"当时 a5 里装着
+WB=10"，别再拿它当 sp 分析。）
+
+### B：CLR_OWB(§490) + WIN_SET(§491)
+
+```
+串口:  b
+vecdef: cause=0x1d va=0xfffffff2 epc1=0x42013aa2（s3_w2c_sem_post 的 s32i）
+        ps=0x60810 wb=9 ws=0x355 depc=0x40378438(_win_ovf12)
+```
+
+故障点从 `wsr windowbase` 移到了库调用路径，但**依然双异常冻机**。
+所以这两个改动确实改写了窗口状态，但没解决问题。
+
+### C：只在基线里**删掉** §457 路径那条 `wsr windowbase`
+
+```
+串口:  bWu1b
+vecdef: cause=0x1d va=0xfffffff2 epc1=0x4201500f（库里）
+        ps=0x6091f wb=4 ws=0x3519 depc=0x40378438(_win_ovf12)
+```
+
+**那条 `wsr windowbase` 的故障确实消失了** —— 恢复段末尾的 `wsr ps`(带 OWB)
++ `rfe` 已经负责把基址装回去了，软件这一下是多余的、而且是故障源。
+但 `_win_ovf12` 还是在库调用里炸。
+
+### 现在的真问题（A/B/C 的共同下游）
+
+**`_win_ovf12` 处理体 spills 到野地址**（`depc` 三次都是它，`va=0xfffffff2/-9`）。
+它用 `a13`（call12 时=调用者的 sp）和 `a0=[a1-12]`（上一级帧链）当基址。
+A/B/C 都说明：**链上某一环的值不可靠**，而这一环来自我们手写的
+call0↔windowed 混编帧。继续在 `RESTORE_FRAME` 里挤指令是死路。
+
+### 下一轮换思路（别再碰 RESTORE_FRAME）
+
+1. **把 C 这个改动捡回来**（删掉多余的 `wsr windowbase`），它确实干掉了一个
+   故障点；然后集中修 `_win_ovf12` 的帧链：保证每个 windowed 壳的帧下方
+   `[sp-12]` 写的是"上一级帧基址"，且 `[sp-48,sp)` 不被内核局部量覆盖。
+2. 或者彻底绕开硬件溢出机制：把 `w2c.S:480 s3_win_spill` 从"靠深调用填满
+   寄存器文件触发溢出"改成**IRAM 里直接逐窗口 spill**（不碰 `_win_ovf*`，
+   也就不依赖那条链）。
+3. 终极方案仍是 `S3_ABI=windowed`：kernel 与库同一 ABI，直接删掉所有壳。
