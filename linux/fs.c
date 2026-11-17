@@ -33,7 +33,11 @@ static LxFile *g_fd = g_fdt0;
 static u64    g_fs_pa;
 /* 当前目录（不带前导 '/'，空串 = 根）。M12-4：cd 之前是个空操作，
  * getcwd 恒回 "/"，相对路径一律当根路径查 —— 所以 `cd /bin; ls` 列的还是 /。 */
-static char   g_cwd[FS_NAME];
+static char   g_cwd_root[FS_NAME];
+/* 指向**当前进程**的 cwd（不带前导 '/'，空串=根）。进程切换时由 proc.c 调
+ * lx_fs_set_cwd() 换指针 —— cwd 必须跟进程走：`top` 自己会 chdir("/proc")，
+ * 共享一份的话它一退出，父 shell 的 cwd 就跟着跑进 /proc，`ls` 列出来是空的。 */
+static char  *g_cwd = g_cwd_root;
 
 
 #if C6OS_VFS
@@ -942,7 +946,13 @@ u64 lx_fs_chdir(u64 upath)
 
 const char *lx_fs_cwd(void)
 {
-    return (const char *)&g_cwd[0];
+    return (const char *)g_cwd;
+}
+
+/* 切进程时换 cwd（proc.c 在换 fd 表的同一个地方调） */
+void lx_fs_set_cwd(char *p)
+{
+    g_cwd = (p != (char *)0) ? p : g_cwd_root;
 }
 
 u64 lx_fs_close(u64 fd)

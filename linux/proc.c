@@ -97,6 +97,7 @@ void lx_proc_attach(u64 as, u64 brk)
     }
     p = &g_proc[g_cur];
     lx_fs_set_fdtab(p->fd);                /* fd 表从此跟着进程走 */
+    lx_fs_set_cwd(p->cwd);
     p->state = LX_P_RUN;
     p->as = as;
     p->brk = brk;
@@ -219,6 +220,7 @@ static void switch_to_(int next)
     lx_brk_set(p->brk);
     lx_mmap_top_set(p->mmap_top);
     lx_fs_set_fdtab(p->fd);
+    lx_fs_set_cwd(p->cwd);
     port_user_set_kstack(p->kstack_top);
     port_user_set_fsbase(p->fs_base);
     if (p->started == 0u) {
@@ -505,6 +507,16 @@ u64 lx_proc_fork(LxRegs *r)
     ch->started = 0u;
     lx_sig_fork(ch, par);
     ch->state = LX_P_READY;
+    {
+        u64 k_;
+
+        for (k_ = 0ull; k_ < (u64)sizeof(ch->cwd); k_++) {
+            ch->cwd[k_] = par->cwd[k_];
+            if (ch->cwd[k_] == '\0') {
+                break;
+            }
+        }
+    }
     {
         u64 i;
 

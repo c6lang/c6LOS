@@ -632,6 +632,8 @@ sys.c 里跟 `setsid`/`umask` 一起被归成"L6+ 再说"的空操作（直接�
 `lx_fs_chdir()` 真的查节点、确认是目录、再用节点名当规范路径写回 `g_cwd`；
 `lx_fs_cwd()` 给 `getcwd` 拼 `"/" + cwd`。
 
-cwd 是**内核里的一份**，不跟进程走：ash 的 `cd` 是内置命令（不 fork），交互使用
-没问题；但子进程里 `chdir` 会漏给父进程。要按进程隔离，得跟 fd 表那套
-per-proc 一起做。
+cwd 一开始是**内核里的一份**，随即被 `top` 打脸：busybox 的 top 自己会
+`chdir("/proc")`，它一退出，父 shell 的 cwd 就跟着进了 /proc，`ls` 于是列出一张
+空表（`pwd` 还显示 /proc —— rootfs 里那个 /proc 是真空目录）。现在 cwd 跟着
+进程走：`LxProc.cwd[]`，进程切换时在换 fd 表的同一个地方调
+`lx_fs_set_cwd(p->cwd)`，fork 时子进程继承父进程的 cwd。

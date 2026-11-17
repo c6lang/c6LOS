@@ -86,6 +86,7 @@ typedef struct LxProc {
     u32 irq_frame;                /* 当前活帧是"定时器中断帧"（20 个 qword） */
     u32 sig_code[LX_NSIG];
     LxSigAction sa[LX_NSIG];
+    char cwd[96];                 /* 当前目录（不带前导 '/'，空串=根）：必须跟进程走 */
     LxFile fd[C6OS_LINUX_MAX_FD];
 } LxProc;
 
