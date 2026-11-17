@@ -5,15 +5,16 @@
  * 读空管道时主动让出 CPU，被唤醒后再从让出点继续。真正的抢占式调度要等
  * L5+ 的 IRQ_USER（时钟中断 + TSS 栈切换），届时这里只换 pick_next 的触发源。
  *
- * 每个进程的内核栈是**静态**的（LX_MAX_PROC × LX_KSTACK_SIZE），这样切换时
- * 不需要在中断上下文里分配内存，也不会被 PMM 耗尽卡死。
+ * 进程表不是定长数组（M13-3b）：槽位指针数组与每个进程的内核栈都来自内核堆，
+ * 随真实并发进程数增长，只有 LX_PROC_MAX_CAP 这个保护性上限。内核栈仍然在
+ * 切换时**不做分配**——槽位建立时就把栈准备好，切换只是换 TSS.rsp0。
  */
 #ifndef C6OS_LINUX_PROC_H
 #define C6OS_LINUX_PROC_H
 
 #include <c6os/linux_abi.h>
 
-#define LX_MAX_PROC      8u
+#define LX_PROC_MAX_CAP  4096u    /* 保护性上限，不是工程上限 */
 #define LX_KSTACK_SIZE   8192ull
 
 /* 进程状态 */

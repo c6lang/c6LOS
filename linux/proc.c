@@ -23,9 +23,20 @@ typedef struct LxPipe {
     u8  buf[LX_PIPE_SZ];
 } LxPipe;
 
-static LxProc  g_proc[LX_MAX_PROC];
+/* 进程表（M13-3b）：槽位数组在内核堆里按需倍增，每个槽位有独立的 LxProc 与
+ * 内核栈。槽位一旦建立就留下复用（和 Linux 的 task_struct/内核栈 slab 一样），
+ * 所以内存上限由**峰值并发**决定，而不是由历史 fork 总数决定。
+ *
+ * 为什么 LxProc 与槽位分开分配：fork 里会持有父进程的 LxProc* 去调 slot_alloc_，
+ * 如果 LxProc 内嵌在数组里，数组倍增会让那个指针失效。 */
+typedef struct LxSlot {
+    LxProc *p;            /* 0 = 未使用 */
+    u8     *kstk;         /* 内核栈基址；栈顶 = kstk + LX_KSTACK_SIZE */
+} LxSlot;
+
+static LxSlot *g_proc;             /* 槽位数组：内核堆，倍增 */
+static u32     g_proc_cap;
 static LxPipe  g_pipe[LX_MAX_PIPE];
-static u8      g_kstack[LX_MAX_PROC][LX_KSTACK_SIZE];
 static int     g_cur = -1;
 
 /* L8：抢占。定时器每 tick 进来一次，攒够时间片就让出 CPU。 */
@@ -71,10 +82,10 @@ i64 lx_fs_lookup(const char *path);                           /* linux/fs.c */
 
 static LxProc *cur_(void)
 {
-    if (g_cur < 0) {
+    if (g_cur < 0 || (u32)g_cur >= g_proc_cap) {
         return (LxProc *)0;
     }
-    return &g_proc[g_cur];
+    return g_proc[g_cur].p;
 }
 
 LxProc *lx_cur_proc(void)
@@ -104,19 +115,102 @@ static void mem_copy_(u8 *d, const u8 *s, u64 n)
 
 /* ---- 进程表 -------------------------------------------------------------- */
 
+/* 槽位定义见文件头：数组本身在 kernel heap，按需倍增。 */
+static int slot_grow_(void)
+{
+    u32 ncap = (g_proc_cap == 0u) ? 8u : (g_proc_cap * 2u);
+    LxSlot *ns;
+    u32 i;
+
+    if (g_proc_cap >= LX_PROC_MAX_CAP) {
+        return -1;
+    }
+    if (ncap > LX_PROC_MAX_CAP) {
+        ncap = LX_PROC_MAX_CAP;
+    }
+    ns = (LxSlot *)port_kcalloc((u64)ncap, (u64)sizeof(LxSlot));
+    if (ns == (LxSlot *)0) {
+        return -1;
+    }
+    for (i = 0u; i < g_proc_cap; i++) {
+        ns[i] = g_proc[i];
+    }
+    if (g_proc != (LxSlot *)0) {
+        port_kfree((void *)g_proc);
+    }
+    g_proc = ns;
+    g_proc_cap = ncap;
+    return 0;
+}
+
+/* 拿一个可用槽位：优先复用已建立但空出来的（保留它的 LxProc 与内核栈），
+ * 没有再扩容。返回的 LxProc 是清零的、kstack_top 已填好的。 */
+static int slot_alloc_(void)
+{
+    u32 i;
+
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *p = g_proc[i].p;
+
+        if (p != (LxProc *)0 && p->state == LX_P_FREE) {
+            mem_zero_((u8 *)p, (u64)sizeof(*p));
+            p->kstack_top = (u64)g_proc[i].kstk + LX_KSTACK_SIZE;
+            return (int)i;
+        }
+    }
+    if (slot_grow_() != 0) {
+        return -1;
+    }
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *p;
+        u8 *ks;
+
+        if (g_proc[i].p != (LxProc *)0) {
+            continue;
+        }
+        p = (LxProc *)port_kcalloc(1ull, (u64)sizeof(*p));
+        ks = (u8 *)port_kmalloc(LX_KSTACK_SIZE);
+        if (p == (LxProc *)0 || ks == (u8 *)0) {
+            if (p != (LxProc *)0) {
+                port_kfree((void *)p);
+            }
+            if (ks != (u8 *)0) {
+                port_kfree((void *)ks);
+            }
+            return -1;
+        }
+        g_proc[i].p = p;
+        g_proc[i].kstk = ks;
+        p->kstack_top = (u64)ks + LX_KSTACK_SIZE;
+        return (int)i;
+    }
+    return -1;
+}
+
 void lx_proc_attach(u64 as, u64 brk)
 {
     LxProc *p;
+    int s;
 
     if (g_cur < 0) {
-        g_cur = 0;
-        p = &g_proc[0];
-        mem_zero_((u8 *)p, (u64)sizeof(*p));
-        p->pid = g_pid_next;
+        s = slot_alloc_();
+        if (s < 0) {
+            port_puts("[lx] 进程表没有内存\n");
+            port_panic_halt();
+        }
+        g_cur = s;
+        p = cur_();
+        p->pid = (u32)g_pid_next;
         g_pid_next++;
         p->ppid = 0u;
+        /* fd 表销毁时逐槽通知管道减 readers/writers：fdt 不认识管道，走钩子。 */
+        lx_fdtab_set_free_hook(pipe_drop_);
     }
-    p = &g_proc[g_cur];
+    p = cur_();
+    if (p == (LxProc *)0) {
+        port_puts("[lx] 进程表坏了\n");
+        port_panic_halt();
+    }
     if (p->fd == (LxFdTab *)0) {
         /* 单进程载荷可能在登记进程之前就 open 过（走 fs.c 的兜底表）：接管它，
          * 那些 fd 属于这个进程，不能丢。 */
@@ -139,20 +233,7 @@ void lx_proc_attach(u64 as, u64 brk)
     lx_sig_reset(p);
     p->tgid = p->pid;
     p->started = 1u;
-    p->kstack_top = (u64)(&g_kstack[g_cur][0]) + LX_KSTACK_SIZE;
     port_user_set_kstack(p->kstack_top);
-}
-
-static int slot_alloc_(void)
-{
-    int i;
-
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (g_proc[i].state == LX_P_FREE) {
-            return i;
-        }
-    }
-    return -1;
 }
 
 /* ---- L7：线程 -------------------------------------------------------------
@@ -207,13 +288,14 @@ static int pick_next_(int from)
 {
     int i;
 
-    /* i 只能到 LX_MAX_PROC-1：resched_ 在调用前已经把"当前"置成 READY，
-     * 若循环最后一圈绕回 from，(from + LX_MAX_PROC) % LX_MAX_PROC == from，
-     * 就会把当前槽位自己挑出来 -> switch_to_(自己) 用陈旧 ksp 自切换、换坏栈。 */
-    for (i = 1; i < (int)LX_MAX_PROC; i++) {
-        int k = (from + i) % (int)LX_MAX_PROC;
+    /* i 只能绕一圈：resched_ 在调用前已经把"当前"置成 READY，
+     * 若最后一圈绕回 from 就会把当前槽位自己挑出来 -> switch_to_(自己)
+     * 用陈旧 ksp 自切换、换坏栈。 */
+    for (i = 1; i < (int)g_proc_cap; i++) {
+        int k = ((from + i) % (int)g_proc_cap + (int)g_proc_cap) % (int)g_proc_cap;
+        LxProc *q = g_proc[k].p;
 
-        if (g_proc[k].state == LX_P_READY) {
+        if (q != (LxProc *)0 && q->state == LX_P_READY) {
             return k;
         }
     }
@@ -224,7 +306,7 @@ static int pick_next_(int from)
  * 回来时（本进程被再次调度）从 lx_ctx_switch 之后继续。 */
 static void switch_to_(int next)
 {
-    LxProc *p = &g_proc[next];
+    LxProc *p = g_proc[next].p;
     LxProc *c = cur_();
     u64 prev_sp;
 
@@ -339,30 +421,36 @@ void lx_proc_block(void)
 
 static void wake_(u32 pid)
 {
-    int i;
+    u32 i;
 
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (g_proc[i].pid == pid && g_proc[i].state == LX_P_BLOCK) {
-            g_proc[i].state = LX_P_READY;
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q != (LxProc *)0 && q->pid == pid && q->state == LX_P_BLOCK) {
+            q->state = LX_P_READY;
         }
     }
 }
 
 LxProc *lx_proc_find(i64 pid)
 {
-    int i;
+    u32 i;
 
     if (pid <= 0) {
         return (LxProc *)0;
     }
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (g_proc[i].state != LX_P_FREE && (i64)g_proc[i].pid == pid) {
-            return &g_proc[i];
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q != (LxProc *)0 && q->state != LX_P_FREE && (i64)q->pid == pid) {
+            return q;
         }
     }
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {    /* kill(pid) 打的是整个线程组 */
-        if (g_proc[i].state != LX_P_FREE && (i64)g_proc[i].tgid == pid) {
-            return &g_proc[i];
+    for (i = 0u; i < g_proc_cap; i++) {    /* kill(pid) 打的是整个线程组 */
+        LxProc *q = g_proc[i].p;
+
+        if (q != (LxProc *)0 && q->state != LX_P_FREE && (i64)q->tgid == pid) {
+            return q;
         }
     }
     return (LxProc *)0;
@@ -390,16 +478,19 @@ void lx_proc_exit_sig(u32 sig)
 /* 把同组其它线程直接释放（不动 self）。共享地址空间随之少一个引用。 */
 static void reap_peers_(LxProc *self)
 {
-    int i;
+    u32 i;
 
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        LxProc *q = &g_proc[i];
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
 
-        if (q == self || q->state == LX_P_FREE || q->tgid != self->tgid) {
+        if (q == (LxProc *)0 || q == self || q->state == LX_P_FREE ||
+            q->tgid != self->tgid) {
             continue;
         }
         q->state = LX_P_FREE;
         q->pid = 0u;
+        lx_fdtab_unref(q->fd);             /* 每个线程持一份 fd 表引用 */
+        q->fd = (LxFdTab *)0;
         port_as_unref(q->as);
         q->as = 0ull;
     }
@@ -409,7 +500,7 @@ static void reap_peers_(LxProc *self)
 static void thread_exit_(LxProc *c)
 {
     u64 ct = c->clear_tid;
-    int i;
+    u32 i;
     int next;
 
     if (ct != 0ull && lx_user_ok(ct, 4ull, C6OS_PROT_W) != 0) {
@@ -418,12 +509,16 @@ static void thread_exit_(LxProc *c)
     c->clear_tid = 0ull;
     c->state = LX_P_FREE;
     c->pid = 0u;
+    lx_fdtab_unref(c->fd);                 /* 只放自己那一份，线程组还有别的引用 */
+    c->fd = (LxFdTab *)0;
     /* 组长还持有这个 AS 的引用，所以这里不会把页表拆掉 */
     port_as_unref(c->as);
     c->as = 0ull;
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (g_proc[i].state == LX_P_BLOCK) {
-            g_proc[i].state = LX_P_READY;
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+            q->state = LX_P_READY;
         }
     }
     next = pick_next_(g_cur);
@@ -526,8 +621,7 @@ u64 lx_proc_fork(LxRegs *r)
         port_as_destroy(as);
         return (u64)0 - LX_ENOMEM;
     }
-    ch = &g_proc[slot];
-    mem_zero_((u8 *)ch, (u64)sizeof(*ch));
+    ch = g_proc[slot].p;                   /* slot_alloc_ 已清零并填好 kstack_top */
     ch->pid = (u32)g_pid_next;
     g_pid_next++;
     ch->ppid = par->pid;
@@ -535,7 +629,6 @@ u64 lx_proc_fork(LxRegs *r)
     ch->as = as;
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
-    ch->kstack_top = (u64)(&g_kstack[slot][0]) + LX_KSTACK_SIZE;
     ch->f.r = *r;                         /* 继承父进程的用户寄存器 */
     ch->f.r.rax = 0ull;                   /* fork 在子进程里返回 0 */
     ch->f.user_rsp = pf->user_rsp;
@@ -591,13 +684,13 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
         return (u64)0 - LX_ECHILD;
     }
     for (;;) {
-        int i;
+        u32 i;
         int has_child = 0;
 
-        for (i = 0; i < (int)LX_MAX_PROC; i++) {
-            LxProc *c = &g_proc[i];
+        for (i = 0u; i < g_proc_cap; i++) {
+            LxProc *c = g_proc[i].p;
 
-            if (c->state == LX_P_FREE || c->ppid != par->pid) {
+            if (c == (LxProc *)0 || c->state == LX_P_FREE || c->ppid != par->pid) {
                 continue;
             }
             if (pid > 0 && (i64)c->pid != pid) {
@@ -746,13 +839,17 @@ static u64 n_(u64 v)
     return (u64)0 - v;
 }
 
+/* 把所有权在等待的进程都叫醒（协作式调度下没有等待队列，统一全表扫）。
+ * 管道可读写、原子操作完成、线程退出都用它。 */
 static void wake_all_(void)
 {
-    int i;
+    u32 i;
 
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (g_proc[i].state == LX_P_BLOCK) {
-            g_proc[i].state = LX_P_READY;
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+            q->state = LX_P_READY;
         }
     }
 }
@@ -1007,13 +1104,15 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
 /* 还有别的进程可能改变管道状态吗？没有就别死等（协作式调度里等不到人）。 */
 static int others_live_(int self)
 {
-    int i;
+    u32 i;
 
-    for (i = 0; i < (int)LX_MAX_PROC; i++) {
-        if (i == self) {
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || (int)i == self) {
             continue;
         }
-        if (g_proc[i].state == LX_P_READY || g_proc[i].state == LX_P_RUN) {
+        if (q->state == LX_P_READY || q->state == LX_P_RUN) {
             return 1;
         }
     }
@@ -1160,8 +1259,7 @@ u64 lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
     if (slot < 0) {
         return (u64)0 - LX_EAGAIN;
     }
-    ch = &g_proc[slot];
-    mem_zero_((u8 *)ch, (u64)sizeof(*ch));
+    ch = g_proc[slot].p;                   /* slot_alloc_ 已清零并填好 kstack_top */
     ch->pid = (u32)g_pid_next;
     g_pid_next++;
     tid = ch->pid;
@@ -1171,7 +1269,6 @@ u64 lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
     port_as_ref(ch->as);                   /* 线程组每个成员持一个引用 */
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
-    ch->kstack_top = (u64)(&g_kstack[slot][0]) + LX_KSTACK_SIZE;
     ch->f.r = *r;                          /* 继承父线程的陷入帧 */
     ch->f.r.rax = 0ull;                    /* 线程里 clone 返回 0 */
     ch->f.user_rsp = child_stack;          /* 跑在 clone 给的栈上 */
@@ -1201,7 +1298,6 @@ void lx_proc_exit_group(u64 code)
 {
     LxProc *c = cur_();
     LxProc *lead;
-    int i;
     int next;
 
     if (c == (LxProc *)0) {
@@ -1230,11 +1326,7 @@ void lx_proc_exit_group(u64 code)
             }
             wake_(lead->ppid);
         }
-        for (i = 0; i < (int)LX_MAX_PROC; i++) {
-            if (g_proc[i].state == LX_P_BLOCK) {
-                g_proc[i].state = LX_P_READY;
-            }
-        }
+        wake_all_();
         next = pick_next_(g_cur);
         if (next < 0) {
             port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
@@ -1266,7 +1358,6 @@ u64 lx_futex(u64 uaddr, u32 op, u32 val, u64 utime)
 {
     u32 cmd = op & 0x7fu;
     LxProc *p = cur_();
-    int i;
 
     (void)utime;
     if (p == (LxProc *)0) {
@@ -1287,10 +1378,13 @@ u64 lx_futex(u64 uaddr, u32 op, u32 val, u64 utime)
     }
     if (cmd == 1u) {                       /* FUTEX_WAKE */
         u64 n = 0ull;
+        u32 i;
 
-        for (i = 0; i < (int)LX_MAX_PROC; i++) {
-            if (g_proc[i].state == LX_P_BLOCK) {
-                g_proc[i].state = LX_P_READY;
+        for (i = 0u; i < g_proc_cap && n < (u64)val; i++) {
+            LxProc *q = g_proc[i].p;
+
+            if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+                q->state = LX_P_READY;
                 n++;
             }
         }
