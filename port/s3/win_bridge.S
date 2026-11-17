@@ -389,8 +389,46 @@ s3_win_call_wifi_main:
      * （本函数只在 wifi 主任务里被调一次，不会重入）。 */
     l32r    a9, .Lbridge_sp
     s32i    a1, a9, 0
+    /* §488 ★★ 进岛前把 WINDOWSTART **归一化到只剩当前窗口**。
+     *
+     * 真板实测：wifi 任务的保存帧里 `WS=0x5001`、`WB=0` —— 即除了当前窗口 0
+     * 之外，12、14 两个"幽灵活窗口"还挂着。这些脏 bit 是以前 windowed 往返
+     * 留下的（`retw` 只在正常返回时清位；我们有一次返回路径不正常）。
+     *
+     * 后果是致命的：硬件认为那几个窗口还活着，于是稍微深一点的 `call8`
+     * 就真的撞上**窗口溢出向量**，而 `_win_ovf8/12` 要靠 `[sp-12]` 这条
+     * **帧链**去找溢出槽 —— 我们的 call0 帧没有这条链（那不是 `entry` 开的帧），
+     * 于是溢出写到野地址、欠载从野地址填回来，`a0` 立刻变垃圾。
+     * 症状：`esp_wifi_init_internal` 里"整个调用链莫名其妙退回到岛外面"
+     *（`WSTAGE` 停在 0x1005 = 还在 bringup 里，但 wifi 任务已经跑到
+     * `s3_task_tramp` 收尾、被 `os_task_exit` 收成 FREE），以及
+     * §485 的 `EPC=0x3fcef000`。
+     *
+     * 归一化的写法：只置 `1 << WINDOWBASE` 这一位（不写 WINDOWBASE 本身，
+     * 避免重映射把 aN 换掉）。本函数是 call0 代码，祖先窗口里没有 windowed
+     * 帧，所以清掉其余位是无损的。 */
+    rsr     a9, windowbase
+    ssl     a9
+    movi    a10, 1
+    sll     a10, a10
+    wsr     a10, windowstart
+    isync
     l32r    a10, .Lwmain
-    call8   .Lwmain_stub
+    /* §487 ★ 一次 `callx8` 直接进岛，**不要** `call8 跳板 + callx8 岛` 两跳。
+     *
+     * 寄存器文件只有 64 个寄存器 = **8 个窗口**，每个 `call8`/`callx8`
+     * 占掉 2 个。走两跳等于把 4 个窗口花在"进门"上，闭源库自己的调用链
+     * 只剩 4 个窗口 —— 真板实测中断现场 `WINDOWSTART=0x1555`
+     * （0/2/4/6/8/10/12 七个窗口全活着）就已经贴上上限了，再深一点就撞
+     * 窗口溢出；溢出/欠载处理体要用 `[sp-12]` 这条**帧链**，而我们的
+     * call0 帧没有这条链 ⇒ 填回来的 a0 是垃圾。
+     * 症状就是 §480（任务"自己返回了" → 被 `os_task_exit` 收成 FREE）和
+     * §485（`EPC=0x3fcef000` 这种"跳到 DRAM 顶"的取指错误）。
+     *
+     * `callx8` 的目标在寄存器里，位移不受 ±128KB 限制，直接够得到 flash
+     * 里的 `s3_win_wifi_main`，跳板本来就没必要。参数/返回值仍走 a10
+     *（call8 之后它就是被调者的 a2）。 */
+    callx8  a10
     mov     a2, a10
     l32r    a9, .Lbridge_sp
     l32i    a1, a9, 0            /* 从内存取回帧基址 */
@@ -448,7 +486,13 @@ s3_win_call_wifi_main:
     .global s3_win_puts
     .type   s3_win_puts, @function
 s3_win_puts:
-    entry   a1, 16
+    /* §487：帧必须 ≥ 48。`entry a1,N` 在 CALLINC=2 时会把 a0..a3 存到
+     * [a1+N-16, a1+N-4]、a4..a7 存到 [a1+N-32, a1+N-20] —— N=16 时
+     * a4..a7 的槽落在**帧外**（[a1-16,a1-4)），虽然只是临时区，但这个
+     * 壳被 windowed 岛在任意深度调用，溢出/欠载处理体会把 [sp-32,sp)
+     * 当成溢出槽；帧外的槽位不属于任何帧，链就断了。N=48 时整个溢出区
+     * 都在自己的帧里（[a1+16,a1+48)），我们只用 [a1+0,a1+16)。 */
+    entry   a1, 48
     s32i    a0, a1, 0
     l32r    a8, .Lputs
     callx0  a8

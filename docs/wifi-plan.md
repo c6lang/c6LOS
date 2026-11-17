@@ -16722,3 +16722,107 @@ bWu1b
 `ets_printf` 内部还有 `call8`/`callx8` 和它自己的栈参数约定，
 只要我们的栈帧形状和它的假设差一丁点，就会在它的循环里炸。
 **该自己实现的东西就自己实现**（这个仓库已经有格式化器了，接上就行）。
+
+---
+
+## §489 祖先窗口 spill 终于跑通：wifi 任务不再"自己死掉"
+
+### 上一节留下的错误现场
+
+§480 起一直有个说不通的现象：`WSTAGE` 停在 `0x1005`（还在 `s3_wifi_bringup()`
+里），可 wifi 任务已经跑到 `s3_task_tramp` 的 `callx0 os_task_exit` 收尾、
+被 `os_task_start_core` 收成 FREE。**岛没有返回，任务却结束了** —— 只可能是
+`a0` 被"从野地址填回来"，整条 windowed 调用链一次退了好几层。
+
+### 根因：`WIN_SPILL` 一直是关的
+
+`port/s3/w2c.S` 的 `WIN_SPILL` 宏（把**祖先窗口**整圈 spill 到任务自己的栈上）
+受 `g_s3_win_spill_en` 开关控制，而 `s3_wifi_osi_init()` 只在
+`#ifdef S3_WIN_SPILL` 时置 1。§447 那次打开就炸（StoreProhibited 到
+`0x0005ffe0`），之后一直是关的。
+
+关着它的后果：任务在 windowed 库里深调用时阻塞（`osi_queue_recv` 之类），
+内核只保存**当前窗口**的 16 个寄存器就切走；另一个任务轮转窗口文件，
+把祖先窗口（5~7 层）里那些还活着的 a0/a1 覆盖掉 ⇒ 回来就废。
+
+### 这轮先做的三件事（都是必须的前置）
+
+1. **进岛只跳一次**（`port/s3/win_bridge.S` 的 `s3_win_call_wifi_main`）：
+   原来是 `call8 .Lwmain_stub` + `callx8 岛` 两跳，白花 4 个窗口。寄存器文件
+   只有 64 个寄存器 = **8 个窗口**，闭源库自己只剩 4 个 —— 真板实测中断现场
+   `WINDOWSTART=0x1555`（七个窗口全活）就已经贴上限了。改成 `callx8` 直接
+   进岛（`callx8` 的目标在寄存器里，够得到 flash，跳板本来就没必要），
+   岛从窗口 2 起跑。
+2. **进岛前把 WINDOWSTART 归一化到只剩当前窗口**（同上，`1 << WINDOWBASE`）。
+   真板实测保存帧里 `WS=0x5001`、`WB=0` —— 12、14 两个"幽灵活窗口"还挂着，
+   稍微深一点就真的撞溢出向量，而溢出处理体要靠 `[sp-12]` 帧链。
+3. **把 windowed 壳的帧从 16 抬到 48**（`s3_win_puts`、`s3_win_tramp`）。
+   `entry a1,N` 在 CALLINC=2 时把 a4..a7 存到 `[a1+N-32, a1+N-20]`；
+   N=16 时那两个槽落在**帧外**，溢出/欠载按 `[sp-32,sp)` 找槽就串到别人帧里。
+
+### 结果：打开 `-DS3_WIN_SPILL` 之后
+
+```
+.[task] 库建任务 fn=40381d1c id=2 stack=8192 prio=29(->2)
+bWu1bu1Wu2.b
+```
+
+**任务表（停机快照）**：
+
+| 槽 | id | 状态 | ctx | 帧 epc | WS | WB |
+|----|----|------|-----|--------|----|----|
+| 0 | 1 (wifi) | **BLOCKED** | `0x3fcc6ed0` | `0x420180cc` | `0x1000` | 12 |
+| 1 | 2 (ppTask) | **RUNNING** | `0x3fcc6f1c` | `0x420180cc` | `0x400` | 10 |
+
+**两个任务都活着**（wifi 任务 state=4 BLOCKED，不是被回收的 FREE），
+窗口跑到 **WB=12**、状态一致 —— 说明 spill 后半段是好的。
+
+### 新的失败点：`wsr.windowbase` 在 EXCM=1 时执行
+
+`_vec_default` 的记录（RTC `0x50000100`）：
+
+```
++0  magic 0000bad0
++4  exccause 0x1d
++8  excvaddr 0xfffffff9
++12 epc1     0x40379764     ← port_task_switch 的 `wsr.windowbase a5`
++16 ps       0x0006091f     ← INTLEVEL=15, EXCM=1, OWB=9, CALLINC=2, WOE=1
++20 a0       0x3fcbcdf4     ← = g_ctx_tmp_sp
++24 a1       0x0000000a     ← = 新 WINDOWBASE 的值（重映射后的残留）
++28 windowbase 0x0a
++32 windowstart 0x00000400
+```
+
+`objdump` 那段：
+
+```
+40379759: extui  a6, a3, 16, 16        ; WS 高 16 位必须为 0
+4037975c: bnez.n a6, 40379774
+4037975e: wsr.windowstart a3
+40379761: isync
+40379764: wsr.windowbase a5            ; ← 故障点
+40379767: isync
+4037976a: l32r   a4, =g_ctx_tmp_sp
+4037976d: l32i.n a1, a4, 0             ; 取回帧指针（写 WB 会重映射 aN！）
+```
+
+PS 里 `EXCM=1` ⇒ **`port_task_switch` 是在异常上下文里被调的**。
+`wsr windowbase` 在 `EXCM=1` 时非法 ⇒ 第一次异常（cause 0）⇒ `_vec_level1`
+处理中又炸（cause 0x1d）⇒ 双异常 ⇒ `_vec_default` 死循环。
+CPU 随后永远停在 INTLEVEL=15，**level-1 中断再也进不来**
+（实测 `intenable=0x40`、`interrupt=0x40` 挂起、`ccompare0` 早已过期：
+`ccount=0x8ee553b7` vs `ccompare0=0x03347385`）⇒ 整个系统冻住。
+
+按 `S3_NO_PREEMPT` 的设计，中断里根本不该切换（`irq.c:380` 直接 `return 0`），
+`os_sched_tick()` 也确实只推进 tick/超时、不切换（`kernel/task.c6:561`），
+`unblock()` 也不切换（`:75`）。**所以还要找出是谁在 `EXCM=1` 下调了
+`port_task_switch`** —— 这是下一轮的第一件事。
+
+### 下一轮
+
+1. 在 `port_task_switch` 入口读 `PS.EXCM` 并记到 RTC，同时把调用者 `a0`
+   记下来 —— 一次就能锁定"谁在异常上下文里切换"。
+2. 顺手给 RESTORE_FRAME 的 `wsr windowbase` 加 EXCM 守卫（`EXCM=1` 时只写
+   WINDOWSTART 不写 WINDOWBASE，并打标记），把"双异常冻死"降级成可观测。
+3. 修复后如果 wifi 任务能一路走完 `esp_wifi_init_internal`，接下去就是
+   `WSTAGE=0x1021`（注册 WPA 回调 + associate）→ DHCP → HTTPS。
