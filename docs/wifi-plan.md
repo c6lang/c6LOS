@@ -16826,3 +16826,61 @@ CPU 随后永远停在 INTLEVEL=15，**level-1 中断再也进不来**
    WINDOWSTART 不写 WINDOWBASE，并打标记），把"双异常冻死"降级成可观测。
 3. 修复后如果 wifi 任务能一路走完 `esp_wifi_init_internal`，接下去就是
    `WSTAGE=0x1021`（注册 WPA 回调 + associate）→ DHCP → HTTPS。
+
+---
+
+## §490 抓到了：`port_task_switch` 入口 PS 是干净的，但 `wsr windowbase` 还是炸
+
+### 新增的入口记录（RTC `0x50001C00`，`ctx.S` `port_task_switch` 存完 a0..a15 之后）
+
+```
++0  次数        5
++4  PS          00060800     ← INTLEVEL=0、EXCM=**0**、OWB=8、CALLINC=2、WOE=1
++8  a0          42019334     ← 调用者返回地址（调度器主循环里那次 call0）
++12 帧          3fcd9390
++16 EXCM 魔数   00000000     ← **一次都没出现过**
+```
+
+**`EXCM=1` 那条假设被彻底否掉了**：`port_task_switch` 永远是从正常任务上下文
+进的（PS 里 EXCM=0、INTLEVEL=0），不是异常里切换。
+
+### 于是转向 `PS.OWB`
+
+入口 PS 的 `OWB=(0x800>>8)&0xF = 8`，非 0 ⇒ "还有窗口回写没落地"。
+按这个思路加了 `CLR_OWB` 宏（`rsr ps / 清 bit8-11 / wsr ps / isync`），
+插在三处写窗口寄存器之前（`WS==0` 归一化、§457 逐任务还原、`43:` 兜底）。
+
+**结果：故障没消失。** `_vec_default` 记录变成：
+
+```
++0 magic 0000bad0   +4 exccause 0x1d   +8 excvaddr 0xfffffff9
++12 epc1 0x403797a8    ← 还是 RESTORE_FRAME 里那条 `wsr windowbase`
++16 ps   0x00060910    ← EXCM=1（硬件进异常时置的）、OWB=9
+```
+
+`OWB` 清完又从 0 变成 9 这件事本身很说明问题：**这不是我们能靠 `wsr ps`
+抹掉的状态，是硬件在两条指令之间自己算出来的**（`entry`/回写记账）。
+`excvaddr=0xfffffff9` 也很怪 —— `wsr` 不是访存指令，`0xfffffff9`(=-7)
+不可能是它产生的地址；按 §468 的经验，**PIF 类错误的 `epc1`/`excvaddr`
+都不可信**，这个现场很可能只是"二次异常踩出来的假象"。
+
+### 当前实测状态（这套固件稳定可复现）
+
+- 串口：`[task] 库建任务 fn=40381d9c id=2 stack=8192 prio=29(->2)` 之后 `bWu1bu1Wu2.b`
+- 任务表：`id=1 BLOCKED(wait_kind=1, obj=0x3fcc8c70)`、`id=2 RUNNING`
+  —— **两个任务都活着**，wifi 任务不再被收成 FREE（§489 的 spill 功不可没）
+- 保存帧：`ctx0 epc=0x420180cc ws=0x1000 wb=12` / `ctx1 epc=0x420180cc ws=0x400 wb=10`
+- 机器已冻死：`intenable=0x40` 而 `interrupt=0x40` 挂起、
+  `ccompare0=0x03222389` 远落后于 `ccount=0xbcb2520b`、`pc` 在 `_vec_default` 的 `j .`
+
+### 下一轮的方向（按价值排序）
+
+1. **别在恢复路径上写 WINDOWBASE**。既然 `wsr windowbase` 这么难伺候，
+   可以改成"只在 WINDOWBASE 确实不同时才写"，更稳的做法是**根本不动窗口**：
+   任务被切走时不做任何窗口归一化，恢复时只 `wsr windowstart`（不写 WB）。
+   WIN_SPILL 已经把祖先窗口落到栈上了，WB 偏移本来就由寄存器文件守着。
+2. **给 `_vec_level1` 加"二次异常不冻机"的处理**：`_vec_default` 现在死循环、
+   INTLEVEL 永远是 15 ⇒ 定时器中断再也不来 ⇒ 整机冻死。至少要把 PS 恢复到
+   能继续收中断（`rsil 0` 后 `j .`），把"冻死"降级成"该任务卡住"。
+3. 拿到不冻机的版本之后，再看 `esp_wifi_init_internal` 到底在等谁
+   （wifi 任务 `wait_kind=1`、`obj=0x3fcc8c70`）。

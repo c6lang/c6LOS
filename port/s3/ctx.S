@@ -5,6 +5,7 @@
     .align 4
     .literal_position
     .literal .Lg_sched, g_sched
+    .literal .Lpsw,     0x50001C00   /* §489：port_task_switch 入口 PS/a0 记录 */
     .literal .Lrtc_cs,  0x50001E80
     /* §464：窗口还原校验失败时的现场记录区（坏 WB / 坏 WS / 帧 / 次数）。
      * 0x50000600..0x5000064F 是 kernel/task.c6 §463 的阻塞诊断，
@@ -75,6 +76,28 @@
     .endm
 
 /* 把当前帧（a1 指向）恢复：EPC/PS + a0/a2..a15，然后 rfe。 */
+    /* §490 ★★★ 写 WINDOWSTART/WINDOWBASE 之前**必须清掉 PS.OWB(bit8-11)**。
+     *
+     * 真板实测（§489 加的 port_task_switch 入口记录，RTC 0x50001C00）：
+     *     进入 port_task_switch 时 PS = 0x00060800
+     *         → INTLEVEL=0、EXCM=**0**（正常任务上下文，不是异常里切换！）
+     *         → OWB = (0x800>>8)&0xF = **8**，即还有窗口回写没落地
+     *     紧接着 RESTORE_FRAME 的 `wsr windowbase a5` 就吃
+     *     `exccause=0x1d`（保留原因）+ `excvaddr=0xfffffff9`，
+     *     然后 `_vec_level1` 里二次异常 ⇒ `_vec_default` 死循环 ⇒ 整机冻住。
+     *
+     * 结论：**OWB 非 0 时改 WINDOWBASE，硬件不接受**（它还要用 OWB 做回写）。
+     * `port/s3/ctx.c` 给新任务建初始 PS 时清 OWB（§345）本来就是同一个道理，
+     * 恢复路径上一直漏了这一步。清的时候不碰其它位（INTLEVEL/CALLINC/WOE
+     * 全部原样保留），然后 isync。 */
+    .macro  CLR_OWB
+    rsr     a2, ps
+    movi    a6, -256                /* 0xFFFFFF00：只清 bit8-11 */
+    and     a2, a2, a6
+    wsr     a2, ps
+    isync
+    .endm
+
     .macro  RESTORE_FRAME
     /* WINDOWSTART 恢复策略（混合版，§246）：
      *
@@ -163,6 +186,7 @@
     bnez    a3, 40f
     l32r    a4, .Ltmpsp
     s32i    a1, a4, 0
+    CLR_OWB
     movi    a3, 0
     wsr     a3, windowbase
     isync
@@ -249,6 +273,7 @@
      *  两个值其实都完全合法），窗口全被归一化掉。 */
     srli    a6, a3, 16
     bnez    a6, 43f                 /* WINDOWSTART 高位非 0 ⇒ 非法 */
+    CLR_OWB
     wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
     isync
     wsr     a5, windowbase
@@ -267,6 +292,7 @@
     s32i    a7, a4, 12
     l32r    a4, .Ltmpsp
     s32i    a1, a4, 0               /* 藏帧指针：wsr windowbase 会重映射 a1 */
+    CLR_OWB
     movi    a6, 1
     wsr     a6, windowstart
     isync
@@ -406,6 +432,34 @@ port_task_switch:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
+    /* §489 诊断：记下"进入 port_task_switch 时的 PS 和调用者返回地址"。
+     *
+     * 真板停机现场（`_vec_default` 记录 RTC 0x50000100）：
+     *   exccause=0x1d epc1=0x40379764（本函数的 `wsr windowbase`）
+     *   ps=0x0006091f  ⇒ INTLEVEL=15 + **EXCM=1**
+     * `wsr windowbase` 在 EXCM=1 时非法 ⇒ 第一次异常 ⇒ `_vec_level1` 处理中
+     * 再炸 ⇒ 双异常 ⇒ `_vec_default` 死循环（INTLEVEL 永远是 15，
+     * level-1 中断再也进不来 —— 实测 intenable=0x40 / interrupt=0x40 挂起 /
+     * ccompare0 早已过期）⇒ 整机冻住。
+     *
+     * 按设计（S3_NO_PREEMPT）中断里根本不该切换，所以要抓"谁在异常上下文里
+     * 调了本函数"。RTC 0x50001C00：
+     *   +0 次数 +4 PS +8 a0(调用者) +12 帧 +16 首个 EXCM 现场魔数 0xBAD5
+     *   +20 该现场的 a0。 */
+    rsr     a2, ps
+    l32r    a3, .Lpsw
+    s32i    a2, a3, 4
+    s32i    a0, a3, 8
+    s32i    a1, a3, 12
+    l32i    a7, a3, 0
+    addi    a7, a7, 1
+    s32i    a7, a3, 0
+    extui   a7, a2, 4, 1            /* PS.EXCM */
+    beqz    a7, .Lpsw_ok
+    movi    a7, 0xBAD5
+    s32i    a7, a3, 16
+    s32i    a0, a3, 20
+.Lpsw_ok:
     /* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
      *
      * 原来 RESTORE_FRAME 结尾写死 `addi a1, a1, 80`，而 §361 把中断帧改成了
