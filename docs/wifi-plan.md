@@ -17803,3 +17803,23 @@ IDF 在 `hal_init` 前后各调用一次 `_wifi_reset_mac`；c6LOS 日志只出�
 上游状态（时钟/电源/复位域）卡住，并非软件没写。
 
 改动已回退，目标未达成，goal 保持 active。
+
+---
+
+## §535 ready 位翻转与 `wifi:mode : sta` / `enable tsf` 同时发生
+
+官方 app 加高频轮询任务 + WiFi VERBOSE 日志，真板时序：
+```
+I (281) HS: after-wifi-init: 00000000
+I (281) phy_init: phy_version 711,97bcf0a2,...
+I (321) wifi:mode : sta (cc:8d:a2:ec:99:c4)
+I (321) wifi:enable tsf
+W (321) HSPOLL: 0x60033d14 00000000 -> 00000001
+I (321) HS: after-wifi-start: 00000001
+```
+⇒ bit0 是在 `esp_wifi_start()` 内 `ic_mac_init`(ROM) 阶段被硬件置起，
+而不是 PHY 校准阶段（校准在 281 ms 已完成而 bit 仍为 0）。
+
+c6LOS 侧 `esp_wifi_start()` 返回 0，但 ROM `ic_mac_init` 没能产生同样
+的硬件效果；其输入 (`g_ic` / 时钟状态 / MAC 电源域) 仍与 IDF 有差异。
+目标未达成，goal 保持 active。
