@@ -216,6 +216,24 @@
 #define LX_SYS_pselect6      270
 #define LX_SYS_eventfd2      290
 #define LX_SYS_epoll_create1 291
+/* M18：socket 族 */
+#define LX_SYS_socket        41
+#define LX_SYS_connect       42
+#define LX_SYS_accept        43
+#define LX_SYS_sendto        44
+#define LX_SYS_recvfrom      45
+#define LX_SYS_sendmsg       46
+#define LX_SYS_recvmsg       47
+#define LX_SYS_shutdown      48
+#define LX_SYS_bind          49
+#define LX_SYS_listen        50
+#define LX_SYS_getsockname   51
+#define LX_SYS_getpeername   52
+#define LX_SYS_socketpair    53
+#define LX_SYS_send          64
+#define LX_SYS_recv          65
+#define LX_SYS_setsockopt    54
+#define LX_SYS_getsockopt    55
 #define LX_SYS_set_robust_list   273
 #define LX_SYS_prlimit64     302
 #define LX_SYS_getrandom     318
@@ -250,6 +268,8 @@
 #define LX_EACCES  13
 #define LX_EROFS   30
 #define LX_ENOSPC  28
+#define LX_EAFNOSUPPORT 97
+#define LX_EOPNOTSUPP 95
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {

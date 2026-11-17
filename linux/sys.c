@@ -1106,6 +1106,58 @@ void lx_syscall_do(LxRegs *r)
         r->rax = 8ull;
         return;
 
+    /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
+    case LX_SYS_socket:
+        r->rax = lx_sock_socket(a0, a1, a2);
+        return;
+    case LX_SYS_bind:
+        r->rax = lx_sock_bind(a0, a1, a2);
+        return;
+    case LX_SYS_connect:
+        r->rax = lx_sock_connect(a0, a1, a2);
+        return;
+    case LX_SYS_listen:
+        r->rax = lx_sock_listen(a0, a1);
+        return;
+    case LX_SYS_accept:
+        r->rax = lx_sock_accept(a0, a1, a2);
+        return;
+    case LX_SYS_sendto:
+        r->rax = lx_sock_sendto(a0, a1, a2, a3, a4, a5);
+        return;
+    case LX_SYS_recvfrom:
+        r->rax = lx_sock_recvfrom(a0, a1, a2, a3, a4, a5);
+        return;
+    case LX_SYS_send:
+        r->rax = lx_sock_send(a0, a1, a2, a3);
+        return;
+    case LX_SYS_recv:
+        r->rax = lx_sock_recv(a0, a1, a2, a3);
+        return;
+    case LX_SYS_sendmsg:
+    case LX_SYS_recvmsg:
+        /* msghdr 的 iovec 暂不展开：返回 EOPNOTSUPP，用户态可退回 send/recv。 */
+        r->rax = neg(LX_EOPNOTSUPP);
+        return;
+    case LX_SYS_shutdown:
+        r->rax = lx_sock_shutdown(a0, a1);
+        return;
+    case LX_SYS_setsockopt:
+        r->rax = lx_sock_setsockopt(a0, a1, a2, a3, a4);
+        return;
+    case LX_SYS_getsockopt:
+        r->rax = lx_sock_getsockopt(a0, a1, a2, a3, a4);
+        return;
+    case LX_SYS_getsockname:
+        r->rax = lx_sock_getsockname(a0, a1, a2);
+        return;
+    case LX_SYS_getpeername:
+        r->rax = lx_sock_getpeername(a0, a1, a2);
+        return;
+    case LX_SYS_socketpair:
+        r->rax = neg(LX_EOPNOTSUPP);
+        return;
+
     default:
         port_puts("[lx] ENOSYS nr=");
         put_dec(nr);

@@ -703,4 +703,43 @@ TIOCSCTTY → tcsetpgrp 流程。
 TIOCSCTTY 在非终端 fd 上不崩）→ `PASS: m17proc`；全量回归
 L2–L8/M9/M13–M13d/M14/M15/M16/alpine 无回归。
 
+### M18 网络：socket syscall → SAL（M18-1 → M18-2）
+
+此前 Linux ABI 完全没有 socket 族分派，socket 类 syscall 一律 ENOSYS；
+LiteOS 侧的 SAL（Socket Abstract Layer）+ UDP/TCP 协议栈只在独立的
+`t_sal`/`t_udp`/`t_tcp` 内核测试里验证过，两条线没有接起来。
+
+M18-1（接 SAL）：新增 `linux/socket.c`，把 Linux socket syscall 映射到
+SAL。设计上让 socket fd **复用主 fd 表**（`LxFile.kind=LX_FD_SOCK`、`node`
+=SAL socket id），而不是另立映射数组——这样 dup/close/fork 继承/exec
+CLOEXEC 全部自动正确，命名空间也不会和文件/pipe fd 冲突。覆盖
+socket/bind/connect/listen/accept/send/recv/sendto/recvfrom/setsockopt/
+getsockopt/shutdown/getpeername/getsockname；sendmsg/recvmsg/socketpair
+暂返回 EOPNOTSUPP（iovec 展开留待后续）。`C6OS_NET=0` 时所有入口返回
+-EAFNOSUPPORT，其它 port 零侵入；Makefile 给 `X86CFLAGS` 补了
+`-DC6OS_NET` 让这个文件能条件编译。
+
+三个字节序/语义转换点：
+1. glibc `socket(AF_INET, SOCK_DGRAM, 0)` 传 proto=0，而 SAL 按
+   (domain,type,proto) 三元组精确匹配（注册的 UDP 是 17），不做默认值
+   替换就 EAFNOSUPPORT。proto=0 → DGRAM 取 17、STREAM 取 6。
+2. `sockaddr_in.sin_port` 是网络序，SAL 用主机序，做 ntohs/htons。
+3. `sin_addr` 是网络序字节数组 `[a,b,c,d]`，主机序地址值是
+   `0xaabbccdd`（大端组装）——一开始按小端组导致 rip=10.0.2.15 被算成
+   0x0f00020a，和 netif->ip 不等，误走 ARP → EHOSTUNREACH(113)。
+
+另一个坑：`lx_fdtab_alloc` 返回的槽 `node` 还是 `LX_FD_NONE`，此时不能用
+`lx_fdtab_get`（它把 NONE 当空槽返回 NULL）去写新建的 socket fd，必须
+直接写 `p->fd->ent[fd]`。
+
+M18-2（验收）：UDP 环回（两个 socket 绑 7777/7778，connect+send 走
+`UdpSockSend` 的本机入队路径，不碰 ARP/link-up）。`tests/t_x86_m18.c6`
+在进 ring3 前调 `SalUdpInit()` + `NetIfAttachX86()` + `NetIfSetIp()`。
+`tests/linux/m18sock.c` 验 bind/send/recv 内容、recvfrom 来源端口、
+无数据 EAGAIN、close。验收：`make check-linuxabi-m18` → `PASS: m18sock`；
+全量回归 L2–L8/M9/M13–M13d/M14–M17/alpine 无回归。
+
+遗留：真正的 TCP 连接语义、阻塞 recv/select 唤醒、sendmsg/recvmsg 的
+iovec、DNS/getaddrinfo、AF_UNIX 都在后续里程碑。
+
 

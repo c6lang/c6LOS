@@ -65,6 +65,7 @@
 #define LX_FD_DEV     4u   /* /dev/* 设备（M15-2）：null/zero/full/random… */
 #define LX_FD_EVENTFD 5u   /* eventfd2（M16-1b）：pos = 对象 id */
 #define LX_FD_PROC    6u   /* procfs 虚拟文件（M17-1）：node = id, pos = 偏移 */
+#define LX_FD_SOCK    7u   /* socket（M18）：node = SAL socket id */
 
 /* procfs 虚拟文件的 id（fs.c 内部生成内容） */
 #define LX_PROC_meminfo   1u
@@ -227,6 +228,27 @@ i64      lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout);
 u64      lx_proc_eventfd2(u64 initval, u64 flags);
 u64      lx_proc_eventfd_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len);
+/* socket（linux/socket.c，M18）：C6OS_NET=0 时链接桩返回 -EAFNOSUPPORT */
+u64      lx_sock_socket(u64 domain, u64 type, u64 proto);
+u64      lx_sock_close(u64 sd);
+u64      lx_sock_bind(u64 sd, u64 usockaddr, u64 ulen);
+u64      lx_sock_connect(u64 sd, u64 usockaddr, u64 ulen);
+u64      lx_sock_listen(u64 sd, u64 backlog);
+u64      lx_sock_accept(u64 sd, u64 uaddr, u64 uaddrlen);
+u64      lx_sock_sendto(u64 sd, u64 ubuf, u64 len, u64 flags,
+                        u64 usockaddr, u64 ulen);
+u64      lx_sock_recvfrom(u64 sd, u64 ubuf, u64 len, u64 flags,
+                          u64 uaddr, u64 uaddrlen);
+u64      lx_sock_send(u64 sd, u64 ubuf, u64 len, u64 flags);
+u64      lx_sock_recv(u64 sd, u64 ubuf, u64 len, u64 flags);
+u64      lx_sock_setsockopt(u64 sd, u64 level, u64 optname,
+                            u64 uval, u64 optlen);
+u64      lx_sock_getsockopt(u64 sd, u64 level, u64 optname,
+                            u64 uval, u64 uoptlen);
+u64      lx_sock_shutdown(u64 sd, u64 how);
+u64      lx_sock_getpeername(u64 sd, u64 uaddr, u64 uaddrlen);
+u64      lx_sock_getsockname(u64 sd, u64 uaddr, u64 uaddrlen);
+void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
 void     lx_sched_preempt(void);

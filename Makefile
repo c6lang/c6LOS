@@ -968,6 +968,7 @@ X86        := build/x86
 X86CDEPFLAGS := -MMD -MP
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
               -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS) \
+              -DC6OS_NET=$(C6OS_NET) \
               $(X86CDEPFLAGS)
 # c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
 # 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
@@ -981,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -994,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1028,11 +1029,12 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
               $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/fdt.o $(X86S_DIR)/obj/vma.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/fdt.o $(X86S_DIR)/obj/vma.o \
+              $(X86S_DIR)/obj/socket.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1041,7 +1043,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o \
-              $(X86S_DIR)/obj/fdt.o
+              $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/fdt.o
 endif
 
 # M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
@@ -1246,6 +1248,10 @@ $(X86S_DIR)/obj/vma.o: linux/vma.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/socket.o: linux/socket.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 x86-user: caps-check-x86
 	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
 		$(X86)/user-disk.img
@@ -1334,6 +1340,14 @@ M17_SRC := tests/linux/m17proc.c
 M17_ELF := $(X86)/m17proc.elf
 
 $(M17_ELF): $(M17_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M18：Linux socket syscall → SAL ----
+M18_SRC := tests/linux/m18sock.c
+M18_ELF := $(X86)/m18sock.elf
+
+$(M18_ELF): $(M18_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
 
@@ -1976,6 +1990,20 @@ check-linuxabi-m17: x86-m17
 	  && echo "PASS: linux-abi M17（procfs 虚拟文件 + 控制终端 ioctl）" \
 	  || { echo "FAIL: linux-abi M17"; tail -30 /tmp/check-m17.log; exit 1; }
 
+# ---- M18：Linux socket syscall → SAL（UDP 环回）----
+x86-m18: caps-check-x86
+	$(MAKE) X86S_NAME=m18 X86S_MAIN=tests/t_x86_m18.c6 LINUX_ABI=1 C6OS_NET=1 \
+		$(X86)/m18-disk.img
+
+check-linuxabi-m18: x86-m18
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m18-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m18.log \
+		| grep -q "^PASS: m18sock" \
+	  && echo "PASS: linux-abi M18（Linux socket syscall → SAL：UDP 环回）" \
+	  || { echo "FAIL: linux-abi M18"; tail -30 /tmp/check-m18.log; exit 1; }
+
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(X86)/fs-disk.img
@@ -2072,6 +2100,11 @@ else ifeq ($(X86S_NAME),m17)
 DISK_DEPS  := $(M17_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(M17_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m18)
+DISK_DEPS  := $(M18_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M18_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),net)
 DISK_DEPS  :=
