@@ -14266,3 +14266,45 @@ a0..a15 **全部装好、a1 也用完了**，再写 `wsr windowbase` + 更新 PS
 **§402 的不变式违反是既存事实，但它是 `rfe` 之前那一刻的瞬时状态**，
 `rfe` 自己会把它修正 —— 我们观测到的 `wb=9/ws=0x200` 很可能是
 **陷阱处理体自己的状态**，不是被恢复任务的。下一步要从这个角度重新看。
+
+## §404 ★★★ 决定性修复：**删除所有主动写 WINDOWSTART / WINDOWBASE**
+
+### 怎么找到的
+这一轮不再试自己的写法，直接读 IDF 的权威实现
+（`components/xtensa/xtensa_context.S`、`xtensa_vectors.S`）：
+
+```asm
+_xt_context_restore:            # 恢复 a2..a15 / SAR / LCOUNT ...
+    ...                         # **一行都不写 WINDOWSTART / WINDOWBASE**
+
+_xt_user_exit:
+    l32i a0, sp, XT_STK_PS   ; wsr a0, PS
+    l32i a0, sp, XT_STK_PC   ; wsr a0, EPC_1
+    l32i a0, sp, XT_STK_A0
+    l32i sp, sp, XT_STK_A1   ; rsync ; rfe
+```
+
+**窗口状态的恢复完全由 `rfe` 按 PS.OWB 完成。** 我们却额外做了
+`wsr windowstart`（§296/§311 引入）和"新建任务归一化"的 `wsr windowbase`
+（§345 引入）—— 正是这两处制造了 §402 实测到的非法组合
+（`windowbase=9` 而 `windowstart=0x200`，bit 9 未置位）。
+
+### 怎么改的
+`RESTORE_FRAME` 里把 `wsr windowstart` / `wsr windowbase` 整块删掉，
+只保留 `rsil a5, 15`、恢复记录环、EPC/PS 写入、a0..a15 装载、`rfe`。
+新建任务的初始 PS 里 OWB 已经是 0（ctx.c 已清），`rfe` 会自己把 WB 设成 0。
+
+### 真板结果（隔离用例 `t_winabi`）
+
+| 标记 | 修复前 | **修复后** |
+|---|---|---|
+| `d[10]` 3a | `0x101` 卡住 | **`0x105` 完成** |
+| `d[11]` 3b | `0x201` | **`0x205` 完成** |
+| `d[12]` 3c | `1` **卡住** | **`0x305` 完成** |
+| `d[13]` 3c 子项 | `0x601` | **`0x605` 完成** |
+| `d[9]` 循环轮次 | — | **1029 轮** |
+| 卡住时 `a1` | `0x00084c1f` 垃圾 | **`0x3fcd8da0` 合法栈地址** |
+
+**3c（在递归链中间做任务切换）从"永远卡死"变成"1029 轮稳定通过"。**
+这同时解释了 §387-§391/§400/§403 六次"自己写 WINDOWBASE"为什么全失败 ——
+这条路本来就不该走，正确做法是**什么都不写，交给 `rfe`**。

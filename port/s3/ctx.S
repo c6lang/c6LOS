@@ -101,30 +101,29 @@
     l32i    a7, a4, 0
     addi    a7, a7, 1
     s32i    a7, a4, 0
-    /* §296/§311：写回任务自己的 WINDOWSTART（帧偏移 68，切换时保存）。
-     * §307 试过完全不管窗口状态，结果一样崩；§310 修掉 CALLINC 之后重试这条。 */
-    l32i    a3, a1, 68
-    bnez    a3, 7f
-    /* §313：帧里没有保存值（新建任务）时必须**归一化**成 `1<<WINDOWBASE`。
-     * 直接跳过 wsr 会把**别的任务**留下的 WINDOWSTART（真板：0x8000，base=15）
-     * 留在硬件里，恢复出来的 a0..a15 就落在错的窗口，rfe 之后落到 ROM 里
-     * 的非法地址（cause=0，a0=PS 值）。 */
-    /* §345：新任务（帧里 WS==0）从窗口 0 干净起步：WB=0、WS=1，
-     * 并且 ctx.c 里已经把初始 PS 的 OWB 清 0 —— 三者必须一致，否则 `rfe`
-     * 装回 PS.OWB 之后 WS 与 WB 不匹配，寄存器映射整个错位
-     *（真板症状：WINDOWBASE=9、a1 取到别的物理寄存器）。
-     * `wsr windowbase` 会重映射虚拟寄存器（含 a1），所以先用全局藏起帧指针。 */
-    l32r    a4, .Ltmpsp
-    s32i    a1, a4, 0
+    /* §404（照抄 IDF）：**不要主动写 WINDOWSTART / WINDOWBASE**。
+     *
+     * 这一块原来是 §296/§311 引入的：把帧里存的 WINDOWSTART 写回硬件，
+     * 新建任务则归一化成 WB=0/WS=1。本轮把 IDF 的 `_xt_context_restore`
+     * 和 `_xt_user_exit`（xtensa_context.S / xtensa_vectors.S）从头读了一遍
+     * —— **它们一行都不写窗口状态寄存器**：
+     *
+     *     _xt_user_exit:
+     *         l32i a0, sp, XT_STK_PS   ; wsr a0, PS
+     *         l32i a0, sp, XT_STK_PC   ; wsr a0, EPC_1
+     *         l32i a0, sp, XT_STK_A0
+     *         l32i sp, sp, XT_STK_A1   ; rsync ; rfe
+     *
+     * 窗口状态的恢复**完全由 `rfe` 按 PS.OWB 完成**。我们额外做的那些
+     * `wsr windowstart` 反而制造了 §402 实测到的非法组合
+     *（`windowbase=9` 而 `windowstart=0x200`，bit 9 未置位）。
+     *
+     * 同时删除的还有"新建任务归一化"那段：新任务的初始 PS 里 OWB=0
+     *（ctx.c 已清），`rfe` 会自己把 WB 设成 0，不需要我们插手。
+     * 这也是本轮 §387/§388/§389/§391/§400/§403 六次"自己写 WB"全部失败的
+     * 根本原因 —— 这条路本来就不该走。
+     */
     movi    a3, 0
-    wsr     a3, windowbase
-    isync
-    l32r    a4, .Ltmpsp
-    l32i    a1, a4, 0
-    movi    a3, 1
-7:
-    wsr     a3, windowstart
-    isync
     /* §363 健全性闸门：EPC 必须落在合法代码区（ROM/IRAM 0x40000000-0x43FFFFFF）。
      * 不合法就说明"这个帧"是垃圾（错误 ctx / 已释放栈 / sp 差了几十字节），
      * 直接把帧和 EPC/PS/WS/WB/a0 记到 0x50001880 并原地停住，等 JTAG 看现场。
