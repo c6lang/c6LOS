@@ -1703,8 +1703,18 @@ u32 s3_wifi_bringup(void)
     wcfg(140u, 0u);             /* dump_hesigb_enable     default n           */
     wcfg(144u, 0x1F2F3F4Fu);    /* magic = WIFI_INIT_CONFIG_MAGIC             */
 
-    g_dbg_sync = 1u;               /* 打开同步点追踪（§229）。注意：关掉它反而走得更短
-                                    * ——串口打印带来的延迟会改变时序，见 §254 */
+    /* §441：**这里必须保持 0**。
+     *
+     * 原来打开（§229 为了看同步点）。但 `osi_mutex_lock/unlock` /
+     * `osi_semphr_take/give` 每次打 1~3 行，而库在 `esp_wifi_init_internal`
+     * 内部要做**上千次**同步操作。115200 波特率下每行约 3.5ms，光打印就要
+     * 好几分钟 —— 真板看起来就是"卡在 WSTAGE 0x1005 不动"，
+     * 实际上库每推进一步都在等串口。
+     *
+     * §254 当初的注释说"关掉它反而走得更短"，正是因为打印改变了时序；
+     * 现在 §438 把抢占切换关掉之后，时序依赖的前提已经不成立，
+     * 关掉打印只会让 init 跑得更快。 */
+    g_dbg_sync = 0u;
     s3_wifi_osi_init();
     ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
                (u32)(void *)g_wifi_osi_funcs._semphr_create,

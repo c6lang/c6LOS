@@ -15175,3 +15175,89 @@ timeout 55 sudo -n python3 tools/cap.py -t 28
 **这次要重点看两件事**：
 1. `[wifimain] id=1 tick=` 是否**只出现一次** —— 若是，说明 §438 的重入真因确实修好了；
 2. 是否走到 `WSTAGE 0x1021`（发起关联）及其之后的 `[wifi] associate ssid=weforpay.com`。
+
+## §441 ★★★ `S3_NO_PREEMPT=1` 生效 —— "wifimain 周期性重入"彻底消失
+
+真板验证（`S3_NO_PREEMPT=1` 作为 make 变量传入）：
+
+| | 修之前 | 修之后 |
+|---|---|---|
+| `[wifimain] id=1` 出现次数 | **5 次**（tick=0/18/31/44…） | **1 次** ✓ |
+| `[wifi] init 前的库状态` | 第 2 次起变成 2 | **始终是 1** ✓ |
+| TRAP | 有 | **无** ✓ |
+
+**§438 的判断完全正确**：整个重入就是这个坑 —— ISR 抢占路径只
+`port_set_cur_ctx(next)` 就恢复下一个任务，**从不保存被打断任务的 `c->sp`**。
+
+## §442 关掉 `g_dbg_sync`：串口打印把库拖死了
+
+`g_dbg_sync = 1u` 原来在 **`esp_wifi_init_internal` 之前**打开、之后才关
+（`wifi_glue.c:1706` → `1739`）。而 `osi_mutex_lock/unlock`、`osi_semphr_take/give`
+每个都打 1~3 行，库在 init 内部要做**上千次**同步操作。
+
+115200 波特率、每行约 40 字节 ⇒ **每行 3.5ms** ⇒ 光打印就要好几分钟。
+真板表现就是"卡在 `WSTAGE 0x1005` 不动"，实际库每推进一步都在等串口。
+
+关掉之后日志立刻变干净（`[lock]/[lockok]/[unlock]` 全消失），
+43 行就跑完了 `[pp]` → `[net80211]` → `[task] 库建任务`。
+
+（`§254` 当初注释说"关掉它反而走得更短"——那时是因为打印改变了时序、
+掩盖了 §438 的抢占 bug。抢占关掉之后这个前提不再成立。）
+
+## §443 `g_prid_base` 初值 0xFFFFFFFF 与汇编判断不匹配（已修，防御性）
+
+`ctx.S` 里 `port_task_switch` / `port_task_yield` 判断核心号的汇编是：
+
+```asm
+rsr  a5, prid ; l32r a3, .Lprid_base ; l32i a6, a3, 0
+movi a11, 0   ; beq  a5, a6, 2f      ; movi a11, 1
+```
+
+**只比较 `[0]`，不相等就直接用索引 1** —— 没有 C 版 `port_core_id()`
+那个"还没登记就返回 0"的兜底。而 S3 的 `prid` 是脏值（实测 **0x0000cdcd**），
+初值 `0xFFFFFFFF` 永不相等。
+
+改成 `{0x0000CDCDu, 0xFFFFFFFFu}`。实测行为没变化（说明 `port_core_bind_self()`
+在此之前已经登记过），但作为防御保留。
+
+## §444 当前卡点：`WSTAGE=0x1005`，两个任务死锁在 `os_task_block_wait`
+
+修复后跑到 `esp_wifi_init_internal` 内部就停住。真板现状：
+
+```
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+.[task] 库建任务 fn=40381ab4 id=2 stack=6144 prio=29(->2)
+bWu1bu1Wu2.b.............Wu1          ← 停在这里，110 秒无新输出
+```
+
+字符解码（`kernel/task.c6` 的 §250 诊断）：
+`b`=任务阻塞(`:343`)、`u`=唤醒任务(`:76`)、`W`=give 匹配上并 unblock(`:454`)、
+`.`=give 时没有匹配的等待者(`:451`)。所以 `.` **不是错误**（信号量计数递增）。
+
+**JTAG 实测（halt 后）**：
+
+| | 值 |
+|---|---|
+| `WSTAGE` | `0x1005` ⇒ 还在 `s3_wifi_bringup()` 里 |
+| `ctx[0]`（wifi 主任务） | sp=`3fcbe980` EPC=`42017f58`(**os_task_block_wait**) a1sl=`3fcbea00`=sp+128 **正常帧** ✓ |
+| `ctx[1]`（库任务） | sp=`3fcc0300` EPC=`42017f58` **a0=0 a1sl=0** ✗ |
+
+**两个任务都阻塞在 `os_task_block_wait` ⇒ 真死锁。**
+
+**关键约束**：`RESTORE_FRAME` 在 `a1sl == 0` 时会跳到 `83f` 闸门写 `0xBAD4`
+并死循环（`ctx.S:214 beqz a1, 83f`）。而 `ctx[1].a1sl` 实测是 0 ——
+**所以一旦调度到库任务就会死在闸门里**。但板子只出现过 1 次 `ESP-ROM` 启动头
+（不是复位循环），且闸门诊断区 `0x500018E0` 是随机值（没命中），
+说明库任务**根本没被恢复过**，两个任务就这么互相等下去。
+
+### 下轮从这里入手
+1. 读任务表确认库任务的 `state` / `wait_kind` / `wait_obj`。
+   `g_tasks` 是 `static`，符号表里没有 —— 但在 `os_task_probe` 的反汇编里
+   能取到它的地址（`l32r a6, … (3fcb971d <__c99_d2>)` 附近，注意那是奇地址，
+   实际结构要按 4/8 对齐往后找 `OS_TASK_MAGIC`）。
+   `OsTask` 偏移：`state`@34、`core`@35、`wait_kind`@36、`wait_obj`@40（32 位）。
+2. 重点怀疑：库任务等的对象和主任务 `[send] qh=3fcc75b0` 发的队列**不是同一个**，
+   或者 `wait_kind` 不匹配（`task.c6:442` 要求 `wait_obj == obj && wait_kind == kind`）。
+3. `ctx[1].a1sl = 0` 本身也要查：`port_task_yield` 里 `addi a14, a1, 128;
+   s32i a14, a1, 76` 不可能得 0，除非那次保存走的不是 yield 的正常路径。

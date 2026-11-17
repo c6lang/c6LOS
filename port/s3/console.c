@@ -294,7 +294,24 @@ u32 s3_prid_raw(void)
 /* ctx.S 里直接拿它做比较：切换路径上不能调用 C 函数——本工具的 C 是 windowed
  * ABI，`callx0` 进 C 函数不会转窗口，会把 a12-a15 冲掉（曾导致切换时 a4 变成
  * 脏指针、L32I 触发 LoadStoreAlignment）。 */
-u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+/* §442：**初值必须是这颗芯片真实的 PRID，不能是 0xFFFFFFFF**。
+ *
+ * `port/s3/ctx.S` 里 `port_task_switch` / `port_task_yield` 判断核心号的
+ * 汇编是：
+ *
+ *     rsr  a5, prid ; l32r a3, .Lprid_base ; l32i a6, a3, 0
+ *     movi a11, 0   ; beq  a5, a6, 2f      ; movi a11, 1
+ *
+ * —— **只比较 [0]，不相等就直接用索引 1**，没有 C 版 `port_core_id()`
+ * 那个"还没登记就返回 0"的兜底。
+ *
+ * 而 ESP32-S3 的 `prid` 是脏值（实测 **0x0000cdcd**）。于是初值 0xFFFFFFFF
+ * 永远不相等 ⇒ 所有 yield/switch 都去操作 `g_s3_cur[1]`，那里是 0 ⇒
+ * `beqz a4, 1f` 直接跳过保存 ⇒ **任务帧一次都存不下来**，
+ * `ctx[0].sp` 永远停在 `port_task_ctx_create` 造的那个 tramp 帧上。
+ *
+ * 用实测值做初值，单核场景下比较必然相等 ⇒ 索引 0 ⇒ 正确。 */
+u32 g_prid_base[C6OS_MAX_CORES] = {0x0000CDCDu, 0xFFFFFFFFu};
 
 void port_core_bind_self(void)
 {
