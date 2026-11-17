@@ -17776,3 +17776,16 @@ I (371) wifi:connected with weforpay.com ...
 DPORT 写保护 / 复位释放时序，或库内部的 `ic_mac_init` 前置状态。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §533 双次 MAC 复位脉冲仍不能置起 ready 位（已回退）
+
+IDF 在 `hal_init` 前后各调用一次 `_wifi_reset_mac`；c6LOS 日志只出现一次。
+试着在 shim 里连发两次脉冲（各 assert 400 圈 + 间隔 1000 圈），真板结果：
+```
+[wifi] reset_mac pulse x2 done hs=00000000
+[wifi] scan_get_ap_num=0 num=0
+```
+⇒ 复位次数不是关键因素；MAC ready 依赖的是我们尚未提供的其它状态。
+改动已回退，目标未达成，goal 保持 active。
