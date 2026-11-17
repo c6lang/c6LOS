@@ -39,6 +39,13 @@
 
 #define PMM_MAX_FRAMES 262144ull          /* 1GB / 4KB */
 static u8  g_bmp[PMM_MAX_FRAMES / 8u];    /* 32KB，1 = 已占用 */
+/* 每帧引用计数：一个页框可以同时是父子地址空间的映射、页缓存的内容，只有最后
+ * 一个引用消失才能回 free list。表不能放 .bss：内核必须整体留在 0xA0000 以下
+ * （0xA0000-0xFFFFF 是 VGA/BIOS 空洞，写进去就是写设备寄存器，QEMU 会直接
+ * abort）。所以启动后从 PMM 里取一段连续页做表，指针经直接映射窗口访问。
+ * NULL = 表还没建好（或没放下）：此时退化为"立即回收"，早期页表页从不共享。 */
+static u8 *g_ref;
+static u64 g_ref_bytes;                   /* 表覆盖多少字节（= 1 byte/frame） */
 static u64 g_frames;                      /* 已纳入管理的帧数上界 */
 static u64 g_free;
 static u64 g_rover = 4ull;                /* 从 4MB 起分配 */
@@ -119,6 +126,9 @@ u64 port_phys_alloc(void)
         }
         if (!bmp_get(f)) {
             bmp_set(f);
+            if (g_ref != (u8 *)0 && f < g_ref_bytes) {
+                g_ref[f] = 1u;
+            }
             g_free--;
             g_rover = f + 1ull;
             return f << 12;
@@ -129,14 +139,40 @@ u64 port_phys_alloc(void)
     return 0;
 }
 
-void port_phys_free(u64 pa)
+void port_phys_ref(u64 pa)
 {
     u64 f = pa >> 12;
 
-    if (f >= 4ull && f < PMM_MAX_FRAMES && bmp_get(f)) {
-        bmp_clr(f);
-        g_free++;
+    if (g_ref == (u8 *)0 || f >= g_ref_bytes || f < 4ull || bmp_get(f) == 0) {
+        return;
     }
+    if (g_ref[f] < 255u) {
+        g_ref[f]++;
+    }
+}
+
+/* 计数归零才真正回 free list；对未分配/保留帧幂等（防 double free）。 */
+void port_phys_put(u64 pa)
+{
+    u64 f = pa >> 12;
+
+    if (f < 4ull || f >= PMM_MAX_FRAMES || bmp_get(f) == 0) {
+        return;
+    }
+    if (g_ref != (u8 *)0 && f < g_ref_bytes) {
+        if (g_ref[f] > 1u) {
+            g_ref[f]--;
+            return;
+        }
+        g_ref[f] = 0u;
+    }
+    bmp_clr(f);
+    g_free++;
+}
+
+void port_phys_free(u64 pa)
+{
+    port_phys_put(pa);
 }
 
 void port_phys_reserve(u64 pa, u64 bytes)
@@ -176,6 +212,47 @@ static void *ptab(u64 pa)
 void *port_phys_map(u64 pa)
 {
     return (void *)(pa | DMAP_BASE);
+}
+
+/* 建立"每帧一字节"的引用计数表：从 PMM 空闲区取一段连续页，经直接映射访问。
+ * 表本身是 1 byte/frame（256MB→64KB，1GB→256KB），所以不能放 .bss；放不下
+ * 就保持 NULL，退化为"put 立即回收"（早期内核页表页从不共享，不会出错）。 */
+static void ref_table_init(void)
+{
+    u64 need = g_frames;                  /* 1 byte per frame */
+    u64 pages = (need + PAGE_SZ - 1ull) >> 12;
+    u64 base = 0ull;
+    u64 run = 0ull;
+    u64 f;
+
+    if (pages == 0ull) {
+        return;
+    }
+    for (f = 4ull; f < g_frames; f++) {
+        if (!bmp_get(f)) {
+            if (run == 0ull) {
+                base = f;
+            }
+            run++;
+            if (run >= pages) {
+                break;
+            }
+        } else {
+            run = 0ull;
+        }
+    }
+    if (run < pages) {
+        return;
+    }
+    for (f = base; f < base + pages; f++) {
+        bmp_set(f);
+        g_free--;
+    }
+    g_ref = (u8 *)port_phys_map(base << 12);
+    g_ref_bytes = pages * PAGE_SZ;
+    for (f = 0ull; f < g_ref_bytes; f++) {
+        g_ref[f] = 0u;
+    }
 }
 
 static u64 alloc_frame_zero(void)
@@ -262,6 +339,9 @@ static void enable_nxe(void)
 void port_as_activate(u64 as)
 {
     __asm__ __volatile__("movq %0, %%cr3" : : "r"(as) : "memory");
+    /* 旧 AS 的最后一个引用可能是在它还挂在 CR3 上时放掉的；现在换下来了，
+     * 可以安全回收它的页表。 */
+    port_as_gc();
 }
 
 /* 内核低端：0..4MB identity、supervisor；再挂上共享的直接映射窗口。 */
@@ -364,17 +444,210 @@ void port_mmu_init(void)
     port_puts("\n");
     port_as_activate(g_kernel_as);
     g_dmap_ready = 1;                     /* 之后所有页表内存走直接映射窗口 */
+    ref_table_init();                     /* 引用计数表要等直接映射可用 */
+}
+
+/* ---- 地址空间生命周期 ----------------------------------------------------
+ *
+ * 句柄就是 PML4 的物理地址，没有地方塞引用计数，所以先用一张小登记表：
+ * 线程组共享一个 AS（CLONE_VM），最后一个线程退出才真正销毁。槽位可复用；
+ * 表满时 create 失败（不静默覆盖）。M13-2 把它收进 OsAs 对象后这张表消失。
+ *
+ * 销毁必须做三件事：还叶子页框、还中间页表页、还 PML4 自己。漏掉任何一层
+ * 都会在"反复 fork/exec"的负载下把内存吃光 —— 这是 L2 里 fork 100 次就
+ * OOM 的根因。
+ */
+
+#define AS_SLOTS 64u
+
+static u64 g_as_pml4[AS_SLOTS];
+static u32 g_as_ref[AS_SLOTS];
+
+static u64 cur_as_(void)
+{
+    u64 v;
+
+    __asm__ __volatile__("movq %%cr3, %0" : "=r"(v));
+    return v;
+}
+
+static int as_slot_find_(u64 as)
+{
+    u32 i;
+
+    for (i = 0u; i < AS_SLOTS; i++) {
+        if (g_as_pml4[i] == as) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int as_slot_alloc_(u64 as)
+{
+    u32 i;
+
+    for (i = 0u; i < AS_SLOTS; i++) {
+        if (g_as_pml4[i] == 0ull) {
+            g_as_pml4[i] = as;
+            g_as_ref[i] = 1u;
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void as_free_(u64 as)
+{
+    u64 *p4;
+    u32 i4;
+
+    if (as == 0ull || as == g_kernel_as) {
+        return;
+    }
+    p4 = tbl(as);
+    for (i4 = 0u; i4 < 512u; i4++) {
+        u64 e4 = p4[i4];
+        u64 *p3;
+        u32 i3;
+
+        /* 内核/DMAP 的 PML4 项没有 U 位：共享，不能还 */
+        if ((e4 & (PTE_P | PTE_U)) != (PTE_P | PTE_U)) {
+            continue;
+        }
+        p3 = tbl(e4);
+        for (i3 = 0u; i3 < 512u; i3++) {
+            u64 e3 = p3[i3];
+            u64 *p2;
+            u32 i2;
+
+            if ((e3 & (PTE_P | PTE_U)) != (PTE_P | PTE_U)) {
+                continue;
+            }
+            p2 = tbl(e3);
+            for (i2 = 0u; i2 < 512u; i2++) {
+                u64 e2 = p2[i2];
+                u64 *p1;
+                u32 i1;
+
+                if ((e2 & PTE_P) == 0ull || (e2 & PTE_PS) != 0ull ||
+                    (e2 & PTE_U) == 0ull) {
+                    continue;
+                }
+                p1 = tbl(e2);
+                for (i1 = 0u; i1 < 512u; i1++) {
+                    u64 e1 = p1[i1];
+
+                    if ((e1 & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+                        port_phys_put(e1 & PTE_ADDR);
+                        p1[i1] = 0ull;
+                    }
+                }
+                port_phys_put(e2 & PTE_ADDR);       /* PT 页 */
+            }
+            port_phys_put(e3 & PTE_ADDR);           /* PD 页 */
+        }
+        port_phys_put(e4 & PTE_ADDR);               /* PDPT 页 */
+    }
+    port_phys_put(as);                              /* PML4 页 */
 }
 
 u64 port_as_create(void)
 {
     u64 as = build_as();
+
+    if (as == 0ull) {
+        return 0ull;
+    }
+    if (as_slot_alloc_(as) < 0) {
+        as_free_(as);
+        return 0ull;
+    }
     return as;
 }
 
 void port_as_destroy(u64 as)
 {
-    (void)as;                             /* L1 不回收；L5 接帧回收 */
+    int slot = as_slot_find_(as);
+
+    as_free_(as);
+    if (slot >= 0) {
+        g_as_pml4[slot] = 0ull;
+        g_as_ref[slot] = 0u;
+    }
+}
+
+void port_as_ref(u64 as)
+{
+    int slot = as_slot_find_(as);
+
+    if (slot >= 0 && g_as_ref[slot] != 0xffffffffu) {
+        g_as_ref[slot]++;
+    }
+}
+
+void port_as_unref(u64 as)
+{
+    int slot = as_slot_find_(as);
+
+    if (slot < 0) {
+        return;
+    }
+    if (g_as_ref[slot] > 1u) {
+        g_as_ref[slot]--;
+        return;
+    }
+    g_as_ref[slot] = 0u;
+    if (as == cur_as_()) {
+        return;                             /* 还在 CPU 上：交给 port_as_gc */
+    }
+    g_as_pml4[slot] = 0ull;
+    as_free_(as);
+}
+
+void port_as_gc(void)
+{
+    u64 cur = cur_as_();
+    u32 i;
+
+    for (i = 0u; i < AS_SLOTS; i++) {
+        u64 as = g_as_pml4[i];
+
+        if (as == 0ull || g_as_ref[i] != 0u || as == cur) {
+            continue;
+        }
+        g_as_pml4[i] = 0ull;
+        as_free_(as);
+    }
+}
+
+/* 覆盖映射：把 va 上已有的用户叶子页还掉。页表层级不存在 = 本来就没映射。 */
+static void unmap_leaf_(u64 as, u64 va)
+{
+    u64 *p4 = tbl(as);
+    u64 *p3;
+    u64 *p2;
+    u64 *p1;
+    u64 e;
+
+    if ((p4[IDX4(va)] & PTE_P) == 0ull) {
+        return;
+    }
+    p3 = tbl(p4[IDX4(va)]);
+    if ((p3[IDX3(va)] & PTE_P) == 0ull) {
+        return;
+    }
+    p2 = tbl(p3[IDX3(va)]);
+    e = p2[IDX2(va)];
+    if ((e & (PTE_P | PTE_PS)) != PTE_P) {
+        return;
+    }
+    p1 = tbl(e);
+    e = p1[IDX1(va)];
+    if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+        port_phys_put(e & PTE_ADDR);
+    }
+    p1[IDX1(va)] = 0ull;
 }
 
 int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
@@ -391,6 +664,7 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
         return -1;
     }
     while (off < bytes) {
+        u64 va = vaddr + off;
         u64 pa = (paddr != 0ull) ? (paddr + off) : port_phys_alloc();
         u64 leaf = 0ull;
 
@@ -403,12 +677,17 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
         if ((prot & C6OS_PROT_X) == 0u) {
             leaf |= PTE_NX;
         }
-        if (map4k(as, vaddr + off, pa, leaf | PTE_U) != 0) {
+        /* MAP_FIXED：先还掉旧页框，再装新页（否则旧帧永远漏掉） */
+        unmap_leaf_(as, va);
+        if (map4k(as, va, pa, leaf | PTE_U) != 0) {
+            if (paddr == 0ull) {
+                port_phys_put(pa);
+            }
             return -3;
         }
         /* 同一 VA 重映射（MAP_FIXED 覆盖旧页）时，TLB 里可能还是旧页框；
          * 不刷的话紧接着写这个 VA 会写进已经没人看的旧帧。 */
-        invlpg(vaddr + off);
+        invlpg(va);
         off += PAGE_SZ;
     }
     return 0;
@@ -416,10 +695,6 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
 
 int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
 {
-    u64 *p4;
-    u64 *p3;
-    u64 *p2;
-    u64 *p1;
     u64 off = 0;
 
     if (as == 0ull) {
@@ -427,8 +702,66 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
     }
     while (off < bytes) {
         u64 va = vaddr + off;
+        u64 *p4 = tbl(as);
+        u64 *p3;
+        u64 *p2;
+        u64 *p1;
+        u64 e;
+        u32 i;
+        int empty = 1;
 
-        p4 = tbl(as);
+        off += PAGE_SZ;
+        /* munmap 允许范围里有洞：没有映射就跳过，不算错 */
+        if ((p4[IDX4(va)] & PTE_P) == 0ull) {
+            continue;
+        }
+        p3 = tbl(p4[IDX4(va)]);
+        if ((p3[IDX3(va)] & PTE_P) == 0ull) {
+            continue;
+        }
+        p2 = tbl(p3[IDX3(va)]);
+        if ((p2[IDX2(va)] & (PTE_P | PTE_PS)) != PTE_P) {
+            continue;
+        }
+        p1 = tbl(p2[IDX2(va)]);
+        e = p1[IDX1(va)];
+        if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+            port_phys_put(e & PTE_ADDR);
+        }
+        p1[IDX1(va)] = 0ull;
+        invlpg(va);
+        /* 整张 PT 空了就还掉：长期进程反复 mmap/munmap 也不漏页表页 */
+        for (i = 0u; i < 512u; i++) {
+            if (p1[i] != 0ull) {
+                empty = 0;
+                break;
+            }
+        }
+        if (empty != 0) {
+            u64 pt = p2[IDX2(va)] & PTE_ADDR;
+
+            p2[IDX2(va)] = 0ull;
+            port_phys_put(pt);
+        }
+    }
+    return 0;
+}
+
+int port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot)
+{
+    u64 off;
+
+    if (as == 0ull) {
+        return -1;
+    }
+    for (off = 0ull; off < bytes; off += PAGE_SZ) {
+        u64 va = vaddr + off;
+        u64 *p4 = tbl(as);
+        u64 *p3;
+        u64 *p2;
+        u64 *p1;
+        u64 e;
+
         if ((p4[IDX4(va)] & PTE_P) == 0ull) {
             return -2;
         }
@@ -437,13 +770,24 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
             return -2;
         }
         p2 = tbl(p3[IDX3(va)]);
-        if ((p2[IDX2(va)] & (PTE_P | PTE_PS)) != PTE_P) {
+        e = p2[IDX2(va)];
+        if ((e & (PTE_P | PTE_PS)) != PTE_P) {
             return -2;
         }
-        p1 = tbl(p2[IDX2(va)]);
-        p1[IDX1(va)] = 0ull;
+        p1 = tbl(e);
+        e = p1[IDX1(va)];
+        if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U)) {
+            return -2;
+        }
+        e &= ~(PTE_W | PTE_NX);
+        if ((prot & C6OS_PROT_W) != 0u) {
+            e |= PTE_W;
+        }
+        if ((prot & C6OS_PROT_X) == 0u) {
+            e |= PTE_NX;
+        }
+        p1[IDX1(va)] = e;
         invlpg(va);
-        off += PAGE_SZ;
     }
     return 0;
 }
@@ -556,6 +900,7 @@ int port_as_copy(u64 dst_as, u64 src_as)
                     }
                     if (map4k(dst_as, va, npa,
                               (e & 0xfffull) | (e & PTE_NX)) != 0) {
+                        port_phys_put(npa);
                         return -3;
                     }
                 }

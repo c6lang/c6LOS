@@ -38,6 +38,27 @@ static u32 g_slice;
 static u64     g_pid_next = 1ull;
 static int     g_resched;
 
+/* L8 的定量证据（ticks/switch）。只在 pid 1 退出时打一次，子进程退出不刷屏。 */
+static void pdec_(u32 v)
+{
+    char b[12];
+    u32 k = 0u;
+
+    if (v == 0u) {
+        port_putc('0');
+        return;
+    }
+    while (v > 0u && k < 11u) {
+        b[k] = (char)('0' + (int)(v % 10u));
+        v /= 10u;
+        k++;
+    }
+    while (k > 0u) {
+        k--;
+        port_putc((int)b[k]);
+    }
+}
+
 /* 汇编侧（port/x86_64/user_entry.S） */
 extern void lx_ctx_switch(u64 *save_sp, u64 new_sp);
 extern void x86_resume_user(void);
@@ -359,7 +380,7 @@ void lx_proc_exit_sig(u32 sig)
     lx_proc_exit((u64)sig);
 }
 
-/* 把同组其它线程直接释放（不动 self）。 */
+/* 把同组其它线程直接释放（不动 self）。共享地址空间随之少一个引用。 */
 static void reap_peers_(LxProc *self)
 {
     int i;
@@ -372,6 +393,8 @@ static void reap_peers_(LxProc *self)
         }
         q->state = LX_P_FREE;
         q->pid = 0u;
+        port_as_unref(q->as);
+        q->as = 0ull;
     }
 }
 
@@ -388,6 +411,9 @@ static void thread_exit_(LxProc *c)
     c->clear_tid = 0ull;
     c->state = LX_P_FREE;
     c->pid = 0u;
+    /* 组长还持有这个 AS 的引用，所以这里不会把页表拆掉 */
+    port_as_unref(c->as);
+    c->as = 0ull;
     for (i = 0; i < (int)LX_MAX_PROC; i++) {
         if (g_proc[i].state == LX_P_BLOCK) {
             g_proc[i].state = LX_P_READY;
@@ -428,6 +454,7 @@ void lx_proc_exit(u64 code)
     }
     c->code = (i64)code;
     c->state = LX_P_ZOMBIE;
+    /* 注意：AS 的最后一个引用留到父进程 wait4 收尸时才放（见 wait4）。 */
     {
         LxProc *par = lx_proc_find((i64)c->ppid);
 
@@ -437,6 +464,13 @@ void lx_proc_exit(u64 code)
         }
     }
     wake_(c->ppid);
+    if (c->pid == 1u) {
+        port_puts("\n[preempt] ticks=");
+        pdec_(g_irq_ticks);
+        port_puts(" switch=");
+        pdec_(g_preempt_switch);
+        port_puts("\n");
+    }
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
@@ -577,6 +611,8 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
                     *(u32 *)ustatus = (u32)status;
                 }
                 c->state = LX_P_FREE;
+                port_as_unref(c->as);      /* 最后一个线程的 AS：到这里才真正拆 */
+                c->as = 0ull;
                 return (u64)cpid;
             }
         }
@@ -663,14 +699,19 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
         return (u64)0 - LX_ENOEXEC;
     }
     /* 换掉整个地址空间；fd 表按 Linux 语义保留（CLOEXEC 还没实现）。 */
-    cur_()->as = as;
-    cur_()->brk = brk;                    /* 新映像的堆起点，不能留旧程序的 */
-    cur_()->mmap_top = C6OS_LINUX_MMAP_BASE;
-    cur_()->fs_base = 0ull;
-    lx_sig_exec(cur_());
-    lx_set_as(as);
-    lx_brk_set(brk);
-    lx_mmap_top_set(cur_()->mmap_top);
+    {
+        u64 old_as = cur_()->as;
+
+        cur_()->as = as;
+        cur_()->brk = brk;                /* 新映像的堆起点，不能留旧程序的 */
+        cur_()->mmap_top = C6OS_LINUX_MMAP_BASE;
+        cur_()->fs_base = 0ull;
+        lx_sig_exec(cur_());
+        lx_set_as(as);
+        lx_brk_set(brk);
+        lx_mmap_top_set(cur_()->mmap_top);
+        port_as_unref(old_as);            /* 旧映像的页框在这里回收 */
+    }
     /* 直接从陷入帧返回新程序入口，不走原来的调用栈 */
     r->r15 = 0ull;
     r->r14 = 0ull;
@@ -1106,6 +1147,7 @@ u64 lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
     ch->tgid = par->tgid;
     ch->ppid = par->ppid;
     ch->as = par->as;                      /* 共享页表：不复制 */
+    port_as_ref(ch->as);                   /* 线程组每个成员持一个引用 */
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
     ch->kstack_top = (u64)(&g_kstack[slot][0]) + LX_KSTACK_SIZE;
@@ -1149,6 +1191,12 @@ void lx_proc_exit_group(u64 code)
         port_panic_halt();
     }
     if (c->tgid != 0u && c->tgid != c->pid) {
+        /* 先把自己从线程组摘掉：reap_peers_ 只处理别人，AS 引用也只放一次。 */
+        c->clear_tid = 0ull;
+        c->state = LX_P_FREE;
+        c->pid = 0u;
+        port_as_unref(c->as);
+        c->as = 0ull;
         lead = lx_proc_find((i64)c->tgid);
         if (lead != (LxProc *)0 && lead != c) {
             lead->code = (i64)code;
@@ -1165,9 +1213,6 @@ void lx_proc_exit_group(u64 code)
             }
             wake_(lead->ppid);
         }
-        c->clear_tid = 0ull;
-        c->state = LX_P_FREE;
-        c->pid = 0u;
         for (i = 0; i < (int)LX_MAX_PROC; i++) {
             if (g_proc[i].state == LX_P_BLOCK) {
                 g_proc[i].state = LX_P_READY;

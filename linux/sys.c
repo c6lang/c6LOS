@@ -440,8 +440,13 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_mprotect:
-        /* L2 先接受：glibc 用它做 RELRO。真正的权限收窄在 L5 加（需要改 PTE）。 */
-        r->rax = 0ull;
+        {
+            int mrc = port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
+                                      (u32)a2);
+
+            /* 未映射/参数越界在 Linux 是 ENOMEM；权限位本身只取 R/W/X */
+            r->rax = (mrc == 0) ? 0ull : neg(LX_ENOMEM);
+        }
         return;
 
     case LX_SYS_poll:

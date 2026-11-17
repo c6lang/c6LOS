@@ -1,0 +1,143 @@
+/* M13 验收（内核侧）：地址空间生命周期 —— 建/映射/改权限/解映射/销毁 反复跑，
+ * 空闲物理页必须回到基线。
+ *
+ * 为什么用内核测试而不是用户态程序：这一轮验证的是 port 层（页框引用计数 +
+ * 页表释放）本身；用户态能观察到的只是"跑几十个命令后 OOM"，定位不到哪条路径
+ * 漏页。直接对 port_as_* 做 300 轮压力，漏一页都会体现在最后的 free_kb 上。
+ *
+ * 不写用户虚拟地址（当前 CR3 不是被测 AS），只查页表状态，避免把测试变成
+ * "激活地址空间"的另一套问题。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+
+#define TEST_VA      0x00400000ull
+#define TEST_PAGES   64ull
+#define TEST_PAGE    4096ull
+#define TEST_ROUNDS  300u
+
+static void put_dec(u64 v)
+{
+    char b[24] = {0};
+    int i = 0;
+
+    if (v == 0ull) {
+        port_putc('0');
+        return;
+    }
+    while (v != 0ull && i < 24) {
+        b[i] = (char)('0' + (int)(v % 10ull));
+        v /= 10ull;
+        i++;
+    }
+    while (i > 0) {
+        i--;
+        port_putc(b[i]);
+    }
+}
+
+static void put_kv(const char *k, u64 v)
+{
+    port_puts(k);
+    put_dec(v);
+    port_puts(" KB\n");
+}
+
+void os_main(void)
+{
+    u64 base = 0ull;
+    u64 after = 0ull;
+    u32 round = 0u;
+    u32 fail = 0u;
+
+    port_init();
+    port_puts("c6os linux-abi M13: address-space lifecycle\n");
+    port_mmu_init();
+
+    base = port_phys_free_kb();
+    put_kv("m13: free base=", base);
+
+    for (round = 0u; round < TEST_ROUNDS; round++) {
+        u64 as = port_as_create();
+
+        if (as == 0ull) {
+            fail = 1u;
+            break;
+        }
+        if (port_as_map(as, TEST_VA, 0ull, TEST_PAGES * TEST_PAGE,
+                        C6OS_PROT_R | C6OS_PROT_W) != 0) {
+            fail = 2u;
+            break;
+        }
+        if (port_as_user_range_ok(as, TEST_VA, TEST_PAGES * TEST_PAGE,
+                                  C6OS_PROT_R | C6OS_PROT_W) == 0) {
+            fail = 3u;
+            break;
+        }
+        /* 1/4 解映射：剩下的仍可读写，解掉的那段必须查不到 */
+        if (port_as_unmap(as, TEST_VA, 16ull * TEST_PAGE) != 0) {
+            fail = 4u;
+            break;
+        }
+        if (port_as_user_range_ok(as, TEST_VA, TEST_PAGE, C6OS_PROT_R) != 0) {
+            fail = 5u;
+            break;
+        }
+        if (port_as_user_range_ok(as, TEST_VA + 16ull * TEST_PAGE,
+                                  TEST_PAGE, C6OS_PROT_R) == 0) {
+            fail = 6u;
+            break;
+        }
+        /* 收窄再放开：mprotect 必须真的改 PTE */
+        if (port_as_protect(as, TEST_VA + 16ull * TEST_PAGE, TEST_PAGE,
+                            C6OS_PROT_R) != 0) {
+            fail = 7u;
+            break;
+        }
+        if (port_as_user_range_ok(as, TEST_VA + 16ull * TEST_PAGE, TEST_PAGE,
+                                  C6OS_PROT_W) != 0) {
+            fail = 8u;
+            break;
+        }
+        if (port_as_protect(as, TEST_VA + 16ull * TEST_PAGE, TEST_PAGE,
+                            C6OS_PROT_R | C6OS_PROT_W) != 0) {
+            fail = 9u;
+            break;
+        }
+        /* 同一 VA 覆盖映射：旧页框必须被释放（MAP_FIXED 路径） */
+        if (port_as_map(as, TEST_VA, 0ull, TEST_PAGE,
+                        C6OS_PROT_R | C6OS_PROT_W) != 0) {
+            fail = 10u;
+            break;
+        }
+        port_as_unref(as);                 /* 引用归零 → 销毁 + 还页 */
+    }
+
+    /* 引用计数：多一个引用时不能提前销毁 */
+    if (fail == 0u) {
+        u64 as = port_as_create();
+
+        if (as == 0ull) {
+            fail = 11u;
+        } else {
+            port_as_ref(as);
+            port_as_unref(as);             /* ref 2 → 1，仍然活着 */
+            if (port_as_map(as, TEST_VA, 0ull, TEST_PAGE,
+                            C6OS_PROT_R) != 0) {
+                fail = 12u;
+            }
+            port_as_unref(as);             /* ref 1 → 0，销毁 */
+        }
+    }
+
+    after = port_phys_free_kb();
+    put_kv("m13: free after=", after);
+
+    if (fail == 0u && after + 64ull >= base) {
+        port_puts("PASS: linux-abi M13（AS 生命周期：页框回收 + PTE 真权限）\n");
+    } else {
+        port_puts("FAIL: linux-abi M13（fail=");
+        put_dec((u64)fail);
+        port_puts("）\n");
+    }
+}

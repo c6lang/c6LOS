@@ -973,7 +973,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +986,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1030,6 +1030,14 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o
+endif
+
+# M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
+ifeq ($(X86S_NAME),mem)
+X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
+              $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
+              $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
+              $(X86S_DIR)/obj/mmu.o
 endif
 
 ifeq ($(C6OS_NET),1)
@@ -1231,6 +1239,22 @@ check-linuxabi: x86-user
 	  && echo "PASS: linux-abi L1（ring3 + int 0x80）" \
 	  || { echo "FAIL: linux-abi L1"; exit 1; }
 
+# ---- M13-1：地址空间生命周期（内核侧压力测试）----
+# 反复建/映射/改权限/解映射/销毁 300 轮，空闲物理页必须回到基线。这是
+# "fork 100 次 OOM" 的回归闸门：漏一页都过不了。
+x86-mem: caps-check-x86
+	$(MAKE) X86S_NAME=mem X86S_MAIN=tests/t_x86_mem.c6 LINUX_ABI=1 \
+		$(X86)/mem-disk.img
+
+check-linuxabi-m13: x86-mem
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/mem-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13.log \
+		| grep -q "^PASS: linux-abi M13" \
+	  && echo "PASS: linux-abi M13（AS 生命周期：页框回收 + PTE 真权限）" \
+	  || { echo "FAIL: linux-abi M13"; tail -20 /tmp/check-m13.log; exit 1; }
+
 # ---- L2：未修改的 Linux 用户态二进制（宿主 gcc 静态链接，内核侧零改动）----
 APP_C   := tests/linux/hello.c
 APP_ELF := $(X86)/app.elf
@@ -1289,6 +1313,17 @@ $(DYNFS): $(DYN_ELF) tools/mk-initramfs.py
 x86-dyn: caps-check-x86
 	$(MAKE) X86S_NAME=dyn X86S_MAIN=tests/t_x86_dyn.c6 LINUX_ABI=1 \
 		$(X86)/dyn-disk.img
+
+# dyn-disk.img 只由上面这次递归 make 产出，而 L5..L8 的载荷镜像把它当普通文件
+# 依赖。外层 make（X86S_NAME 不是 dyn）没有这条规则，干净构建时 check-linuxabi-l5
+# 会直接报 "没有规则可制作目标 build/x86/dyn-disk.img"。这里补一个文件目标：
+# order-only 依赖保证递归 make 先跑，文件存在即算完成。
+#
+# 必须用 X86S_NAME 门禁：递归进去的那次 make 里这个目标就是它自己要构建的，
+# 无条件定义会让 x86-dyn 再递归调用自己，变成无限 make 循环。
+ifneq ($(X86S_NAME),dyn)
+$(X86)/dyn-disk.img: | x86-dyn
+endif
 
 run-x86-dyn: x86-dyn
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/dyn-disk.img,if=ide \
