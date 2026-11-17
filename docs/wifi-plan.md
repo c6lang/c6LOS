@@ -15832,3 +15832,68 @@ spill 才能跟着任务走。所以下一步开 `-DS3_WIN_SPILL`
 现在 spill 只会在 `w2c.S` 的壳里跑（那 3 个调用点都有
 `l32r a8,12b / l32i / beqz a8, 5f` 守卫），不会再在 call0 内核帧上
 触发溢出处理体写飞。
+
+## §458 开 spill：崩点在同函数内往后推了，但没根治
+
+按 §457 的结论把 spill 打开：
+- `ctx.c:62` `g_s3_win_spill_en = 1u`（**初值**：崩点在 PHY 阶段，
+  早于 `s3_wifi_bringup()` 里的 `s3_wifi_osi_init()`，只靠
+  `-DS3_WIN_SPILL` 置位来不及）；
+- 构建另带 `-DS3_WIN_SPILL`，让 `s3_wifi_osi_init()` 别把它压回 0。
+
+真板确认 `g_s3_win_spill_en = 1`。结果：
+
+| spill | 崩溃 pc | vaddr | cause |
+|---|---|---|---|
+| 关 | `0x42057049` | `0x15c` | `0x1c` |
+| 开 | `0x4205706a` | `0x164` | `0x1c` |
+
+**崩点在同一条指令序列里往后挪了**（`0x49` → `0x6a`），说明 spill 确实起了
+作用、只是不够，不是无效。
+
+### 崩溃现场解读
+
+函数是 **`ram_chip_i2c_readReg`（`0x42057020`）** —— IDF 的 IRAM 手写函数：
+
+```asm
+4205703b: l32i.n a6, a3, 0      ; a3 是函数表指针
+4205703f: l32i   a6, a6, 0x154
+42057042: callx8 a6             ; ★ 调用
+42057045: l32i.n a8, a3, 0      ; ★ 调用后**又用 a3**
+42057049: l32i   a8, a8, 0x15c  ; ← spill 关时崩在这
+4205704e: callx8 a8
+42057051: l32i.n a8, a3, 0      ; ★ 再用 a3
+42057055: l32i   a8, a8, 0x168
+4205705e: callx8 a8
+42057066: l32i.n a3, a3, 0      ; ★ 还用它
+4205706a: l32i   a3, a3, 0x164  ; ← spill 开时崩在这
+```
+
+它**反复假设 `a3` 跨 `callx8` 保留**。在窗口机制正确的前提下这个假设成立：
+`callx8` 推进 WINDOWBASE 后 caller 的 `a3` 落在**旧窗口**里，callee 碰不到，
+`retw` 回来时自然还在。`a3` 只有在**窗口绕圈**（WINDOWBASE 走满 16 回到同一
+物理位置）并且溢出处理没把旧窗口正确存栈时才会丢。
+
+已核对过三处细节，都**正确**，问题不在这三处：
+1. 向量表布局（`irq.S:12-44`）：`ovf4@0x000 / unf4@0x040 / ovf8@0x080 /
+   unf8@0x0C0 / ovf12@0x100 / unf12@0x140`，与标准 Xtensa 一致。
+2. sp 所在寄存器：`_win_ovf4` 用 `a5`（`call4` 后新窗口的 `a1` 是 caller 的
+   `a5`）、`_win_ovf8` 用 `a9`、`_win_ovf12` 用 `a13` —— 全部正确。
+3. `_win_ovf8` 的 8 条 `s32e`（4 条到 `[a9-16..-4]`、4 条到 `[a0-32..-20]`）
+   与 xtensa HAL 的 `_WindowOverflow8` 逐条一致；`_win_unf8`/`_win_unf12`
+   与之对称。
+
+### 下轮方向
+
+1. **`_win_ovf4` 是四个向量里唯一没有 sp 兜底的**（`irq.S:55-60` 直接
+   `s32e a0, a5, -16`）。§292/§326 给 ovf8/ovf12 补了
+   `bnez a0, 1f / mov a0, a9`，漏了 ovf4。如果 `a5` 为 0（call0 调用者
+   → `call4` → 新窗口 `a1` 是调用者的 `a5`，而 call0 函数根本没有窗口约定）
+   就会往 `-16` 写。先把它补齐，并顺手加诊断记录哪个向量被进过几次。
+2. 统计 `windowbase` 的绕圈次数：在 `_win_ovf*` 入口各记一个计数器
+   （`0x50001C00` 起）。如果 ovf4 计数远大于 ovf8/ovf12，就说明
+   `ram_chip_i2c_readReg` 这条链是走 `call4` 绕圈的，方向 1 的判断成立。
+3. 若确认是混合 ABI（call0 调用者 → 内部 `callx8`）导致 `a5` 无意义，
+   就在 `w2c` 壳的界面上补一层"把 call0 调用者伪装成 windowed"的垫片，
+   或者干脆让 PHY 调用走纯 windowed 路径（`s3_win_call_phy_enable()`
+   已经存在，见 `S3_PHY_FROM_MAIN`）。

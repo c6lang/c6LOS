@@ -59,7 +59,18 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
  *   1 = 壳里按 IDF 的做法把祖先窗口整圈 spill + WINDOWSTART 归一化
  * 由 s3_wifi_osi_init()（wifi_glue.c）在进闭源库之前打开 —— 只有闭源库那几条
  * 调用链需要窗口语义，我们的 call0 任务根本不需要，别让它们冒这个险。 */
-u32 g_s3_win_spill_en = 0u;
+/* §458：初值改成 1。§457 修好 WINDOWBASE/WINDOWSTART 的逐任务恢复之后，
+ * 露出来的下一层就是"窗口寄存器的内容没跟着任务走"：库代码在 `callx8`
+ * 之后从栈上欠流恢复 `a3`，读到的却是上一个任务的残留，于是 `*(a3)==0`
+ * 再 `l32i 0x15c` 就崩（真板 `cause=0x1c vaddr=0x15c pc=0x42057049`）。
+ *
+ * 必须**从头**就开：崩点在 PHY 阶段（`register_chipv7_phy` 之后），
+ * 早于 `s3_wifi_bringup()` 里的 `s3_wifi_osi_init()`，只靠
+ * `-DS3_WIN_SPILL` 在那个函数里置位来不及。
+ * §447 已经把"开关形同虚设"的 bug 修掉，现在 spill 只在 `w2c.S` 的
+ * 3 个壳里跑（都有 `l32r a8,12b / l32i / beqz a8, 5f` 守卫），
+ * 不会再在 call0 内核帧上触发溢出处理体写飞。 */
+u32 g_s3_win_spill_en = 1u;
 
 S3Ctx g_sched[C6OS_MAX_CORES];
 /* 诊断计数（ctx.S 里自增后覆写到 RTC，避免 RTC 初值随机的干扰） */
