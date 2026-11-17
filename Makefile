@@ -1125,7 +1125,7 @@ $(X86)/disk.img: $(X86)/boot16.bin $(X86)/flat.bin
 $(X86S_DIR)/ir/stamp: $(X86S_C6)
 	@mkdir -p $(X86S_DIR)/ir
 	for f in $^; do \
-		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude $(C6_DEFS) --emit-llvm \
 			-o $(X86S_DIR)/ir/$$(basename $$f .c6).ll $$f || exit 1; \
 	done
 	@touch $@
@@ -1582,6 +1582,8 @@ ALPINE_ROOT := $(ALPINE_DIR)/root
 ALPINE_CPIO := $(ALPINE_DIR)/full.cpio
 ALPINE_DATA := $(ALPINE_DIR)/data.img
 ALPINE_ISO  := $(ALPINE_DIR)/alpine.iso
+# 1 = 编交互式版本（裸 /bin/sh，自己敲命令），0 = 跑固定的 sh -c 脚本
+ALPINE_INTERACTIVE ?= 0
 
 # 3.5MB 的 tarball：只在缓存里没有时下。也可以手工把 tarball 放进
 # $(ALPINE_DIR)，免得每次 CI 都去连 CDN。
@@ -1609,7 +1611,9 @@ $(ALPINE_DATA): tools/mkfat.py
 x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 	@rm -rf $(ISO_DIR)
 	@mkdir -p $(ISO_DIR)
-	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 $(ISO_KER)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(if $(filter 1,$(ALPINE_INTERACTIVE)),C6_DEFS=-DC6OS_ALPINE_INTERACTIVE) \
+		$(ISO_KER)
 	@mkdir -p $(ALPINE_DIR)
 	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		--rootfs $(ALPINE_CPIO) -o $(ALPINE_ISO)
@@ -1618,6 +1622,10 @@ run-x86-alpine: x86-alpine
 	qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
 		-nographic -serial stdio -monitor none -no-reboot
+
+# 自己敲命令：起来就是 Alpine 的 /bin/sh 提示符（/ #），exit 或 Ctrl-D 退出。
+run-x86-alpine-shell:
+	@$(MAKE) ALPINE_INTERACTIVE=1 run-x86-alpine
 
 # 验收：`sh -c '...'` 那段脚本的四件事都要在串口上看得到，而且 /data 里写下的
 # 文件在宿主侧（数据盘镜像）能查出来 —— 证明真的落盘了。

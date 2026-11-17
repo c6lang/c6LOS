@@ -1026,10 +1026,15 @@ static u16 poll_events_(LxProc *p, i32 fd)
 i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
 {
     LxProc *p = cur_();
-    u32 rounds = 0u;
+    u64 deadline = 0ull;           /* port_cycles 口径；0=无限等 */
+    int have_deadline = 0;
 
     if (p == (LxProc *)0) {
         return 0;
+    }
+    if (timeout > 0) {
+        deadline = port_cycles() + (u64)timeout * 1000000ull;
+        have_deadline = 1;
     }
     for (;;) {
         u64 i;
@@ -1051,17 +1056,23 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
                 cnt++;
             }
         }
-        /* !others_live_ 那条快捷路径是给"协作式调度 + 管道"设计的：没人能
-         * 再往管道里写数据了，就地返回免得死等。但终端不适用 —— 输入来自
-         * 串口，不来自别的进程，正是要在这里空转泵串口。M12 之前 ash 在这
-         * 里拿到 0（"没有 fd 就绪"），当成 stdin EOF 直接 exit_group(0)。 */
-        if (cnt > 0 || timeout == 0 || rounds >= 4096u ||
-            (tty == 0u && !others_live_(g_cur))) {
+        if (cnt > 0 || timeout == 0) {
             return cnt;
         }
-        rounds++;
+        if (have_deadline && port_cycles() >= deadline) {
+            return cnt;
+        }
         (void)lx_tty_pump();           /* 轮询式串口：每一轮都是一次机会 */
-        lx_proc_block();
+        /* 终端：输入来自串口，没有哪个进程会来唤醒我们，就地继续泵。
+         * 这里**不能**用 lx_proc_block()：它把进程标成 BLOCK 再 resched，
+         * 没人可切时状态就悬在 BLOCK 上，而且再也等不到唤醒。
+         * 纯管道才值得真阻塞——但也得先确认还有别人能往管道里写。 */
+        if (tty == 0u) {
+            if (!others_live_(g_cur)) {
+                return cnt;
+            }
+            lx_proc_block();
+        }
     }
 }
 

@@ -579,3 +579,43 @@ wasm 例外 —— wasm 没有函数符号的绝对地址，后端直接拒绝�
 llvm-static-data`，不带任何 C 运行时链接一个裸 `_start`，验文件作用域与函数内
 static 两种指针表。M12 这边就改回原生的 `static const char *const kAv[] = {...}`，
 `lx_exec_prepare_sh` 那个包装函数随之删掉 —— 它当初存在只是为了绕开这个 bug。
+
+### M12 补充：自己敲命令（交互式 shell）
+
+验收脚本是 `sh -c '固定脚本'`，因为"等人输入"在自动化里没法复现。但真想体验时
+还是要能自己敲。这条路踩了两个坑，都属于"看上去根本不相关"的那种：
+
+1. **`poll` 不阻塞（真正的根因）**。`lx_proc_poll` 原来的循环有个
+   `rounds >= 4096u` 的保护，轮够次数就 `return cnt`（通常是 0）。它本来是给
+   "协作式调度里的管道"防死等加的，对终端却是错的：busybox 的 `read` 内置命令
+   是**先 poll 再 read**，拿到 0 就当 stdin EOF，于是提示符 `/ #` 一打出来 shell
+   就 `exit_group(0)`；lineedit 的 DSR 等待也死在同一处（poll 返回 0 → 以为终端
+   不回话 → 退出）。改法：超时为负就真阻塞（空转泵串口 —— 终端输入不来自别的
+   进程，没有谁会来唤醒我们，所以**不能** `lx_proc_block()`），为正则按
+   `port_cycles()` 到点返回；纯管道仍然只在"还有别的进程活着"时才阻塞。
+
+   定位过程值得记一笔：先怀疑 lineedit 的 `ESC[6n` 握手（回与不回都退），又怀疑
+   `TCSETS`，都不对；最后把系统调用号全量打出来，看到 `read -r x` 在
+   `A-probe` 和 `GOT:` 之间**只发了一次 poll、一次 read 都没有**，才锁定到 poll。
+
+2. **`TCSETS` 收下了但没用**。行规程原来固定 canonical+echo，而 busybox 的
+   lineedit 会 `tcsetattr` 切 raw 模式自己回显 —— 结果命令被回显两遍。现在
+   `TCSETS` 记住 `c_lflag`：`ICANON` 关掉时字节直接透传（不再攒行/退格），
+   `ECHO` 关掉时不再回显。`TCGETS` 回的也是程序 `tcsetattr` 过的值，不再是硬编码
+   常量，否则 `tcgetattr`→改→`tcsetattr` 这种写法读到的是假状态。
+
+用法：
+
+```
+$ make run-x86-alpine-shell
+/ # ls /
+bin  etc  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
+/ # uname -a
+Linux c6los 6.1.0-c6los #1 x86_64 Linux
+/ # cat /etc/alpine-release
+3.20.0
+```
+
+已知没做：挂载点本身的 `stat`/`readdir`（`ls /data` 报 No such file，但
+`echo m12ok > /data/m12.txt` 与 `cat /data/m12.txt` 都是好的），以及 `sendfile`
+（`cat` 时能看到 `[lx] ENOSYS nr=40`）。

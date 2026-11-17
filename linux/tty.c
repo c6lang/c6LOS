@@ -24,6 +24,14 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 
+/* 行的编辑语义由 c_lflag 决定（TCSETS 会改它）：
+ *   ICANON 开：攒整行，退格/^C/^D 由我们处理（命令行外的普通程序）
+ *   ICANON 关：raw 模式，字节直接透传给读者 —— busybox 的 lineedit 就是这么
+ *              干的，它要自己回显、自己处理方向键；我们再回一遍就成双回显了 */
+#define TTY_ICANON  0x00000002u
+#define TTY_ECHO    0x00000008u
+static u32  g_lflag = 0x00008A3Bu;      /* 默认 ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN */
+
 #define TTY_LINE 256u                  /* 一行最多多少字符（超出丢弃并响铃） */
 #define TTY_PEND 512u                  /* 待读走的数据缓冲（可能攒了多行） */
 
@@ -38,6 +46,7 @@ static u32  g_eof;                     /* Ctrl-D 置位：下一读返回 0 */
 void lx_tty_init(void)
 {
     g_on = 1u;
+    g_lflag = 0x00008A3Bu;
     g_elen = 0u;
     g_plen = 0u;
     g_ppos = 0u;
@@ -82,6 +91,19 @@ static void commit_(void)
 /* 吃一个输入字节，喂进行规程 */
 static void feed_(u8 c)
 {
+    if ((g_lflag & TTY_ICANON) == 0u) {
+        /* raw：不攒行、不做行编辑，也不替读者回显（除非 ECHO 还开着） */
+        if (c == '\r') {
+            c = '\n';
+        } else if (c == '\n' && (g_lflag & TTY_ECHO) == 0u) {
+            c = '\r';                    /* 不重复本例：只把 CR 补上 */
+        }
+        if ((g_lflag & TTY_ECHO) != 0u) {
+            echo_((char)c);
+        }
+        pend_((char)c);
+        return;
+    }
     if (c == '\r' || c == '\n') {
         echo_('\n');
         commit_();
@@ -309,7 +331,7 @@ i64 lx_tty_ioctl(u64 fd, u64 req, u64 arg)
         *(u32 *)(t + 0)  = 0x00000500u;    /* ICRNL | IXON */
         *(u32 *)(t + 4)  = 0x00000005u;    /* OPOST | ONLCR */
         *(u32 *)(t + 8)  = 0x000000BFu;    /* B38400 | CS8 | CREAD | HUPCL */
-        *(u32 *)(t + 12) = 0x00008A3Bu;    /* ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN */
+        *(u32 *)(t + 12) = g_lflag;        /* 程序 tcsetattr 过的值要能读回来 */
         t[16] = 0u;                        /* c_line */
         t[17] = 1u;                        /* c_cc[VINTR]  = ^C */
         t[18] = 4u;                        /* c_cc[VEOF]   = ^D */
@@ -335,7 +357,13 @@ i64 lx_tty_ioctl(u64 fd, u64 req, u64 arg)
         return 0;
     }
     if (req == (u64)TCSETS || req == (u64)TCSETSW || req == (u64)TCSETSF) {
-        return 0;                          /* 接受，但行规程固定（见文件头） */
+        if (arg == 0ull || lx_user_ok(arg, 60ull, C6OS_PROT_R) == 0) {
+            return (i64)0 - (i64)LX_EFAULT;
+        }
+        /* 只认 c_lflag：ICANON / ECHO 决定行规程怎么走，别的标志位
+         * （波特率、校验位）我们没有硬件可设，收下不回话 */
+        g_lflag = *(u32 *)((u8 *)arg + 12);
+        return 0;
     }
     if (req == (u64)TIOCGWINSZ) {
         u8 *w = (u8 *)arg;

@@ -38,6 +38,13 @@ static OsFsPart g_part = {0};
  * 拿到的 argv[1] 不是 "-c"，退回"从 stdin 读脚本"卡在串口上。这张表能生效
  * 本身就是那次修复的端到端检验（kernel 里没有 C 运行时）。
  * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
+#ifndef C6OS_ALPINE_INTERACTIVE
+/* 交给 Alpine /bin/sh 的脚本，作为 `sh -c` 的第三个 argv。
+ *
+ * 用固定脚本而不是裸 `sh`：自动化验收里没法复现"等人输入"，失败时只能看到
+ * "什么都没发生"。带 -c 的脚本走的是完全同一条装载 / 动态链接 / 系统调用路径，
+ * 但输出确定。想自己敲命令：make run-x86-alpine-shell。
+ * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
 static const char kScript[] =
     "echo alpine-M12-alive; "
     "uname -a; "
@@ -48,6 +55,14 @@ static const char kScript[] =
 
 /* argv 表：静态指针数组，加载即有效，不依赖任何构造函数 */
 static const char *const kAv[] = { "/bin/sh", "-c", kScript };
+#define K_AV_N 3u
+#else
+/* 交互式（make run-x86-alpine-shell）：裸 /bin/sh，提示符 / #，命令从串口读。
+ * 靠的是 lx_proc_poll 真阻塞（见 linux/proc.c）：ash 的 read 内置命令先 poll
+ * 再 read，poll 以前空转几千轮就返回 0，ash 当成 stdin EOF 就退出了。 */
+static const char *const kAv[] = { "/bin/sh" };
+#define K_AV_N 1u
+#endif
 
 static void put_u32(UINT32 v)
 {
@@ -203,7 +218,7 @@ void os_main(void)
         port_puts("FAIL: alpine M12（port_as_create）\n");
         return;
     }
-    if (lx_exec_preparev(as, spa, ssz, "/bin/sh", kAv, 3u) != 0) {
+    if (lx_exec_preparev(as, spa, ssz, "/bin/sh", kAv, K_AV_N) != 0) {
         port_puts("FAIL: alpine M12（lx_exec_preparev）\n");
         return;
     }
