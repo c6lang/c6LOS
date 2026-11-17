@@ -293,6 +293,26 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 - `make run-x86-alpine-shell` —— 起来就是 Alpine 的 `/ #` 提示符，自己敲命令；
   `exit` 或 Ctrl-D 退出，qemu 用 Ctrl-A X 关。
 
+## M13 Linux ABI 完整支持（Tier 3+）
+
+设计见 `docs/linux-abi-complete.md`。目标：Alpine 用户态程序"功能完整正确"，
+先补 LiteOS 兼容内核面（内存/进程/fd/VFS/信号/时间/设备/proc）的结构性缺口，
+再补 Linux ABI 的 syscall 与语义。T4（namespace/cgroup/seccomp）明确不做。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| ✅ M13-0 设计稿 | 现状实测缺口矩阵、对象模型（OsAs/OsVma/OsFile/OsWaitQueue）、M13–M20 里程碑与风险 | `docs/linux-abi-complete.md` |
+| ✅ 基础设施 | 干净树上 `dyn-disk.img` 无规则：补文件目标 + order-only 依赖，L5–L8 可回归 | `make check-linuxabi-l5..l8` |
+| ✅ M13-1 页框生命周期 | PMM 引用计数（动态表，不占内核镜像）；`port_as_destroy/unmap` 五层真回收；`MAP_FIXED` 先 unmap；`mprotect` 真改 PTE；AS 引用计数（线程组共享，最后退出才拆）；内核 BSS 不得越过 0xA0000（链接期 ASSERT） | ✅ `check-linuxabi-m13`：300 轮 AS 建/拆/改权限/覆盖映射后 `free_kb` 精确回基线（257888→257888） |
+| M13-2 地址空间 | `OsAs/OsVma`、COW fork、按需分页、栈增长、`mprotect/mmap/munmap/msync` 真语义 | 100 次 fork 只多一份内存；8 MB 栈不崩；munmap 后空闲页回升 |
+| M13-3 资源动态化 | 动态任务表/fd 表/内核栈、pipe 动态环形缓冲、ramfs 节点池 | 1000 个 fd、32 线程、64 KB 管道可用 |
+| M14 进程/信号/exec | B1–B14：setpgid 分派、wait4 选项/waitid、envp/shebang/CLOEXEC、`*at` dirfd、64 信号 + stop/cont + EINTR/`SA_RESTART`、SIGPIPE、fcntl 真语义、readv/dup3 | `check-linuxabi-m14` 用户态逐项 PASS |
+| M15 VFS/设备 | ops 分发表；统一路径解析（挂载点/`*at`/符号链接）；写类/属性类 syscall；statfs；devfs；ramfs 动态 | `check-linuxabi-m15`：busybox 文件操作矩阵 + `/data` 可见 + shebang |
+| M16 事件/时间 | 等待队列全面接入；select/epoll/eventfd/timerfd/signalfd；clock_*/gettimeofday/RTC；O_NONBLOCK | `check-linuxabi-m16`：epoll 用例、timeout 准时、date 误差 ≤2 s |
+| M17 终端/proc | pty、控制终端、作业控制、procfs/sysfs 最小集 | `check-linuxabi-m17`：ps/top/free/df、Ctrl-Z/bg/fg |
+| M18 网络 | socket 族接 SAL、AF_UNIX、阻塞语义、TCP 完善、DNS、epoll 集成 | `check-linuxabi-m18`：wget/nc/nslookup |
+| M19 验收矩阵 | musl libc-test 子集、busybox applet 矩阵、Alpine 包冒烟 | `check-linuxabi-m19` 报告 |
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |

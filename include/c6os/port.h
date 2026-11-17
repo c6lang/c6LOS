@@ -65,19 +65,32 @@ u32 s3_win_call_cache_invalidate(void);
 
 /* 地址空间句柄（port 私有；x86-64 = 页表根物理地址，0 表示失败）。 */
 u64  port_as_create(void);
+/* 强制销毁（只用于"这个 AS 还是私有的"失败路径；ref 应为 1）。 */
 void port_as_destroy(u64 as);
+/* 引用计数：线程组共享地址空间（CLONE_VM）时 +1；ref 到 0 才真正销毁。
+ * 当前 CR3 上的 AS 会延后到 port_as_gc（切页表之后）再释放。 */
+void port_as_ref(u64 as);
+void port_as_unref(u64 as);
+void port_as_gc(void);
 void port_as_activate(u64 as);
-/* 建立/拆除映射。paddr==0 表示分配新物理页（匿名映射）。 */
+/* 建立/拆除映射。paddr==0 表示分配新物理页（匿名映射）；同一 VA 覆盖映射会
+ * 先释放旧页框（MAP_FIXED 语义）。 */
 int  port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot);
 int  port_as_unmap(u64 as, u64 vaddr, u64 bytes);
+/* 改已映射页的权限（mprotect）：W/NX 立刻写回 PTE，不重新分配页框。 */
+int  port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot);
 /* fork 用：复制用户区间（写时复制可后续替换此实现）。返回 0 成功。 */
 int  port_as_copy(u64 dst_as, u64 src_as);   /* fork：复制全部用户页 */
 void port_user_set_kstack(u64 top);          /* L5：每进程内核栈 */
 /* 用户指针校验（copy_from_user 的第一道闸）。返回 1 可访问。 */
 int  port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot);
 
-/* 物理帧（4KB）。返回 0 表示失败。 */
+/* 物理帧（4KB）。返回 0 表示失败。
+ * alloc 得到 ref=1；ref/put 是引用计数；put 到 0 才回 free list。
+ * port_phys_free 保留为 put 的别名（旧名字，别在新代码里用）。 */
 u64  port_phys_alloc(void);
+void port_phys_ref(u64 pa);
+void port_phys_put(u64 pa);
 void port_phys_free(u64 pa);
 u64  port_phys_total_kb(void);
 u64  port_phys_free_kb(void);
