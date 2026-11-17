@@ -182,6 +182,10 @@
      * 不合理就记录 (帧, 该值, EPC, a0) 到 0x500018E0 并停住，
      * 而不是带着垃圾 sp 跑下去（真板症状：a1=0x0008437f 恰好是 flash text 大小）。 */
     l32i    a1, a1, 76
+    /* §392：偏移 76 为 0 ⇒ 这是个**没写过自描述槽的旧帧**（例如
+     * `s3_task_tramp` 之前某条老路径留下的）。直接记现场并停住，
+     * 比拿 a1=0 继续跑好定位得多。 */
+    beqz    a1, 83f
     l32r    a3, .Lstklo2
     bltu    a1, a3, 81f
     l32r    a3, .Lstkhi2
@@ -197,6 +201,13 @@
     movi    a4, 0xBAD3
     s32i    a4, a3, 16
 82: j       82b
+83:
+    l32r    a3, .Lbadsp
+    movi    a4, 0xBAD4
+    s32i    a4, a3, 16
+    s32i    a0, a3, 4
+    s32i    a2, a3, 8
+84: j       84b
     .endm
 
     .global port_task_switch

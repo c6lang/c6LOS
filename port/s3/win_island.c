@@ -952,7 +952,15 @@ void s3_win_stress_task(void *arg)
             d[11] = 0x200u + dep;
 
             d[12] = dep;
-            d[7] = d[7] + s3_win_stress(dep, dep);   /* 3c：交互形态 */
+            /* §394：先试**不递归、只切**（等同 s3_win_stress 的最内层），
+             * 用来区分"切换本身坏"与"深链 + 切换交互坏"。 */
+            d[13] = 0x500u + dep;
+            d[7] = d[7] + s3_win_deep12_entry(8u);
+            s3_w2c_task_delay(1u);
+            d[7] = d[7] + s3_win_deep(16u);
+            d[13] = 0x600u + dep;
+            /* 真正的交互形态 */
+            d[7] = d[7] + s3_win_stress(dep, dep);
             d[12] = 0x300u + dep;
 
             d[9] = 0x400u + dep;
