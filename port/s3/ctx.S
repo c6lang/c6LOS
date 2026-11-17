@@ -491,6 +491,33 @@ port_ps_get:
 #endif
 
     .weak os_task_exit
+/* §412：windowed 跳板。被 tramp 用 `call8` 调（硬件完成窗口轮转），
+ * 再用 `callx8` 去调远端 windowed 入口。a12 里是目标地址、a2 是参数，
+ * 两者在 `call8` 的轮转里都不受影响（a12 → 被调者的 a4）。
+ * 返回时 `retw` 会把窗口退回去。 */
+    .align  4
+    .global s3_win_tramp
+    .type   s3_win_tramp, @function
+s3_win_tramp:
+    /* call8 轮转规则（§385 已实测）：
+     *     壳的 a0..a7  = 调用者的 a8..a15
+     *     壳的 a8..a15 = 调用者的 a0..a7
+     * tramp 把目标地址放在 **a12**，而 a12 是 tramp 的 a8..a15 之一
+     * ⇒ 在壳里它变成 **a4**。参数在 tramp 的 a2 ⇒ 壳里是 **a10**。 */
+    /* §413：跳板必须有**标准的 windowed 函数开场 `entry`**。
+     *
+     * 我第一版写的是 `mov a8,a4 / callx8 a8 / retw`，结果
+     * `TRAP pc=00000001 a0=00000000`。原因：`retw` 是靠 PS.CALLINC
+     * 决定"往回轮转几个窗口"的，而被调者自己的 `retw` **已经把 CALLINC
+     * 归零**；跳板再 `retw` 就rotate 0 个窗口，用当前窗口里那个 0 当返回
+     * 地址跳走。`entry` 才是建立"被调者帧 + CALLINC 记账"的那条指令。 */
+    entry   a1, 16
+    s32i    a0, a1, 0
+    mov     a8, a4               /* 壳的 a4 = tramp 的 a12 = 目标地址 */
+    callx8  a8
+    l32i    a0, a1, 0
+    retw
+
     .global s3_task_tramp
     .type   s3_task_tramp, @function
 s3_task_tramp:
@@ -530,7 +557,18 @@ s3_task_tramp:
     or      a6, a6, a7
     wsr     a6, ps
     rsync
-    callx8  a12
+    /* §412：**用 `call8` 而不是 `callx8` 进 windowed 入口**。
+     *
+     * `call8` 与 `callx8` 的差别不在"编码 CALLINC"，而在**硬件会把
+     * WINDOWSTART 推进一格**（真正把 8 个寄存器让给被调用者）；`callx8`
+     * 只做前者。被调用者因此拿到的 a1 还是 tramp 的，第一条
+     * `s32i a0, a1, 0` 就写到 `0xffffffe0`。
+     *
+     * 但入口地址在 flash（0x42xxxxxx），`call8` 的 128KB 相对位移够不着，
+     * 所以先 `call8` 到**近处的 windowed 跳板** `s3_win_tramp`（本文件内、
+     * 同一个段），由它去 `callx8` 远端入口 —— 此时窗口已经轮转过，
+     * `callx8` 只是在已经正确的窗口里做一次远调用。 */
+    call8   s3_win_tramp
     call0   os_task_exit
     j       1f
 2:

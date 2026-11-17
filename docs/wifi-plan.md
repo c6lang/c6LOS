@@ -14442,3 +14442,49 @@ M1..M5 → T1 call0 任务进入 windowed 主流程 → [wifimain] id=1
 
 ⇒ `wsr windowstart` 在 tramp 这个位置同样会毁掉 a1，
 **和 §387-§391 在 RESTORE_FRAME 里遇到的是同一个问题**。
+
+## §412/§413 ★ 修复：`callx8` 缺 `call8` 的窗口轮转 —— 加一个近处 windowed 跳板
+
+### 症状
+`s3_task_tramp` 用 `callx8` 进 windowed 入口，被调者拿到的"自己的 a1"
+还是 tramp 的 a1，第一条 `s32i a0, a1, 0` 写到 `0xffffffe0`：
+
+```
+TRAP epc1=0x4037af8b (s3_win_call_wifi_main 第一条 s32i)
+     a1=0xffffffe0  exccause=0x1d (StoreProhibited)
+```
+
+### 为什么
+`call8` 与 `callx8` 的差别**不只是**"编码 CALLINC"——硬件 `call8` 会把
+WINDOWSTART 推进一格，真正把 8 个寄存器让给被调用者；`callx8` 不做这一步。
+
+### 怎么修
+入口在 flash（`0x42xxxxxx`），`call8` 的 128KB 相对位移够不着。
+所以 `call8` 到一个**同段内**的 windowed 跳板 `s3_win_tramp`，
+由它 `callx8` 远端入口：
+
+```asm
+    .align  4
+s3_win_tramp:
+    entry   a1, 16               ; ← 必须有！见 §413
+    s32i    a0, a1, 0
+    mov     a8, a4               ; call8：壳的 a4 = tramp 的 a12 = 目标地址
+    callx8  a8
+    l32i    a0, a1, 0
+    retw
+```
+
+`call8` 轮转规则（§385 已实测）：壳的 `a0..a7` = 调用者的 `a8..a15`，
+壳的 `a8..a15` = 调用者的 `a0..a7`。
+
+### §413 第一版忘了 `entry`
+第一版是 `mov a8,a4 / callx8 a8 / retw`，结果
+`TRAP pc=00000001 a0=00000000`。原因：`retw` 靠 PS.CALLINC 决定往回轮转
+几个窗口，而被调者自己的 `retw` **已经把 CALLINC 归零**，跳板再 `retw`
+就是轮转 0 个窗口、用当前窗口里的 0 当返回地址。**`entry` 才是建立
+"被调者帧 + CALLINC 记账"的指令。** （另外 `entry` 必须 4 字节对齐，
+否则汇编报 `unaligned entry instruction`。）
+
+### 真板结果
+WiFi 主构建：`[task] 库建任务 → [give] t=2 sem#1`，PHY 全程 `rc=1`。
+隔离用例 `t_winabi`：`3a=5 3b=5 3c=5 sub=5`、`d[9]=1029` 轮，无回归。
