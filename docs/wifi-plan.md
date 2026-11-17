@@ -14517,3 +14517,37 @@ M1..M5 → T1 → [wifimain] id=1 → W0 phy start
 下一步：`tramp n=1` 说明库任务（`fn=40381a38`）**还没被启动过**。
 查 `switch=1 yield=1` 那一次切换给了谁，以及 `[give]` 之后主任务阻塞在
 哪个对象上（`0x50001A00` 阻塞记录）。
+
+## §416/§417/§418/§419 `s3_win_call_wifi_main` 的窗口污染
+
+### 症状（真板）
+`epc1=0x40378763` = `wifi_call0_task` 里 `call0 s3_win_call_wifi_main`
+的**下一条指令**，`a1=0`；中断进来后在 `RESTORE_FRAME` 的 sp 闸门
+（`0x500018E0`）报 `0xBAD4` 并死循环（`pc=0x4037972c`）。
+
+### 为什么
+这个桥是 **call0** 的（`addi a1,a1,-32` 开帧、`ret` 返回），却要调
+windowed 的 `s3_win_wifi_main`。原来的代码直接 `callx8`，
+`call8`/`callx8` 会轮转寄存器窗口 ⇒ 返回后当前窗口里的 `a1`
+已经**不是**我们那个帧基址了。
+
+### 试过的
+| # | 做法 | 结果 |
+|---|---|---|
+| §416 | 改成 `call8` 到近处 windowed 跳板（`entry` 开场 + `retw`） | 过了，但 `a0` 带 CALLINC 标签，`pc=0x10` |
+| §417 | 修正跳板的寄存器映射（`a10`→壳 `a2`，返回值壳 `a10`→`a2`） | 回到 `[give] t=2 sem#1`，仍未过 |
+| §418 | 帧基址存进全局 `g_win_bridge_sp`（a 寄存器全不可靠） | 干净地走到 `[give]`，`[mtxnew] #2` 不再混入 `3fcef000` |
+| §419 | 跳板里 `callx8` 前存 PS、之后 `wsr ps` 恢复 CALLINC=2 | **退化**：卡在 `T1` 之后，连 PHY 都没出来，已回滚 |
+
+### 认识
+`call8`/`callx8` 配对的是 `retw`；`ret` 是 call0 的。
+被调者自己的 `retw` 会把 PS.CALLINC **清零**，所以跳板的 `retw`
+不会轮转窗口 —— 和 §412/§413 在 `ctx.S` 里踩的是同一个坑。
+§412/§413 那边侥幸没事，只是因为跳板之后不再依赖窗口状态。
+
+### 下一步方向（换路子，不再在 call0 里调 windowed）
+**把 WiFi 主流程做成一个真正的 windowed 任务**，走已经用真板验证过的
+`s3_task_tramp → call8 s3_win_tramp → callx8 入口` 那条路径
+（§412/§413 已证明它能把库任务正确启动起来：
+`tramp n=2 entry=40381a38`）。这样 call0 ↔ windowed 的转换点就只有
+tramp 一个，而它是修好并验证过的。

@@ -342,6 +342,7 @@ s3_win_call_phy_enable:
     .align  4
     .literal_position
     .literal .Lwmain, s3_win_wifi_main
+    .literal .Lbridge_sp, g_win_bridge_sp
     .global s3_win_call_wifi_main
     .type   s3_win_call_wifi_main, @function
 s3_win_call_wifi_main:
@@ -358,11 +359,41 @@ s3_win_call_wifi_main:
     or      a12, a12, a13
     wsr     a12, ps
     rsync
-    /* s3_win_wifi_main 在 flash 里（0x42xxxxxx），call8 的 128KB 相对位移够不着，
-     * 所以走 callx8（目标地址从字面量表取）。 */
+    /* §416（真 bug）：**本函数是 call0 的（用 `ret` 返回），绝不能 `callx8`**。
+     *
+     * `callx8` 会把寄存器窗口轮转 8 个：返回之后 `a1` 已经是**被调者窗口**
+     * 里的值，后面的 `l32i a12, a1, 20` / `addi a1, a1, 32` / `ret` 全在错的
+     * 窗口里执行。真板症状：`s3_win_call_wifi_main` 返回后
+     * `wifi_call0_task` 的 `a1` 变成 0（`epc1` 正是 `call0` 的下一条指令）。
+     *
+     * `call8`/`callx8` 必须配 `retw`（windowed 函数）；`ret` 是 call0 的。
+     * 目标在 flash（0x42xxxxxx），`call8` 的 128KB 相对位移够不着，
+     * 所以先 `call8` 到**本文件内的 windowed 跳板**（`entry` 开场、`retw` 收尾，
+     * 见 §412/§413），由它去 `callx8` 远端 —— 那时窗口已经轮转好了。 */
+    /* §417（真 bug，第 2 次修）：**`callx8`/`call8` 之后 `a1` 已经轮转**。
+     *
+     * 本函数是 call0 的（`ret` 返回、`addi a1,a1,-32` 开帧），却要调
+     * windowed 的 `s3_win_wifi_main`。`callx8`/`call8` 会把寄存器窗口轮转
+     * ⇒ 返回之后**当前窗口里的 a1 不再是我们那个帧基址**
+     *（轮转规则：壳的 a8..a15 = 调用者的 a0..a7 ⇒ 壳的 a9 = 调用者的 a1）。
+     * 真板症状：返回后 `wifi_call0_task` 的 a1 变成 0。
+     *
+     * 修法：**把帧基址放在 a9**（= 壳里的 a1），调用回来后从 a9 里取回来。
+     * `mov a1, a9` 在返回后的旧窗口里执行，而旧窗口的 a9 是我们自己写的值
+     *（调用者 a1 在壳里是 a1，调用者 a9 不受 call8 的转义影响）。 */
+    /* §418：**a 寄存器全都不可靠** —— `call8` 轮转 8 个，而
+     * `callx8` 的 CALLINC 只让硬件把被调者的 a0..a3 存在溢出槽里，
+     * 我们窗口里的 a4..a15 会被被调者当成自己的 a12..a7 用掉。
+     * 试过 a9（壳里它是 a1）也失败。
+     * ⇒ 帧基址只能放**内存**。借 `g_win_bridge_sp` 这个专用全局
+     * （本函数只在 wifi 主任务里被调一次，不会重入）。 */
+    l32r    a9, .Lbridge_sp
+    s32i    a1, a9, 0
     l32r    a10, .Lwmain
-    callx8  a10
+    call8   .Lwmain_stub
     mov     a2, a10
+    l32r    a9, .Lbridge_sp
+    l32i    a1, a9, 0            /* 从内存取回帧基址 */
     l32i    a12, a1, 20
     wsr     a12, ps
     rsync
@@ -373,6 +404,35 @@ s3_win_call_wifi_main:
     l32i    a15, a1, 16
     addi    a1, a1, 32
     ret
+
+/* §416：windowed 跳板。被 `call8` 调（硬件完成窗口轮转），再 `callx8`
+ * 远端 windowed 入口。`entry` 建立 CALLINC 记账，`retw` 才能正确退回去。
+ * 参数与返回值都经 a10 透传（call8 后 a10 就是被调者的 a2，正好是第一个参数）。 */
+    .align  4
+    .type   .Lwmain_stub, @function
+.Lwmain_stub:
+    /* call8 轮转：壳的 a0..a7 = 调用者的 a8..a15，壳的 a8..a15 = 调用者的 a0..a7。
+     * 调用者把目标地址放在 a10 ⇒ 壳里是 **a2**。
+     * `callx8` 之后目标在**新窗口**的 a0..a7 = 壳的 a8..a15，
+     * 返回值在目标的 a2 ⇒ 壳的 **a10**。
+     * 所以要：从 a2 取地址 → callx8 → 从 a10 取返回值 → 放回 a2 交还调用者。 */
+    entry   a1, 16
+    s32i    a0, a1, 0
+    /* §419（真 bug，第 3 次修）：**必须在 `callx8` 前保存 PS、之后恢复**。
+     *
+     * `retw` 靠 PS.CALLINC 决定往回轮转几个窗口。被调者自己的 `retw`
+     * 会把 CALLINC **清零**，跳板再 `retw` 就轮转 0 个窗口 —— 于是返回到
+     * **跳板的窗口**而不是调用者的窗口，`a1` 全套都是错的（真板症状：
+     * `s3_win_call_wifi_main` 返回后 `wifi_call0_task` 的 `a1` = 0，
+     * 中断进来后 sp 闸门报 `0xBAD4`）。
+     *
+     * 这一步和 §412/§413 在 ctx.S 里踩的是同一个坑；那边跳板之后不再依赖
+     * 窗口状态所以侥幸没事，这里必须显式把 CALLINC 恢复成 2。 */
+    mov     a8, a2
+    callx8  a8
+    mov     a2, a10
+    l32i    a0, a1, 0
+    retw
 
 /* u32 s3_win_call_phy_cal_word(u32 i) —— 读回校准数据里的一个 32bit 字 */
     .align  4

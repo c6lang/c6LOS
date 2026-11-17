@@ -46,6 +46,9 @@ S3Ctx g_sched[C6OS_MAX_CORES];
  * 但库创建的 ppTask 是 windowed 的，必须用 callx8 + WOE 才能正确 entry/retw。*/
 u32 g_next_task_windowed = 0;
 u32 g_win_scratch[8] = {0};
+/* §418：win_bridge.S 的 s3_win_call_wifi_main 用它跨 windowed 调用
+ * 保存自己的帧基址（`call8` 会轮转寄存器，a 寄存器全不可靠）。 */
+u32 g_win_bridge_sp = 0;
 /* §258：恢复 WINDOWBASE 时需要先记住帧指针（寄存器换映射后 a1 就变了） */
 u32 g_ctx_tmp_sp = 0;
 u32 g_ts_cnt = 0;   /* 任务启动次数 */
