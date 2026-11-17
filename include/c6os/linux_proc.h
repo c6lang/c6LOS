@@ -255,6 +255,9 @@ u64      lx_sock_getsockname(u64 sd, u64 uaddr, u64 uaddrlen);
 /* M23：sendmsg/recvmsg（iovec 展开，控制消息暂忽略） */
 u64      lx_sock_sendmsg(u64 sd, u64 umsg, u64 flags);
 u64      lx_sock_recvmsg(u64 sd, u64 umsg, u64 flags);
+/* M24：轮询式网卡——等待路径每轮泵一次，收 ARP 应答/DNS 响应 */
+void     lx_net_pump(void);
+u16      lx_sock_poll_one(u64 sd);   /* 返回 LX_POLLIN/POLLOUT 等就绪位 */
 void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
 /* M19：busybox id/df/cat 依赖 */
 u64      lx_proc_getgroups(u64 size, u64 ugroups);

@@ -3215,6 +3215,12 @@ static u16 poll_events_(LxProc *p, i32 fd)
         LxSignalFd *s = sfd_at_(f->pos);
         return (s != (LxSignalFd *)0 && s->count != 0u) ? (u16)LX_POLLIN : (u16)0;
     }
+    if (f->kind == LX_FD_SOCK) {
+        u16 rev = lx_sock_poll_one(f->node);
+
+        return (u16)(rev & ((u16)LX_POLLIN | (u16)LX_POLLOUT |
+                            (u16)LX_POLLERR | (u16)LX_POLLHUP));
+    }
     if (f->kind == LX_FD_PIPE_R) {
         const LxPipe *pp = pipe_at_(f->node);
         u16 ev = 0u;
@@ -3274,7 +3280,11 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
         u64 i;
         i64 cnt = 0;
         u32 tty = 0u;                  /* 这轮轮询里有没有终端 fd */
+        u32 has_sock = 0u;             /* 这轮轮询里有没有 socket fd（M24） */
 
+        if (C6OS_NET) {
+            lx_net_pump();             /* 轮询式网卡：收 ARP 应答/DNS 响应 */
+        }
         for (i = 0ull; i < nfds; i++) {
             u8 *e = (u8 *)(ufds + i * 8ull);
             i32 fd = *(i32 *)e;
@@ -3286,6 +3296,9 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
                 if (qe != (const LxFile *)0 && qe->node == LX_FD_CONSOLE &&
                     lx_tty_enabled() != 0u) {
                     tty = 1u;
+                }
+                if (qe != (const LxFile *)0 && qe->kind == LX_FD_SOCK) {
+                    has_sock = 1u;
                 }
             }
             rev = poll_events_(p, fd);
@@ -3320,11 +3333,12 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
                     has_tfd = 1;
                 }
             }
-            if (!others_live_(g_cur) && !(has_tfd && have_deadline)) {
+            if (!others_live_(g_cur) && !(has_tfd && have_deadline) &&
+                !has_sock) {
                 return cnt;
             }
-            if (!others_live_(g_cur)) {
-                continue;                  /* 有 timerfd：自旋等到点 */
+            if (!others_live_(g_cur) && !(has_sock && have_deadline)) {
+                continue;                  /* 有 timerfd/socket：自旋等到点 */
             }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
@@ -3375,13 +3389,20 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
         u64 ready_w[16] = {0};
         u64 ready_e[16] = {0};
         u32 tty = 0u;
+        u32 has_sock = 0u;
 
+        if (C6OS_NET) {
+            lx_net_pump();             /* M24：收 ARP 应答/DNS 响应 */
+        }
         for (i = 0; i < nfds; i++) {
             u16 rev = poll_events_(p, i);
             const LxFile *f = lx_fdtab_get(p->fd, (u64)i);
 
             if (f != (LxFile *)0 && f->node == LX_FD_CONSOLE && lx_tty_enabled() != 0u) {
                 tty = 1u;
+            }
+            if (f != (LxFile *)0 && f->kind == LX_FD_SOCK) {
+                has_sock = 1u;
             }
             if (fdset_test_(rset, i) && (rev & (LX_POLLIN | LX_POLLHUP)) != 0u) {
                 ready_r[i >> 6u] |= 1ull << (i & 63);
@@ -3414,8 +3435,11 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
         }
         (void)lx_tty_pump();
         if (tty == 0u) {
-            if (!others_live_(g_cur)) {
+            if (!others_live_(g_cur) && !has_sock) {
                 return 0;
+            }
+            if (!others_live_(g_cur) && !(has_sock && have_deadline)) {
+                continue;                  /* M24：有 socket：自旋等网卡应答 */
             }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();

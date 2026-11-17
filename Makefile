@@ -982,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -995,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1034,7 +1034,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1394,6 +1394,35 @@ M23_ELF := $(X86)/m23msg.elf
 $(M23_ELF): $(M23_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+# ---- M24：getaddrinfo / DNS（动态 ELF + 带 /etc 的 initramfs）----
+M24_SRC  := tests/linux/m24dns.c
+M24_ELF  := $(X86)/m24dns.elf
+M24_FS   := $(X86)/m24fs.img
+M24ROOT  := $(X86)/m24root
+LIBNSSD  := /lib/x86_64-linux-gnu/libnss_dns.so.2
+LIBNSSF  := /lib/x86_64-linux-gnu/libnss_files.so.2
+
+# 动态 ELF：解释器/libc 从 initramfs 加载（与 DYNROOT 一致）
+$(M24_ELF): $(M24_SRC)
+	@mkdir -p $(dir $@)
+	gcc -Os -s -o $@ $<
+
+# 复制 dynroot（ld.so/libc/libresolv/busybox）+ /etc 解析配置，打成 initramfs
+$(M24_FS): $(DYN_ELF) $(LD_SO) $(LIBC6) $(LIBRES) $(LIBNSSD) $(LIBNSSF) tools/mk-initramfs.py
+	@rm -rf $(M24ROOT)
+	@mkdir -p $(M24ROOT)/bin $(M24ROOT)/lib64 $(M24ROOT)/lib/x86_64-linux-gnu $(M24ROOT)/etc
+	cp $(LD_SO)  $(M24ROOT)/lib64/ld-linux-x86-64.so.2
+	cp $(LIBC6)  $(M24ROOT)/lib/x86_64-linux-gnu/libc.so.6
+	cp $(LIBRES) $(M24ROOT)/lib/x86_64-linux-gnu/libresolv.so.2
+	cp $(LIBNSSD) $(M24ROOT)/lib/x86_64-linux-gnu/libnss_dns.so.2
+	cp $(LIBNSSF) $(M24ROOT)/lib/x86_64-linux-gnu/libnss_files.so.2
+	cp $(DYN_ELF) $(M24ROOT)/bin/busybox
+	printf 'nameserver 10.0.2.3\n' > $(M24ROOT)/etc/resolv.conf
+	printf '127.0.0.1 localhost\n10.0.2.15 c6os\n' > $(M24ROOT)/etc/hosts
+	printf 'hosts: files dns\n' > $(M24ROOT)/etc/nsswitch.conf
+	python3 tools/mk-initramfs.py $@ $(M24ROOT)
+
 
 # ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
 DYN_ELF := $(X86)/busybox
@@ -2114,6 +2143,22 @@ check-linuxabi-m23: x86-m23
 	  && echo "PASS: linux-abi M23（sendmsg/recvmsg iovec）" \
 	  || { echo "FAIL: linux-abi M23"; tail -30 /tmp/check-m23.log; exit 1; }
 
+# ---- M24：getaddrinfo / DNS ----
+# 复用通用 disk 规则：递归 make 构建内核 flat.bin，DISK_APP 塞动态 ELF +
+# 带 /etc/resolv.conf|hosts 的 initramfs（M24_FS）。
+x86-m24: caps-check-x86 $(M24_ELF) $(M24_FS)
+	$(MAKE) X86S_NAME=m24 X86S_MAIN=tests/t_x86_m24.c6 LINUX_ABI=1 C6OS_NET=1 \
+		$(X86)/m24-disk.img
+
+check-linuxabi-m24: x86-m24
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m24-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m24.log \
+		| grep -q "^PASS: m24dns" \
+	  && echo "PASS: linux-abi M24（getaddrinfo / DNS）" \
+	  || { echo "FAIL: linux-abi M24"; tail -30 /tmp/check-m24.log; exit 1; }
+
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(X86)/fs-disk.img
@@ -2236,6 +2281,11 @@ DISK_DEPS  := $(M23_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(M23_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m24)
+DISK_DEPS  := $(M24_ELF) $(M24_FS)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M24_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(M24_FS) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),net)
 DISK_DEPS  :=
 DISK_MB    := 1

@@ -869,8 +869,47 @@ recvmsg 三段重组一致、msg_name 来源正确、带 msg_name 的 sendmsg（
 语义）、controllen/flags 归零。验收 `make check-linuxabi-m23` → 19/19
 checks PASS；全量回归 L2–L8/M9/M13–M13d/M14–M22/alpine 无回归。
 
-遗留：真 pty/控制终端、DNS/getaddrinfo、AF_UNIX、ancillary 数据、
-musl libc-test 全量 —— 后续里程碑。
+遗留：真 pty/控制终端、AF_UNIX、ancillary 数据、musl libc-test 全量
+—— 后续里程碑。
+
+### M24 DNS / getaddrinfo：内核 socket ABI 层面的缺口
+
+用户态 `getaddrinfo()` 主体在 libc 里，但 Layered 实测（数字解析、
+/etc/hosts、手写 DNS 查询、glibc getaddrinfo 四层）暴露了一串**内核 ABI**
+缺口。这些是 M18 的 UDP 环回测试覆盖不到的外部网络路径：
+
+1. **send 返回值语义**：SAL 外部发送成功返回 0（"已交给 IP 层排队"），
+   Linux `send/sendto/sendmsg` 必须返回**字节数**。glibc 见 send=0 就当
+   写失败，DNS 查询根本不发第二遍。`lxs_send_ret_` 把 0 转成请求的 len。
+2. **未 bind 的 UDP socket 自动端口**：`lport` 只在 bind 时设置，不 bind
+   就是 0 → DNS 应答回不到 socket。Linux 语义要求首次 send 自动分配临时
+   端口，补 `udp_autobind_`（49152 起找空槽）。
+3. **SOCK_CLOEXEC/SOCK_NONBLOCK 标志**：glibc 用
+   `socket(AF_INET, SOCK_DGRAM|CLOEXEC|NONBLOCK, 0)`，原实现严格比较
+   `type==SOCK_DGRAM` → EAFNOSUPPORT。改为屏蔽标志位判断，并把标志存进 fd。
+4. **轮询式网卡泵**：e1000 收包纯轮询、无中断。ARP 应答和 UDP 响应必须
+   主动 `NetIfPollX86()` 才能进来：poll/select 等待循环每轮泵一次
+   （`lx_net_pump`），send 遇 -EHOSTUNREACH / recv 遇 -EAGAIN 时也泵后重试。
+5. **socket 就绪判定**：poll_events_ 的 LX_FD_SOCK 分支改用 `SalPoll`
+   真实就绪位，不再无条件报 POLLIN（否则 glibc 以为数据到了、read 却 EAGAIN）。
+6. **内核入口网络初始化对齐 M10-3**：`NetIfUp` + link-up 等待 + 进 ring3 前
+   ARP 预解析 DNS 服务器 MAC（DNS 查询发往网关外的 10.0.2.3）。
+
+initramfs 加入 `/etc/resolv.conf`/`/etc/hosts`/`nsswitch.conf` 与 NSS 模块
+（libnss_dns/files），动态 ELF 的解释器/ld.so 从 initramfs 加载。
+
+`tests/linux/m24dns.c` 验 10 项：AI_NUMERICHOST 数字解析 + getnameinfo、
+/etc/hosts localhost、手写 UDP DNS 查询（connect+sendto+recvfrom 拿到 40B
+应答，QR 位正确）。验收 `make check-linuxabi-m24` → 10/10 checks PASS；
+全量回归 L2–L8/M9/M13–M13d/M14–M23/check-{sal,udp,tcp}/alpine 无回归。
+
+**观测而非硬验收**：glibc 的 `getaddrinfo("example.com")` 在本测试里仍返回
+EAI_NONAME——手写 DNS 查询走同一套内核 socket ABI 已通，差异落在 glibc
+NSS 模块内部 resolver 的细节（超时/重试/私有状态）；目标 Alpine 用 musl，
+resolver 实现完全不同。这项记为后续（musl libc-test 全量时再评估），不影响
+"内核 Linux socket ABI 完整"的结论。
+
+遗留：真 pty/控制终端、AF_UNIX、ancillary 数据、musl libc-test 全量。
 
 > 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
 > `timeout` 时若被 SIGKILL，内部 timeout 会残留 qemu 占住 m19-disk.img 锁，

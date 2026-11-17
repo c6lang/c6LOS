@@ -13,15 +13,50 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 
+/* M24：轮询式网卡泵。syscall 等待路径（poll/select/recv）每轮调一次，
+ * 才能收到 ARP 应答与 UDP 响应——纯轮询驱动没有中断，不泵就永远收不到。 */
+void lx_net_pump(void);
+
 #if C6OS_NET
 #include "los/los_typedef.h"
 #include "los/sal.h"
+#include "los/net.h"
 
 #define LX_AF_INET      2u
 #define LX_SOCK_STREAM  1u
 #define LX_SOCK_DGRAM   2u
 #define LX_SOL_SOCKET   1u
 #define LX_SOCK_MAX     64u
+
+static LxFile *lxs_get_(u64 fd);   /* M24：lx_sock_poll_one 前置引用 */
+
+/* M24：泵轮询式网卡（x86 e1000）。NetIfPollX86 把 RX 环里的帧喂进协议栈，
+ * ARP 应答与 DNS 响应才会被处理；没有中断，等待路径必须主动调。 */
+void lx_net_pump(void)
+{
+    LosNetIf *nif = NetIfGet(0u);
+
+    if (nif != (LosNetIf *)0) {
+        (void)NetIfPollX86(nif);
+    }
+}
+
+/* M24：单个 socket 的就绪位。UDP 看接收队列计数，TCP 看 SalPoll。 */
+u16 lx_sock_poll_one(u64 sd)
+{
+    LxFile *f = lxs_get_(sd);
+    int revents;
+
+    if (f == (LxFile *)0) {
+        return LX_POLLNVAL;
+    }
+    revents = SalPoll((int)f->node, 0x1u | 0x4u);   /* POLLIN | POLLOUT */
+    if (revents < 0) {
+        return 0u;
+    }
+    return (u16)((revents & 0x1u) ? LX_POLLIN : 0u) |
+           (u16)((revents & 0x4u) ? LX_POLLOUT : 0u);
+}
 
 static u64 lxs_err_(int sal_rc)
 {
@@ -82,22 +117,27 @@ static void lxs_addr_out_(const LosSockAddr *in, u64 uaddr)
 u64 lx_sock_socket(u64 domain, u64 type, u64 proto)
 {
     LxProc *p = lx_cur_proc();
+    u64 base_type = type & ~(u64)(0x80000ull | 0x800ull);  /* 去 CLOEXEC/NONBLOCK */
+    u64 want_flags = type & (u64)(0x80000ull | 0x800ull);
     int sd;
     u64 fd;
 
     if (p == (LxProc *)0) {
         return (u64)0 - LX_EBADF;
     }
-    if (domain != LX_AF_INET || (type != LX_SOCK_STREAM && type != LX_SOCK_DGRAM)) {
+    /* M24：glibc 的 getaddrinfo 用 socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|
+     * SOCK_NONBLOCK, 0)；严格比较 type 会把这些标志当成非法 type。 */
+    if (domain != LX_AF_INET ||
+        (base_type != LX_SOCK_STREAM && base_type != LX_SOCK_DGRAM)) {
         return (u64)0 - LX_EAFNOSUPPORT;
     }
     /* Linux 语义：proto=0 表示"按 type 选默认协议"。SAL 按 (domain,type,proto)
      * 三元组精确匹配，注册的 UDP 是 17、TCP 是 6，glibc 却传 0 —— 不补默认
      * 值就 EAFNOSUPPORT（M18 验收里 socket A/B 失败的原因）。 */
     if (proto == 0ull) {
-        proto = (type == LX_SOCK_DGRAM) ? 17ull : 6ull;
+        proto = (base_type == LX_SOCK_DGRAM) ? 17ull : 6ull;
     }
-    sd = SalSocket((int)domain, (int)type, (int)proto);
+    sd = SalSocket((int)domain, (int)base_type, (int)proto);
     if (sd < 0) {
         return lxs_err_(sd);
     }
@@ -113,8 +153,8 @@ u64 lx_sock_socket(u64 domain, u64 type, u64 proto)
         f->pos = 0ull;
         f->is_dir = 0u;
         f->kind = LX_FD_SOCK;
-        f->flags = 0u;
-        f->oflags = 0u;
+        f->flags = (want_flags & 0x80000ull) ? LX_FD_CLOEXEC : 0u;
+        f->oflags = (want_flags & 0x800ull) ? LX_O_NONBLOCK : 0u;
     }
     return fd;
 }
@@ -201,6 +241,44 @@ u64 lx_sock_accept(u64 fd, u64 uaddr, u64 uaddrlen)
     return cfd;
 }
 
+/* M24：SalSend 在 ARP 未解析时返回 -113(EHOSTUNREACH)。轮询式网卡没有
+ * 中断，用户态同步 send 没有机会泵网卡收 ARP 应答，第一个 DNS 包永远
+ * 发不出去。这里在 -113 时泵网卡再重试，让 ARP 有时间完成。 */
+static int sal_send_retry_(int sd, const void *buf, u32 len)
+{
+    int rc = SalSend(sd, buf, len);
+    int i;
+
+    for (i = 0; i < 4000 && rc == -113; i++) {
+        lx_net_pump();
+        rc = SalSend(sd, buf, len);
+    }
+    return rc;
+}
+
+static int sal_sendto_retry_(int sd, const void *buf, u32 len,
+                             const LosSockAddr *a)
+{
+    int rc = SalSendTo(sd, buf, len, a);
+    int i;
+
+    for (i = 0; i < 4000 && rc == -113; i++) {
+        lx_net_pump();
+        rc = SalSendTo(sd, buf, len, a);
+    }
+    return rc;
+}
+
+static u64 lxs_send_ret_(int rc, u64 want)
+{
+    /* SAL 外部发送成功返回 0（已交给 IP 层排队），环回返回 len；
+     * Linux send/sendto/sendmsg 的返回值一律是"发送的字节数"。 */
+    if (rc == 0) {
+        return want;
+    }
+    return lxs_err_(rc);
+}
+
 u64 lx_sock_sendto(u64 fd, u64 ubuf, u64 len, u64 flags,
                    u64 uaddr, u64 ulen)
 {
@@ -216,11 +294,38 @@ u64 lx_sock_sendto(u64 fd, u64 ubuf, u64 len, u64 flags,
         if (lx_user_ok(uaddr, 16ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
         (void)ulen;
         lxs_addr_in_(uaddr, &a);
-        rc = SalSendTo((int)f->node, (const void *)ubuf, (u32)len, &a);
+        rc = sal_sendto_retry_((int)f->node, (const void *)ubuf, (u32)len, &a);
     } else {
-        rc = SalSend((int)f->node, (const void *)ubuf, (u32)len);
+        rc = sal_send_retry_((int)f->node, (const void *)ubuf, (u32)len);
     }
-    return lxs_err_(rc);
+    return lxs_send_ret_(rc, len);
+}
+
+/* M24：UDP 空队列返回 -113? 不，返回 -11(EAGAIN)。等待响应时泵网卡收包，
+ * 再试一次——让不经过 poll 的同步 recv（如 SO_RCVTIMEO 循环）也能收到
+ * ARP 应答/DNS 响应。 */
+static int sal_recv_retry_(int sd, void *buf, u32 len)
+{
+    int rc = SalRecv(sd, buf, len);
+    int i;
+
+    for (i = 0; i < 2000 && rc == -11; i++) {
+        lx_net_pump();
+        rc = SalRecv(sd, buf, len);
+    }
+    return rc;
+}
+
+static int sal_recvfrom_retry_(int sd, void *buf, u32 len, LosSockAddr *a)
+{
+    int rc = SalRecvFrom(sd, buf, len, a);
+    int i;
+
+    for (i = 0; i < 2000 && rc == -11; i++) {
+        lx_net_pump();
+        rc = SalRecvFrom(sd, buf, len, a);
+    }
+    return rc;
 }
 
 u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
@@ -236,7 +341,7 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
         LosSockAddr a;
 
         if (lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
-        rc = SalRecvFrom((int)f->node, (void *)ubuf, (u32)len, &a);
+        rc = sal_recvfrom_retry_((int)f->node, (void *)ubuf, (u32)len, &a);
         if (rc >= 0) {
             lxs_addr_out_(&a, uaddr);
             if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) != 0) {
@@ -244,7 +349,7 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
             }
         }
     } else {
-        rc = SalRecv((int)f->node, (void *)ubuf, (u32)len);
+        rc = sal_recv_retry_((int)f->node, (void *)ubuf, (u32)len);
     }
     return lxs_err_(rc);
 }
@@ -388,13 +493,13 @@ u64 lx_sock_sendmsg(u64 fd, u64 umsg, u64 flags)
                 return (u64)0 - LX_EFAULT;
             }
             lxs_addr_in_(name, &a);
-            rc = SalSendTo((int)f->node, (const void *)buf, (u32)total, &a);
+            rc = sal_sendto_retry_((int)f->node, (const void *)buf, (u32)total, &a);
         } else {
-            rc = SalSend((int)f->node, (const void *)buf, (u32)total);
+            rc = sal_send_retry_((int)f->node, (const void *)buf, (u32)total);
         }
         port_kfree((void *)buf);
         (void)flags;
-        return lxs_err_(rc);
+        return lxs_send_ret_(rc, total);
     }
 }
 
@@ -426,10 +531,10 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
             port_kfree((void *)buf);
             return (u64)0 - LX_EFAULT;
         }
-        rc = SalRecvFrom((int)f->node, (void *)buf, (u32)total, &a);
+        rc = sal_recvfrom_retry_((int)f->node, (void *)buf, (u32)total, &a);
         if (rc >= 0) { lxs_addr_out_(&a, name); }
     } else {
-        rc = SalRecv((int)f->node, (void *)buf, (u32)total);
+        rc = sal_recv_retry_((int)f->node, (void *)buf, (u32)total);
     }
     if (rc < 0) {
         port_kfree((void *)buf);
@@ -467,6 +572,10 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
 }
 
 #else /* !C6OS_NET */
+
+/* 无网络 port：泵是空操作，零侵入。 */
+void lx_net_pump(void) { }
+u16 lx_sock_poll_one(u64 sd) { (void)sd; return 0u; }
 
 u64 lx_sock_socket(u64 d, u64 t, u64 p) { (void)d; (void)t; (void)p; return (u64)0 - LX_EAFNOSUPPORT; }
 u64 lx_sock_close(u64 fd) { (void)fd; return (u64)0 - LX_EBADF; }
