@@ -17694,3 +17694,36 @@ app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替�
 （`build/wifi/c6os.bin` 是好的），但需要用户断电重插后才能重新烧录。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §529 真板完整取到 https://qq.com 页面数据（官方 IDF app 侧基线）
+
+为排除“路由器 / DNS / 证书 / 网络”因素，在 `/tmp/idf_station` 官方 station
+例程上加了 `esp_http_client` GET https://qq.com/（CA bundle + 自动跳转 +
+事件回调抓 body），真板实测：
+
+```
+I (2431) wifi:connected with weforpay.com, aid = 2, channel 6, 40U,
+             bssid = dc:d8:7c:5a:7a:46
+I (3451) wifi station: got ip:192.168.68.120
+I (10371) https: HTTP status=200 content_length=132932 BODY(600):
+<html>
+<head><title>302 Found</title></head> ...
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <title>腾讯网</title>
+  ...
+```
+
+⇒ **硬件、路由器、2.4G 天线、DNS、TLS 证书、HTTP 全部正常**；
+qq.com 返回真实腾讯网首页 132932 字节。
+
+注意：这是 **IDF 官方 app** 的成果，不是 c6LOS，因此目标仍未达成。
+c6LOS 侧需补齐 IDF app 启动阶段的模拟/RF 初始化，才能让同样的
+WiFi + HTTPS 流程在 c6LOS 上跑通。goal 保持 active。
+
+附：本轮发现 `esptool --no-stub` 写 app image 会让 bootloader 报
+`Image hash failed`（虽然 esptool 自校验通过）；必须用 stub 模式
+（460800）写入，否则 app 不可引导。
