@@ -15261,3 +15261,65 @@ bWu1bu1Wu2.b.............Wu1          ← 停在这里，110 秒无新输出
    或者 `wait_kind` 不匹配（`task.c6:442` 要求 `wait_obj == obj && wait_kind == kind`）。
 3. `ctx[1].a1sl = 0` 本身也要查：`port_task_yield` 里 `addi a14, a1, 128;
    s32i a14, a1, 76` 不可能得 0，除非那次保存走的不是 yield 的正常路径。
+
+## §445 摸清任务表内存布局（`g_tasks` 是 static，符号表里没有）
+
+`nm` 找不到 `g_tasks` —— c6 编译器把它并进了 `__c99_d2`（`0x3fcb971d`）。
+用 openocd `dump_image` 导出整片再搜 `OS_TASK_MAGIC(0xC6A50001)` 得到：
+
+**`g_tasks` 基址 = `0x3fcb971d`，`sizeof(OsTask)` = `0x70` (112)。**
+
+**注意字段顺序和 `include/c6os/task.h` 的声明**不一样**（编译器重排了）：
+
+| 实际偏移 | 字段 | 校验 |
+|---|---|---|
+| +0 | `ctx` | `0x3fcc5ed0`=`&g_ctx[0]` / `0x3fcc5f1c`=`&g_ctx[1]` ✓ |
+| +4 | `arg` | 0 ✓ |
+| +8 | `entry` | `0x4037ac24` / `0x40381ab4` ✓ |
+| +24 | `id` | 1 / 2 ✓ |
+| +28 | `magic` | `0xC6A50001` ✓ |
+| +32 | `stack_size` | `0x2000`(8192) / `0x1800`(6144) ✓ |
+| +44 | `prio`/`base_prio`/`state`/`core` | 字节串 `03 03 01 00` / `02 02 02 00` |
+| +92 | `name` | `"wifi"` ✓ |
+
+**状态枚举**：`0=FREE 1=READY 2=RUNNING 3=DEAD 4=BLOCKED 5=SUSP`。
+
+**JTAG 实测那一刻**：wifi 主任务 **state=1(READY)**、库任务 **state=2(RUNNING)**，
+`g_s3_cur[0] = 0x3fcc5f1c = &g_ctx[1]`，`g_prid_base[0] = 0x0000cdcd`（与 `prid` 一致，
+所以核心号算的是 0，没问题）、`g_sched[0].sp = 0x3fcd9390`。
+
+### 重要澄清：`ctx[1].a1sl==0` **不是 bug**
+`ctx[1]` 是库任务**第一次**阻塞时留下的旧帧（EPC 确实停在 `os_task_block_wait`）。
+库任务被唤醒后又跑了一段，栈向下增长把它自己的旧帧覆盖了 —— 所以 `a0/WS/a1sl`
+变成 0，而 `c->sp` 还停在旧位置。**真正的问题是它之后一直在跑、不再 yield**，
+于是 wifi 主任务虽然 READY 却永远拿不到 CPU（`S3_NO_PREEMPT` 下没有时间片）。
+
+## §446 ★ 当前卡点：`windowbase = 14`（非法）→ `s3_win_spill` 野写
+
+halt 后读 CPU 寄存器：
+
+| 寄存器 | 值 | 含义 |
+|---|---|---|
+| `pc` | `0x40379e54` | **卡在 `_vec_level1` 异常向量入口**（`_vec_level1` 从 `0x40379e58` 起） |
+| `exccause` | `0x1d` | **StoreProhibited**（非法写） |
+| `excvaddr` | `0x0005ffe0` | 野地址（像个小整数被当指针） |
+| `epc1` | `0x42014ee7` | **`s3_win_spill+0x40`，一条 `call12`** |
+| `a1` | `0x3fcc0550` | 库任务栈内（`[3fcbeed0,3fcc06d0)`）✓ |
+| **`windowbase`** | **`0x0e` (14)** | **非法！必须 4 的倍数（0/4/8/…/60）** |
+| `windowstart` | `0x4935` | 位模式异常 |
+
+**根因链**：`windowbase` 漂移到 14（非法）⇒ `s3_win_spill` 里那条 `call12`
+按错误的窗口基址分配 ⇒ 写到 `0x0005ffe0` ⇒ StoreProhibited ⇒ 进 `_vec_level1`
+⇒ 而异常入口的 `rotw -1` 让 wb 更加错乱 ⇒ 永久卡在向量里
+（这正是 §343 记录过的现象，只是这次触发点换成了 `s3_win_spill`）。
+
+### 下轮方向
+1. `port/s3/w2c.S` 的 `WIN_SPILL` 宏：spill 前后有没有动 `windowbase`？
+   `s3_win_spill` 是用 `entry` + `call12` 实现的，**`call12` 会把 windowbase 推进 3**
+   （12 个寄存器的窗口），如果 `retw` 的 CALLINC 与它对不上，wb 就会漂。
+2. 重点查 `s3_win_spill` 的 `retw` 是否与 `call12` 配对：**`call12` 必须配
+   `retw`（CALLINC=3）**，若中间插了 `call8`/`call0` 把 CALLINC 冲掉，
+   `retw` 就会退回错误的窗口数 ⇒ wb 漂移。
+3. 也可以考虑：库任务在 `S3_NO_PREEMPT` 下长期不让出 CPU 本身也是个问题 ——
+   即使窗口修好，wifi 主任务仍可能饿死。可考虑在 `s3_w2c_*` 壳里定期
+   主动 yield，或恢复抢占但**同时**在 ISR 里正确保存 `c->sp`（这才是 §376 想做的事）。
