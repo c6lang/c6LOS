@@ -1029,7 +1029,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
               $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/fdt.o $(X86S_DIR)/obj/vma.o \
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/fdt.o \
+              $(X86S_DIR)/obj/vma.o \
               $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/afunix.o
 endif
 
@@ -1263,6 +1264,12 @@ x86-user: caps-check-x86
 run-x86-user: x86-user
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/user-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# M26：统一回归入口——跑完所有 Linux ABI 里程碑 + 网络 + alpine，
+# 逐项汇总、单项失败不中断（实现见 tools/check-linuxabi-all.sh）。
+.PHONY: check-linuxabi-all
+check-linuxabi-all:
+	@bash tools/check-linuxabi-all.sh
 
 # L1 验收：真跑一遍"进 ring3 → int 0x80 → 退出"通路，按输出判定。
 check-linuxabi: x86-user

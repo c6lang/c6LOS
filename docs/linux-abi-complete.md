@@ -943,4 +943,23 @@ L2–L8/M9/M13–M13d/M14–M24/check-{sal,udp,tcp}/alpine 无回归。
 > 导致下次跑报 "Failed to get write lock"。这是验收脚本的既有行为，杀掉
 > 残留进程即可，与 M20 代码无关。
 
+### M26 统一回归入口
+
+里程碑累积到 M25 后，逐个 `make check-linuxabi-*` 已不便复现整体验收。
+M26 交付一条命令的完整回归：`make check-linuxabi-all`
+（实现 `tools/check-linuxabi-all.sh`）：
+
+- 按依赖顺序跑 L1–L8、M9、M13–M13d、M14–M25、
+  `check-{sal,ip,ping,udp,tcp}`、`check-alpine` 共 30 项；
+- 单项失败不中断（记录输出末尾 12 行），末尾汇总 `N PASS, M FAIL`，
+  任一项失败则整体退出 1；
+- 每项后清理残留 qemu，规避上面提到的镜像锁问题。
+
+这是可维护性交付：新增里程碑只需在脚本 `TESTS` 列表加一行。
+
+**剩余缺口（诚实清单）**：真 pty/控制终端（当前单全局串口 tty，无
+/dev/ptmx 多实例）、AF_UNIX 的 STREAM 真字节流边界与 SCM_RIGHTS、
+musl libc-test 全量、glibc NSS 内部 DNS resolver 细节（内核 socket ABI
+已由手写 DNS 查询证明完整）。这些不影响已验证的 Alpine/busybox 主体功能。
+
 
