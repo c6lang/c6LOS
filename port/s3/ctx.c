@@ -222,17 +222,17 @@ void port_task_ctx_check(void *ctx)
     hi = lo + (u32)(c->size);
     sp = c->sp;
     if (lo == 0u || sp < lo || sp >= hi || (sp & 3u) != 0u) {
-        extern int s3_ets_printf(const char *fmt, ...);
+        /* §508：只记录、不 printf、不停机。
+         * 原来的 printf 会经过 windowed→call0 的 printf 壳，而此时 sp 已经坏了，
+         * 于是 `vsprintf_internal` 拿 0xbad1 当指针取指，双异常把第一现场冲掉。
+         * 现在留 m[0..4] 给 JTAG 看，继续执行，看任务到底会不会真的炸。 */
         volatile u32 *m = (volatile u32 *)0x50000100u;
         m[0] = 0xBAD1u;
         m[1] = sp;
         m[2] = lo;
         m[3] = hi;
         m[4] = (u32)(void *)c;
-        s3_ets_printf("[ctx] sp 越界：sp=%08x stack=[%08x,%08x) ctx=%08x\n",
-                   (unsigned)sp, (unsigned)lo, (unsigned)hi, (unsigned)(u32)(void *)c);
-        while (1) {
-        }
+        m[5] = m[5] + 1u;
     }
 }
 
