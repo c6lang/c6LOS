@@ -252,6 +252,10 @@ void lx_sig_send_one(LxProc *t, u32 sig, int to_group)
         lx_proc_job_cont(t->pid);
         return;
     }
+    /* M22：先问 signalfd 是否吞掉该信号（被监控则入队、不走 handler）。 */
+    if (lx_signalfd_queue(sig, (u64)LX_SI_USER, (u64)t->pid) != 0) {
+        return;
+    }
     t->sig_pending |= 1ull << (sig - 1u);
     t->sig_code[sig] = (u32)LX_SI_USER;
     if (t->state == LX_P_STOP) {

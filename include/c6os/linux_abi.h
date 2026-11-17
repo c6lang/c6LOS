@@ -223,6 +223,8 @@
 #define LX_SYS_timerfd_create 283
 #define LX_SYS_timerfd_settime 286
 #define LX_SYS_timerfd_gettime 287
+/* M22：signalfd */
+#define LX_SYS_signalfd4      289
 /* M18：socket 族 */
 #define LX_SYS_socket        41
 /* M19：busybox applet 矩阵暴露的缺口 */

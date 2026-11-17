@@ -1924,6 +1924,7 @@ u64 lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count)
 static void ep_release_(u64 id);   /* M20：定义在 epoll 块，close 里释放注册表 */
 static u16 poll_events_(LxProc *p, i32 fd);  /* M20：epoll_wait 复用，定义在下方 */
 static void tfd_release_(u64 id);  /* M21：定义在 timerfd 块，close 里释放对象 */
+static void sfd_release_(u64 id);  /* M22：定义在 signalfd 块，close 里释放对象 */
 
 u64 lx_proc_close(u64 fd)
 {
@@ -1949,6 +1950,13 @@ u64 lx_proc_close(u64 fd)
     }
     if (fe->kind == LX_FD_TIMERFD) {
         tfd_release_(fe->pos);
+        fe->node = LX_FD_NONE;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
+    if (fe->kind == LX_FD_SIGNALFD) {
+        sfd_release_(fe->pos);
         fe->node = LX_FD_NONE;
         fe->kind = LX_FD_FILE;
         wake_all_();
@@ -2925,6 +2933,205 @@ u64 lx_timerfd_read(u64 fd, u64 ubuf, u64 len)
     return 8ull;
 }
 
+/* ---- M22：signalfd（把信号转成可 read 的 128B siginfo）----
+ * 全局对象表（同 epoll/timerfd）。每个对象带 sigmask；lx_sig_send_one
+ * 投递前先问 lx_signalfd_queue：若信号被某 signalfd 监控则入它的队列，
+ * 不再走 handler/默认动作。队列是内核堆上的定长记录（sig/code/pid）。 */
+#define LX_SFD_SENTINEL 0xfffffff8ull
+#define SFD_QMAX 64u
+
+typedef struct {
+    u32 sig;
+    u32 code;
+    u32 pid;
+} LxSfdRec;
+
+typedef struct {
+    u64 mask;                   /* 1ull << (sig-1) */
+    LxSfdRec q[SFD_QMAX];
+    u32 head;
+    u32 tail;
+    u32 count;
+    u32 used;
+} LxSignalFd;
+
+static LxSignalFd *g_sfd;
+static u32 g_sfd_cap;
+
+static LxSignalFd *sfd_at_(u64 id)
+{
+    if (g_sfd == (LxSignalFd *)0 || id >= g_sfd_cap || g_sfd[id].used == 0u) {
+        return (LxSignalFd *)0;
+    }
+    return &g_sfd[id];
+}
+
+/* close(fd) 时释放槽位；由前置声明供 lx_proc_close 调用。 */
+static void sfd_release_(u64 id)
+{
+    LxSignalFd *s = sfd_at_(id);
+
+    if (s != (LxSignalFd *)0) {
+        s->used = 0u;
+    }
+}
+
+static int sfd_grow_(void)
+{
+    u32 ncap = (g_sfd_cap == 0u) ? 4u : g_sfd_cap * 2u;
+    LxSignalFd *ne;
+
+    if (ncap > 64u) {
+        return -1;
+    }
+    ne = (LxSignalFd *)port_kcalloc((u64)ncap, (u64)sizeof(LxSignalFd));
+    if (ne == (LxSignalFd *)0) {
+        return -1;
+    }
+    if (g_sfd != (LxSignalFd *)0) {
+        u32 i;
+
+        for (i = 0u; i < g_sfd_cap; i++) { ne[i] = g_sfd[i]; }
+        port_kfree((void *)g_sfd);
+    }
+    g_sfd = ne;
+    g_sfd_cap = ncap;
+    return 0;
+}
+
+/* sig.c 调用：任意一个 signalfd 监控该信号就入队并吞掉。返回 1=已消费。 */
+int lx_signalfd_queue(u64 sig, u64 code, u64 pid)
+{
+    u32 i;
+
+    if (sig == 0ull || sig > 64ull || g_sfd == (LxSignalFd *)0) {
+        return 0;
+    }
+    for (i = 0u; i < g_sfd_cap; i++) {
+        LxSignalFd *s = &g_sfd[i];
+
+        if (s->used == 0u || (s->mask & (1ull << (sig - 1ull))) == 0ull) {
+            continue;
+        }
+        if (s->count < SFD_QMAX) {
+            LxSfdRec *r = &s->q[s->tail];
+
+            r->sig = (u32)sig;
+            r->code = (u32)code;
+            r->pid = (u32)pid;
+            s->tail = (s->tail + 1u) % SFD_QMAX;
+            s->count++;
+        }
+        wake_all_();
+        return 1;                           /* 该信号从此不再走 handler */
+    }
+    return 0;
+}
+
+u64 lx_signalfd4(u64 fd, u64 umask, u64 masklen, u64 flags)
+{
+    LxProc *p = cur_();
+    LxFile *fe;
+    LxSignalFd *s;
+
+    if (p == (LxProc *)0 || (flags & ~((u64)0x80000ull | 0x800ull)) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    /* fd=-1 新建：兼容符号扩展(0xffffffffffffffff)和 32 位零扩展
+     * (0x00000000ffffffff)两种——glibc 的 signalfd(-1,...) 在此 ABI 下
+     * 观察到零扩展形式（与 AT_FDCWD 同构）。 */
+    {
+        u32 fd32 = (u32)fd;
+        int is_new = ((i64)fd < 0) ||
+                     (fd32 == 0xffffffffu && (fd >> 32) == 0ull);
+
+        if (!is_new) {                     /* 修改已有 signalfd 的 mask */
+            fe = lx_fdtab_get(p->fd, fd);
+            if (fe == (LxFile *)0 || fe->kind != LX_FD_SIGNALFD) {
+                return n_((u64)LX_EBADF);
+            }
+            s = sfd_at_(fe->pos);
+            if (s == (LxSignalFd *)0) { return n_((u64)LX_EBADF); }
+        } else {                           /* 新建 */
+            u32 i;
+
+        for (i = 0u; i < g_sfd_cap; i++) {
+            if (g_sfd[i].used == 0u) { break; }
+        }
+        if (i >= g_sfd_cap) {
+            if (sfd_grow_() != 0) { return n_((u64)LX_ENOMEM); }
+            for (i = 0u; i < g_sfd_cap; i++) {
+                if (g_sfd[i].used == 0u) { break; }
+            }
+        }
+        if (i >= g_sfd_cap) { return n_((u64)LX_ENOMEM); }
+        fd = lx_fdtab_alloc(p->fd);
+        if (fd == LX_FD_NONE) { return n_((u64)LX_EMFILE); }
+        s = &g_sfd[i];
+        s->used = 1u;
+        s->head = 0u;
+        s->tail = 0u;
+        s->count = 0u;
+        s->mask = 0ull;
+        fe = &p->fd->ent[fd];              /* 直接写槽（alloc 后 node=NONE） */
+        fe->node = LX_SFD_SENTINEL;
+        fe->pos = (u64)i;
+        fe->is_dir = 0u;
+        fe->kind = LX_FD_SIGNALFD;
+        fe->flags = (flags & 0x80000ull) ? LX_FD_CLOEXEC : 0u;
+        fe->oflags = (flags & 0x800ull) ? LX_O_NONBLOCK : 0u;
+        }
+    }
+    if (masklen != 0ull) {
+        if (lx_user_ok(umask, masklen, C6OS_PROT_R) == 0) {
+            return n_((u64)LX_EFAULT);
+        }
+        s->mask = *(const u64 *)umask;       /* 8 字节 sigset */
+    }
+    return fd;
+}
+
+/* 生成 128B signalfd_siginfo（只填前 16 字节，其余清零）。 */
+static void sfi_(u8 *b, u32 sig, u32 code, u32 pid)
+{
+    u32 i;
+
+    for (i = 0u; i < 128u; i++) { b[i] = 0u; }
+    *(u32 *)(b + 0u) = sig;
+    *(u32 *)(b + 4u) = 0u;                  /* ssi_errno */
+    *(i32 *)(b + 8u) = (i32)code;
+    *(u32 *)(b + 12u) = pid;
+}
+
+u64 lx_signalfd_read(u64 fd, u64 ubuf, u64 len)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxSignalFd *s;
+    LxSfdRec r;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_SIGNALFD) {
+        return n_((u64)LX_EBADF);
+    }
+    s = sfd_at_(fe->pos);
+    if (s == (LxSignalFd *)0 || len < 128ull ||
+        lx_user_ok(ubuf, 128ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    while (s->count == 0u) {
+        if ((fe->oflags & LX_O_NONBLOCK) != 0u) {
+            return n_((u64)LX_EAGAIN);
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);
+        lx_proc_block();
+    }
+    r = s->q[s->head];
+    s->head = (s->head + 1u) % SFD_QMAX;
+    s->count--;
+    sfi_((u8 *)ubuf, r.sig, r.code, r.pid);
+    return 128ull;
+}
+
 u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
@@ -2948,6 +3155,9 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     }
     if (fe->kind == LX_FD_TIMERFD) {
         return lx_timerfd_read(fd, ubuf, len);
+    }
+    if (fe->kind == LX_FD_SIGNALFD) {
+        return lx_signalfd_read(fd, ubuf, len);
     }
     if (fe->kind == LX_FD_SOCK) {
         return lx_sock_recv(fd, ubuf, len, 0ull);
@@ -3000,6 +3210,10 @@ static u16 poll_events_(LxProc *p, i32 fd)
         lx_timerfd_check();
         return (tfd_at_(f->pos) != (LxTimerFd *)0 &&
                 tfd_at_(f->pos)->counter != 0u) ? (u16)LX_POLLIN : (u16)0;
+    }
+    if (f->kind == LX_FD_SIGNALFD) {
+        LxSignalFd *s = sfd_at_(f->pos);
+        return (s != (LxSignalFd *)0 && s->count != 0u) ? (u16)LX_POLLIN : (u16)0;
     }
     if (f->kind == LX_FD_PIPE_R) {
         const LxPipe *pp = pipe_at_(f->node);

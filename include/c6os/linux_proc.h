@@ -68,6 +68,7 @@
 #define LX_FD_SOCK    7u   /* socket（M18）：node = SAL socket id */
 #define LX_FD_EPOLL   8u   /* epoll（M20）：node = 对象 id */
 #define LX_FD_TIMERFD 9u   /* timerfd（M21）：node = 对象 id */
+#define LX_FD_SIGNALFD 10u /* signalfd（M22）：node = 对象 id */
 
 /* procfs 虚拟文件的 id（fs.c 内部生成内容） */
 #define LX_PROC_meminfo   1u
@@ -266,6 +267,11 @@ u64      lx_timerfd_settime(u64 fd, u64 flags, u64 unew, u64 uold);
 u64      lx_timerfd_gettime(u64 fd, u64 ucur);
 u64      lx_timerfd_read(u64 fd, u64 ubuf, u64 len);
 void     lx_timerfd_check(void);
+/* M22：signalfd */
+u64      lx_signalfd4(u64 fd, u64 umask, u64 masklen, u64 flags);
+u64      lx_signalfd_read(u64 fd, u64 ubuf, u64 len);
+/* sig.c 投递时把被 signalfd 监控的信号转入队列；返回 1=已转走 */
+int      lx_signalfd_queue(u64 sig, u64 code, u64 pid);
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
 void     lx_sched_preempt(void);

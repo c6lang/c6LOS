@@ -821,7 +821,34 @@ M13–M13d/M14–M20/alpine 无回归。
 返回 0，timerfd 永远等不到到期——加了"有 timerfd + 有 deadline 才自旋"的
 窄条件，避免影响既有的 stdin 立即 EOF 语义。
 
-遗留：signalfd、真 pty、DNS/getaddrinfo、AF_UNIX —— 后续里程碑。
+遗留：真 pty、DNS/getaddrinfo、AF_UNIX —— 后续里程碑。
+
+### M22 signalfd：事件循环三件套收齐
+
+signalfd(2) 把信号转成可 read 的 fd，epoll/timerfd/signalfd 三件套至此齐备：
+
+- `LX_FD_SIGNALFD` fd kind + `LxSignalFd` 对象表（64 槽，每槽 8B sigmask
+  + 64 项环形队列 `{sig,code,pid}`），close 释放槽位。
+- `signalfd4(289)`：`fd=-1` 新建（分配 fd + 对象槽）、`fd>=0` 改 mask；
+  CLOEXEC/NONBLOCK 标志同 eventfd。
+- 关键分流在 `lx_sig_send_one()`：投递前先问 `lx_signalfd_queue(sig)`，
+  若任一 signalfd 监控该信号则入队并**吞掉**（不再置 sig_pending、不走
+  handler/默认动作）；mask 外信号照常走原路径。
+- read 返回 128B `struct signalfd_siginfo`（只填 signo@0/errno@4/code@8/
+  pid@12，其余清零），空队列 NONBLOCK→EAGAIN、否则阻塞等 `wake_all_`；
+  poll/epoll 经 `poll_events_` 报 POLLIN。
+
+`tests/linux/m22signalfd.c` 验：signalfd 新建、阻塞 SIGUSR1 后 kill(self)
+→ read 到正确 signo/code、空队列 EAGAIN、poll 唤醒、mask 外 SIGUSR2 仍走
+handler。验收 `make check-linuxabi-m22` → 20/20 checks PASS；全量回归
+L2–L8/M9/M13–M13d/M14–M21/alpine 无回归。
+
+踩坑：glibc 的 `signalfd(-1,...)` 在此 ABI 下把 -1 零扩展成
+`0x00000000ffffffff`（与 AT_FDCWD 同构），按 `(i64)fd<0` 判断会误当成
+"修改已有 fd"而 EBADF；改成同时识别符号扩展和零扩展两种 -1 形式。
+
+遗留：真 pty/控制终端、DNS/getaddrinfo、AF_UNIX、sendmsg iovec、
+musl libc-test 全量 —— 后续里程碑。
 
 > 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
 > `timeout` 时若被 SIGKILL，内部 timeout 会残留 qemu 占住 m19-disk.img 锁，

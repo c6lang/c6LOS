@@ -1136,6 +1136,10 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_timerfd_gettime:
         r->rax = lx_timerfd_gettime(a0, a1);
         return;
+    /* M22：signalfd */
+    case LX_SYS_signalfd4:
+        r->rax = lx_signalfd4(a0, a1, a2, a3);
+        return;
 
     /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
     case LX_SYS_socket:
