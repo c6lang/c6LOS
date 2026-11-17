@@ -313,6 +313,26 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 | M18 网络 | socket 族接 SAL、AF_UNIX、阻塞语义、TCP 完善、DNS、epoll 集成 | `check-linuxabi-m18`：wget/nc/nslookup |
 | M19 验收矩阵 | musl libc-test 子集、busybox applet 矩阵、Alpine 包冒烟 | `check-linuxabi-m19` 报告 |
 
+## M21 Linux ABI 平台无关化 + MaixCam 裸机点亮（设计稿已出）
+
+设计见 `docs/linux-abi-portable.md`（分层与 `lx_abi` 契约）和
+`docs/maixcam-bringup.md`（SG2002/C906 启动链、特权模型、外设矩阵、V0–V9）。
+一句话：把 `linux/` 拆成「ABI 无关语义核心 `lx/`」+「每架构一份 `abi/<abi>/`」，
+先以 x86 零变化落地，再新增 `abi/rv64-linux` + `port/rv64virt`（qemu 门禁），
+最后上 MaixCam 大核裸机。在 RV64 大核上跑 x86-64 机器码不存在（不做解释器）。
+
+| 任务 | 细节 | 验收 |
+|---|---|---|
+| A1 平台无关化 | `lx/` + `abi/x86_64-linux/`；帧对核心不透明；syscall 号表化；`stat`/`sigframe`/`auxv`/布局常量外移；`port_user_enter/return` 归 port | `check-linuxabi-l1..l8` + `-m13` + `check-alpine` 输出与改动前逐字一致；`make check-all` 绿；`C6OS_ABI=none` 时 `make s3` 体积不变 |
+| A2/A3 rv64 后端 | `port/rv64virt`（qemu `-M virt`）+ `abi/rv64-linux`（Sv39、`ecall`、asm-generic `stat`、riscv `sigframe`、`tp` TLS、FP 扩展区） | `check-abi-rv64-l2..l8` 逐条 PASS（静态/动态/信号/线程/抢占） |
+| A4 FP 上下文 | `copy_ext` + `mstatus.FS`；新增 `tests/linux/fpthr.c` | 浮点密集 4 线程 + 信号嵌套计数正确 |
+| A5 门禁二维化 | `C6OS_ABI`、`C6OS_PORT_ARCH`、`tools/chk-abi.sh`、`make check-layering`（`lx/` 禁 x86 寄存器名） | 负测试：x86 ABI + rv64 port → 解析期 error |
+| V0 启动接管 | 方案 B（保留厂商 FSBL+OpenSBI+U-Boot，我们的镜像当 payload）；串口/tick/GPIO | 串口 banner + 内存图 + `tick=1000/s` ±1% |
+| V1–V2 存储 + 板上 ABI | SD/FAT；U 态 + 静态 rv64 ELF + busybox `sh` | `PASS: maixcam V2`；`sh -c 'echo hi > /data/x; cat /data/x'` → `hi` |
+| V3–V7 外设 | DSI/ST7701 屏 + `fb0`；触摸 `input0`；I2S 音频；以太网接 SAL；CSI 抓帧 + 屏上预览 | 各级 `check-maixcam-vN` 或明确现象 |
+| 明确不做 | **WiFi/BLE、硬件编解码(VPU)、NPU、ISP(3A)** 四项：需厂商固件与编译器，即使 Linux 侧也是闭源 `.ko` + 固件 | 写进文档，不再评估 |
+| V8/V9（可选） | Alpine 全量矩阵上板；V9 切方案 A（M-mode 内核、无 OpenSBI） | V0–V8 不退，仅 `port/sg2002` 内变化 |
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |

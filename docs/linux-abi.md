@@ -384,6 +384,13 @@ Tier 3 是目标，但低 tier 必须始终可构建、可回归。
 | `port/s3`（ESP32-S3） | ⚠️ 只有 cache 映射，无进程页表 | ❌ 无特权级 | **永久关闭**；`port_caps()` 返回 0 |
 | `port/sim` / host | ❌ 隔离靠宿主进程 | ❌ | 只做 ABI **语义**回归（不验证特权切换） |
 
+> **修订（平台无关化，M21）**：上表说明的是"这个 port 能不能当宿主"，**不足以**说明
+> "能不能跑某个 ABI"——本文 §3/§8 里的地址空间布局、`LX_SYS_*` 号、`stat`/`sigframe`
+> 布局都是 `x86_64-linux` 这**一个后端**的实例。现已把 `linux/` 拆成 ABI 无关核心
+> `lx/` 与每架构一份的 `abi/<abi>/`，门禁也从一维（caps）变二维（caps + ABI 架构）。
+> 详见 [linux-abi-portable.md](linux-abi-portable.md) §1/§4 与
+> [maixcam-bringup.md](maixcam-bringup.md)（第一个新后端是 `rv64-linux`）。
+
 ### 2.2 构建期门禁（两道）
 
 > 实现在 `Makefile` 里分两道：**解析期** `$(error)`（`LINUX_ABI=1` 且目标含
