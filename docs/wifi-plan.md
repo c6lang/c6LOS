@@ -17208,3 +17208,28 @@ JTAG 实测：该寄存器 **write-only**（写 3 读回 0），且时钟/复位
 ### 目标仍未达成
 
 尚未看到 AP 关联成功、DHCP 地址、TLS 连接、qq.com 页面数据。目标保持 active。
+
+---
+
+## §507 scan 卡点排查：栈加大无效，0xbad1 现场需重新看
+
+真板在 `[wifi] scan start（阻塞）` 之后稳定复现：
+
+```
+*** TRAP sp=3fcd9230 cause=0000001c pc=4037a62e ps=00060810
+    vaddr=0000bad1 callinc=2 a0=8037a747
+```
+
+- 0x50000140 的 `s3_trap` 记录是**本次**写的（magic=0x54524150），vaddr=0xbad1 可信。
+- 0x50000100 里的 0xBAD1/sp/lo/hi 是 `port_task_ctx_check` 写的，但 RTC 掉电不丢，
+  **可能是上一次启动的残留**（这次 ppTask 栈仍是 8192），不能直接当本次证据。
+- 把 `osi_task_create` 的最小栈从 8192 抬到 16384 后重烧：日志**完全一样**，
+  trap 位置/值不变 ⇒ 不是 ppTask 栈不够。该改动已回退。
+
+`cause=0x1c` = InstFetchPIFAddrError，EXCVADDR=0xbad1 —— CPU 取指到 0xbad1。
+`pc=0x4037a62e` 落在 `vsprintf_internal$isra$0`（`l8ui a11,a9,0`），
+`a0=0x8037a747` 的返回目标 0x4037a744 也在同一函数里。
+下一步应先清掉 0x50000100 再复位，确认 0xBAD1 到底是本次还是残留；
+再沿 printf 壳（`s3_ets_printf_call0` / `s3_win_puts`）查 0xbad1 这个指针的来源。
+
+目标（AP 关联 → DHCP → TLS → qq.com）仍未达成，goal 保持 active。
