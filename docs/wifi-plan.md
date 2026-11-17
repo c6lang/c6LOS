@@ -16884,3 +16884,72 @@ CPU 随后永远停在 INTLEVEL=15，**level-1 中断再也进不来**
    能继续收中断（`rsil 0` 后 `j .`），把"冻死"降级成"该任务卡住"。
 3. 拿到不冻机的版本之后，再看 `esp_wifi_init_internal` 到底在等谁
    （wifi 任务 `wait_kind=1`、`obj=0x3fcc8c70`）。
+
+---
+
+## §491 窗口基址切换的不变式写错了 —— 故障点前移
+
+### 真正的错
+
+`RESTORE_FRAME`（`port/s3/ctx.S`）恢复现场时是这样切窗口的：
+
+```
+wsr  a3, windowstart     ; a3 = 该任务保存的 WINDOWSTART（"只有它自己那个窗口活"）
+isync
+wsr  a5, windowbase      ; a5 = 该任务保存的 WINDOWBASE
+isync
+```
+
+**不变式 `(WINDOWSTART >> WINDOWBASE) & 1 == 1` 在"这两条写之间"也被要求成立。**
+第一条写把**当前（调度器）窗口的活位当场清掉**了 —— 当时 WB 还是调度器的值，
+而新的 WS 里没有它的位 —— 于是紧接着的 `wsr windowbase` 立刻吃保留异常
+（`exccause=0x1d`），`_vec_level1` 里再炸 ⇒ 双异常 ⇒ 整机冻死。
+§489/§490 反复抓到的 `epc1 = RESTORE_FRAME 的 wsr windowbase` 就是它。
+（`excvaddr=0xfffffff9`、`epc1` 不可信之类都是二次异常的假象，§468 早有先例。）
+
+### 修法：`WIN_SET` 宏
+
+```asm
+    .macro  WIN_SET              ; a3 = WSt（<0x10000）, a5 = WBt（<16）
+    CLR_OWB                      ; 先清 PS.OWB(bit8-11)
+    rsr     a6, windowbase
+    movi    a2, 1
+    ssl     a6
+    sll     a2, a2               ; a2 = 1 << 当前 WINDOWBASE
+    or      a6, a3, a2           ; 把当前窗口的活位并进去
+    wsr     a6, windowstart
+    isync
+    wsr     a5, windowbase
+    isync
+    .endm
+```
+
+这个"当前窗口活位"**故意不清理**：调度器那 16 个寄存器确实还活在那个物理窗口里，
+标成活的是对的（真正的 Xtensa OS 也这么做）。三处窗口切换点全部换成 `WIN_SET`：
+`WS==0` 归一化、§457 逐任务还原、`43:` 兜底。
+
+### 结果：那个故障真的没了，但暴露出下一层
+
+- `_vec_default` 记录里 `epc1` 不再是 `ctx.S` 的 `wsr windowbase`，
+  而是 **`0x42013aa2`（闭源库 flash 里）**，`exccause=0x1d`、
+  `excvaddr=0xfffffff2`。
+- `0x50000680` 的"坏 WS/坏 WB"诊断**全 0** ⇒ 校验一次都没失败过，值都是合法的。
+- `0x50001C00`：`port_task_switch` 只被调了 2 次，入口 `PS=0x00060800`（EXCM=0）。
+- 串口从 `bWu1bu1Wu2.b` 变成只到 `b`（更早停住），机器**仍然冻死**
+  （`pc` 在 `_vec_default` 的 `j .`，`ccompare0` 落后 `ccount` 一大截）。
+
+`excvaddr = 0xfffffff2`（= -14）这种"负的小偏移"是**基址为 0 的访存**特征：
+窗口溢出/欠载处理体里的 `s32e a0, a9, -16` / `l32e a0, a1, -12` 一旦
+`a9/a1` 为 0 就是这个样子 —— 也就是 §312 描述过的"溢出处理体用脏 a9，
+双重异常打死在 `_vec_default`"。**这条链（`[sp-12]` 帧链）在我们自己写的
+windowed 壳里本来就不成立**，得继续补。
+
+### 下一轮（明确）
+
+1. 让每个 windowed 壳的帧形状**符合 ABI 的溢出槽约定**：帧里留出
+   `[sp-48, sp)` 这一带不用（我们自己的保存项都放在 `[sp, sp+16)` 之上），
+   并且在 `[sp-12]` 处写上"上一层帧基址"，让硬件溢出/欠载处理体能把链走通。
+   现在 `w2c.S` 的 `W2C` 宏存 `a0@16`、`a8..a11@40..52` 已经越过了 48 字节
+   槽位区，要整体沿 `-48` 重新排布。
+2. `_vec_default` 别死循环：先把 PS 恢复到能继续收中断（或直接把当前任务标
+   DEAD 再 `ret`），把"冻机"降级成"该任务卡住"，这样串口日志还能继续看。

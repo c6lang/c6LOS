@@ -98,6 +98,33 @@
     isync
     .endm
 
+    /* §491 ★★★ 安全地把窗口基址切到 (a3=WSt, a5=WBt)。
+     *
+     * **关键：不变式 `(WINDOWSTART >> WINDOWBASE) & 1 == 1` 在"两次写之间"
+     * 也必须成立。** 原来这里直接把 WINDOWSTART 写成"只有目标窗口活"的值，
+     * 于是**当前（调度器）窗口的活位当场被清掉** —— 紧接着的
+     * `wsr windowbase` 立刻吃保留异常（`exccause=0x1d`）⇒ `_vec_level1` 里
+     * 再炸 ⇒ 双异常 ⇒ 整机冻死。§489/§490 抓到的一直是这个。
+     *
+     * 修法：先把**当前窗口**的活位并进去再写。当前 WB 用 `rsr` 现读，因为
+     * 恢复方（调度器/port_task_switch）的窗口和任务的窗口不一定相同。
+     * 这个位**故意不清理**：调度器那 16 个寄存器确实还活在那个物理窗口里，
+     * 标成活的是对的（真正的 Xtensa OS 也这么做）。
+     *
+     * 前提：a3 < 0x10000 且 a5 < 16（调用点已分别校验过）。 */
+    .macro  WIN_SET
+    CLR_OWB
+    rsr     a6, windowbase
+    movi    a2, 1
+    ssl     a6
+    sll     a2, a2                  /* a2 = 1 << 当前 WINDOWBASE */
+    or      a6, a3, a2              /* a6 = WSt | 当前窗口活位 */
+    wsr     a6, windowstart
+    isync
+    wsr     a5, windowbase
+    isync
+    .endm
+
     .macro  RESTORE_FRAME
     /* WINDOWSTART 恢复策略（混合版，§246）：
      *
@@ -187,12 +214,9 @@
     l32r    a4, .Ltmpsp
     s32i    a1, a4, 0
     CLR_OWB
-    movi    a3, 0
-    wsr     a3, windowbase
-    isync
-    movi    a3, 1
-    wsr     a3, windowstart
-    isync
+    movi    a3, 1                   /* WSt = 1（只有窗口 0） */
+    movi    a5, 0                   /* WBt = 0 */
+    WIN_SET
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0
     j       11f
@@ -273,11 +297,7 @@
      *  两个值其实都完全合法），窗口全被归一化掉。 */
     srli    a6, a3, 16
     bnez    a6, 43f                 /* WINDOWSTART 高位非 0 ⇒ 非法 */
-    CLR_OWB
-    wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
-    isync
-    wsr     a5, windowbase
-    isync
+    WIN_SET                         /* a3 = 帧偏移 68 (WINDOWSTART)，a5 = 偏移 72 (WB) */
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0               /* 取回帧指针（此时窗口已是本任务的）*/
     j       44f
@@ -292,13 +312,9 @@
     s32i    a7, a4, 12
     l32r    a4, .Ltmpsp
     s32i    a1, a4, 0               /* 藏帧指针：wsr windowbase 会重映射 a1 */
-    CLR_OWB
-    movi    a6, 1
-    wsr     a6, windowstart
-    isync
-    movi    a6, 0
-    wsr     a6, windowbase
-    isync
+    movi    a3, 1                   /* 归一到 WSt=1 / WBt=0 */
+    movi    a5, 0
+    WIN_SET
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0
 44:
