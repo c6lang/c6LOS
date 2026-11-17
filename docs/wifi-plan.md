@@ -16977,3 +16977,67 @@ openocd: 127.0.0.1:4444 ConnectionRefusedError
 
 结论：**自愈不要靠 RTC 看门狗**。真要"冻机不落地"，得让 `_vec_default`
 自己把现场收拾干净（恢复 INTLEVEL、把当前任务标 DEAD 并切走），而不是整片复位。
+
+---
+
+## §493 板子又被 `S3_AUTO_WDT` 固件卡在"USB 掉总线"状态（需断电重插）
+
+§492 那个实验固件还留在板子上，之后所有 `flashbl.sh` / `openocd` 都在
+USB 层就失败：
+
+```
+serial..._update_dtr_state: fcntl.ioctl(self.fd, TIOCMBIS, ...):
+    OSError: [Errno 71] Protocol error
+openocd: 127.0.0.1:4444 ConnectionRefusedError
+/dev/ttyACM0 能 open()，但读 4 秒 0 字节
+```
+
+结论：**这一轮的硬件实验全被卡住，需要人工断电重插一次。**
+重插之后的第一条命令应该回到"已知能跑"的稳定构建（**不要**再带
+`-DS3_AUTO_WDT`）：
+
+```sh
+make C6_ROOT=/home/winger/c6 S3_APP_BASE=0x20000 S3_NO_PREEMPT=1 \
+     S3_CDEFS="-DS3_WIN_SPILL" \
+     S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_WIFI_TASK_CALL0" https
+python3 tools/chkimg.py build/wifi/c6os.elf build/wifi/c6os.bin 0x20000
+pkill -x openocd; sleep 1; timeout 200 ./tools/flashbl.sh build/wifi/c6os.bin 12
+```
+
+### 下一轮**第一条**要读的东西（一次就读全，别再只读 6 个字）
+
+`_vec_default` 的记录一共 10 个有用的字（`port/s3/irq.S`，
+`movi a2, 0x50000100` 那段）：
+
+| 偏移 | 内容 |
+|------|------|
+| +0  | magic `0x0000BAD0` |
+| +4  | `EXCCAUSE` |
+| +8  | `EXCVADDR` |
+| +12 | `EPC1`（双重异常时=第一次故障的 PC） |
+| +16 | `PS`（进异常时硬件置的，EXCM 恒为 1，**别再看它判断上下文**） |
+| +20 | `a0` |
+| +24 | **`a1`** ← 一直没读过，这次的故障就是"a1 变垃圾"，必须要 |
+| +28 | `WINDOWBASE` |
+| +32 | `WINDOWSTART` |
+| +36 | 进的是哪个 default 槽位 |
+
+```python
+import oc, struct
+d = struct.unpack('<10I', oc.dump(0x50000100, 40))
+# magic cause va epc ps a0 a1 wb ws slot
+```
+
+另外一起读：`0x500018E0`（§380 sp 闸门记录：帧/该值/EPC/a0）、
+`0x50001880`（§363 EPC 闸门记录）、`0x50001C00`（§489 switch 入口
+PS/a0/次数/EXCM 魔数）、`0x50000680`（§464 坏 WS/WB 记录）。
+
+### 已经确定的判读方法
+
+- 故障在 `s3_w2c_sem_post+6`（`s32i a8, a1, 40`）而前一条 `s32i a0,a1,16`
+  **成功** ⇒ 不是"a1 完全野"，而是 a1 落在某个区域边界上（或窗口映射错位
+  让 a1 读到了别的物理寄存器）。+24 那个 `a1` 一读就能定性。
+- 若 `a1` 合法而 `WINDOWBASE`/`WINDOWSTART` 不合 `(WS>>WB)&1==1`
+  ⇒ 还是窗口映射；若 `a1` 是 0x6000xxxx/0x3fcfxxxx 这类值 ⇒ 是 sp 本身丢了，
+  去查 `port/s3/w2c.S` 的 512 字节死区 + `WIN_SPILL`（实测 784 字节）
+  叠加后是否把 8192 的库任务栈打穿。
