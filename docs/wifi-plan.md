@@ -17727,3 +17727,25 @@ WiFi + HTTPS 流程在 c6LOS 上跑通。goal 保持 active。
 附：本轮发现 `esptool --no-stub` 写 app image 会让 bootloader 报
 `Image hash failed`（虽然 esptool 自校验通过）；必须用 stub 模式
 （460800）写入，否则 app 不可引导。
+
+---
+
+## §531 `0x60033d14` 是只读硬件状态位，不是可写的握手寄存器
+
+真板诊断（`osi_wifi_reset_mac` 里 CPU 直接写）：
+```
+[wifi] hs before=00000000 after=00000000
+[wifi] reset_mac pulse done
+```
+⇒ `hal_init` 里 `or a3,2; s32i` 的写**完全无效**，随后轮询的 bit0
+是硬件状态（MAC ready），不是软件可置位的 ack。之前 JTAG `mww 3`
+读回 0 也与此一致。
+
+因此补丁跳过轮询只是让软件往下走，并没有让 MAC 真正 ready；
+0 AP 的根因仍在于 **IDF app 启动阶段有我们没有的 MAC/PHY 初始化**。
+IDF 的 `wifi_hw_start()` 反汇编显示顺序：
+`wifi_reset_mac`（走 OSI `_wifi_reset_mac` + 写 `0x60033084 &= 0x7fffffff`）
+→ `ic_mac_init`(ROM 0x40383bc0) → `ic_set_interrupt_handler` → `chip_enable`。
+我们的 shim 只做了复位脉冲，没有 `0x60033084` 的 mask 写（该写由库自身完成）。
+
+诊断代码已回退，目标未达成，goal 保持 active。
