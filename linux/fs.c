@@ -862,6 +862,205 @@ static u64 dev_node_(const char *s)
     return 0ull;
 }
 
+/* ---- M17-1：procfs 最小集 -------------------------------------------------
+ * busybox ps/top/free/df 读的是 /proc/{meminfo,stat,uptime,cpuinfo,
+ * self/status,self/stat,self/cmdline,PID/...}。我们用一个"虚拟文件"层：
+ * 每个 proc 文件对应一个 id，内容在首次访问时一次性生成到内核堆缓冲，
+ * 之后 open/read/pread/stat/getdents 都走同一套 fd 机制（kind=LX_FD_PROC）。
+ * 内容常驻（条目数固定、总量 < 4KB），不需要 fd close hook，也不占 VFS 文件槽。 */
+#define PROC_BUF_MAX 4096u
+
+typedef struct {
+    u32 id;
+    u32 size;
+    char *buf;
+} LxProcFile;
+
+static LxProcFile g_procf[LX_PROC_pidcmdline + 1u];
+
+static char *proc_buf_(u32 id)
+{
+    if (g_procf[id].buf == (char *)0) {
+        g_procf[id].buf = (char *)port_kcalloc(1ull, (u64)PROC_BUF_MAX);
+    }
+    return g_procf[id].buf;
+}
+
+/* 极简缓冲追加：内核侧没有 snprintf，proc 内容的数字都是无符号小整数。 */
+static u32 pcat_(char *b, u32 off, const char *s)
+{
+    while (*s != '\0') {
+        b[off++] = *s++;
+    }
+    return off;
+}
+
+static u32 pnum_(char *b, u32 off, u64 v)
+{
+    char tmp[24];
+    u32 n = 0u;
+    u32 i;
+
+    if (v == 0ull) {
+        b[off++] = '0';
+        return off;
+    }
+    while (v != 0ull) {
+        tmp[n++] = (char)('0' + (u32)(v % 10ull));
+        v /= 10ull;
+    }
+    while (n > 0u) {
+        b[off++] = tmp[--n];
+    }
+    return off;
+}
+
+static u32 proc_meminfo_(char *b)
+{
+    u32 o = 0u;
+
+    o = pcat_(b, o, "MemTotal:       24576 kB\nMemFree:        12288 kB\n"
+                    "MemAvailable:   16384 kB\nBuffers:            0 kB\n"
+                    "Cached:          2048 kB\nSwapTotal:             0 kB\n"
+                    "SwapFree:              0 kB\n");
+    return o;
+}
+
+static u32 proc_uptime_(char *b)
+{
+    u64 ms = port_cycles() / 1000000ull;
+    u32 o = 0u;
+    u32 sec = (u32)(ms / 1000ull);
+    u32 cs = (u32)((ms % 1000ull) / 10ull);
+
+    o = pnum_(b, o, sec);
+    b[o++] = '.';
+    if (cs < 10u) { b[o++] = '0'; }
+    o = pnum_(b, o, cs);
+    b[o++] = ' ';
+    o = pnum_(b, o, sec);
+    b[o++] = '.';
+    if (cs < 10u) { b[o++] = '0'; }
+    o = pnum_(b, o, cs);
+    b[o++] = '\n';
+    return o;
+}
+
+static u32 proc_cpuinfo_(char *b)
+{
+    u32 o = 0u;
+
+    o = pcat_(b, o, "processor\t: 0\nvendor_id\t: c6os\n"
+                    "model name\t: c6os x86-64 Linux ABI\n"
+                    "cpu MHz\t\t: 1000.000\nflags\t\t: fpu tsc\n"
+                    "processor\t: 1\nvendor_id\t: c6os\n"
+                    "model name\t: c6os x86-64 Linux ABI\n"
+                    "cpu MHz\t\t: 1000.000\nflags\t\t: fpu tsc\n");
+    return o;
+}
+
+static u32 proc_status_(char *b, u32 pid)
+{
+    u32 o = 0u;
+
+    o = pcat_(b, o, "Name:\tbusybox\nState:\tS (sleeping)\nTgid:\t");
+    o = pnum_(b, o, pid);
+    o = pcat_(b, o, "\nPid:\t");
+    o = pnum_(b, o, pid);
+    o = pcat_(b, o, "\nPPid:\t0\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"
+                    "VmPeak:\t    8192 kB\nVmSize:\t    8192 kB\n"
+                    "VmRSS:\t    4096 kB\nThreads:\t1\n");
+    return o;
+}
+
+static u32 proc_cmdline_(char *b)
+{
+    u32 o = pcat_(b, 0u, "/bin/busybox");
+
+    b[o++] = '\0';                             /* cmdline 以 NUL 分隔参数 */
+    return o;
+}
+
+static u32 proc_stat_(char *b)
+{
+    u32 o = 0u;
+
+    o = pcat_(b, o, "cpu  100 0 50 1000 0 0 0 0 0 0\ncpu0 100 0 50 1000 0 0 0 0 0 0\n"
+                    "intr 0\nctxt 100\nbtime 1700000000\n"
+                    "processes 1\nprocs_running 1\nprocs_blocked 0\n");
+    return o;
+}
+
+static u32 proc_pidstat_(char *b, u32 pid)
+{
+    /* /proc/PID/stat: busybox ps 读第 2 字段(comm)和第 4 字段(ppid)、
+     * 第 14/15 字段(utime/stime)算 CPU。给个最简合法行。 */
+    u32 o = pnum_(b, 0u, pid);
+
+    o = pcat_(b, o, " (busybox) S 0 0 0 0 -1 0 0 0 0 0 0 0 "
+                    "10 5 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+    return o;
+}
+
+static u32 proc_gen_(u32 id, u32 pid, char **out)
+{
+    char *b;
+
+    if (id == 0u || id > LX_PROC_pidcmdline) {
+        return 0u;
+    }
+    b = proc_buf_(id);
+    if (b == (char *)0) {
+        return 0u;
+    }
+    switch (id) {
+    case LX_PROC_meminfo:   g_procf[id].size = proc_meminfo_(b); break;
+    case LX_PROC_uptime:    g_procf[id].size = proc_uptime_(b); break;
+    case LX_PROC_cpuinfo:   g_procf[id].size = proc_cpuinfo_(b); break;
+    case LX_PROC_stat:      g_procf[id].size = proc_stat_(b); break;
+    case LX_PROC_cmdline:   g_procf[id].size = proc_cmdline_(b); break;
+    case LX_PROC_status:    g_procf[id].size = proc_status_(b, pid); break;
+    case LX_PROC_pidstat:   g_procf[id].size = proc_pidstat_(b, pid); break;
+    case LX_PROC_pidstatus: g_procf[id].size = proc_status_(b, pid); break;
+    case LX_PROC_pidcmdline:g_procf[id].size = proc_cmdline_(b); break;
+    default: return 0u;
+    }
+    *out = b;
+    return g_procf[id].size;
+}
+
+/* 把 /proc/... 路径映射到 id；pid=0 表示"self"或全局文件。
+ * 返回 0 = 不是可打开的 proc 文件。 */
+static u32 proc_id_(const char *s, u32 *pid)
+{
+    *pid = 0u;
+    if (seq_(s, "proc/meminfo") == 1)  return LX_PROC_meminfo;
+    if (seq_(s, "proc/uptime") == 1)   return LX_PROC_uptime;
+    if (seq_(s, "proc/cpuinfo") == 1)  return LX_PROC_cpuinfo;
+    if (seq_(s, "proc/stat") == 1)     return LX_PROC_stat;
+    if (seq_(s, "proc/self/status") == 1)   return LX_PROC_status;
+    if (seq_(s, "proc/self/stat") == 1)     return LX_PROC_pidstat;
+    if (seq_(s, "proc/self/cmdline") == 1)  return LX_PROC_cmdline;
+    /* /proc/<pid>/{status,stat,cmdline}：pid 用简单的十进制解析 */
+    if (s[0] == 'p' && s[1] == 'r' && s[2] == 'o' && s[3] == 'c' && s[4] == '/') {
+        u32 p = 0u;
+        const char *q = s + 5u;
+        u32 any = 0u;
+
+        while (*q >= '0' && *q <= '9') {
+            p = p * 10u + (u32)(*q - '0');
+            q++;
+            any = 1u;
+        }
+        if (any != 0u && q[0] == '/') {
+            if (seq_(q + 1u, "status") == 1)  { *pid = p; return LX_PROC_pidstatus; }
+            if (seq_(q + 1u, "stat") == 1)    { *pid = p; return LX_PROC_pidstat; }
+            if (seq_(q + 1u, "cmdline") == 1) { *pid = p; return LX_PROC_pidcmdline; }
+        }
+    }
+    return 0u;
+}
+
 static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
 {
     char ap[FS_NAME] = {0};
@@ -884,6 +1083,32 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         }
         fd_set(fd, LX_FD_ROOT, 1u, LX_FD_FILE, flags);
         return fd;
+    }
+    if (s[0] == 'p' && s[1] == 'r' && s[2] == 'o' && s[3] == 'c') {
+        u32 pid = 0u;
+        u32 id = proc_id_(s, &pid);
+        char *buf;
+
+        if (id != 0u && proc_gen_(id, pid, &buf) != 0u) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, (u64)id, 0u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        /* /proc 目录本身：列一组条目 */
+        if (s[4] == '\0') {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, LX_FD_ROOT, 1u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        return (u64)0 - LX_ENOENT;
     }
     {
         u64 dev = dev_node_(s);
@@ -1011,6 +1236,32 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         return vfs_err_(n);
     }
 #endif
+    if (f->kind == LX_FD_PROC) {
+        u32 id = (u32)f->node;
+        char *b;
+        u64 sz;
+
+        if (f->is_dir != 0u || id == 0u || id > LX_PROC_pidcmdline) {
+            return (u64)0 - LX_EISDIR;
+        }
+        b = proc_buf_(id);
+        sz = (u64)g_procf[id].size;
+        if (off >= sz) {
+            return 0ull;
+        }
+        {
+            u64 n = (len < sz - off) ? len : sz - off;
+            u64 i;
+
+            if (user != 0u && lx_user_ok(dst, n, C6OS_PROT_W) == 0) {
+                return (u64)0 - LX_EFAULT;
+            }
+            for (i = 0ull; i < n; i++) {
+                *(u8 *)(dst + i) = (u8)b[off + i];
+            }
+            return n;
+        }
+    }
     if (f->kind == LX_FD_DEV) {
         return dev_read_(f->node, dst, len, user);
     }
@@ -1112,6 +1363,9 @@ u64 lx_fs_fd_size(u64 fd)
 {
     LxFile *f = fd_get(fd);
 
+    if (f != 0 && f->kind == LX_FD_PROC && f->is_dir == 0u) {
+        return (u64)g_procf[(u32)f->node].size;
+    }
 #if C6OS_VFS
     if (f != 0 && f->kind == LX_FD_VFS) {
         INT32 sz = 0;
@@ -1311,6 +1565,19 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
         return 0ull;
     }
 #endif
+    if (f->kind == LX_FD_PROC) {
+        u32 mode = (f->is_dir != 0u) ? 0040755u : 0100644u;
+        u64 sz = 0ull;
+
+        /* 目录 fd 的 node 是 LX_FD_ROOT 哨兵，不是 proc id —— 别拿它索引表。 */
+        if (f->is_dir == 0u && (u32)f->node <= LX_PROC_pidcmdline) {
+            sz = (u64)g_procf[(u32)f->node].size;
+        }
+        if (fill_stat(ustat, 0u, sz, mode) != 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        return 0ull;
+    }
     if (f->node == LX_FD_CONSOLE) {
         if (fill_stat(ustat, 0u, 0ull, 0020620u) != 0) {
             return (u64)0 - LX_EFAULT;
@@ -1368,6 +1635,23 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
             return (u64)0 - LX_EFAULT;
         }
         return 0ull;
+    }
+    if (s[0] == 'p' && s[1] == 'r' && s[2] == 'o' && s[3] == 'c') {
+        u32 pid = 0u;
+        u32 id = proc_id_(s, &pid);
+        char *b;
+
+        if (s[4] == '\0') {
+            return (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) ?
+                   (u64)0 - LX_EFAULT : 0ull;
+        }
+        if (id != 0u) {
+            u64 sz = (u64)proc_gen_(id, pid, &b);
+
+            return (fill_stat(ustat, 0u, sz, 0100644u) != 0) ?
+                   (u64)0 - LX_EFAULT : 0ull;
+        }
+        return (u64)0 - LX_ENOENT;
     }
 #if C6OS_VFS
     /* B8：挂载点（/tmp 的 ramfs、/data 的 fatfs）必须能被 stat 看见。
@@ -1724,6 +2008,59 @@ static u64 getdents_vfs_(LxFile *f, u64 ubuf, u64 len)
 }
 #endif
 
+/* /proc 目录的 getdents64：列出最小集条目（busybox ps/free 只需能列目录）。 */
+static u64 getdents_proc_(LxFile *f, u64 ubuf, u64 len)
+{
+    static const char *const names[] = {
+        "meminfo", "uptime", "cpuinfo", "stat",
+        "self", "1", "2", "3", "4"
+    };
+    u64 used = 0ull;
+
+    while (f->pos < 2ull + (u64)(sizeof names / sizeof names[0])) {
+        const char *nm;
+        u64 nl;
+        u64 rl;
+        u8 rec[512];
+
+        if (f->pos == 0ull) {
+            nm = ".";
+        } else if (f->pos == 1ull) {
+            nm = "..";
+        } else {
+            nm = names[f->pos - 2ull];
+        }
+        nl = 0ull;
+        while (nm[nl] != '\0') { nl++; }
+        /* 与 initramfs 版一致：19 字节头 + 名字 + NUL，再 8 字节对齐。 */
+        rl = (19ull + nl + 1ull + 7ull) & ~7ull;
+        if (used + rl > len) {
+            break;
+        }
+        for (u64 i = 0ull; i < 512ull; i++) {
+            rec[i] = 0u;
+        }
+        *(u64 *)(rec + 0ull) = 1ull;        /* d_ino */
+        *(u64 *)(rec + 8ull) = f->pos + 1ull;  /* d_off */
+        rec[16] = (u8)(rl & 0xffull);       /* d_reclen */
+        rec[17] = (u8)((rl >> 8) & 0xffull);
+        rec[18] = (u8)((f->pos <= 1ull || seq_(nm, "self") == 1)
+                       ? 4u : 8u);         /* d_type: DIR/REG */
+        for (u64 i = 0ull; i < nl; i++) {
+            rec[19ull + i] = (u8)nm[i];
+        }
+        if (lx_user_ok(ubuf + used, rl, C6OS_PROT_W) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        for (u64 i = 0ull; i < rl; i++) {
+            *(u8 *)(ubuf + used + i) = rec[i];
+        }
+        used += rl;
+        f->pos++;
+    }
+    return used;
+}
+
 /* getdents64：Linux 的 dirent64 布局，名字以 NUL 结尾，记录 8 字节对齐。 */
 u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
 {
@@ -1738,6 +2075,9 @@ u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
     }
     if (f->is_dir == 0u) {
         return (u64)0 - 20;                      /* ENOTDIR */
+    }
+    if (f->kind == LX_FD_PROC) {
+        return getdents_proc_(f, ubuf, len);
     }
 #if C6OS_VFS
     if (f->kind == LX_FD_VFS) {

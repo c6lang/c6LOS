@@ -64,6 +64,18 @@
 #define LX_FD_VFS     3u   /* /tmp 等走内核 VFS（M9-4） */
 #define LX_FD_DEV     4u   /* /dev/* 设备（M15-2）：null/zero/full/random… */
 #define LX_FD_EVENTFD 5u   /* eventfd2（M16-1b）：pos = 对象 id */
+#define LX_FD_PROC    6u   /* procfs 虚拟文件（M17-1）：node = id, pos = 偏移 */
+
+/* procfs 虚拟文件的 id（fs.c 内部生成内容） */
+#define LX_PROC_meminfo   1u
+#define LX_PROC_uptime    2u
+#define LX_PROC_cpuinfo   3u
+#define LX_PROC_status    4u
+#define LX_PROC_cmdline   5u
+#define LX_PROC_stat      6u
+#define LX_PROC_pidstat   7u
+#define LX_PROC_pidstatus 8u
+#define LX_PROC_pidcmdline 9u
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，

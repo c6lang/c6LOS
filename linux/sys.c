@@ -858,6 +858,18 @@ void lx_syscall_do(LxRegs *r)
         /* M14-2：TIOCSPGRP/TIOCGPGRP 是作业控制的核心 —— ash 启动时会
          * `tcsetpgrp(0, getpid())` 把前台组设成自己，然后用 kill(-pgid) 给
          * 整条作业发信号。以前一律 ENOTTY，ash 只能退回"没有作业控制"的模式。 */
+        /* TIOCSCTTY (0x540E)：把 fd 设为控制终端。本内核只有一个全局串口
+         * 终端（tty 已启用时 fd 0/1/2 就是它），没有 per-process ctty 表，
+         * 所以"接受"即可成功；未启用 tty 时 ENOTTY。busybox/ash 只在
+         * setsid 之后调它，返回 0 就能继续走作业控制流程。 */
+        if (a1 == 0x540eull) {
+            if (a0 <= 2ull && lx_tty_enabled() != 0u) {
+                r->rax = 0ull;
+            } else {
+                r->rax = neg(LX_ENOTTY);
+            }
+            return;
+        }
         if (a0 <= 2ull && (a1 == 0x5410ull || a1 == 0x540full)) {
             if (a1 == 0x5410ull) {         /* TIOCSPGRP：arg 是 pid_t* */
                 i64 v;

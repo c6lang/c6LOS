@@ -671,4 +671,36 @@ NULL → eventfd2 返回 ENOMEM。改成"先找空位，找不到再扩容"。
 gettimeofday/clock_getres 字段）→ `PASS: m16ev`；全量回归
 L2–L8/M9/M13–M13d/M14/M15/alpine 无回归。
 
+### M17 终端与 procfs（M17-1 → M17-3）
+
+M17-1（procfs 最小集）：busybox `ps/top/free/df` 强依赖 `/proc`，而此前
+只有 `/proc/self/exe` 的 readlink 特例。新增一个"虚拟文件"层：路径以
+`/proc/` 开头时 open 生成内容到内核堆缓冲（`LxProcFile` 表，每文件 4KB，
+一次性常驻，不占 VFS 槽、不需要 fd close hook），之后 read/pread/stat/
+fstat/getdents 全走统一 fd 机制（`LX_FD_PROC` kind）。覆盖
+`/proc/{meminfo,uptime,cpuinfo,stat}`、`/proc/self/{status,stat,cmdline}`
+以及 `/proc/<pid>/{status,stat,cmdline}`，`/proc` 目录可列举。
+
+内核侧没有 `snprintf`，proc 内容用自造的 `pcat_/pnum_` 追加辅助生成
+（数字都是无符号小整数），避免引入整套格式化库。
+
+M17-2（控制终端）：补 `TIOCSCTTY`。本内核只有一个全局串口终端（tty
+启用时 fd 0/1/2 就是它），没有 per-process ctty 表，所以 TIOCSCTTY
+在 fd 0/1/2 上直接返回 0，未启用 tty 时 ENOTTY。M14 已有的
+TIOCSPGRP/TIOCGPGRP + 作业控制状态机配合即可让 ash 走完 setsid →
+TIOCSCTTY → tcsetpgrp 流程。
+
+踩到两个坑（都由验收的页错误引出）：
+1. `getdents_proc_` 的 dirent64 记录长度算成 `(nl+19)&~7`，漏算了结尾
+   NUL 的对齐，reclen 比实际写入短 → glibc readdir 越界读 → #PF。
+   改成和 initramfs 版一致：`(19 + nl + 1 + 7) & ~7`。
+2. `/proc` 目录 fd 的 node 是 `LX_FD_ROOT` 哨兵，`lx_fs_fstat` 的 proc
+   分支没判 `is_dir` 就拿它当数组下标访问 `g_procf[node]` → 越界 #PF。
+   加 `is_dir == 0 && node <= MAX` 防护。
+
+验收：`make check-linuxabi-m17`（`tests/linux/m17proc.c`：全局/self proc
+文件可读、stat 拿到非零 size、`opendir("/proc")` 能列到 meminfo、
+TIOCSCTTY 在非终端 fd 上不崩）→ `PASS: m17proc`；全量回归
+L2–L8/M9/M13–M13d/M14/M15/M16/alpine 无回归。
+
 
