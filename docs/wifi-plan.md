@@ -14607,3 +14607,60 @@ W2 bringup returned
 走 §412/§413 修好的 `s3_task_tramp → call8 s3_win_tramp → callx8 入口`
 路径）与 call0 模式在上面的症状上完全一致 ⇒ 说明这条路本身是对的、
 问题一直在 ctx 层。
+
+## §421 `esp_wifi_init_internal` 返回 0x3013 —— 库的 init 状态机被 PHY enable 污染
+
+### 症状
+```
+[wifi] init 前的库状态 @3fcba3f0 = 2
+[v2]wifi|init: init is in progress
+[wifi] esp_wifi_init_internal -> 12307      (0x3013 = ESP_ERR_WIFI_INIT_STATE)
+```
+
+### 反汇编定位（`esp_wifi_init_internal`）
+```asm
+4203dc61: l32r a5, (3fcba3f0)     ; = g_wifi_osi_funcs_md5 + 4
+4203dc66: l32i a3, a5, 0          ; a3 = 状态
+4203dc69: beqi a3, 1, ...         ; 1 = 未初始化 → 继续 init ✓
+...       bnei a3, 2, ...
+          l32r a13, "init: init is in progress"
+          l32r a2, 0x3013         ; ESP_ERR_WIFI_INIT_STATE
+```
+镜像里这个变量的 `.data` **初值是 1**（正确）。
+
+### 是谁改成了 2
+分阶段打点：
+```
+[wst] entry            = 1
+[wst] after phy_cal    = 1
+[wst] after phy_enable = 2      ← s3_win_phy_enable() 之后变成 2
+```
+我们手动做 PHY enable（`esp_phy_enable`），库的 wifi 状态机因此残留成
+"正在初始化"，于是后面真正的 `esp_wifi_init_internal` 一进去就撞状态机。
+
+### 实验性修法（有效）
+调 `esp_wifi_init_internal` 之前把状态复位成 1：
+```c
+if (*wst != 1u) { *wst = 1u; }
+```
+（`wst = (volatile u32 *)(g_wifi_osi_funcs_md5 + 4)`，
+**必须用符号 + 偏移，不能硬编码地址** —— 加一行打印就会让 `.data`
+整体挪位，§421 第一次就是踩了这个坑，白读了一个代码指针。）
+
+### 真板结果 —— init 真的跑起来了
+```
+[lock]/[lockok] ✓ → [pp] pp rom version ✓ → [net80211] net80211 rom version ✓
+→ [unlock] ✓
+→ [v2]wifi|create wifi task: queue not null
+→ [semnew] #2 → [task] 库建任务
+→ TRAP cause=0x1c(StoreProhibited) pc=0x4037d338(osi_queue_recv_body)
+       vaddr=0x18  a0=0x80043d06
+```
+`pc` 处是 `l32i a9, a4, 24` ⇒ **`a4`（队列句柄）= 0**，
+与库那句 `create wifi task: queue not null` 对得上：库认为队列已经存在、
+于是没建，后面 recv 就拿到 NULL。
+
+### 下一步
+查 `osi_queue_recv_body` 的 `a4` 从哪来，以及 `[v2]...queue not null`
+是库检查了哪个全局 —— 很可能是我们的 `osi_queue_create`/`osi_queue_recv`
+实现或 OSI 表槽位填错，让库以为队列已存在。

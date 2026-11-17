@@ -1690,7 +1690,22 @@ u32 s3_wifi_bringup(void)
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 144u));
     {
-        u32 irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+        u32 irc;
+        /* §421 诊断：库的 init 状态机就在 `g_wifi_osi_funcs_md5 + 4`
+         * （镜像初值 1 = 未初始化，2 = 正在初始化，3/4 = 其它）。
+         * 如果进来时不是 1，说明之前有一次 init 没走完就返回了 ——
+         * 那样这次必然拿到 0x3013。用符号而不是硬编码地址：加一行打印
+         * 就会让 .data 布局整体挪位（§421 第一次就是踩了这个）。 */
+        extern unsigned char g_wifi_osi_funcs_md5[];
+        volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+        ets_printf("[wifi] init 前的库状态 @%08x = %u\n",
+                   (unsigned)(u32)(void *)wst, (unsigned)*wst);
+        /* §421 实验：我们手动做了 PHY enable，库的状态机残留成 2
+         * （"正在初始化"），于是 init 直接返回 0x3013。复位成 1 再进去。 */
+        if (*wst != 1u) { *wst = 1u; }
+        irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+        ets_printf("[wifi] init 后的库状态 @%08x = %u\n",
+                   (unsigned)(u32)(void *)wst, (unsigned)*wst);
 
         ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
         g_dbg_sync = 0u;

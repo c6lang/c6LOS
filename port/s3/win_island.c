@@ -716,6 +716,13 @@ u32 s3_win_wifi_main(void)
     /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
     ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
                (unsigned)s3_w2c_tick_get());
+    /* §421 诊断：钉住库的 wifi init 状态机是从哪一步开始变成 2 的。 */
+    {
+        extern unsigned char g_wifi_osi_funcs_md5[];
+        extern int ets_printf(const char *fmt, ...);
+        volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+        ets_printf("[wst] entry=%u\n", (unsigned)*wst);
+    }
 #ifdef S3_PHY_BISECT
     /* §204：跨复位自动二分。没跑完就停在这儿**不喂狗**，让 RWDT(8s) 复位，
      * 下一轮继续；跑完了（或没开这个开关）才走正常流程。 */
@@ -728,12 +735,16 @@ u32 s3_win_wifi_main(void)
     s3_win_log("W0 phy start\n");
     WSTAGE(0x1002u); s3_w2c_wdt_feed();
     (void)s3_win_phy_cal();
+    { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+      ets_printf("[wst] after phy_cal=%u\n", (unsigned)*w); }
     WSTAGE(0x1003u); s3_w2c_wdt_feed();
 #ifndef S3_PHY_VIA_OSI
     (void)s3_win_phy_enable();
 #else
     ets_printf("[phy] 跳过手动初始化：交给 OSI _phy_enable 回调\n");
 #endif
+    { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+      ets_printf("[wst] after phy_enable=%u\n", (unsigned)*w); }
     WSTAGE(0x1004u); s3_w2c_wdt_feed();
     s3_win_log("W1 bringup\n");
     WSTAGE(0x1005u); s3_w2c_wdt_feed();
