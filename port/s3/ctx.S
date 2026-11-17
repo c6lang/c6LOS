@@ -156,7 +156,7 @@
      * 用 g_ctx_tmp_sp 藏帧指针（`wsr windowbase` 会重映射 a1），
      * 这一段在 `rsil 15` 关中断内、只存取一次，不会和别的路径打架。 */
     l32i    a3, a1, 68
-    bnez    a3, 11f
+    bnez    a3, 40f
     l32r    a4, .Ltmpsp
     s32i    a1, a4, 0
     movi    a3, 0
@@ -167,6 +167,48 @@
     isync
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0
+    j       11f
+40:
+    /* §457 ★ WINDOWBASE / WINDOWSTART 必须逐任务复原。
+     *
+     * `port_task_switch` 和 `port_task_yield` 的保存段（`ctx.S:349-351`、
+     * `:555-557`）一直**在存**这两个寄存器，注释还写着 §258 的理由：
+     * "WINDOWBASE 也必须是每任务一份，别任务的 windowed 调用会把基址搬来
+     * 搬去；如果切回来时不复原，被打断的 windowed 函数 retw 时的调用者窗口
+     * 就落到了错误的物理寄存器上"。**但恢复这一侧从来没有实现** ——
+     * 这里原来只有"68 == 0 就强制归零窗口"那一条，对已有任务(68 != 0)
+     * 直接跳 `11:`，一个字节都不碰。
+     *
+     * §455/§456 实测到的正是这个后果：库任务把 WINDOWBASE 推到 10，
+     * 切回 wifi 主任务时 WINDOWBASE 还是 10，主任务的 `retw` 于是落到
+     * 库任务用过的物理窗口上，把库任务的 `a1`（`0x3fcc0300` 这种）当成
+     * 自己的 sp "恢复"回来 —— 表现就是 switch 明明恢复对了 sp
+     * （`0x3fcbe8a0`），下一次 yield 却已经在库任务的栈里。
+     *
+     * `wsr windowbase` 会重映射 aN→物理寄存器的对应关系，连 `a1` 自己
+     * 都会变，所以帧指针必须先存进 `g_ctx_tmp_sp`（和上面那段同样的手法）。
+     * 保存下来的 (windowstart, windowbase) 是当初真的在同一颗核上生效过的
+     * 组合，天然满足 `(WS >> WB) & 1 == 1` 和 WB%4==0 两条硬不变式。 */
+    l32i    a5, a1, 72              /* 本任务保存的 WINDOWBASE */
+    l32r    a4, .Ltmpsp
+    s32i    a1, a4, 0               /* 藏帧指针（wsr windowbase 后 a1 会变）*/
+    /* ★ 顺序不能反（第一版就写反了，真板症状是 `pc` 落在
+     * `_vec_default+0x2c` 的自循环里、`exccause` 走未预期异常）。
+     *
+     * `wsr windowbase` 改变的是 aN→物理寄存器的映射，写完 `a3`/`a5` 里装的
+     * **就已经不是原来那个值**了。所以必须先 `wsr windowstart, a3`
+     * （windowstart 不改变映射，此时 `a5` 仍是 WINDOWBASE，仍然有效），
+     * 再 `wsr windowbase, a5`。
+     *
+     * 中间那一瞬 (新 WS, 旧 WB) 可能违反 `(WS>>WB)&1==1`，但硬件只在
+     * `retw`/`call` 时才检查，而这一段整个在 `rsil 15` 关中断内、
+     * 两条 `wsr` 之间没有任何指令，所以没有窗口可被观察。 */
+    wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
+    isync
+    wsr     a5, windowbase
+    isync
+    l32r    a4, .Ltmpsp
+    l32i    a1, a4, 0               /* 取回帧指针（此时窗口已是本任务的）*/
 11:
     /* §363 健全性闸门：EPC 必须落在合法代码区（ROM/IRAM 0x40000000-0x43FFFFFF）。
      * 不合法就说明"这个帧"是垃圾（错误 ctx / 已释放栈 / sp 差了几十字节），

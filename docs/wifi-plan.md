@@ -15760,3 +15760,75 @@ switch #3  ctx0  sp=0x3fcbee50   栈0内 ✔
 同时给 `_win_ovf8` / `_win_ovf12` 的入口加 sp 合法性检查：如果 `a9`
 （按 ABI 应为调用者 sp）落在任何任务栈之外，就直接走 `_vec_exc`
 打印现场，而不是 `s32e` 写飞。
+
+## §457 ★★★ 真凶：`WINDOWBASE`/`WINDOWSTART` 存了却从不恢复
+
+`port_task_switch`（`ctx.S:349-351`）和 `port_task_yield`（`:555-557`）
+的保存段一直在存这两个寄存器：
+
+```asm
+    rsr     a5, windowstart
+    s32i    a5, a1, 68
+    rsr     a5, windowbase
+    s32i    a5, a1, 72
+```
+
+注释还写着 §258 的理由："WINDOWBASE 也必须是每任务一份，别任务的 windowed
+调用（call8/call12）会把基址搬来搬去；**如果切回来时不复原**，被打断的
+windowed 函数 retw 时的'调用者窗口'就落到了错误的物理寄存器上"。
+
+**但恢复这一侧从来没实现过。** `RESTORE_FRAME`（`ctx.S:158`）里只有
+`l32i a3, a1, 68 / bnez a3, 11f` —— 即"68 == 0 就强制归零窗口"，
+对**已有任务**（68 != 0）直接跳 `11:`，一个字节都不碰（§404 的结论是
+"已有任务的帧完全不碰"）。
+
+于是 §455/§456 观测到的现象就完全说得通了：库任务把 WINDOWBASE 推到 10，
+切回 wifi 主任务时 WINDOWBASE 还是 10 ⇒ 主任务的 `retw` 落到库任务用过的
+物理窗口上 ⇒ 把库任务的 `a1`（`0x3fcc0300` 这类）当成自己的 sp "恢复"回来。
+这正是"switch 明明恢复对了 sp、下一次 yield 却已在库任务栈里"的原因。
+
+### 改动
+
+在 `RESTORE_FRAME` 的 `40:` 分支（已有任务）补上逐任务恢复。
+
+**踩到的坑（第一版直接崩）**：`wsr windowbase` 改变的是 aN→物理寄存器
+的映射，**写完 `a3`/`a5` 里装的就已经不是原来那个值**了。第一版写成
+`wsr windowbase, a5` 再 `wsr windowstart, a3` ⇒ 第二条写进去的是垃圾
+⇒ 违反 `(WS>>WB)&1==1` ⇒ 真板 `pc` 落在 `_vec_default+0x2c` 的自循环里。
+正确顺序是**先 `wsr windowstart, a3`**（它不改变映射，此时 `a5` 仍有效），
+**再 `wsr windowbase, a5`**。中间那一瞬 (新 WS, 旧 WB) 可能违反不变式，
+但硬件只在 `retw`/`call` 时检查，而这一段整个在 `rsil 15` 关中断内、
+两条 `wsr` 之间没有指令。帧指针照样要先藏进 `g_ctx_tmp_sp`。
+
+### 真板结果：错位彻底消失
+
+```
+ctx[0] sp=0x3fcbe8a0  stack=[0x3fcbced0,0x3fcbeed0)  在栈内 ✔
+ctx[1] sp=0x3fcc0650  stack=[0x3fcbeed0,0x3fcc06d0)  在栈内 ✔
+```
+
+两个任务的 sp 各归各位，`g_s3_cur` 也不再和实际任务错位。**§450–§456
+追了七轮的那个"sp 跳进别人栈里"到此结束。**
+
+## §457 之后的下一层：窗口内容仍然没被 spill
+
+错位修掉后，崩溃点从"调度错乱"推进到了库代码内部：
+
+```
+*** TRAP sp=3fcbe7b0 cause=0000001c pc=42057049 ps=00060410
+    vaddr=0000015c callinc=00000002 a0=80035810
+```
+
+`0x42057049` 是 `l32i a8, a8, 0x15c`，而 `a8` 来自它前面两条的
+`l32i.n a8, a3, 0` —— **`a3` 是在 `callx8` 之后被读的**。windowed ABI 里
+`a3` 是 caller-saved，`callx8` 触发的窗口溢出/欠流会从栈上把 `a3` 恢复回来；
+而栈上那一格现在是**上一个任务留下的残留**（§455 的机制），于是 `a3` 变成
+一个"首字为 0"的地址，`l32i 0x15c` 就落到 `vaddr=0x15c`。
+
+⇒ `WINDOWBASE`/`WINDOWSTART` 恢复对了，但**窗口寄存器的内容**还得靠
+spill 才能跟着任务走。所以下一步开 `-DS3_WIN_SPILL`
+（`wifi_glue.c:1250` 的 `s3_wifi_osi_init` 会因此把
+`g_s3_win_spill_en` 置 1）。§447 已经修掉了"这个开关形同虚设"的 bug，
+现在 spill 只会在 `w2c.S` 的壳里跑（那 3 个调用点都有
+`l32r a8,12b / l32i / beqz a8, 5f` 守卫），不会再在 call0 内核帧上
+触发溢出处理体写飞。
