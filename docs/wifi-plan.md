@@ -14488,3 +14488,32 @@ s3_win_tramp:
 ### 真板结果
 WiFi 主构建：`[task] 库建任务 → [give] t=2 sem#1`，PHY 全程 `rc=1`。
 隔离用例 `t_winabi`：`3a=5 3b=5 3c=5 sub=5`、`d[9]=1029` 轮，无回归。
+
+## §414 本轮小结（三项真板验证过的代码修复）
+
+| # | 修复 | 真板效果 |
+|---|---|---|
+| §404 | 删掉 `RESTORE_FRAME` 里所有主动写 WINDOWSTART/WINDOWBASE | **3c（递归链中间切换）从永久卡死 → 1029 轮稳定通过** |
+| §409 | 只对 `WS==0` 的新任务帧做窗口归一化 | 新任务第一次被调度时窗口状态干净 |
+| §412/§413 | tramp 用 `call8` 进近处 windowed 跳板（`callx8` 缺 `call8` 的窗口轮转） | windowed 入口的 `a1` 不再变成 `0xffffffe0` |
+
+隔离用例 `t_winabi`：`3a=5 3b=5 3c=5 sub=5`、`d[9]=1029` 轮，三项修复叠加后无回归。
+
+## §415 当前卡点
+
+WiFi 主构建稳定走到：
+
+```
+M1..M5 → T1 → [wifimain] id=1 → W0 phy start
+→ register_chipv7_phy rc=1 ✓   (PHY 完全打通，多轮未过的地方)
+→ W1 bringup → B0/B1/B2 ✓ → [lock]/[lockok] ✓
+→ [pp]/[net80211] ✓ → [unlock] ✓ → [mtxnew]#1#2 ✓ → [semnew]#1 ✓
+→ [task] 库建任务 id=2 → [give] t=2 sem#1 → 停
+```
+
+**偶发**：有一次在 `stage=0x1003`（PHY 使能）崩在
+`ram_write_pll_cap`（cause=0x1c），重跑即恢复。记为时序敏感，不作为主线索。
+
+下一步：`tramp n=1` 说明库任务（`fn=40381a38`）**还没被启动过**。
+查 `switch=1 yield=1` 那一次切换给了谁，以及 `[give]` 之后主任务阻塞在
+哪个对象上（`0x50001A00` 阻塞记录）。
