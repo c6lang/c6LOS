@@ -13917,3 +13917,31 @@ windowbase=9  windowstart=0x200
 "调度器主循环的帧指针已经不对"。下一步应该直接在
 `port_task_yield` 返回点（`os_task_block_wait` 里 `call0 port_task_yield`
 的下一句）下硬件断点，看**返回时 a1 是不是还等于调用前的值**。
+
+## §381 §379 之后：**不再是我们自己的崩，而是闭源 PHY 库崩**
+
+修掉五处"帧压溢出槽"之后，现场变成了完全不同的一类：
+
+```
+trap（0x50000140，第一次异常，未被打印路径污染）：
+  cause=0x1c LoadProhibited   vaddr=0x000001a8
+  epc1=0x42055659  →  pbus_rx_dco_cal_1step   （闭源 PHY 库！）
+  a0=0x82055bbc    →  0x42055bbc = set_rx_gain_cal_dc 的调用点，**带 CALLINC 标签**
+  ps=0x00060010    frame=3fcbe880
+dbg2（0x50001800）：最后一次切换**完全干净**
+  switch_out_sp=3fcd8e90 → target_ctx=3fcc2e40 → restored_sp=3fcbedc0
+```
+
+解读：`vaddr=0x1a8` 是"拿一个小整数当指针解引用"——PHY 的一次增益校准
+（`set_rx_gain_cal_dc` → `pbus_rx_dco_cal_1step`）里某个参数/指针变成了
+`0x1a8`。这是**库内部状态被破坏**，不是我们栈帧错位。
+
+结合 §367/§369 已修的"W2C 壳没保存 a12..a15"，现在剩下的最可能嫌疑是：
+**库的 windowed 调用链在被切走时，`a4..a7`（callee-saved）在某个桥里仍会被
+脏掉**，而 PHY 校准链正是长时间跑、频繁跨桥的那段。
+
+下一步（下一轮）：
+1. 给 `abi_thunk.S` 和 `win_bridge.S` 的每条桥加"a4..a7 往返一致性"断言
+   （进桥时把 a4..a7 存一份到 RTC，出桥前比较），一次上板就能定位是哪条桥。
+2. 或者在 PHY 校准前后各做一次"全寄存器指纹"对比（`s3_win_stress` 的
+   phase2 已经验证过纯自己的深调用没问题）。
