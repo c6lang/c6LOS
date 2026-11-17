@@ -17460,3 +17460,26 @@ PHY 侧已核对：`s3_phy_init_data[128]` 与 IDF `esp32s3/phy_init_data.c`
   （可能是 `esp_phy_enable` 的完整时序，或 WiFi MAC 复位/天线配置）。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §516 照 IDF 补"复位后关闭共用时钟再重开"：无效
+
+IDF `esp_wifi_bt_power_domain_on()` 的顺序是：
+清 WIFI_FORCE_PD → 延时 → `wifi_bt_common_module_enable()` → modem 复位脉冲
+→ 清 WIFI_FORCE_ISO → **`wifi_bt_common_module_disable()`**；
+之后 `esp_phy_enable()` 再用 `esp_phy_common_clock_enable()` 打开。
+
+我们原来一直让时钟开着。补上"末尾关时钟 + `s3_win_phy_enable` 里重开"
+后重烧：`scan_get_ap_num=0 num=0`，与之前逐字相同 ⇒ 无关。已回退该实验。
+
+到目前为止排除清单（都经真板 A/B）：
+任务切换窗口状态、窗口溢出帧链、ctx sp 守卫、hal_init 握手（只能绕过）、
+中断掩码、PHY 校准模式、PHY 初始化数据、库目标架构、时钟开/关时序。
+
+**唯一剩下的、与硬件直接相关的未知**就是 `0x60033d14` bit0（hal_init 等它，
+软件写不动、PHY ready 也不置位）。它既不是时钟也不是中断使能能解释的。
+下一轮方向：反汇编 `hal_init` 后面的 `mac_txrx_init` 看它是否依赖那个位指定的
+硬件状态；或者查 S3 的 WiFi MAC 寄存器资料确认 0xD14 的 bit0 定义。
+
+目标未达成，goal 保持 active。
