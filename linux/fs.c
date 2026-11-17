@@ -31,6 +31,9 @@ static u32    g_nodes;
 static LxFile g_fdt0[C6OS_LINUX_MAX_FD];
 static LxFile *g_fd = g_fdt0;
 static u64    g_fs_pa;
+/* 当前目录（不带前导 '/'，空串 = 根）。M12-4：cd 之前是个空操作，
+ * getcwd 恒回 "/"，相对路径一律当根路径查 —— 所以 `cd /bin; ls` 列的还是 /。 */
+static char   g_cwd[FS_NAME];
 
 
 #if C6OS_VFS
@@ -271,6 +274,38 @@ u32 lx_fs_nodes(void)
 
 /* 路径归一化：把 "." / ".." / 重复斜杠塌掉（in → out，out 不带前导 '/'）。
  * 发行版的符号链接目标里有 ".."，不归一化就会拼出查不到的路径。 */
+static int norm_(const char *in, char *out, u64 cap);
+
+/* 把用户给的路径变成"规范化 + 相对当前 cwd"的形式（不带前导 '/'）。
+ * 和 strip_() 的区别就在这里：strip_ 只去前导斜杠，相对的 "." 会被当成根。 */
+static int path_(const char *in, char *out, u64 cap)
+{
+    char tmp[FS_NAME * 2u];
+    u64 w = 0ull;
+
+    if (in == (const char *)0) {
+        return -1;
+    }
+    if (in[0] == '/') {
+        return norm_(in, out, cap);
+    }
+    while (g_cwd[w] != '\0' && w + 2ull < (u64)sizeof(tmp)) {
+        tmp[w] = g_cwd[w];
+        w++;
+    }
+    if (w != 0ull) {
+        tmp[w] = '/';
+        w++;
+    }
+    while (in[0] != '\0' && w + 1ull < (u64)sizeof(tmp)) {
+        tmp[w] = in[0];
+        w++;
+        in++;
+    }
+    tmp[w] = '\0';
+    return norm_(tmp, out, cap);
+}
+
 static int norm_(const char *in, char *out, u64 cap)
 {
     u64 w = 0;
@@ -594,6 +629,7 @@ static int fill_stat(u64 ustat, u32 ino, u64 size, u32 mode)
 static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
 {
     char path[FS_NAME];
+    char ap[FS_NAME] = {0};
     const char *s;
     int idx;
     u64 fd;
@@ -623,7 +659,10 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
             i++;
         }
     }
-    s = strip_(path);
+    if (path_(path, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENOENT;
+    }
+    s = ap;
     if (s[0] == '\0') {                            /* "/" 根目录 */
         fd = fd_alloc();
         if (fd == LX_FD_NONE) {
@@ -851,6 +890,61 @@ u64 lx_fs_pa_of(const char *path)
     return (i < 0) ? 0ull : g_fs_pa + g_node[(u32)i].off;
 }
 
+/* cd：路径可以是相对的（相对当前 cwd）。目录不存在或不是目录就报错。 */
+u64 lx_fs_chdir(u64 upath)
+{
+    char path[FS_NAME] = {0};
+    char ap[FS_NAME] = {0};
+    u64 i;
+    int idx;
+
+    if (upath == 0ull || lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    for (i = 0ull; i + 1ull < (u64)sizeof(path); i++) {
+        u8 c;
+
+        if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        c = *(const u8 *)(upath + i);
+        path[i] = (char)c;
+        if (c == 0u) {
+            break;
+        }
+    }
+    if (path[0] == '\0') {
+        return (u64)0 - LX_ENOENT;
+    }
+    if (path_(path, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENOENT;
+    }
+    if (ap[0] == '\0') {                     /* 根 */
+        g_cwd[0] = '\0';
+        return 0ull;
+    }
+    idx = fs_find(ap);
+    if (idx < 0) {
+        return (u64)0 - LX_ENOENT;
+    }
+    if ((g_node[(u32)idx].mode & 0xF000u) != 0x4000u) {
+        return (u64)0 - LX_ENOENT;
+    }
+    for (i = 0ull; i + 1ull < (u64)sizeof(g_cwd); i++) {
+        g_cwd[i] = g_node[(u32)idx].name[i];
+        if (g_cwd[i] == '\0') {
+            break;
+        }
+    }
+    g_cwd[sizeof(g_cwd) - 1u] = '\0';
+    return 0ull;
+}
+
+const char *lx_fs_cwd(void)
+{
+    return (const char *)&g_cwd[0];
+}
+
 u64 lx_fs_close(u64 fd)
 {
     LxFile *f = fd_get(fd);
@@ -978,6 +1072,7 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
 u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
 {
     char path[FS_NAME];
+    char ap[FS_NAME] = {0};
     const char *s;
     int idx;
     u64 i;
@@ -1001,7 +1096,10 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
             break;
         }
     }
-    s = strip_(path);
+    if (path_(path, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENOENT;
+    }
+    s = ap;
     if (s[0] == '\0') {
         /* AT_EMPTY_PATH：path 为空时按 dirfd 取文件自己的 stat。
          * glibc 的 fstat 就走这条路；不认它的话所有文件都会拿到根目录那
@@ -1030,6 +1128,7 @@ u64 lx_fs_access(u64 upath, u64 mode)
     (void)mode;
     {
         char path[FS_NAME];
+        char ap[FS_NAME] = {0};
         const char *s;
         u64 i;
 
@@ -1051,7 +1150,10 @@ u64 lx_fs_access(u64 upath, u64 mode)
                 break;
             }
         }
-        s = strip_(path);
+        if (path_(path, ap, (u64)sizeof ap) != 0) {
+            return (u64)0 - LX_ENOENT;
+        }
+        s = ap;
         if (s[0] == '\0' || fs_find(s) >= 0) {
             return 0ull;
         }

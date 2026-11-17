@@ -383,18 +383,31 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_getcwd:
-        if (a1 < 2ull) {
+    {
+        const char *cwd = lx_fs_cwd();
+        u64 n = 0ull;
+        u64 len;
+
+        while (cwd[n] != '\0') {
+            n++;
+        }
+        len = 1ull + n;                    /* 前导 '/' + cwd */
+        if (a1 < len + 1ull) {
             r->rax = neg(LX_EINVAL);
             return;
         }
-        if (lx_user_ok(a0, 2ull, C6OS_PROT_W) == 0) {
+        if (lx_user_ok(a0, len + 1ull, C6OS_PROT_W) == 0) {
             r->rax = neg(LX_EFAULT);
             return;
         }
         *(u8 *)a0 = '/';
-        *(u8 *)(a0 + 1ull) = 0;
-        r->rax = 1ull;
+        for (n = 0ull; cwd[n] != '\0'; n++) {
+            *(u8 *)(a0 + 1ull + n) = (u8)cwd[n];
+        }
+        *(u8 *)(a0 + 1ull + n) = 0;
+        r->rax = len;
         return;
+    }
 
     case LX_SYS_exit:                      /* 只结束当前线程 */
         if (lx_proc_tgid() == lx_proc_tid()) {
@@ -612,11 +625,14 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_setpgid:
+    case LX_SYS_chdir:
+        r->rax = lx_fs_chdir(a0);           /* M12-4：真的换目录（含相对路径） */
+        return;
+
     case LX_SYS_setsid:
     case LX_SYS_umask:
-    case LX_SYS_chdir:
     case LX_SYS_fcntl:
-        /* L5 先把进程模型跑通；真正的信号投递是 L6，chdir/fcntl 是 L6+ */
+        /* L5 先把进程模型跑通；真正的信号投递是 L6 */
         r->rax = 0ull;
         return;
 

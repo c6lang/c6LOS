@@ -255,6 +255,9 @@ u64  lx_fs_node_size(u32 i);
 u64  lx_fs_node_data_pa(u32 i);
 u32  lx_fs_node_mode(u32 i);
 u64  lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode);
+/* cd / pwd：cwd 是内核里的一份（多进程共享，见 fs.c 的说明） */
+u64  lx_fs_chdir(u64 upath);
+const char *lx_fs_cwd(void);
 u64  lx_fs_read(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_close(u64 fd);
 u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);

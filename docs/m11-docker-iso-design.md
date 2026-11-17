@@ -619,3 +619,19 @@ Linux c6los 6.1.0-c6los #1 x86_64 Linux
 已知没做：挂载点本身的 `stat`/`readdir`（`ls /data` 报 No such file，但
 `echo m12ok > /data/m12.txt` 与 `cat /data/m12.txt` 都是好的），以及 `sendfile`
 （`cat` 时能看到 `[lx] ENOSYS nr=40`）。
+
+### M12 补充：cd / pwd
+
+`cd /bin` 之后 `ls` 列的还是根目录。三个地方凑成了这个现象：`LX_SYS_chdir` 在
+sys.c 里跟 `setsid`/`umask` 一起被归成"L6+ 再说"的空操作（直接回 0）；`getcwd`
+死写 `"/"`；而相对路径（`ls` 不带参数就是 `.`）在 fs.c 里被 `strip_()` 去掉前导
+斜杠后**直接当根路径**查 —— 即便 cwd 变了也没人用它。
+
+现在 fs.c 有 `g_cwd`（不带前导 `'/'`，空串=根）和 `path_()`：相对路径先拼 cwd 再
+`norm_()` 归一化，`openat` / `statat` / `access` 三处用户路径入口都改走它。
+`lx_fs_chdir()` 真的查节点、确认是目录、再用节点名当规范路径写回 `g_cwd`；
+`lx_fs_cwd()` 给 `getcwd` 拼 `"/" + cwd`。
+
+cwd 是**内核里的一份**，不跟进程走：ash 的 `cd` 是内置命令（不 fork），交互使用
+没问题；但子进程里 `chdir` 会漏给父进程。要按进程隔离，得跟 fd 表那套
+per-proc 一起做。
