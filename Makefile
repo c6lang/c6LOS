@@ -1349,7 +1349,7 @@ $(SH_ELF): tests/linux/shpipe.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(SH_IMG): $(SH_ELF) $(X86)/dyn-disk.img
+$(SH_IMG): $(SH_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(SH_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
@@ -1357,9 +1357,35 @@ $(SIG_ELF): tests/linux/sig.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(SIG_IMG): $(SIG_ELF) $(X86)/dyn-disk.img
+$(SIG_IMG): $(SIG_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(SIG_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+# ---- M13-2a：COW fork ------------------------------------------------------
+# 48MB 匿名映射 + 6 次 fork（受 LX_MAX_PROC=8 限制）：全量复制会 OOM，COW 只多
+# 页表页；父子写必须隔离。
+COW_ELF := $(X86)/cow.elf
+COW_IMG := $(X86)/cow-disk.img
+
+$(COW_ELF): tests/linux/cow.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+# 依赖 x86-dyn（而不是 dyn-disk.img 这个文件）：保证镜像一定在内核重建之后才
+# 拷贝；同时避免 check 目标和文件规则各触发一次递归 make（并发时两边会打架，
+# 曾出现镜像里是旧内核、调试打印对不上的怪现象）。
+$(COW_IMG): $(COW_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(COW_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m13b: $(COW_IMG)
+	@timeout 90 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(COW_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13b.log \
+		| grep -q "^PASS: cow" \
+	  && echo "PASS: linux-abi M13-2a（COW fork：48MB×6 次 fork + 写隔离）" \
+	  || { echo "FAIL: linux-abi M13-2a"; tail -20 /tmp/check-m13b.log; exit 1; }
 
 check-linuxabi-l5: $(SH_IMG)
 	@timeout 60 qemu-system-x86_64 -m 256M \
@@ -1376,7 +1402,7 @@ $(THR_ELF): tests/linux/thread.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $< -lpthread
 
-$(THR_IMG): $(THR_ELF) $(X86)/dyn-disk.img
+$(THR_IMG): $(THR_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(THR_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
@@ -1387,7 +1413,7 @@ $(PRE_ELF): tests/linux/preempt.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(PRE_IMG): $(PRE_ELF) $(X86)/dyn-disk.img
+$(PRE_IMG): $(PRE_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(PRE_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 

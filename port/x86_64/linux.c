@@ -83,6 +83,13 @@ int x86_exc_dump(LxRegs *r, u64 cr2)
 {
     u64 *p = (u64 *)r + 15ull;
 
+    /* 先看是不是 COW 写缺页：ring3 直接写、内核写用户缓冲都会到这里。
+     * 修好就原样 iretq 重试那条指令（不看 CPL：内核写用户页同样会缺页）。 */
+    if (p[0] == 14ull && lx_cur_proc() != (LxProc *)0) {
+        if (port_pf_resolve(cr2, (u32)p[1]) != 0) {
+            return 1;
+        }
+    }
     /* L6：用户态踩到 #PF/#GP/#UD/#DE/#AC 时先看能不能变成信号投递出去。 */
     if (lx_cur_proc() != (LxProc *)0 && (p[3] & 3ull) == 3ull) {
         if (lx_sig_deliver_exc(lx_cur_proc(), r, cr2, (u32)p[0]) != 0) {

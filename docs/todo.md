@@ -304,7 +304,8 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 | ✅ M13-0 设计稿 | 现状实测缺口矩阵、对象模型（OsAs/OsVma/OsFile/OsWaitQueue）、M13–M20 里程碑与风险 | `docs/linux-abi-complete.md` |
 | ✅ 基础设施 | 干净树上 `dyn-disk.img` 无规则：补文件目标 + order-only 依赖，L5–L8 可回归 | `make check-linuxabi-l5..l8` |
 | ✅ M13-1 页框生命周期 | PMM 引用计数（动态表，不占内核镜像）；`port_as_destroy/unmap` 五层真回收；`MAP_FIXED` 先 unmap；`mprotect` 真改 PTE；AS 引用计数（线程组共享，最后退出才拆）；内核 BSS 不得越过 0xA0000（链接期 ASSERT） | ✅ `check-linuxabi-m13`：300 轮 AS 建/拆/改权限/覆盖映射后 `free_kb` 精确回基线（257888→257888） |
-| M13-2 地址空间 | `OsAs/OsVma`、COW fork、按需分页、栈增长、`mprotect/mmap/munmap/msync` 真语义 | 100 次 fork 只多一份内存；8 MB 栈不崩；munmap 后空闲页回升 |
+| ✅ M13-2a COW fork | `port_as_copy` 改写时复制（PTE 软件位 `PTE_COW=1<<9`，置 COW 必清 W）；#PF 经 `port_pf_resolve` 私有化；`mprotect` 前先拆 COW；`port_as_user_range_ok` 视 COW 为可写；wait4 的 pid 按 int 符号扩展（B16） | ✅ `check-linuxabi-m13b`：48MB×6 次 fork（深拷贝必 OOM），父子写隔离正确 |
+| M13-2b 地址空间 | `OsAs/OsVma`、按需分页、栈增长、`munmap/msync` 真语义 | munmap 后空闲页回升；8 MB 栈不崩 |
 | M13-3 资源动态化 | 动态任务表/fd 表/内核栈、pipe 动态环形缓冲、ramfs 节点池 | 1000 个 fd、32 线程、64 KB 管道可用 |
 | M14 进程/信号/exec | B1–B14：setpgid 分派、wait4 选项/waitid、envp/shebang/CLOEXEC、`*at` dirfd、64 信号 + stop/cont + EINTR/`SA_RESTART`、SIGPIPE、fcntl 真语义、readv/dup3 | `check-linuxabi-m14` 用户态逐项 PASS |
 | M15 VFS/设备 | ops 分发表；统一路径解析（挂载点/`*at`/符号链接）；写类/属性类 syscall；statfs；devfs；ramfs 动态 | `check-linuxabi-m15`：busybox 文件操作矩阵 + `/data` 可见 + shebang |

@@ -581,7 +581,10 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_wait4:
-        r->rax = lx_proc_wait4((i64)a0, a1, a2, a3);
+        /* Linux 的 pid 参数是 int：glibc 传 -1 时上游高 32 位不可信（常是零
+         * 扩展），这里必须按 int 截断再符号扩展，否则 -1 会变成 +4294967295，
+         * 进程表里找不到任何子进程，wait() 直接 ECHILD。*/
+        r->rax = lx_proc_wait4((i64)(i32)a0, a1, a2, a3);
         return;
 
     case LX_SYS_pipe:

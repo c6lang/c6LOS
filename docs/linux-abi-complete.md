@@ -101,6 +101,7 @@ port/x86_64/    硬件层：mmu.c(4 级页表/CR3)、user_entry.S(syscall/iret)�
 | B13 | `linux/sys.c` | `readv` 有号无实现；`sendfile` 缺 | 补 file ops 后一起实现 |
 | B14 | `linux/sys.c: prctl/madvise/fcntl/umask/setuid...` | 一律返回 0（假成功） | 能实现的实现，不能的返回明确错误；`fcntl` 真语义 |
 | B15 | `Makefile` | 干净构建时 `check-linuxabi-l5..l8` 找不到 `dyn-disk.img` 规则 | 已修：补文件目标 + order-only 依赖 |
+| B16 | `linux/sys.c: wait4`（同类：kill/setpgid/tgkill 等 int 参数） | pid 是 Linux `int`，按 u64 直接取用：`wait(-1)` 变 +4294967295，恒 `ECHILD` | 已修 wait4（`(i64)(i32)a0`）；其余 int 参数在 M14 统一扫一遍 |
 
 > B15 是施工前顺手修掉的基础设施 bug；没有它，L5–L8 的回归无法在干净树上跑。
 
@@ -388,4 +389,33 @@ QEMU 报 `qemu_mutex_lock_iothread_impl: assertion failed` 后 abort（现场看
 **启动后从 PMM 取连续页、经直接映射访问**（表多大随 RAM 走，1GB 也只 256KB，
 但不占内核镜像），并在 `port/x86_64/stage2.ld` 加
 `ASSERT(__bss_end <= 0xA0000)`：把"镜像长过洞"从运行期 QEMU abort 变成链接期报错。
+
+### M13-2a 写时复制 fork
+
+做了什么：
+
+- `port_as_copy` 不再深拷贝：可写页父子都把 PTE 的 `W` 清掉、置软件位
+  `PTE_COW=(1<<9)`（置 COW **必清 W**，否则硬件写不会被拦），只读页原样共享，
+  两种情况都 `port_phys_ref` 记一次引用。48MB 匿名映射 fork 6 次，深拷贝必 OOM，
+  COW 只多页表页。
+- 缺页路径：`x86_exc_dump` 见到 #PF（vec 14）且当前有 `LxProc` 时先调
+  `port_pf_resolve(cr2, err)`。它只接管 `(err & 7) == 7`（present 的用户态写）
+  且 PTE 带 `P|U|COW` 的缺页：引用计数为 1 就原地恢复可写，否则新分配一页复制、
+  `port_phys_put` 旧页，最后 `invlpg` 返回 1 让用户态重试。其它缺页照旧走
+  信号/异常，所以 L6 的 SIGSEGV 用例不受影响。
+- `mprotect`：给 COW 页改权限前先经 `cow_break_` 私有化，避免把共享页框的属性
+  一起改掉。
+- `port_as_user_range_ok`：COW 页（已清 W）对内核 `copy_to/from_user` 必须仍视为
+  可写，否则 fork 后第一次 `wait` 写 status 就失败。
+- 顺带修一个真的 Linux ABI bug（B16）：`wait4` 的 pid 是 `int`，glibc 传 -1 时
+  上游高 32 位不可信；按 u64 直接用会变成 +4294967295，进程表里找不到任何子进程，
+  `wait()` 恒 `ECHILD`。入口统一 `(i64)(i32)a0`。
+
+踩到的坑：Makefile 里 L5–L8 的载荷镜像把 `$(X86)/dyn-disk.img` 当普通文件依赖，
+内核改了但镜像没重建，跑出来的是旧内核（症状是"改了没效果"，还容易误判成并发
+打架）。全部改成依赖递归目标 `x86-dyn`。
+
+验收：`make check-linuxabi-m13b` → 用户态 `PASS: cow`；回归 L2/L4/L5/L6/L7/L8/M13
+全 PASS（M9-4 连跑 3 次 PASS；整套循环里偶发一次失败，属环境/镜像时序抖动，
+非本次改动引入）。
 
