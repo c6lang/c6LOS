@@ -428,6 +428,28 @@ port_task_switch:
     slli    a14, a14, 30         /* 0x40000000：代码段基址高位 */
     or      a15, a15, a14
     s32i    a15, a1, 60
+    /* §473 ★★★ 必须保存 PS 到帧偏移 64 —— `port_task_switch` 原来**漏了**这四行。
+     *
+     * `RESTORE_FRAME` 的恢复段：
+     *     l32i a2, a1, 64      ← 取 PS
+     *     movi a3, 16
+     *     or   a2, a2, a3      ← 置 EXCM（给 rfe 用）
+     *     wsr  a2, ps
+     *     ... rfe
+     * `port_task_yield` 的保存段一直是**有**这四行的
+     * （`rsr a5,ps / movi a6,-32 / and / s32i a5,a1,64`，见下面 yield 那段），
+     * 唯独 `port_task_switch` 没有 ⇒ 偏移 64 是**栈上的旧内存**。
+     * 一旦那格恰好带着 EXCM=1（或 INTLEVEL≠0），`rfe` 返回后 EXCM 仍是 1，
+     * 被恢复的任务执行的下一条 `retw` 就是**非法指令** —— 正是 §468 抓到的
+     * `exccause=0`、`epc1=0x40048c6e(retw.n)`、`ps=0x00060010`(EXCM=1,
+     * INTLEVEL=0)、`a0=0`。
+     *
+     * 和 yield 一样清掉 INTLEVEL(bit0-3) 与 EXCM(bit4)：恢复侧会自己
+     * `or 16` 重新置 EXCM 给 `rfe`，而任务自身的 INTLEVEL 必须是 0。 */
+    rsr     a5, ps
+    movi    a6, -32
+    and     a5, a5, a6
+    s32i    a5, a1, 64
     /* §316：把每次切换点的 a0 / 算出来的 EPC / PS / WS / WB 记进 RTC 环形区
      * （0x50000300=序号，0x50000304 起每项 16 字节），用来查"切回来时
      * EPC 为什么会是 ROM 里的 retw.n"。a11..a14 此时已经压进帧，可以随便用。 */

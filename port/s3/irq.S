@@ -429,11 +429,42 @@ _vec_level1:
     l32i    a2, a1, 68
     beqz    a2, 44f                 /* 68 == 0 ⇒ 没写过，别碰窗口 */
     l32i    a3, a1, 72
+    /* §471 ★ 和 ctx.S §470 完全相同的两道校验 —— 这里原来是**裸写**。
+     *
+     * Xtensa 硬不变式：WINDOWBASE < 16，且必须是 4 的倍数
+     * （它同时是 WINDOWSTART 的右移量，要满足
+     *  `(WINDOWSTART >> WINDOWBASE) & 1 == 1`）。写不合法的值，
+     * **`wsr windowbase` 这条指令自己就进异常** —— 直接掉进
+     * `_vec_default` 的 `j .` 死循环，现场全丢。
+     *
+     * §470 已在 `ctx.S` 的 `RESTORE_FRAME` 里加了同样的校验并实测命中 3 次
+     * （`坏WB=0xa`），但 `_vec_default` 照样被进 —— 就是因为**这条路径**
+     * 还在裸写。帧偏移 72 里如果是垃圾（`0xa`），这条 `wsr` 立刻炸。 */
+    movi    a6, 16
+    bgeu    a3, a6, 45f             /* WINDOWBASE >= 16 ⇒ 非法 */
+    extui   a6, a3, 0, 2
+    bnez    a6, 45f                 /* WINDOWBASE 非 4 倍数 ⇒ 非法 */
+    srli    a6, a2, 16
+    bnez    a6, 45f                 /* WINDOWSTART 高位非 0 ⇒ 非法（只有低 16 位有意义） */
     l32r    a6, .Ltmpsp_i
     s32i    a1, a6, 0
     wsr     a2, windowstart
     isync
     wsr     a3, windowbase
+    isync
+    l32r    a6, .Ltmpsp_i
+    l32i    a1, a6, 0
+    j       44f
+45:
+    /* 非法：归一化到 WINDOWSTART=1 / WINDOWBASE=0（满足不变式的最保守状态），
+     * 至少保证接下来的 `wsr` 不会再进异常，让中断能正常返回。 */
+    l32r    a6, .Ltmpsp_i
+    s32i    a1, a6, 0
+    movi    a6, 1
+    wsr     a6, windowstart
+    isync
+    movi    a6, 0
+    wsr     a6, windowbase
     isync
     l32r    a6, .Ltmpsp_i
     l32i    a1, a6, 0

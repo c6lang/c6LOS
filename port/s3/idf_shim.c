@@ -19,7 +19,7 @@
 static u32 g_phy_ps;
 
 /* 调试：闭源库回调我们的胶水函数时打一个字符（限 40 个），用来定位它卡在哪 */
-int  ets_printf(const char *fmt, ...);
+int  s3_ets_printf(const char *fmt, ...);
 static u32 g_trace_n;
 
 void s3_beacon(u32 slot, u32 val);
@@ -29,7 +29,7 @@ void s3_win_trace(const char *s)
     s3_beacon(3u, 0xC0000000u | (g_trace_n & 0xFFFFu));
     if (g_trace_n < 40u) {
         g_trace_n = g_trace_n + 1u;
-        ets_printf("%s", s);
+        s3_ets_printf("%s", s);
     }
 }
 

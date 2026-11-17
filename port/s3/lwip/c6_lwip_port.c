@@ -129,7 +129,7 @@ static int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
 
 /* 供 .c6 侧（经 w2c 壳）调用：起 lwIP、装 netif、注册 RX 回调。
  * mac 必须是真实 MAC（见 §203：假 MAC 会让 DHCP 身份不合法）。 */
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 /* 阶段信标：DRAM 全局（RTC 慢速内存实测会被库/PHY 写坏，改用 DRAM，
  * 崩了以后 JTAG 直接 x/8xw g_lwip_stage 就能看走到哪一步）。 */
 volatile unsigned int g_lwip_stage[8] = {0};
@@ -224,7 +224,7 @@ void c6_lwip_print_ip(void)
 {
     LWSTAGE2(1, 0x2111u);
     if (netif_default == 0) {
-        ets_printf("[lwip] netif 不存在\n");
+        s3_ets_printf("[lwip] netif 不存在\n");
         return;
     }
     {
@@ -235,7 +235,7 @@ void c6_lwip_print_ip(void)
         const u8_t *mb = (const u8_t *)m;
         const u8_t *gb = (const u8_t *)g;
 
-        ets_printf("[lwip] ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u\n",
+        s3_ets_printf("[lwip] ip=%u.%u.%u.%u mask=%u.%u.%u.%u gw=%u.%u.%u.%u\n",
                    ab[0], ab[1], ab[2], ab[3], mb[0], mb[1], mb[2], mb[3],
                    gb[0], gb[1], gb[2], gb[3]);
     }

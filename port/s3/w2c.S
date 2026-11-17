@@ -511,3 +511,40 @@ s3_win_spill:
     entry   a1, 16
     movi    a15, 0
     retw
+
+/* §474 ★★★ `ets_printf` 是 **windowed** 函数，而本仓的 C 代码全部按
+ * **call0** 编译 —— 直接 `call0` 调它，`a0` 就不带 CALLINC，ROM 里的
+ * `entry a1, 80` 因而**不轮转窗口**；等它内部的 `call8` 把 WINDOWBASE
+ * 推上去之后，`retw` 拿着 CALLINC=0 的 `a0` 回退，与 WINDOWBASE 不配套
+ * ⇒ **非法指令**。
+ *
+ * 真板症状（§468 抓到的完整现场）：
+ *   exccause=0、epc1 落在 ROM 的 `retw.n`、a0=0、ps.EXCM=1。
+ * 这也解释了为什么"大多数 ets_printf 调用看着没问题" —— 只有当调用瞬间
+ * WINDOWBASE 恰好是 0 时，CALLINC=0 才碰巧与实践一致。
+ *
+ * 修法：一层 **call0 可调**的薄壳，内部用 `callx8` 进 ROM 的跳转桩。
+ * `ets_printf` 的桩（0x400005d0）是 `l32r a9,[0x400005cc] / jx a9`，
+ * 纯跳转、不改 CALLINC，于是 CALLINC=2 一路带到真实实现的
+ * `entry a1, 80`。参数 a2..a7 在 call8 前后是重叠的，不需要搬。 */
+    .align 4
+14: .word   ets_printf
+
+    .align 4
+    .global s3_ets_printf
+    .type   s3_ets_printf, @function
+s3_ets_printf:
+    addi    a1, a1, -64            /* 给 callx8 的硬件溢出槽留空间 */
+    s32i    a0, a1, 0
+    /* §475 ★ `callx8` 期间硬件会把 caller 的 a12..a15 溢出到栈、返回时
+     * 由 `retw` 恢复，所以 a12 在 `callx8` **返回之后**仍是这里写进去的值。
+     * 而 `a1` 不能假设不变 —— `_win_ovf8` 的兜底逻辑会把它换成溢出槽地址，
+     * 于是 `l32i a0, a1, 0` 读到的是 `callx8` 设的返回地址（`0x8...`），
+     * `ret` 拿它当 CALLINC=0 的地址用 → `cause=0x14` 取指禁止。 */
+    mov     a12, a1
+    l32r    a8, 14b
+    callx8  a8
+    mov     a1, a12                /* ★ 用备份的 a1，别信 callx8 之后的 a1 */
+    l32i    a0, a1, 0
+    addi    a1, a1, 64
+    ret

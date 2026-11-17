@@ -16,7 +16,7 @@ void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
 volatile u32 g_osi_calls[128];
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 
 /* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
  * 串口不可靠时用 `esptool read-mem 0x50000200` 直接读回来。
@@ -134,8 +134,8 @@ static void *osi_malloc(u32 n)
     *(volatile u32 *)0x50000748u = *(volatile u32 *)0x50000748u + 1u;
     *(volatile u32 *)0x5000074cu = n;
     if (*(volatile u32 *)0x50000748u == 1u) {
-        extern int ets_printf(const char *fmt, ...);
-        ets_printf("[heap] 分配失败 n=%u\n", (unsigned)n);
+        extern int s3_ets_printf(const char *fmt, ...);
+        s3_ets_printf("[heap] 分配失败 n=%u\n", (unsigned)n);
     }
     return 0;
 }
@@ -297,7 +297,7 @@ static WSem *wsem_new(u32 max, u32 init)
     g_sem_seq = g_sem_seq + 1u;
     s->seq = g_sem_seq;
     if (g_dbg_sync != 0u) {
-        ets_printf("[semnew] #%u p=%08x max=%u init=%u t=%u\n",
+        s3_ets_printf("[semnew] #%u p=%08x max=%u init=%u t=%u\n",
                    (unsigned)s->seq, (unsigned)(void *)s, (unsigned)max, (unsigned)init,
                    (unsigned)s3_w2c_current_task());
     }
@@ -330,7 +330,7 @@ static int osi_semphr_take(void *sem, u32 ticks)
     WSem *s = (WSem *)sem;
 
     if (g_dbg_sync != 0u) {
-        ets_printf("[take] t=%u sem#%u tk=%x\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[take] t=%u sem#%u tk=%x\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)((s != 0) ? s->seq : 0u), (unsigned)ticks);
     }
     int ok;
@@ -348,7 +348,7 @@ static int osi_semphr_give(void *sem)
     int r;
     HIT_OF(_semphr_give);
     if (g_dbg_sync != 0u) {
-        ets_printf("[give] t=%u sem#%u\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[give] t=%u sem#%u\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)((s != 0) ? s->seq : 0u));
     }
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(2u, (u32)sem, 0u, 0xEEu); return 0; }
@@ -408,7 +408,7 @@ static void *osi_mutex_create(void)
         g_mtx_seq = g_mtx_seq + 1u;
         *(u32 *)((u8 *)m + 8u) = g_mtx_seq;   /* WMtx 的第 3 个字当序号 */
         if (g_dbg_sync != 0u) {
-            ets_printf("[mtxnew] #%u p=%08x t=%u\n", (unsigned)g_mtx_seq,
+            s3_ets_printf("[mtxnew] #%u p=%08x t=%u\n", (unsigned)g_mtx_seq,
                        (unsigned)m, (unsigned)s3_w2c_current_task());
         }
     }
@@ -434,7 +434,7 @@ static int osi_mutex_lock(void *p)
     HIT_OF(_mutex_lock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
     if (g_dbg_sync != 0u) {
-        ets_printf("[lock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[lock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
     }
     {
@@ -445,7 +445,7 @@ static int osi_mutex_lock(void *p)
         ok = (pr == 0) ? 1 : 0;
         B_OUT(4u);
         if (g_dbg_sync != 0u) {
-            ets_printf("[lockok] t=%u pr=%d ok=%d\n", (unsigned)s3_w2c_current_task(),
+            s3_ets_printf("[lockok] t=%u pr=%d ok=%d\n", (unsigned)s3_w2c_current_task(),
                        pr, ok);
         }
         return ok;
@@ -457,7 +457,7 @@ static int osi_mutex_unlock(void *p)
     HIT_OF(_mutex_unlock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
     if (g_dbg_sync != 0u) {
-        ets_printf("[unlock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[unlock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
     }
     return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 1 : 0;
@@ -501,7 +501,7 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
 {
     WEvt *e = (WEvt *)g;
 
-    ets_printf("[evwait] t=%u g=%x bits=%x all=%d tk=%x\n",
+    s3_ets_printf("[evwait] t=%u g=%x bits=%x all=%d tk=%x\n",
                (unsigned)s3_w2c_current_task(), (unsigned)(void *)g,
                (unsigned)bits, wait_all, (unsigned)ticks);
     u32 got;
@@ -598,7 +598,7 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     int r;
     HIT_OF(_queue_send);
     if (g_dbg_sync != 0u) {
-        ets_printf("[send] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[send] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)qh, (unsigned)ticks);
     }
     if (q == 0 || q->magic != WQ_MAGIC) {
@@ -717,7 +717,7 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
      * RTC 环在真板上会互相覆盖、read-mem 又会先复位，只有这里直接打印
      * 才可靠（一次启动只有两三次）。 */
     {
-        /* §320 实验：这条打印原来走 ets_printf + s3_w2c_current_task()（一个
+        /* §320 实验：这条打印原来走 s3_ets_printf + s3_w2c_current_task()（一个
          * windowed 壳）。真板上崩溃点正好是 ROM printf 内部那个 `retw.n`，
          * 所以先把它换成"只写 RTC、不调任何函数"的记法，看崩溃是否跟着消失。 */
         static u32 recv_n_;
@@ -820,7 +820,7 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
      * 发生在"库任务开始执行"之后，还是主流程自己继续走就会崩。 */
     id = 1;
     if (handle != 0) { *(u32 *)handle = 1u; }
-    ets_printf("[task] 跳过库任务 fn=%08x\n", (unsigned)(u32)fn);
+    s3_ets_printf("[task] 跳过库任务 fn=%08x\n", (unsigned)(u32)fn);
     return 1;
 #endif
     id = s3_w2c_task_create(name, fn, arg, p, stack);
@@ -834,7 +834,7 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
         td[4] = s3_w2c_current_task();
         td[5] = prio;
     }
-    ets_printf("[task] 库建任务 fn=%08x id=%d stack=%u prio=%u(->%u)\n",
+    s3_ets_printf("[task] 库建任务 fn=%08x id=%d stack=%u prio=%u(->%u)\n",
                (unsigned)(u32)fn, id, (unsigned)stack, (unsigned)prio, (unsigned)p);
     if (id < 0) { return 0; }
     /* 句柄用稳定的表下标，和 _task_get_current_task() 同一口径 */
@@ -858,7 +858,7 @@ static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
 static void osi_task_delay(u32 ticks)
 {
     if (g_dbg_sync != 0u) {
-        ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
+        s3_ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)ticks);
     }
     s3_w2c_task_delay(ticks);
@@ -904,9 +904,9 @@ static void osi_wifi_rtc_disable_iso(void)
 /* ---- 日志：把库自己打的信息送到我们的串口 ---- */
 /* 注意：这里**不能**调 port_puts —— 它是 call0 编译的，从 windowed 代码
  * 调过去会把寄存器窗口搞乱（实测 cause=0x14 InstrPageTableErr，
- * 返回地址被 OR 上 bit31）。ROM 的 ets_printf 从 windowed 调是安全的
+ * 返回地址被 OR 上 bit31）。ROM 的 s3_ets_printf 从 windowed 调是安全的
  * （s3_win_log 一直这么用）。 */
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 
 /* 只有落在 flash/IROM/IRAM/DRAM 里的指针才当字符串用。 */
 static int c6_ok_str(u32 p)
@@ -981,16 +981,16 @@ static void c6_log_fmt(const char *fmt, void *app)
         }
     }
     out[o] = '\0';
-    ets_printf("%s", out);
+    s3_ets_printf("%s", out);
 }
 
 static void osi_log_write(u32 level, const char *tag, const char *fmt, const char *arg)
 {
     OSI_HIT(83);
     if (level < 2u) {
-        ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
-        if (c6_ok_str((u32)(void *)fmt)) { ets_printf("%s", fmt); }
-        ets_printf("\n");
+        s3_ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+        if (c6_ok_str((u32)(void *)fmt)) { s3_ets_printf("%s", fmt); }
+        s3_ets_printf("\n");
     }
     (void)arg;
 }
@@ -1001,22 +1001,22 @@ static void osi_log_writev(u32 level, const char *tag, const char *fmt,
 {
     OSI_HIT(84);
     if (level > 2u) { return; }             /* 只打 WARN/ERROR，避免刷屏 */
-    ets_printf("[v%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+    s3_ets_printf("[v%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
     if (!c6_ok_str((u32)(void *)fmt)) {
         /* fmt 不是字符串：把 va_list 里的东西直接摊开看 */
         u32 p = (ap != 0) ? *(u32 *)ap : 0u;
-        ets_printf("(fmt=%08x)", (u32)(void *)fmt);
+        s3_ets_printf("(fmt=%08x)", (u32)(void *)fmt);
         if (p >= 0x3F000000u && p < 0x3FE00000u) {
             u32 i;
             u32 *w = (u32 *)p;
-            ets_printf(" args@%08x:", p);
-            for (i = 0u; i < 6u; i++) { ets_printf(" %08x", w[i]); }
+            s3_ets_printf(" args@%08x:", p);
+            for (i = 0u; i < 6u; i++) { s3_ets_printf(" %08x", w[i]); }
         }
-        ets_printf("\n");
+        s3_ets_printf("\n");
         return;
     }
     c6_log_fmt(fmt, ap);
-    ets_printf("\n");
+    s3_ets_printf("\n");
     (void)buf; (void)len;
 }
 static u32 osi_log_timestamp(void) { OSI_HIT(85); return 0u; }
@@ -1406,7 +1406,7 @@ void s3_wifi_dump_events(const char *tag)
     u32 i = 0u;
     u32 show = (n > 8u) ? 8u : n;
 
-    ets_printf("[evt] %s: 共 %u 条", tag, (unsigned)n);
+    s3_ets_printf("[evt] %s: 共 %u 条", tag, (unsigned)n);
     for (i = 0u; i < show; i++) {
         u32 base = p[i * 2u];
         u32 id = p[i * 2u + 1u];
@@ -1417,9 +1417,9 @@ void s3_wifi_dump_events(const char *tag)
         } else if (base != 0u) {
             kind = "ip/other";
         }
-        ets_printf(" [%s:%u]", kind, (unsigned)id);
+        s3_ets_printf(" [%s:%u]", kind, (unsigned)id);
     }
-    ets_printf("\n");
+    s3_ets_printf("\n");
 }
 
 /* ---- OSI 调用统计：每个阶段结束打一遍，方便判断"库到底走到哪一步" --------
@@ -1431,10 +1431,10 @@ void s3_wifi_dump_osi(const char *tag)
     u32 i = 0u;
     u32 printed = 0u;
 
-    ets_printf("[osi] %s:", tag);
+    s3_ets_printf("[osi] %s:", tag);
     for (i = 0u; i < 128u; i++) {
         if (c[i] != 0u) {
-            ets_printf(" %u=%u", (unsigned)i, (unsigned)c[i]);
+            s3_ets_printf(" %u=%u", (unsigned)i, (unsigned)c[i]);
             printed = printed + 1u;
             if (printed >= 16u) {
                 break;              /* 一行最多 16 项，别把串口刷爆 */
@@ -1442,9 +1442,9 @@ void s3_wifi_dump_osi(const char *tag)
         }
     }
     if (printed == 0u) {
-        ets_printf(" (还没有任何回调)");
+        s3_ets_printf(" (还没有任何回调)");
     }
-    ets_printf("\n");
+    s3_ets_printf("\n");
 }
 
 /* ---- 剩下几个"库会调但我们还没实现"的槽位（§225）----------------------
@@ -1514,10 +1514,10 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     for (i = 0u; i < 80u; i++) { cfg[i] = 0u; }
     if (ssid == 0 || ssid[0] == 0) {
         /* 没给账号：仍然把接口拉起来扫一遍，至少验证射频与收发链路 */
-        ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
+        s3_ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
         (void)esp_wifi_set_storage(1);
         (void)esp_wifi_set_mode(1);
-        ets_printf("[wifi] start=%d\n", esp_wifi_start());
+        s3_ets_printf("[wifi] start=%d\n", esp_wifi_start());
         (void)s3_wifi_scan();
         return 0xFFFFFFFFu;
     }
@@ -1526,27 +1526,27 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
         n = 0;
         while (pass[n] != 0 && n < 64) { ((u8 *)cfg)[32 + n] = (u8)pass[n]; n++; }
     }
-    ets_printf("[wifi] associate ssid=%s\n", ssid);
+    s3_ets_printf("[wifi] associate ssid=%s\n", ssid);
     /* wifi_storage_t: 0 = WIFI_STORAGE_FLASH, 1 = WIFI_STORAGE_RAM */
     r1 = esp_wifi_set_storage(1);
-    ets_printf("[wifi] set_storage(RAM)=%d\n", r1);
+    s3_ets_printf("[wifi] set_storage(RAM)=%d\n", r1);
     /* wifi_mode_t: 1 = WIFI_MODE_STA */
     r2 = esp_wifi_set_mode(1);
-    ets_printf("[wifi] set_mode(STA)=%d\n", r2);
+    s3_ets_printf("[wifi] set_mode(STA)=%d\n", r2);
     /* wifi_interface_t: 0 = WIFI_IF_STA */
     r3 = esp_wifi_set_config(0, (void *)cfg);
-    ets_printf("[wifi] set_config=%d\n", r3);
+    s3_ets_printf("[wifi] set_config=%d\n", r3);
     r4 = esp_wifi_start();
-    ets_printf("[wifi] start=%d\n", r4);
+    s3_ets_printf("[wifi] start=%d\n", r4);
     /* 关掉省电：modem sleep 需要 OSI 的 `_wifi_rtc_enable/disable_iso` 和定时器
      * （我们那两个是空实现），睡眠一开 RX 就可能收不到包。取一个页面不需要省电，
      * 所以显式 WIFI_PS_NONE(0)（§221）。 */
-    ets_printf("[wifi] set_ps(NONE)=%d\n", esp_wifi_set_ps(0));
+    s3_ets_printf("[wifi] set_ps(NONE)=%d\n", esp_wifi_set_ps(0));
     /* 先扫一遍：不需要密码就能验证射频链路（也方便判断"连不上"是 AP 没扫到
      * 还是认证失败）。 */
     (void)s3_wifi_scan();
     r5 = esp_wifi_connect_internal();
-    ets_printf("[wifi] connect=%d\n", r5);
+    s3_ets_printf("[wifi] connect=%d\n", r5);
     return (u32)r5;
 }
 
@@ -1566,14 +1566,14 @@ int s3_wifi_scan(void)
 
     for (i = 0; i < 64; i++) { cfg[i] = 0; }
     for (i = 0; i < 256; i++) { rec[i] = 0; }
-    ets_printf("[wifi] scan start（阻塞）\n");
+    s3_ets_printf("[wifi] scan start（阻塞）\n");
     r = esp_wifi_scan_start((const void *)cfg, 1);
-    ets_printf("[wifi] scan_start=%d\n", r);
+    s3_ets_printf("[wifi] scan_start=%d\n", r);
     if (r != 0) {
         return -1;
     }
     r = esp_wifi_scan_get_ap_num(&num);
-    ets_printf("[wifi] scan_get_ap_num=%d num=%u\n", r, (unsigned)num);
+    s3_ets_printf("[wifi] scan_get_ap_num=%d num=%u\n", r, (unsigned)num);
     if (r != 0 || num == 0) {
         return (int)num;
     }
@@ -1581,7 +1581,7 @@ int s3_wifi_scan(void)
     if (r == 0) {
         /* 偏移按 IDF 的 wifi_ap_record_t：bssid[6]@0, ssid[33]@6,
          * primary(u8)@39, second@40, rssi(int8)@41 */
-        ets_printf("[wifi] AP0 ssid=%.32s ch=%u rssi=%d\n",
+        s3_ets_printf("[wifi] AP0 ssid=%.32s ch=%u rssi=%d\n",
                    (const char *)(rec + 6), (unsigned)rec[39], (int)(signed char)rec[41]);
     }
     return (int)num;
@@ -1599,14 +1599,14 @@ int s3_wifi_wait_connected(int ms)
         for (i = 0; i < 96; i++) { ap[i] = 0; }
         r = esp_wifi_sta_get_ap_info((void *)ap);
         if (r == 0) {
-            ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
+            s3_ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
                        (const char *)ap, (unsigned)ap[40]);
             return 1;
         }
         s3_w2c_task_delay(1u);
         waited = waited + 10;
     }
-    ets_printf("[wifi] 关联超时（%d ms），sta_get_ap_info=%d\n", ms, r);
+    s3_ets_printf("[wifi] 关联超时（%d ms），sta_get_ap_info=%d\n", ms, r);
     return 0;
 }
 #else
@@ -1661,7 +1661,7 @@ u32 s3_wifi_bringup(void)
      * 只清我们确认需要的。 */
     { extern void *s_wifi_queue; s_wifi_queue = 0; }
 
-    ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
+    s3_ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
                (u32)g_osi_calls[0], (u32)(void *)g_wifi_osi_funcs._version,
                (u32)(void *)&g_osi_calls[0]);
     while (i < 40u) { *(volatile u32 *)((u8 *)g_wifi_cfg_blob + i * 4u) = 0u; i = i + 1u; }
@@ -1733,14 +1733,14 @@ u32 s3_wifi_bringup(void)
      * 关掉打印只会让 init 跑得更快。 */
     g_dbg_sync = 0u;
     s3_wifi_osi_init();
-    ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
+    s3_ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
                (u32)(void *)g_wifi_osi_funcs._semphr_create,
                (u32)(void *)g_wifi_osi_funcs._mutex_create,
                (u32)(void *)g_wifi_osi_funcs._magic,
                (u32)(void *)g_wifi_osi_funcs._version);
     g_init_task = s3_w2c_current_task();
     *(volatile u32 *)0x50001400u = g_init_task;
-    ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
+    s3_ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
                (u32)(void *)g_wifi_cfg_blob,
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 144u));
@@ -1753,16 +1753,16 @@ u32 s3_wifi_bringup(void)
          * 就会让 .data 布局整体挪位（§421 第一次就是踩了这个）。 */
         extern unsigned char g_wifi_osi_funcs_md5[];
         volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
-        ets_printf("[wifi] init 前的库状态 @%08x = %u\n",
+        s3_ets_printf("[wifi] init 前的库状态 @%08x = %u\n",
                    (unsigned)(u32)(void *)wst, (unsigned)*wst);
         /* §421 实验：我们手动做了 PHY enable，库的状态机残留成 2
          * （"正在初始化"），于是 init 直接返回 0x3013。复位成 1 再进去。 */
         if (*wst != 1u) { *wst = 1u; }
         irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
-        ets_printf("[wifi] init 后的库状态 @%08x = %u\n",
+        s3_ets_printf("[wifi] init 后的库状态 @%08x = %u\n",
                    (unsigned)(u32)(void *)wst, (unsigned)*wst);
 
-        ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
+        s3_ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
         g_dbg_sync = 0u;
         return irc;
     }
@@ -1772,12 +1772,12 @@ void *s3_wifi_calls_ptr(void) { return (void *)g_osi_calls; }
 /* 诊断：把关键 OSI 函数的调用计数打到串口（供 .c6 侧经桥调用） */
 static void pnm(const char *n, u32 v)
 {
-    ets_printf("%s=%08x ", n, v);
+    s3_ets_printf("%s=%08x ", n, v);
 }
 
 void s3_osi_dump(void)
 {
-    ets_printf("\n[osi] ");
+    s3_ets_printf("\n[osi] ");
     pnm("mutex",    g_osi_calls[18]);
     pnm("lock",     g_osi_calls[21]);
     pnm("qcreat",   g_osi_calls[23]);
@@ -1786,7 +1786,7 @@ void s3_osi_dump(void)
     pnm("evt",      g_osi_calls[31]);
     pnm("wmalloc",  g_osi_calls[90]);
     pnm("log",      g_osi_calls[83]);
-    ets_printf("\n");
+    s3_ets_printf("\n");
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */
@@ -1977,10 +1977,10 @@ int __wrap_wifi_init_in_caller_task(void)
  * 并且**真的打出来**（§192 的 `_log_write=0` 说明库自己的日志通道不走 OSI，
  * 这条 printf 才是唯一能看到库内部诊断的路）。
  *
- * 输出走 ROM 的 ets_printf（windowed，本文件也是 windowed，ABI 一致）。
+ * 输出走 ROM 的 s3_ets_printf（windowed，本文件也是 windowed，ABI 一致）。
  * 只需要支持很小一部分格式：%s %d %u %x %c %% 和宽度。够读 md5/自检失败。 */
 
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 extern void s3_win_log(const char *s);
 
 static char *wp_utoa(char *end, u32 v, u32 base)
@@ -2076,7 +2076,7 @@ static int lib_printf_line(const char *tag, const char *fmt, va_list ap)
         buf[n] = '\0';
     }
     if (n > 0) {
-        ets_printf("[%s] %s\n", tag, buf);
+        s3_ets_printf("[%s] %s\n", tag, buf);
     }
     return n;
 }

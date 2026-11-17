@@ -110,14 +110,14 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         /* 栈池不够：**必须吭声**。以前这里静默返回 0，表现是"某个任务凭空
          * 没起来"，很难查（§219）。 */
         {
-            extern int ets_printf(const char *fmt, ...);
+            extern int s3_ets_printf(const char *fmt, ...);
             volatile u32 *m = (volatile u32 *)0x50000BE0u;
 
             m[0] = want;
             m[1] = g_pool_off;
             m[2] = S3_STACK_POOL;
             m[3] = m[3] + 1u;
-            ets_printf("[ctx] 栈池不够：需要 %u，已用 %u/%u\n",
+            s3_ets_printf("[ctx] 栈池不够：需要 %u，已用 %u/%u\n",
                        (unsigned)want, (unsigned)g_pool_off, (unsigned)S3_STACK_POOL);
         }
         return 0;
@@ -222,14 +222,14 @@ void port_task_ctx_check(void *ctx)
     hi = lo + (u32)(c->size);
     sp = c->sp;
     if (lo == 0u || sp < lo || sp >= hi || (sp & 3u) != 0u) {
-        extern int ets_printf(const char *fmt, ...);
+        extern int s3_ets_printf(const char *fmt, ...);
         volatile u32 *m = (volatile u32 *)0x50000100u;
         m[0] = 0xBAD1u;
         m[1] = sp;
         m[2] = lo;
         m[3] = hi;
         m[4] = (u32)(void *)c;
-        ets_printf("[ctx] sp 越界：sp=%08x stack=[%08x,%08x) ctx=%08x\n",
+        s3_ets_printf("[ctx] sp 越界：sp=%08x stack=[%08x,%08x) ctx=%08x\n",
                    (unsigned)sp, (unsigned)lo, (unsigned)hi, (unsigned)(u32)(void *)c);
         while (1) {
         }

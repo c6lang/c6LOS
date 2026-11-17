@@ -137,11 +137,11 @@ u32 s3_win_deep(u32 n)
 }
 
 /* ---- ROM 控制台转发 ---------------------------------------------------
- * ROM 里的 ets_printf 按 ROM 自己的配置输出（USB-Serial/JTAG 或 UART0），
+ * ROM 里的 s3_ets_printf 按 ROM 自己的配置输出（USB-Serial/JTAG 或 UART0），
  * 不依赖我们 port_init 里的 USB 初始化 —— 串口"坏掉"时这是最可靠的通道。
  * 注意 ROM 是 windowed ABI，必须从孤岛（windowed）里调，call0 直接调会跑飞。
  */
-int ets_printf(const char *fmt, ...);
+int s3_ets_printf(const char *fmt, ...);
 /* ROM：0x40005c58，填 g_phyFuns 函数表（见 esp32s3.rom.ld） */
 /* ROM 0x40005c58：返回 PHY 的函数表指针（调用者负责存进 g_phyFuns）；
  * 注意 ROM 是 windowed，返回值在 a10，本文件也是 windowed 编译，直接收就对。 */
@@ -157,7 +157,7 @@ void phy_bbpll_en_usb(u32 enable);
 
 void s3_win_log(const char *s)
 {
-    ets_printf("%s", s);
+    s3_ets_printf("%s", s);
 }
 
 void s3_win_trace(const char *s);
@@ -347,7 +347,7 @@ int s3_win_phy_enable(void);     /* 定义在下面 */
 
 int s3_win_phy_enable_hook(void)
 {
-    ets_printf("[phy] OSI _phy_enable 回调进入\n");
+    s3_ets_printf("[phy] OSI _phy_enable 回调进入\n");
     return s3_win_phy_enable();
 }
 
@@ -398,19 +398,19 @@ int s3_win_phy_enable(void)
     if (g_phyFuns == 0u) {
         phy_get_romfuncs();
     }
-    ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
+    s3_ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
 
     /* §292 实验：参照工程运行时 SYSCON_WIFI_RST_EN(0x60026018) = 0x3e08，
      * 我们一直是 0。按参照值写一次，看 MAC 块（0x6001c000 段）会不会活过来。 */
-    ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x\n",
+    s3_ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x\n",
                (unsigned)*(volatile u32 *)0x6001c08cu,
                (unsigned)*(volatile u32 *)0x60008000u);
-    ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
+    s3_ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
     /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
      *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
      *    IDF 的 S3 流程从不调它，我们也不调 —— 少一个"自己发明的调用"。 */
     rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-    ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
+    s3_ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
 
     /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */
     s3_win_usb_reclaim();
@@ -502,25 +502,25 @@ u32 s3_win_phy_bisect(void)
     }
     k = bisect_get(BISECT_CUR);
     if (k >= BISECT_N) {
-        ets_printf("[bisect] done hung=0x%08x ok=0x%08x\n",
+        s3_ets_printf("[bisect] done hung=0x%08x ok=0x%08x\n",
                    (unsigned)bisect_get(BISECT_HUNG), (unsigned)bisect_get(BISECT_OK));
         bisect_set(BISECT_DONE, BISECT_MAGIC);
         return 1u;
     }
-    ets_printf("[bisect] round k=%u\n", (unsigned)k);
+    s3_ets_printf("[bisect] round k=%u\n", (unsigned)k);
     while (s <= k) {
         if ((bisect_get(BISECT_HUNG) & (1u << s)) != 0u) {
-            ets_printf("[bisect]   step %u SKIP(以前挂死过)\n", (unsigned)s);
+            s3_ets_printf("[bisect]   step %u SKIP(以前挂死过)\n", (unsigned)s);
             s = s + 1u;
             continue;
         }
         s3_w2c_wdt_feed();                         /* 每步都从满 8s 开始计时 */
         bisect_or(BISECT_HUNG, 1u << s);       /* 先进"挂死候选"，跑完再清 */
-        ets_printf("[bisect]   step %u enter\n", (unsigned)s);
+        s3_ets_printf("[bisect]   step %u enter\n", (unsigned)s);
         {
             u32 rc = bisect_run(s);
 
-            ets_printf("[bisect]   step %u ok rc=%u\n", (unsigned)s, (unsigned)rc);
+            s3_ets_printf("[bisect]   step %u ok rc=%u\n", (unsigned)s, (unsigned)rc);
         }
         bisect_andn(BISECT_HUNG, 1u << s);
         bisect_or(BISECT_OK, 1u << s);
@@ -714,14 +714,14 @@ u32 s3_win_wifi_main(void)
     u32 rc = 0;
 
     /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
-    ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
+    s3_ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
                (unsigned)s3_w2c_tick_get());
     /* §421 诊断：钉住库的 wifi init 状态机是从哪一步开始变成 2 的。 */
     {
         extern unsigned char g_wifi_osi_funcs_md5[];
-        extern int ets_printf(const char *fmt, ...);
+        extern int s3_ets_printf(const char *fmt, ...);
         volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
-        ets_printf("[wst] entry=%u\n", (unsigned)*wst);
+        s3_ets_printf("[wst] entry=%u\n", (unsigned)*wst);
     }
 #ifdef S3_PHY_BISECT
     /* §204：跨复位自动二分。没跑完就停在这儿**不喂狗**，让 RWDT(8s) 复位，
@@ -729,28 +729,28 @@ u32 s3_win_wifi_main(void)
     if (s3_win_phy_bisect() == 0u) {
         for (;;) { }
     }
-    ets_printf("[wifimain] bisect passed, normal flow\n");
+    s3_ets_printf("[wifimain] bisect passed, normal flow\n");
 #endif
     WSTAGE(0x1001u); s3_w2c_wdt_feed();
     s3_win_log("W0 phy start\n");
     WSTAGE(0x1002u); s3_w2c_wdt_feed();
     (void)s3_win_phy_cal();
     { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
-      ets_printf("[wst] after phy_cal=%u\n", (unsigned)*w); }
+      s3_ets_printf("[wst] after phy_cal=%u\n", (unsigned)*w); }
     WSTAGE(0x1003u); s3_w2c_wdt_feed();
 #ifndef S3_PHY_VIA_OSI
     (void)s3_win_phy_enable();
 #else
-    ets_printf("[phy] 跳过手动初始化：交给 OSI _phy_enable 回调\n");
+    s3_ets_printf("[phy] 跳过手动初始化：交给 OSI _phy_enable 回调\n");
 #endif
     { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
-      ets_printf("[wst] after phy_enable=%u\n", (unsigned)*w); }
+      s3_ets_printf("[wst] after phy_enable=%u\n", (unsigned)*w); }
     WSTAGE(0x1004u); s3_w2c_wdt_feed();
     s3_win_log("W1 bringup\n");
     WSTAGE(0x1005u); s3_w2c_wdt_feed();
     rc = s3_wifi_bringup();
     WSTAGE(0x1006u); s3_w2c_wdt_feed();
-    ets_printf("[wifi] bringup rc=%u\n", (unsigned)rc);
+    s3_ets_printf("[wifi] bringup rc=%u\n", (unsigned)rc);
     s3_win_log("W2 bringup returned\n");
 #ifdef S3_WITH_LWIP
     /* §210/§215：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调），
@@ -764,7 +764,7 @@ u32 s3_win_wifi_main(void)
         int irc = c6_lwip_start(lwip_mac);
         u32 n = 0u;
 
-        ets_printf("[lwip] start rc=%d\n", irc);
+        s3_ets_printf("[lwip] start rc=%d\n", irc);
         {
             extern void s3_wifi_dump_osi(const char *tag);
 
@@ -790,7 +790,7 @@ u32 s3_win_wifi_main(void)
                 for (k = 0u; k < 24u; k++) { s_wpa_cb_zero[k] = (u32)(void *)s3_wpa_cb_stub; }
                 s_wpa_cb_zero[18] = 0u;
             }
-            ets_printf("[wifi] register_wpa_cb=%d\n",
+            s3_ets_printf("[wifi] register_wpa_cb=%d\n",
                        esp_wifi_register_wpa_cb_internal((void *)s_wpa_cb_zero));
             extern u32 s3_wifi_associate(const char *ssid, const char *pass);
             extern int s3_wifi_wait_connected(int ms);
@@ -817,7 +817,7 @@ u32 s3_win_wifi_main(void)
                     WSTAGE(0x1023u);
                     c6_lwip_print_ip();
                 } else {
-                    ets_printf("[lwip] DHCP 超时\n");
+                    s3_ets_printf("[lwip] DHCP 超时\n");
                 }
             }
         }
@@ -827,13 +827,13 @@ u32 s3_win_wifi_main(void)
             n = n + 1u;
         }
         WSTAGE(0x1011u);
-        ets_printf("[lwip] polled %u\n", (unsigned)n);
+        s3_ets_printf("[lwip] polled %u\n", (unsigned)n);
 #ifdef S3_WITH_HTTPS
         {
             extern int c6_https_demo(void);
             int hrc = c6_https_demo();
 
-            ets_printf("[https] demo rc=%d\n", hrc);
+            s3_ets_printf("[https] demo rc=%d\n", hrc);
             WSTAGE(0x1020u);
         }
 #endif
@@ -849,13 +849,13 @@ void s3_win_hello_task(void *arg)
 {
     u32 n = 0u;
 
-    ets_printf("[w%u] hello, windowed task (sp=%08x)\n",
+    s3_ets_printf("[w%u] hello, windowed task (sp=%08x)\n",
                (unsigned)(u32)arg, (unsigned)s3_w2c_sp_probe());
     for (;;) {
         s3_w2c_task_delay(20u);
         n = n + 1u;
         if ((n & 0x3u) == 0u) {
-            ets_printf("[w%u] tick %u\n", (unsigned)(u32)arg, (unsigned)n);
+            s3_ets_printf("[w%u] tick %u\n", (unsigned)(u32)arg, (unsigned)n);
         }
     }
 }

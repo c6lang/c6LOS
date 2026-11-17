@@ -16474,3 +16474,79 @@ isync
 
 **下一步就是给 §460 加上同样的 `extui`/`bnez` 校验**（非法就归一化到 0/1）。
 另外 `w2c.S` 的 `WIN_SPILL` / `s3_win_spill` 也值得一并核对。
+
+## §473 ★★ `port_task_switch` 从来没有保存 PS（帧偏移 64）
+
+`RESTORE_FRAME` 的恢复段是：
+
+```
+l32i a2, a1, 64      ← 取 PS
+movi a3, 16
+or   a2, a2, a3      ← 置 EXCM（给 rfe 用）
+wsr  a2, ps
+... rfe
+```
+
+而 `port_task_switch` 的保存段只写了 `0..56`(a0..a15)、`60`(返回地址)、
+`68/72`(WS/WB)、`76`(sp) —— **偏移 64 一个字节都没写**，是栈上的旧内存。
+
+`port_task_yield` 一直是**有**这四行的：
+
+```
+rsr  a5, ps
+movi a6, -32
+and  a5, a5, a6
+s32i a5, a1, 64
+```
+
+已给 `port_task_switch` 补上同样四行（`ctx.S`，`s32i a15, a1, 60` 之后）。
+
+## §474 ★★★ 根因：`ets_printf` 是 windowed，而本仓 C 代码是 call0
+
+`ets_printf` 在 elf 里只是符号 `0x400005d0`，真板读出来是**跳转桩**：
+
+```
+400005d0: l32r a9, [0x400005cc]   ; 字面量 = 0x4004423c
+400005d3: jx   a9                 ; 纯跳转，不改 CALLINC
+```
+
+真实实现在 `0x4004423c`，入口就是 **`entry a1, 80`** ⇒ **windowed ABI**。
+
+本仓 C 代码全部按 `-mabi=call0` 编译，直接调它时 `a0` **不带 CALLINC**，
+`entry` 于是不轮转窗口；等 `ets_printf` 内部的 `call8` 把 WINDOWBASE 推上去
+之后，`retw` 拿着 CALLINC=0 的 `a0` 回退，与 WINDOWBASE 不配套
+⇒ **非法指令（cause 0）**。
+
+这解释了两件一直没想通的事：
+1. 为什么崩在 ROM 的 `retw.n` 上、`a0=0`、`ps.EXCM=1`（§468）；
+2. 为什么"大多数 `ets_printf` 调用看着没问题" —— 只有调用瞬间
+   `WINDOWBASE==0` 时 CALLINC=0 才碰巧配套。所以它**时灵时不灵**。
+
+**修法**：`port/s3/w2c.S` 末尾加一层 **call0 可调**的薄壳 `s3_ets_printf`，
+内部 `callx8` 进桩（桩不改 CALLINC，CALLINC=2 会一路带到 `entry a1,80`），
+参数 a2..a7 在 call8 前后重叠、不用搬。同时把 `port/s3/*.c` 与
+`port/s3/lwip/*.c` 里全部 103 处 `ets_printf` 换成 `s3_ets_printf`。
+
+## §475 壳本身还有 bug（当前卡点）
+
+壳里 `callx8` 之后**不能假设 `a1` 不变**，也不能靠 `a12` 备份：
+
+- `a12` 属于 callee-saved，`callx8` 只在它落在活窗口范围内时才自动溢出/恢复；
+- `_win_ovf8` 的兜底（§326）也可能把 `a1` 换成溢出槽地址。
+
+用 `a12` 备份 `a1` 的版本实测仍崩：
+
+```
+cause=0x14 (InstFetchProhibited)  pc=a0=0x8037b1bc  ps=0x00060610
+```
+
+`0x8037b1bc` = `0x4037b1bc | 0x80000000`，正是 `callx8` 设的返回地址
+（CALLINC=2），`ret` 把它当 CALLINC=0 的地址用 ⇒ 取指禁止。
+
+**下一步**：壳里改用**全局**（RTC 槽）保存 `a1`/`a0`，或者在 `callx8`
+之前把 `a0` 存进一个**绝对地址**、之后从同一绝对地址读回，
+完全不依赖任何 `aN` 在 `callx8` 前后的稳定性。
+
+**注意**：崩溃性质已经从 `cause=0`（窗口账目错）变成
+`cause=0x14`（壳自己取指跳飞），说明 §473/§474 修掉的**是**真问题，
+现在只剩壳这一层。
