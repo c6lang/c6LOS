@@ -15109,3 +15109,41 @@ ISR 路径只 `port_set_cur_ctx(next)` 就恢复 next，**从不保存被打断�
 `S3_NO_PREEMPT=1` 的新镜像**已经构建成功**，但板子的 USB 在半死状态
 （`/dev/ttyACM0` 消失、`OSError: [Errno 71] Protocol error`、设备号已经
 枚举到 `Device 081`），需要**断电重插**才能继续烧写/抓串口。
+
+## §439 新镜像已构建并静态验证，卡在硬件：板子 USB 需要物理断电重插
+
+### 镜像
+`build/wifi/c6os.bin`（721744 字节），构建命令：
+
+```sh
+make C6_ROOT=/home/winger/c6 S3_APP_BASE=0x20000 \
+     S3_NO_PREEMPT=1 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON" https
+```
+
+### 已做的静态验证（没法上板，先在这层确认）
+1. `s3_timer_irq` 的反汇编里**已经没有任何** `os_sched_preempt_ctx` /
+   `os_sched_*` 调用 ⇒ `-DS3_NO_PREEMPT` 这次真的编进去了。
+2. `port/s3/irq.c:354` 在 `#ifdef S3_NO_PREEMPT` 分支里直接 `return 0`
+   ⇒ 中断路径不会 `port_set_cur_ctx(next)`，也就不会在"不保存 `c->sp`"
+   的情况下换任务。
+3. 内存布局：`g_stack_pool = 0x3fcbced0` 长度 `0x9000`，`g_ctx = 0x3fcc5ed0`
+   —— **紧贴但不重叠**；`_bss_end = 0x3fcd746e`，`_stack_limit = 0x3fcd7c6e`，
+   `_stack_top = 0x3FCD9500`，主栈 ~6KB。
+
+### 硬件状态（需要人工）
+板子的 USB 已经半死，软件层面无解：
+
+```
+$ dmesg | grep 'usb 2-4'
+usb 2-4: can't set config #1, error -71     ← EPROTO，连配置都设不了
+```
+
+* `/dev/ttyACM*` 不出现（cdc_acm 不 probe）
+* `esptool --before no-reset flash-id` → `Failed to connect: No serial data received`
+* pyserial 设 DTR → `OSError: [Errno 71] Protocol error`
+* openocd → `libusb_get_string_descriptor_ascii() failed`，随后 segfault 退出
+
+`unbind`/`bind`、`authorized` 翻转、`modprobe -r/+ cdc_acm` 都试过，
+设备能重新出现在总线上（`Device 081`），但**配置阶段就失败**。
+
+⇒ **必须断电重插板子**，之后直接用上面的命令烧写即可。
