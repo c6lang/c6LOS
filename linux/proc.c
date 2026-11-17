@@ -1801,6 +1801,125 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     return 0ull;
 }
 
+/* M19：getgroups(2)。单用户模型里进程只有主组 0，没有 supplementary groups。
+ * size=0 时返回组数（1），供 busybox id 先探测再分配缓冲。 */
+u64 lx_proc_getgroups(u64 size, u64 ugroups)
+{
+    if (size == 0ull) {
+        return 1ull;
+    }
+    if (size < 1ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (lx_user_ok(ugroups, 4ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    *(u32 *)ugroups = 0u;
+    return 1ull;
+}
+
+/* M19：sysinfo(2)。busybox top/free 读 uptime/loads/mem/totalram 等；
+ * x86-64 struct sysinfo 是 112 字节（uptime 0 / loads 8 / totalram 32 /
+ * freeram 40 / sharedram 48 / bufferram 56 / totalswap 64 / freeswap 72 /
+ * procs 80 / totalhigh 88 / freehigh 96 / 余下保留）。给一组与 meminfo 自洽的常量。 */
+u64 lx_proc_sysinfo(u64 ubuf)
+{
+    u64 i;
+    u8 si[112];
+
+    if (lx_user_ok(ubuf, 112ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    for (i = 0ull; i < 112ull; i++) {
+        si[i] = 0u;
+    }
+    /* 逐字段写小端 u64：uptime=0 / loads[3]=8,16,24（全 0 已清零）/
+     * totalram=32 / freeram=40 / sharedram=48 / bufferram=56 /
+     * totalswap=64 / freeswap=72；procs(u16)=80。 */
+    {
+        u64 uptime = port_cycles() / 1000000000ull;
+        u64 totalram = 24576ull * 1024ull;
+        u64 freeram = 12288ull * 1024ull;
+        u64 field[3];
+        u64 f;
+
+        field[0] = uptime; field[1] = totalram; field[2] = freeram;
+        for (f = 0ull; f < 3ull; f++) {
+            u64 at[3] = {0ull, 32ull, 40ull};
+            u32 b;
+
+            for (b = 0u; b < 8u; b++) {
+                si[at[f] + b] = (u8)((field[f] >> (8u * b)) & 0xffu);
+            }
+        }
+    }
+    si[80] = 1u; si[81] = 0u;                   /* procs (u16) */
+    for (i = 0ull; i < 112ull; i++) {
+        *(u8 *)(ubuf + i) = si[i];
+    }
+    return 0ull;
+}
+
+/* M19：sendfile(2)。busybox cat 从 procfs 输出到 stdout 走它。
+ * off=NULL 时用 infd 当前位置并推进（和 read 一样）；off!=NULL 用给定偏移、
+ * 不推进 infd、回写新偏移。用 4KB 内核中转缓冲，read/write 复用各层分派。 */
+static u64 write_kbuf_(u64 fd, const u8 *src, u64 len);  /* 定义在 write 附近 */
+
+u64 lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count)
+{
+    u8 *tmp;
+    u64 off = 0ull;
+    int have_off = (uoff != 0ull);
+    u64 done = 0ull;
+
+    if (have_off) {
+        if (lx_user_ok(uoff, 8ull, C6OS_PROT_R) == 0) {
+            return n_((u64)LX_EFAULT);
+        }
+        off = *(const u64 *)uoff;
+    }
+    tmp = (u8 *)port_kcalloc(1ull, 4096ull);
+    if (tmp == (u8 *)0) {
+        return n_((u64)LX_ENOMEM);
+    }
+    while (done < count) {
+        u64 chunk = (count - done < 4096ull) ? count - done : 4096ull;
+        u64 nr;
+        u64 nw;
+
+        if (have_off) {
+            nr = lx_fs_pread_k(infd, (u64)tmp, chunk, off);
+        } else {
+            LxFile *f = lx_fdtab_get(lx_cur_proc() != (LxProc *)0
+                                     ? lx_cur_proc()->fd : (LxFdTab *)0, infd);
+            u64 pos = (f != (LxFile *)0) ? f->pos : 0ull;
+
+            nr = lx_fs_pread_k(infd, (u64)tmp, chunk, pos);  /* 内核缓冲直读 */
+            if ((i64)nr > 0 && f != (LxFile *)0) {
+                f->pos += nr;                               /* 推进 in_fd 游标 */
+            }
+        }
+        if ((i64)nr <= 0) {
+            break;
+        }
+        nw = write_kbuf_(outfd, tmp, nr);
+        if ((i64)nw <= 0) {
+            if (done == 0ull) { done = n_((u64)LX_EIO); }
+            break;
+        }
+        done += nw;
+        off += nw;
+        if (nw < nr) {
+            break;
+        }
+    }
+    port_kfree((void *)tmp);
+    if (have_off && lx_user_ok(uoff, 8ull, C6OS_PROT_W) != 0) {
+        *(u64 *)uoff = off;
+    }
+    return done;
+}
+
 u64 lx_proc_close(u64 fd)
 {
     LxProc *p = cur_();
@@ -2552,6 +2671,26 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
     }
 }
 
+/* sendfile 用：从**内核**缓冲写到一个 fd，跳过用户范围检查（普通 write
+ * 的 ubuf 在用户空间，要走 port_as_user_range_ok；sendfile 的中转页在
+ * 内核堆，不能过那道检查）。目前只需支持 pipe/console/文件三种目标。 */
+static u64 write_kbuf_(u64 fd, const u8 *src, u64 len)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+
+    if (fe == (LxFile *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    if (fe->kind == LX_FD_PIPE_W) {
+        return pipe_write_(p, fe, (u64)src, len);
+    }
+    if (fe->node == LX_FD_CONSOLE) {
+        return lx_console_put((u64)src, len);
+    }
+    return lx_console_write(fd, (u64)src, len);
+}
+
 u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
@@ -2560,8 +2699,7 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
     fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
     if (fe == (LxFile *)0) {
         return n_((u64)LX_EBADF);
-    }
-    if (fe->kind == LX_FD_PIPE_W) {
+    }    if (fe->kind == LX_FD_PIPE_W) {
         if (port_as_user_range_ok(p->as, ubuf, len, C6OS_PROT_R) == 0) {
             return n_((u64)LX_EFAULT);
         }

@@ -77,6 +77,7 @@
 #define LX_PROC_pidstat   7u
 #define LX_PROC_pidstatus 8u
 #define LX_PROC_pidcmdline 9u
+#define LX_PROC_mounts    10u
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，
@@ -249,6 +250,10 @@ u64      lx_sock_shutdown(u64 sd, u64 how);
 u64      lx_sock_getpeername(u64 sd, u64 uaddr, u64 uaddrlen);
 u64      lx_sock_getsockname(u64 sd, u64 uaddr, u64 uaddrlen);
 void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
+/* M19：busybox id/df/cat 依赖 */
+u64      lx_proc_getgroups(u64 size, u64 ugroups);
+u64      lx_proc_sysinfo(u64 ubuf);
+u64      lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count);
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
 void     lx_sched_preempt(void);

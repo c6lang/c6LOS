@@ -1106,6 +1106,17 @@ void lx_syscall_do(LxRegs *r)
         r->rax = 8ull;
         return;
 
+    /* ---- M19：busybox applet 矩阵暴露的 syscall 缺口 ---- */
+    case LX_SYS_sendfile:
+        r->rax = lx_proc_sendfile(a0, a1, a2, a3);
+        return;
+    case LX_SYS_sysinfo:
+        r->rax = lx_proc_sysinfo(a0);
+        return;
+    case LX_SYS_getgroups:
+        r->rax = lx_proc_getgroups(a0, a1);
+        return;
+
     /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
     case LX_SYS_socket:
         r->rax = lx_sock_socket(a0, a1, a2);

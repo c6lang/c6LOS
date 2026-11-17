@@ -876,7 +876,7 @@ typedef struct {
     char *buf;
 } LxProcFile;
 
-static LxProcFile g_procf[LX_PROC_pidcmdline + 1u];
+static LxProcFile g_procf[LX_PROC_mounts + 1u];
 
 static char *proc_buf_(u32 id)
 {
@@ -991,6 +991,18 @@ static u32 proc_stat_(char *b)
     return o;
 }
 
+/* /proc/mounts：busybox df -h 用它读已挂载文件系统。给一行根 romfs + tmpfs，
+ * 字段对齐 mount(5) 的 6 列格式。 */
+static u32 proc_mounts_(char *b)
+{
+    u32 o = 0u;
+
+    o = pcat_(b, o, "rootfs / romfs rw 0 0\n"
+                    "tmpfs /tmp tmpfs rw 0 0\n"
+                    "proc /proc proc rw 0 0\n");
+    return o;
+}
+
 static u32 proc_pidstat_(char *b, u32 pid)
 {
     /* /proc/PID/stat: busybox ps 读第 2 字段(comm)和第 4 字段(ppid)、
@@ -1006,7 +1018,7 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
 {
     char *b;
 
-    if (id == 0u || id > LX_PROC_pidcmdline) {
+    if (id == 0u || id > LX_PROC_mounts) {
         return 0u;
     }
     b = proc_buf_(id);
@@ -1023,6 +1035,7 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
     case LX_PROC_pidstat:   g_procf[id].size = proc_pidstat_(b, pid); break;
     case LX_PROC_pidstatus: g_procf[id].size = proc_status_(b, pid); break;
     case LX_PROC_pidcmdline:g_procf[id].size = proc_cmdline_(b); break;
+    case LX_PROC_mounts:    g_procf[id].size = proc_mounts_(b); break;
     default: return 0u;
     }
     *out = b;
@@ -1038,6 +1051,7 @@ static u32 proc_id_(const char *s, u32 *pid)
     if (seq_(s, "proc/uptime") == 1)   return LX_PROC_uptime;
     if (seq_(s, "proc/cpuinfo") == 1)  return LX_PROC_cpuinfo;
     if (seq_(s, "proc/stat") == 1)     return LX_PROC_stat;
+    if (seq_(s, "proc/mounts") == 1)   return LX_PROC_mounts;
     if (seq_(s, "proc/self/status") == 1)   return LX_PROC_status;
     if (seq_(s, "proc/self/stat") == 1)     return LX_PROC_pidstat;
     if (seq_(s, "proc/self/cmdline") == 1)  return LX_PROC_cmdline;
@@ -1241,7 +1255,7 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         char *b;
         u64 sz;
 
-        if (f->is_dir != 0u || id == 0u || id > LX_PROC_pidcmdline) {
+        if (f->is_dir != 0u || id == 0u || id > LX_PROC_mounts) {
             return (u64)0 - LX_EISDIR;
         }
         b = proc_buf_(id);
@@ -1570,7 +1584,7 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
         u64 sz = 0ull;
 
         /* 目录 fd 的 node 是 LX_FD_ROOT 哨兵，不是 proc id —— 别拿它索引表。 */
-        if (f->is_dir == 0u && (u32)f->node <= LX_PROC_pidcmdline) {
+        if (f->is_dir == 0u && (u32)f->node <= LX_PROC_mounts) {
             sz = (u64)g_procf[(u32)f->node].size;
         }
         if (fill_stat(ustat, 0u, sz, mode) != 0) {
@@ -2012,7 +2026,7 @@ static u64 getdents_vfs_(LxFile *f, u64 ubuf, u64 len)
 static u64 getdents_proc_(LxFile *f, u64 ubuf, u64 len)
 {
     static const char *const names[] = {
-        "meminfo", "uptime", "cpuinfo", "stat",
+        "meminfo", "uptime", "cpuinfo", "stat", "mounts",
         "self", "1", "2", "3", "4"
     };
     u64 used = 0ull;

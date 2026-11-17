@@ -218,6 +218,10 @@
 #define LX_SYS_epoll_create1 291
 /* M18：socket 族 */
 #define LX_SYS_socket        41
+/* M19：busybox applet 矩阵暴露的缺口 */
+#define LX_SYS_sendfile      40
+#define LX_SYS_sysinfo       99
+#define LX_SYS_getgroups     115
 #define LX_SYS_connect       42
 #define LX_SYS_accept        43
 #define LX_SYS_sendto        44
@@ -270,6 +274,7 @@
 #define LX_ENOSPC  28
 #define LX_EAFNOSUPPORT 97
 #define LX_EOPNOTSUPP 95
+#define LX_EIO     5
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {

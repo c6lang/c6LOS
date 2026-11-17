@@ -1351,6 +1351,18 @@ $(M18_ELF): $(M18_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
 
+# ---- M19：busybox applet 矩阵 ----
+M19_SRC := tests/linux/m19applet.c
+M19_ELF := $(X86)/m19applet.elf
+
+$(M19_ELF): $(M19_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(X86)/m19-disk.img: $(M19_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(M19_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
 # ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
 DYN_ELF := $(X86)/busybox
 DYNFS   := $(X86)/dynfs.img
@@ -2003,6 +2015,16 @@ check-linuxabi-m18: x86-m18
 		| grep -q "^PASS: m18sock" \
 	  && echo "PASS: linux-abi M18（Linux socket syscall → SAL：UDP 环回）" \
 	  || { echo "FAIL: linux-abi M18"; tail -30 /tmp/check-m18.log; exit 1; }
+
+# ---- M19：busybox applet 矩阵（未修改的动态 busybox）----
+check-linuxabi-m19: $(X86)/m19-disk.img
+	@timeout 180 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m19-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m19.log \
+		| grep -q "^PASS: m19applet" \
+	  && echo "PASS: linux-abi M19（busybox applet 矩阵）" \
+	  || { echo "FAIL: linux-abi M19"; tail -40 /tmp/check-m19.log; exit 1; }
 
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \

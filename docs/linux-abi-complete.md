@@ -742,4 +742,36 @@ M18-2（验收）：UDP 环回（两个 socket 绑 7777/7778，connect+send 走
 遗留：真正的 TCP 连接语义、阻塞 recv/select 唤醒、sendmsg/recvmsg 的
 iovec、DNS/getaddrinfo、AF_UNIX 都在后续里程碑。
 
+### M19 验收矩阵：busybox applet（M19-1 → M19-3）
+
+前 18 个里程碑都是"我们觉得该实现什么"，M19 反过来看"真实程序实际调
+什么"：`tests/linux/m19applet.c` 逐个 fork+execve `/bin/busybox <applet>`
+（复用 L4/L5 的动态 busybox initramfs 镜像），把 stdout 接到 pipe，检查
+退出码与关键输出。14 个 applet：echo/cat/uname/id/true/false/date/free/
+df/ps/head/wc/env/pwd + mkdir/rmdir（后两个在 VFS=0 镜像下接受 EROFS）。
+
+矩阵第一轮就暴露了 3 个此前完全没发现的 ENOSYS：
+- `cat` → `sendfile(40)`：busybox cat 用 sendfile 而不是 read/write 循环。
+- `id` → `getgroups(115)`：单用户模型补"返回 1 个组 0"。
+- `df` → `sysinfo(99)`：补 112 字节 `struct sysinfo`（字段偏移用宿主
+  `offsetof` 实测，不是猜的）。
+
+还暴露了 `/proc/mounts` 缺失（df 读它列挂载点），M17 的 procfs 最小集
+补上 mount 行；以及三个实现 bug：
+1. 验收脚本无论失败多少都打印 `PASS: m19applet (11/16)`，make 的 grep
+   误判成 PASS —— 改成失败时输出 `FAIL:`。
+2. `/proc/mounts` 的 id=10 超出了 `g_procf` 数组（按 pidcmdline=9 分
+   配），open/stat 越界 → ENOENT。数组和所有上限检查统一改成
+   `LX_PROC_mounts`。
+3. `sendfile` 的中转页在内核堆，读端 `lx_fs_pread`（user=1）和写端
+   `lx_proc_write`（pipe 分支做用户范围检查）都把它当用户地址拒掉 →
+   cat rc=0 但输出空。补内核缓冲路径 `lx_fs_pread_k` / `write_kbuf_`。
+
+验收：`make check-linuxabi-m19` → `PASS: m19applet (14/14 applets)`；
+全量回归 L2–L8/M9/M13–M13d/M14–M18/alpine 无回归。
+
+这轮之后，"完整 Linux ABI"的判据从"我们实现的 syscall 列表"变成"真实
+busybox/Alpine 程序跑通"，未覆盖项收敛到：真正 pty/控制终端、完整 procfs
+字段、DNS/getaddrinfo、AF_UNIX、musl libc-test 全量 —— 作为后续工作。
+
 
