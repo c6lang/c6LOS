@@ -15715,3 +15715,48 @@ _win_unf8:
    "回来后从本任务栈 unspill"做成显式配对（不依赖硬件欠流），
    并在 `_win_ovf8/_win_ovf12` 入口加 sp 合法性检查，脏就直接
    走 `_vec_exc` 打印现场而不是写飞。
+
+## §456 call0 任务实验：错位依旧 ⇒ 问题在 windowed 内部，与任务入口 ABI 无关
+
+按 §455 方向 1 试了现成的 `-DS3_WIFI_TASK_CALL0`（`tests/t_s3_wifi3.c6:141`
+那段 §241 就写好的分支：wifi 主任务走 call0，windowed 代码经
+`s3_win_call_wifi_main` 跳板进去）。
+
+构建命令加上 `-DS3_WIFI_TASK_CALL0`（**改过之后这条 -D 必须一直带着**，
+否则行为会变）。串口日志确认分支生效：
+
+```
+M4 task wifi ok
+T1 call0 任务进入 windowed 主流程        ← §241 分支的标志行
+[wifimain] id=1 tick=1
+...（一路跑到）
+[task] 库建任务 fn=40381bd4 id=2 stack=6144 prio=29(->2)
+bWu1bb                                    ← 还是死在这
+```
+
+实时轨迹（`S3Ctx` 布局同前）：
+
+```
+yield  #0  ctx0  sp=0x3fcbe8a0   栈0内 ✔
+       #1  ctx1  sp=0x3fcc0300   栈1内 ✔
+       #2  ctx0  sp=0x3fcc0300   栈1内 ✘   ← 错位照旧
+switch #3  ctx0  sp=0x3fcbee50   栈0内 ✔
+       #6  ctx1  sp=0x3fcc0650   栈1内 ✔
+       #7  ctx0  sp=0x3fcbe8a0   栈0内 ✔  ← 切回去时 sp 还是对的
+```
+
+**和 §455 的形状一模一样**：switch 把 sp 恢复对了（`0x3fcbe8a0`），
+下一次 yield 时却已经在栈1里（`0x3fcc0300`），只是具体数值换了。
+
+⇒ **把"任务入口走 call0"这条路排掉了。** `wifi_call0_task` 内部仍然经过
+`s3_win_call_wifi_main` 进 windowed，窗口照旧被覆盖，欠流照旧从栈上
+读到别的任务残留。所以问题不在"谁是 windowed 任务"，而在
+**windowed 调用期间窗口没有被保存到任务自己的栈上**。
+
+⇒ 下轮走 §455 的方向 2：在 `w2c` 的壳里把"切走前 spill 到本任务栈"和
+"回来后从本任务栈 unspill"做成**显式配对**，不再依赖硬件欠流去猜
+（`_win_unf8` 的 `l32e a1,a9,-12` 只有在"那一格确实是本次 spill 写的"
+时才正确，而现在的实现里没有任何东西保证这一点）。
+同时给 `_win_ovf8` / `_win_ovf12` 的入口加 sp 合法性检查：如果 `a9`
+（按 ABI 应为调用者 sp）落在任何任务栈之外，就直接走 `_vec_exc`
+打印现场，而不是 `s32e` 写飞。
