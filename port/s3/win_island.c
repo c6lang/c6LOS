@@ -409,8 +409,16 @@ int s3_win_phy_enable(void)
     /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
      *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
      *    IDF 的 S3 流程从不调它，我们也不调 —— 少一个"自己发明的调用"。 */
+    /* §514：IDF 在返回 ESP_CAL_DATA_CHECK_FAIL(1) 时会保存新校准数据并重试，
+     * 我们以前直接把 rc=1 带回去 —— 于是 hal_init()（在库回调之前跑）看到的
+     * 是**还没初始化好的 RF**，它的 0x60033d14 bit0 握手就永远不完成。
+     * 现在先重试两次，让 PHY 在 esp_wifi_init_internal 之前就真的 ready。 */
     rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
     s3_ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
+    if (rc == 1) {
+        rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+        s3_ets_printf("[phy] register_chipv7_phy retry rc=%d\n", rc);
+    }
 
     /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */
     s3_win_usb_reclaim();

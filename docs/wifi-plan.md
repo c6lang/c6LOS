@@ -17397,3 +17397,30 @@ $ command -v idf.py → 缺失（tools/idf.py 在，但依赖不全）
 已排除；WiFi 库目录 `components/esp_wifi/lib/esp32s3` 确认是 S3 版本。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §514 用户确认硬件正常；PHY 重试仍无 AP；hal_init 握手仍未满足
+
+用户回复（本轮实测前提）：
+- 天线：**板载 PCB 天线**（不是未接的外置天线）
+- 路由器 weforpay.com：**2.4G 或双频**
+- 附近**有其他 2.4G AP**（手机热点等）
+
+⇒ 排除天线/频段/环境，**一个 AP 都扫不到是我们的初始化问题**。
+
+照 IDF `esp_phy_load_cal_and_init` 的行为，给 `s3_win_phy_enable()` 加了
+`register_chipv7_phy rc==1 (ESP_CAL_DATA_CHECK_FAIL)` 的重试：
+日志确认 `retry rc=0` ✓（PHY 现在在 hal_init 之前就返回成功）。
+
+但两种镜像结果：
+- 打了 hal_init 补丁：`scan_get_ap_num=0 num=0`，仍然没有 AP。
+- **不打补丁**：还是卡在 hal_init，`W2 bringup returned` 之后一切静止。
+
+⇒ `0x60033d14` 的 bit0 不是"PHY ready"（PHY 已 ready 也不置位）。
+它是别的东西：可能是 MAC 内部仲裁/中断应答。下一步重点查
+`osi_queue_send_from_isr` / `_event_group_set_bits` 这类 ISR→任务投递路径，
+以及 WiFi MAC 中断是否真的进了我们的向量表（现在只看到库在打印
+`Haven't to connect...`，说明它的状态机在跑但收不到扫描结果）。
+
+目标未达成，goal 保持 active。
