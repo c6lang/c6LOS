@@ -15589,3 +15589,59 @@ wifi 主任务的 ctx，此后两者共享同一份帧、同一个执行流。
 3. 若确认是中断搬的，就在 `port_task_switch` 的
    "存 `c->sp` → `g_s3_cur` → 恢复"这三步外面套一个"中断遮蔽"
    （或者把它做成一体的不可中断序列）。
+
+## §453 把中断/栈/槽位三路嫌疑逐个排除掉
+
+§452 指向"switch 中途被打断搬了 sp"，逐个查完，**全部排除**：
+
+1. **中断帧对称**：`irq.S:336` `addi a1,a1,-128` 保存，`irq.S:430`
+   `l32i a1,a1,76` 恢复；而 76 槽在 `irq.S:376` 明确写成 `addi a2,a1,128 /
+   s32i a2,a1,76` ⇒ 保存/恢复严格对称，中断不会搬 sp。
+2. **中断里不切任务**：`irq.S:387` 的 `l32i a1,a2,64`（中断内切栈）只在
+   `s3_timer_irq` 返回非 0 时走，而它在 `S3_NO_PREEMPT` 下
+   （`irq.c:354`）**无条件 `return 0`**；`port_set_cur_ctx` 也只在那条的
+   `#else` 分支（`irq.c:370`）里调。⇒ 我们这套构建里
+   **中断从不切换任务，也从不碰 `g_s3_cur`**。
+3. **主栈不溢出**：`_stack_top=0x3fcd9500`、`_stack_limit=0x3fcd8c6e`
+   ⇒ 可用 2194 字节；实测 `port_idle` 时 `a1≈0x3fcd9400`，只用了 256 字节。
+   `_bss_end=0x3fcd846e` 之上还有 2048 字节隔离带（那一带是
+   `sockets` / `select_cb_list` / `phy_version_str`），没有踩到。
+4. **ctx 槽位不会被复用**：`port_task_ctx_create` 用
+   `if (g_ctx[i].stack == 0)` 找第一个空槽，`ctx[0].stack` 非 0 且 wifi
+   主任务没退出 ⇒ 新任务只能拿槽 1，无法覆盖 `ctx[0].sp`。
+
+## §453 ★ 但轨迹里 `#3..#7` 是垃圾，指向"`a4` 为垃圾的 yield 调用"
+
+按计数低 3 位还原时间序（计数是随机初值，`& 7 = 3`）：
+`3,4,5,6,7,0,1,2`，最后 8 次 yield 是
+
+```
+#3  ctx=0x00000006       sp=0x3fcc6f1c
+#4  ctx=0x3fcc6f1c       sp=0x4037992e
+#5  ctx=0x3fcc85b4       sp=0x00000006
+#6  ctx=ctx[0]           sp=0x3fcc6ed0      ← sp 等于 ctx 地址
+#7  ctx=0x42018088       sp=0x00e126c0      ← ctx 是一个代码地址
+#0  ctx=ctx[0]           sp=0x3fcc08e0      ✔
+#1  ctx=ctx[1]           sp=0x3fcc2300      ✔
+#2  ctx=ctx[0]           sp=0x3fcc2300      ✘
+```
+
+`0x42018088` 正是 `os_task_block_wait` 的返回点、`0x4037992e` 是
+`s3_task_tramp` 里的指令地址 —— 这些**不可能是 ctx 指针**。而轨迹代码只
+**读** `a4`/`a1`、只写环形缓冲，不会改动它们 ⇒ 这些是 `port_task_yield`
+**真的**被用垃圾 `a4` 调用了。
+
+`port_task_yield` 的 `a4` 只有一个来源：`ctx.S` 里
+`l32r a4, .Lg_cur / l32i a4, a4, <core*4>`，也就是 `g_s3_cur[core]`。
+而 `g_s3_cur[0]` 现在读出来是对的（`0x3fcc6ed0`）。
+
+⇒ 两种可能，下轮二选一验证：
+- **(a)** `g_s3_cur[0]` 曾经是垃圾（被 `port_task_switch` 的
+  `s32i a4, a3, 0` 用垃圾 `a4` 写过），后来又变回 `ctx[0]`；
+- **(b)** `port_task_yield` 有第二个入口，`a4` 不走 `g_s3_cur`。
+
+验证办法：在轨迹里**同时**记 `g_s3_cur[0]` 当时的实际值（多存一个字），
+并在 `port_task_yield` 入口加一条"`a4` 必须落在 `[&g_ctx[0], &g_ctx[N])`
+区间内"的断言。若垃圾 `a4` 真的存在，它会立刻被抓到；若不出现，
+说明 (a) 成立 —— 去查 `port_task_switch` 的 `a4` 来源
+（`ctx.S` 里 `l32i a4, a1, 4`，它取的是**被打断任务的 a2 槽**）。
