@@ -69,6 +69,7 @@
 #define LX_FD_EPOLL   8u   /* epoll（M20）：node = 对象 id */
 #define LX_FD_TIMERFD 9u   /* timerfd（M21）：node = 对象 id */
 #define LX_FD_SIGNALFD 10u /* signalfd（M22）：node = 对象 id */
+#define LX_FD_UNIX    11u /* AF_UNIX socket（M25）：node = 对象 id */
 
 /* procfs 虚拟文件的 id（fs.c 内部生成内容） */
 #define LX_PROC_meminfo   1u
@@ -258,6 +259,15 @@ u64      lx_sock_recvmsg(u64 sd, u64 umsg, u64 flags);
 /* M24：轮询式网卡——等待路径每轮泵一次，收 ARP 应答/DNS 响应 */
 void     lx_net_pump(void);
 u16      lx_sock_poll_one(u64 sd);   /* 返回 LX_POLLIN/POLLOUT 等就绪位 */
+/* M25：AF_UNIX socket（linux/afunix.c），复用主 fd 表 */
+u64      lx_unix_socket(u64 type);
+u64      lx_unix_bind(u64 fd, u64 uaddr, u64 ulen);
+u64      lx_unix_connect(u64 fd, u64 uaddr, u64 ulen);
+u64      lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen);
+u64      lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen);
+u64      lx_unix_close(u64 fd);
+u16      lx_unix_poll(u64 id);
+void     lx_unix_wake(void);
 void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
 /* M19：busybox id/df/cat 依赖 */
 u64      lx_proc_getgroups(u64 size, u64 ugroups);

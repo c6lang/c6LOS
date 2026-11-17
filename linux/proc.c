@@ -1941,6 +1941,13 @@ u64 lx_proc_close(u64 fd)
         wake_all_();
         return 0ull;
     }
+    if (fe->kind == LX_FD_UNIX) {
+        (void)lx_unix_close(fd);
+        fe->node = LX_FD_NONE;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
     if (fe->kind == LX_FD_EPOLL) {
         ep_release_(fe->pos);
         fe->node = LX_FD_NONE;
@@ -3162,6 +3169,9 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     if (fe->kind == LX_FD_SOCK) {
         return lx_sock_recv(fd, ubuf, len, 0ull);
     }
+    if (fe->kind == LX_FD_UNIX) {
+        return lx_unix_recvfrom(fd, ubuf, len, 0ull, 0ull);
+    }
     if (fd <= 2ull) {
         /* M12：init 显式开了行规程之后，fd 0 才是真终端（阻塞读一行）；
          * 没开就还是老行为——永远 EOF，L2..L6 的验收依赖这个。 */
@@ -3489,6 +3499,9 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
     }
     if (fe->kind == LX_FD_SOCK) {
         return lx_sock_send(fd, ubuf, len, 0ull);
+    }
+    if (fe->kind == LX_FD_UNIX) {
+        return lx_unix_sendto(fd, ubuf, len, 0ull, 0ull);
     }
     /* 按 node 判目标，而不是 fd 号：dup 出来的高位 fd 也可能是终端或 VFS 文件。 */
     if (fe->node == LX_FD_CONSOLE) {

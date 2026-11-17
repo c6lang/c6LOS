@@ -911,6 +911,33 @@ resolver 实现完全不同。这项记为后续（musl libc-test 全量时再�
 
 遗留：真 pty/控制终端、AF_UNIX、ancillary 数据、musl libc-test 全量。
 
+### M25 AF_UNIX socket
+
+AF_UNIX 是 syslog/dbus/容器运行时常用的本地通信路径，M18 的 socket 面只接
+了 SAL 的 AF_INET。M25 在 linux 层新增 `linux/afunix.c`，与 INET 路径并列、
+不侵入 SAL：
+
+- `LX_FD_UNIX` fd kind（node=对象 id），复用主 fd 表 → dup/close/fork/
+  CLOEXEC 全部自动正确。
+- `UnixSock` 内核堆对象表（动态倍增，64 上限）：path（108B sockaddr_un）、
+  peer 对端、type（DGRAM/STREAM）、每 socket 8 槽×4KB 环形接收队列。
+- socket/bind/connect/sendto/recvfrom/close 全套 + sockaddr_un 布局
+  （family@0 u16、path@2）；按路径查对端，重复 bind=EEXIST/EADDRINUSE、
+  不存在路径=ECONNREFUSED、空队列阻塞或 NONBLOCK=EAGAIN。
+- 关键架构点：AF_UNIX **不依赖 C6OS_NET**，所以 `!C6OS_NET` 的桩段也把
+  socket 族 syscall 路由到 AF_UNIX（`lxs_get_` 提到 #if 之外，同时接受
+  LX_FD_SOCK 与 LX_FD_UNIX）；S3 等无网络 port 同样可用。
+- 顺带修引导容量：afunix.o 让 stage2 涨到 387 扇区，超过 boot16 前 4 个
+  DAP 的 382 扇区上限 → 加 dap5（LBA383 起 127 扇区），覆盖到 0x4FA00。
+
+`tests/linux/m25unix.c` 验 23 项：SOCK_DGRAM 创建/双端 bind/重复 bind
+EADDRINUSE/不存在路径 ECONNREFUSED/双向 send-recv 内容/NONBLOCK EAGAIN/
+close。验收 `make check-linuxabi-m25` → 23/23 checks PASS；全量回归
+L2–L8/M9/M13–M13d/M14–M24/check-{sal,udp,tcp}/alpine 无回归。
+
+遗留：SOCK_STREAM 的真字节流边界（当前按消息成槽）、SCM_RIGHTS ancillary、
+抽象名字空间、真 pty、musl libc-test 全量。
+
 > 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
 > `timeout` 时若被 SIGKILL，内部 timeout 会残留 qemu 占住 m19-disk.img 锁，
 > 导致下次跑报 "Failed to get write lock"。这是验收脚本的既有行为，杀掉

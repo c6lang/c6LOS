@@ -17,6 +17,24 @@
  * 才能收到 ARP 应答与 UDP 响应——纯轮询驱动没有中断，不泵就永远收不到。 */
 void lx_net_pump(void);
 
+/* 取 socket fd 对应的 LxFile（AF_INET 的 LX_FD_SOCK 或 AF_UNIX 的
+ * LX_FD_UNIX 都接受）。放在 #if C6OS_NET 之外，桩段也要用。 */
+static LxFile *lxs_get_(u64 fd)
+{
+    LxProc *p = lx_cur_proc();
+    LxFile *f;
+
+    if (p == (LxProc *)0) {
+        return (LxFile *)0;
+    }
+    f = lx_fdtab_get(p->fd, fd);
+    if (f == (LxFile *)0 ||
+        (f->kind != LX_FD_SOCK && f->kind != LX_FD_UNIX)) {
+        return (LxFile *)0;
+    }
+    return f;
+}
+
 #if C6OS_NET
 #include "los/los_typedef.h"
 #include "los/sal.h"
@@ -27,8 +45,6 @@ void lx_net_pump(void);
 #define LX_SOCK_DGRAM   2u
 #define LX_SOL_SOCKET   1u
 #define LX_SOCK_MAX     64u
-
-static LxFile *lxs_get_(u64 fd);   /* M24：lx_sock_poll_one 前置引用 */
 
 /* M24：泵轮询式网卡（x86 e1000）。NetIfPollX86 把 RX 环里的帧喂进协议栈，
  * ARP 应答与 DNS 响应才会被处理；没有中断，等待路径必须主动调。 */
@@ -50,6 +66,9 @@ u16 lx_sock_poll_one(u64 sd)
     if (f == (LxFile *)0) {
         return LX_POLLNVAL;
     }
+    if (f->kind == LX_FD_UNIX) {
+        return lx_unix_poll(f->node);
+    }
     revents = SalPoll((int)f->node, 0x1u | 0x4u);   /* POLLIN | POLLOUT */
     if (revents < 0) {
         return 0u;
@@ -62,22 +81,6 @@ static u64 lxs_err_(int sal_rc)
 {
     /* SAL 返回 -errno（POSIX 数值），Linux ABI 同口径，直接透传。 */
     return (sal_rc >= 0) ? (u64)sal_rc : (u64)0 - (u64)(-sal_rc);
-}
-
-/* 取 socket fd 对应的 LxFile（必须是 LX_FD_SOCK kind）。 */
-static LxFile *lxs_get_(u64 fd)
-{
-    LxProc *p = lx_cur_proc();
-    LxFile *f;
-
-    if (p == (LxProc *)0) {
-        return (LxFile *)0;
-    }
-    f = lx_fdtab_get(p->fd, fd);
-    if (f == (LxFile *)0 || f->kind != LX_FD_SOCK) {
-        return (LxFile *)0;
-    }
-    return f;
 }
 
 /* Linux struct sockaddr_in: family(2) port(2,网络序) addr(4,网络序) zero[8]。
@@ -125,6 +128,10 @@ u64 lx_sock_socket(u64 domain, u64 type, u64 proto)
     if (p == (LxProc *)0) {
         return (u64)0 - LX_EBADF;
     }
+    /* M25：AF_UNIX(1) 走内核本地对象（linux/afunix.c），不进 SAL。 */
+    if (domain == 1u) {
+        return lx_unix_socket(type);
+    }
     /* M24：glibc 的 getaddrinfo 用 socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|
      * SOCK_NONBLOCK, 0)；严格比较 type 会把这些标志当成非法 type。 */
     if (domain != LX_AF_INET ||
@@ -161,6 +168,11 @@ u64 lx_sock_socket(u64 domain, u64 type, u64 proto)
 
 u64 lx_sock_close(u64 sd)
 {
+    LxFile *f = lxs_get_(sd);
+
+    if (f != (LxFile *)0 && f->kind == LX_FD_UNIX) {
+        return lx_unix_close(sd);
+    }
     return lxs_err_(SalClose((int)sd));
 }
 
@@ -171,6 +183,9 @@ u64 lx_sock_bind(u64 fd, u64 uaddr, u64 ulen)
     int rc;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) {
+        return lx_unix_bind(fd, uaddr, ulen);
+    }
     if (lx_user_ok(uaddr, 16ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     (void)ulen;
     lxs_addr_in_(uaddr, &a);
@@ -185,6 +200,9 @@ u64 lx_sock_connect(u64 fd, u64 uaddr, u64 ulen)
     int rc;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) {
+        return lx_unix_connect(fd, uaddr, ulen);
+    }
     if (lx_user_ok(uaddr, 16ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     (void)ulen;
     lxs_addr_in_(uaddr, &a);
@@ -286,6 +304,9 @@ u64 lx_sock_sendto(u64 fd, u64 ubuf, u64 len, u64 flags,
     int rc;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) {
+        return lx_unix_sendto(fd, ubuf, len, uaddr, ulen);
+    }
     if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     (void)flags;
     if (uaddr != 0ull) {
@@ -335,6 +356,9 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
     int rc;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) {
+        return lx_unix_recvfrom(fd, ubuf, len, uaddr, uaddrlen);
+    }
     if (lx_user_ok(ubuf, len, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
     (void)flags;
     if (uaddr != 0ull) {
@@ -573,26 +597,64 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
 
 #else /* !C6OS_NET */
 
-/* 无网络 port：泵是空操作，零侵入。 */
+/* 无网络 port：INET 栈空操作，零侵入；但 AF_UNIX 不依赖 SAL，照常可用。 */
 void lx_net_pump(void) { }
-u16 lx_sock_poll_one(u64 sd) { (void)sd; return 0u; }
+u16 lx_sock_poll_one(u64 sd)
+{
+    LxFile *f = lxs_get_(sd);
+    return (f != (LxFile *)0 && f->kind == LX_FD_UNIX) ? lx_unix_poll(f->node) : 0u;
+}
 
-u64 lx_sock_socket(u64 d, u64 t, u64 p) { (void)d; (void)t; (void)p; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_close(u64 fd) { (void)fd; return (u64)0 - LX_EBADF; }
-u64 lx_sock_bind(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_connect(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_listen(u64 fd, u64 b) { (void)fd; (void)b; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_accept(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_sendto(u64 fd, u64 b, u64 l, u64 f, u64 a, u64 al) { (void)fd; (void)b; (void)l; (void)f; (void)a; (void)al; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_recvfrom(u64 fd, u64 b, u64 l, u64 f, u64 a, u64 al) { (void)fd; (void)b; (void)l; (void)f; (void)a; (void)al; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_send(u64 fd, u64 b, u64 l, u64 f) { (void)fd; (void)b; (void)l; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_recv(u64 fd, u64 b, u64 l, u64 f) { (void)fd; (void)b; (void)l; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_setsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_getsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_shutdown(u64 fd, u64 h) { (void)fd; (void)h; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_getpeername(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_getsockname(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_sendmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
-u64 lx_sock_recvmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
+/* 桩段里判断 fd 是不是 AF_UNIX（复用主 fd 表的 kind） */
+static int lxs_is_unix_(u64 fd)
+{
+    LxProc *p = lx_cur_proc();
+    LxFile *f;
+
+    if (p == (LxProc *)0) { return 0; }
+    f = lx_fdtab_get(p->fd, fd);
+    return (f != (LxFile *)0 && f->kind == LX_FD_UNIX) ? 1 : 0;
+}
+
+u64 lx_sock_socket(u64 d, u64 t, u64 p)
+{
+    (void)p;
+    return (d == 1u) ? lx_unix_socket(t) : (u64)0 - LX_EAFNOSUPPORT;
+}
+u64 lx_sock_close(u64 fd)
+{
+    return lxs_is_unix_(fd) ? lx_unix_close(fd) : (u64)0 - LX_EBADF;
+}
+u64 lx_sock_bind(u64 fd, u64 a, u64 l)
+{
+    return lxs_is_unix_(fd) ? lx_unix_bind(fd, a, l) : (u64)0 - LX_EAFNOSUPPORT;
+}
+u64 lx_sock_connect(u64 fd, u64 a, u64 l)
+{
+    return lxs_is_unix_(fd) ? lx_unix_connect(fd, a, l) : (u64)0 - LX_EAFNOSUPPORT;
+}
+u64 lx_sock_listen(u64 fd, u64 b) { (void)fd; (void)b; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_accept(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_sendto(u64 fd, u64 b, u64 l, u64 f, u64 a, u64 al)
+{
+    (void)f;
+    return lxs_is_unix_(fd) ? lx_unix_sendto(fd, b, l, a, al)
+                            : (u64)0 - LX_EAFNOSUPPORT;
+}
+u64 lx_sock_recvfrom(u64 fd, u64 b, u64 l, u64 f, u64 a, u64 al)
+{
+    (void)f;
+    return lxs_is_unix_(fd) ? lx_unix_recvfrom(fd, b, l, a, al)
+                            : (u64)0 - LX_EAFNOSUPPORT;
+}
+u64 lx_sock_send(u64 fd, u64 b, u64 l, u64 f) { return lx_sock_sendto(fd, b, l, f, 0ull, 0ull); }
+u64 lx_sock_recv(u64 fd, u64 b, u64 l, u64 f) { return lx_sock_recvfrom(fd, b, l, f, 0ull, 0ull); }
+u64 lx_sock_setsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_getsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_shutdown(u64 fd, u64 h) { (void)fd; (void)h; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_getpeername(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_getsockname(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_sendmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_recvmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EOPNOTSUPP; }
 
 #endif

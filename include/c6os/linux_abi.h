@@ -284,6 +284,8 @@
 #define LX_EAFNOSUPPORT 97
 #define LX_EOPNOTSUPP 95
 #define LX_EIO     5
+#define LX_ECONNREFUSED 111
+#define LX_EADDRINUSE 98
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {
