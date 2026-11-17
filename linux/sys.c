@@ -3,6 +3,7 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 
+
 /* Linux x86-64 系统调用实现（personality 的语义层）。
  *
  * 约定：返回负 errno；未实现的统一 -ENOSYS 并打一条日志（可观测性优先，
@@ -311,7 +312,8 @@ static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     return sys_mmap2(addr, len, prot, flags, fd, off);
 }
 
-static void lx_syscall_do(LxRegs *r)
+static 
+void lx_syscall_do(LxRegs *r)
 {
     u64 nr = r->rax;
     u64 a0 = r->rdi;
@@ -404,9 +406,6 @@ static void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_exit_group:                /* 整组退出 */
-        port_puts("\n[lx] exit_group(");
-        put_dec(a0);
-        port_puts(")\n");
         lx_proc_exit_group(a0);            /* 不返回 */
         return;
 

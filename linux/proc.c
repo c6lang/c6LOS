@@ -35,25 +35,6 @@ static u32 g_irq_ticks;
 static u32 g_preempt_switch;
 static u32 g_slice;
 
-static void pdec_(u32 v)
-{
-    char b[12];
-    u32 k = 0u;
-
-    if (v == 0u) {
-        port_putc('0');
-        return;
-    }
-    while (v > 0u && k < 11u) {
-        b[k] = (char)('0' + (int)(v % 10u));
-        v /= 10u;
-        k++;
-    }
-    while (k > 0u) {
-        k--;
-        port_putc((int)b[k]);
-    }
-}
 static u64     g_pid_next = 1ull;
 static int     g_resched;
 
@@ -454,11 +435,6 @@ void lx_proc_exit(u64 code)
         }
     }
     wake_(c->ppid);
-    port_puts("\n[preempt] ticks=");
-    pdec_(g_irq_ticks);
-    port_puts(" switch=");
-    pdec_(g_preempt_switch);
-    port_puts("\n");
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");

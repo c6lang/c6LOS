@@ -420,16 +420,12 @@ int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
                     &e, &ph, &pn, &pe, &brk) != 0) {
         return -1;
     }
-    port_puts("elf: 主程序已装载\n");
 
     ilen = elf_interp(img_pa, img_size, ipath, INTERP_MAX);
     if (ilen != 0ull) {
         u64 isz = lx_fs_size_of(ipath);
         u64 ipa = lx_fs_pa_of(ipath);
 
-        port_puts("elf: 解释器 ");
-        port_puts(ipath);
-        port_puts("\n");
         if (isz == 0ull || ipa == 0ull) {
             port_puts("elf: FAIL 解释器不在 initramfs 里\n");
             return -2;
