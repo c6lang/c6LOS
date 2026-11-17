@@ -15945,3 +15945,57 @@ WINDOWBASE(72)（`irq.S:370-374`），但**恢复段完全不还原它们**
    看 PHY 还会不会崩。会崩 ⇒ 与中断无关，回头查 `phy_i2c_enter_critical`
    这条临界区是不是根本没真正关中断；不崩 ⇒ 就是中断，按 1 修。
    （关 tick 会让 `os_task_delay` 挂住，但能走过 PHY 这一段就够判定。）
+
+## §460 ★★★ 中断恢复段补上窗口还原 —— PHY 校准通过，崩溃消失
+
+按 §459 方向 1，在 `_vec_level1` 的恢复段（`irq.S` 里 `rsync` 之后、
+`l32i a0, a1, 0` 之前）补上 WINDOWSTART/WINDOWBASE 还原，做法与 §457
+在 `RESTORE_FRAME` 里补的完全一致（**先 `wsr windowstart` 再
+`wsr windowbase`**；帧指针先藏 `g_ctx_tmp_sp`，字面量
+`.Ltmpsp_i` 加在 `irq.S` 标量池里）。`68 == 0` 时照样跳过、不碰窗口。
+
+### 真板结果：PHY 阶段整段跑通
+
+```
+[phy] calling register_chipv7_phy(mode=0)
+[phy] register_chipv7_phy rc=1        ← ★ 校准成功，不再是 TRAP
+[wst] after phy_enable=1
+W1 bringup
+B0 osi0=00000000 osi@00000000 calls@3fcc7ab4
+B1 slot13=4037c698 slot18=4037c530 magic=deadbeaf ver=00000008
+B2 cfg@3fcc79a4 osi=3fcc7cb4 magic@144=1f2f3f4f
+[wifi] init 前的库状态 @3fcba3f4 = 1
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+.[task] 库建任务 fn=40381c2c id=2 stack=6144 prio=29(->2)
+bWu1bu1Wu2.b
+```
+
+对照前面几轮：`bWu1bb` → `bWu1bb` → 现在是 `bWu1bu1Wu2.b`，末尾的
+调度活动明显变多，且 `register_chipv7_phy rc=1` 证明 **PHY 校准（含 I2C
+读 EFuse/PHY 参数那条链）完整走完了**。
+
+### 同时确认：sp 错位彻底没了
+
+```
+ctx[0] sp=0x3fcbe940  stack=[0x3fcbced0,0x3fcbeed0)  在栈内 ✔
+ctx[1] sp=0x3fcc0300  stack=[0x3fcbeed0,0x3fcc06d0)  在栈内 ✔
+
+yield 错位闸门 : 未命中（值 0x032400b5 = RTC 随机初值，从未写过）
+switch sp 闸门 : 未命中（值 0xfaa0f1a4 = 随机初值，从未写过）
+ctx 指针闸门   : 命中 0xBAD7 —— 但这是**误报**：判据写的是"16 字节对齐"，
+                 而 `sizeof(S3Ctx)=76`，`ctx[1]=&ctx[0]+76=0x3fcc6f1c`
+                 只是 4 字节对齐。判据该放宽到 4 字节（或干脆删掉，
+                 §457 之后它已经没有诊断价值了）。
+```
+
+⇒ §450–§456 追了七轮的"sp 跳进别人栈里"到此**彻底结束**，
+两道错位闸门从此再没被触发过。
+
+### 当前状态
+
+两个任务都阻塞（日志末尾的 `b`），调度器空转 —— 这是**纯逻辑层面的
+死锁**，不再是寄存器/窗口/栈的问题。下一步要找出它们在等什么
+（`OsTask` 的 `wait_kind` / `wait_obj`，布局见 §445：
+`wait_kind` 在 +48、`wait_obj` 在 +56，任务表在 `__c99_d2` 里、
+符号表查不到，靠扫 magic `0xC6A50001` 定位）。

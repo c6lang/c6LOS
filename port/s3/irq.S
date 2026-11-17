@@ -409,6 +409,35 @@ _vec_level1:
     or      a2, a2, a3
     wsr     a2, ps
     rsync
+    /* §460 ★ 还原被中断任务的 WINDOWSTART / WINDOWBASE。
+     *
+     * 保存段（`irq.S:370-374`）一直在写帧偏移 68/72，但恢复段从来不还原 ——
+     * 和 §457 在 `RESTORE_FRAME` 里补的是**同一个缺口**，中断这条路径漏了。
+     * 若中断期间有 windowed 调用把 WINDOWBASE 搬走，返回时被中断的
+     * windowed 函数 `retw` 就落到错的物理窗口上。
+     *
+     * 真板症状正是 `ram_chip_i2c_readReg` 里 `callx8` 跳到 `0x164` 去取指
+     * （cause=0x1c = InstPIFAddrError），而且**下硬件断点就复现不了**
+     * （连命 55 次全正常）—— 典型的时序竞态，只可能是中断插进来的。
+     *
+     * 两个顺序要求，和 §457 完全一样：
+     *   1. **先 `wsr windowstart` 再 `wsr windowbase`** —— `wsr windowbase`
+     *      会重映射 aN→物理寄存器，写完 `a2`/`a3` 里就不是原值了；
+     *   2. 帧指针必须先藏进 `g_ctx_tmp_sp`，因为重映射会把 `a1` 也换掉。
+     * `ctx.S` 那边这段在 `rsil 15` 里，中断上下文里本身就是 INTLEVEL≥1，
+     * 定时器是 level-1、不会自我抢占，所以共用这个全局不会打架。 */
+    l32i    a2, a1, 68
+    beqz    a2, 44f                 /* 68 == 0 ⇒ 没写过，别碰窗口 */
+    l32i    a3, a1, 72
+    l32r    a6, .Ltmpsp_i
+    s32i    a1, a6, 0
+    wsr     a2, windowstart
+    isync
+    wsr     a3, windowbase
+    isync
+    l32r    a6, .Ltmpsp_i
+    l32i    a1, a6, 0
+44:
     l32i    a0, a1, 0
     l32i    a2, a1, 4
     l32i    a3, a1, 8
@@ -468,3 +497,4 @@ port_irq_restore:
     .literal .Lstklo,  0x3FCA0000
     .literal .Lstkhi,  0x3FCEF000
     .literal .Lsprec,  0x500018C0
+    .literal .Ltmpsp_i, g_ctx_tmp_sp   /* §460：恢复窗口寄存器时藏帧指针 */
