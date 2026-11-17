@@ -16610,3 +16610,41 @@ T1 call0 任务进入 windowed 主流程
 读 TRAP 先读 `0x50000140`（§466）；`cause=0x1c` 时别信 `epc1`（§468）；
 判"地址是否合法"直接用 `0x40000000 <= v < 0x44000000`，别拿
 `v & 0x3FFFFFFF` 当判据（两次白查）。
+
+## §477 ★ 订正：`WINDOWBASE` **不必**是 4 的倍数（§470/§471 的假设是错的）
+
+§476 修好之后崩溃换了一副面孔，`_vec_default` 记下：
+
+```
+magic=0xBAD0  exccause=0x1d (LoadStorePIFAddrErrorCause)
+excvaddr=0xffffffde  epc1=0x40049068 (ROM)  ps=0x00060410
+a0=0xfffffffe  a1=0x3fcbed60  windowbase=0x6  windowstart=0x5555
+```
+
+`windowbase = 6` 直接推翻了我 §470/§471 加的那条校验（"`WINDOWBASE` 必须是
+4 的倍数"）。**那条假设是错的**：
+
+- `entry`/`call4/8/12`/`retw`/`rfe` 确实只按 4 的倍数步进，
+- 但 **`rotw N` 可以产生任意 `WINDOWBASE`**（它的全部意义就是把基址搬 N 格），
+  而 `rotw` 是窗口溢出/下溢机制（`WIN_SPILL`、`_win_unf12` 的跳板、
+  以及 Xtensa 自己的 `xthal_window_spill`）的**正常手段**。
+
+所以 §470/§471 那两道 `extui a6,a5,0,2 / bnez 43f` 会把**合法的 rotw 状态**
+判成非法、强行归一化到 `WB=0/WS=1`，反而把窗口账目搅乱。
+`0x5555` 这种 `windowstart` 就是"归一化之后又被 rotw 搬过"的痕迹。
+
+**正确的校验只有一条**：`WINDOWBASE < 16`（`NUM_AREGS=64` ⇒ 4 个窗口位）。
+`(WINDOWSTART >> WINDOWBASE) & 1 == 1` 这条硬不变式由硬件 + `rotw` 保证。
+
+⇒ **下一步**：把 `ctx.S` 的 `40:` 分支和 `irq.S` 的 §471 里那两条
+`extui`/`bnez` 删掉，只保留 `bgeu a5,16` 和 `srli a6,a3,16`（WINDOWSTART
+只有低 16 位有效）。然后再看真实崩溃在哪。
+
+## 当前状态小结
+
+- §476 之后 `*** TRAP` 那条线（`cause=0` / `cause=0x14`）**确实没了**，
+  说明 `ets_printf` 壳和 `.Lwmain_stub` 的 `callx0` 修的是真问题；
+- 现在停在 `[wifimain] id=1 tick=1` 之后，走 `_vec_default`（不打印、
+  只把现场写 `0x50000100`），要读那里才看得到；
+- 首要动作是**先撤掉那条错误的 4 对齐校验**再复测，
+  否则每轮都会被它自己搅乱。
