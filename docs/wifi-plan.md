@@ -17233,3 +17233,43 @@ JTAG 实测：该寄存器 **write-only**（写 3 读回 0），且时钟/复位
 再沿 printf 壳（`s3_ets_printf_call0` / `s3_win_puts`）查 0xbad1 这个指针的来源。
 
 目标（AP 关联 → DHCP → TLS → qq.com）仍未达成，goal 保持 active。
+
+---
+
+## §509 ★★ 全流程第一次跑通到 HTTPS；真正的剩余问题是射频没工作
+
+提交 e2172b1：`port_task_ctx_check` 改成**只写 RTC 记录、不 printf、不停机**。
+原 printf 经过 windowed→call0 壳时拿 0xbad1 当指针取指，把第一现场冲掉了。
+
+真板日志（45 秒）第一次出现完整链路：
+
+```
+[wifi] associate ssid=weforpay.com
+[wifi] start=0 / set_ps(NONE)=0
+[wifi] scan start（阻塞）
+[wifi] scan_start=12300          ← ESP_ERR_WIFI_TIMEOUT (0x300C)
+[wifi] connect=0                 ← esp_wifi_connect_internal 接受请求
+[wifi] 关联超时（15000 ms），sta_get_ap_info=12303   ← ESP_ERR_WIFI_NOT_CONNECT (0x300F)
+[lwip] polled 2000
+[https] === 开始取 https://qq.com/ ===
+[https] DNS 解析 qq.com 失败 / 失败 / demo rc=-1
+T2 windowed 主流程返回            ← 系统还活着
+```
+
+**结论：软件流水线全通了，卡在射频本身。**
+`scan_start` 超时 + `sta_get_ap_info=NOT_CONNECT` 说明 MAC/PHY 没有真的收发光。
+最可疑的是 §506 的 `hal_init` 补丁：我们只是把 `0x60033d14` 的 bit0 握手轮询
+跳过了，让软件继续跑，但那个握手很可能正是"MAC 硬件就绪"的信号 ——
+绕过它 = 库以为初始化完成、硬件其实没 ready。
+
+### 下一步（优先级从高到低）
+
+1. **真正满足 hal_init 的握手**而不是补丁掉它。查 `0x60033d14`（WiFi_MAC+0xD14）
+   bit0 由哪个时钟/复位/中断置位；重点看是不是需要开 WiFi MAC 中断并让 ISR
+   应答，或需要额外的 `SYSCON_WIFI_RST_EN` 脉冲时序。
+2. 若握手确实无法在裸机环境满足，就自己实现最小 MAC 初始化替代 hal_init
+   （参考 IDF 的 `esp_wifi_init` 顺序），而不是跳过轮询。
+3. 关联/DHCP 通了以后，DNS→TLS→qq.com 才有意义；当前 DNS 失败只是没有网络的
+   自然结果，不是 TLS/lwIP 的 bug。
+
+目标（真板取得 https://qq.com 页面）仍未达成，goal 保持 active。
