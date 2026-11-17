@@ -345,12 +345,14 @@ static void switch_to_(int next)
     port_user_set_fsbase(p->fs_base);
     if (p->started == 0u) {
         lx_sig_deliver_frame(p, &p->f);     /* 还没跑过：p->f 的快照才是权威 */
-    } else if (p->irq_frame == 0u) {
-        /* 陷入帧固定在内核栈顶 128 字节（x86_syscall_entry 压的 16 个寄存器），
-         * 阻塞/让出都不会挪动它。被定时器抢占的进程例外：活帧是 20 个 qword
-         * （15 寄存器 + 硬件帧），这种就延后到它下次系统调用返回再投递。 */
-        lx_sig_deliver_frame(p, (LxFrame *)(p->kstack_top - (u64)sizeof(LxFrame)));
     }
+    /* 已经在用户态跑过的进程**不要**在这里投递信号：它多半是从
+     * lx_proc_block() 被唤醒、正走在某个系统调用的返回路上，此时内核栈顶那份
+     * 陷入帧的 rax 还是**进系统调用时**的旧值（read 的调用号 0）。在这里
+     * build_() 会把旧 rax 存进 signal frame，rt_sigreturn 再 restore 回来 ——
+     * 于是 read 明明写了 1 字节给用户，返回值却是 0（M14 case 11）。
+     * 统一等 lx_syscall() 出口投递，那儿拿到的 rax 才是真正返回值。 */
+    (void)p->irq_frame;
     x86_resume_frame = (u64)(&p->f);
     if (c == (LxProc *)0) {
         return;
@@ -363,6 +365,289 @@ void lx_proc_yield(void)
     g_resched = 1;
 }
 
+/* 还有别的进程可能改变等待条件吗？
+ * 协作式调度里所有阻塞都是"别人来叫醒我"，如果没有任何别人在跑，
+ * 叫醒永远不会发生 —— 这时候宁可返回失败也不能挂死。 */
+static int others_live_(int self);
+static void wake_all_(void);
+static void wake_(u32 pid);
+static void stop_self_(LxProc *c, u32 sig);
+static void notify_parent_(LxProc *p, u32 pid, int cld);
+static u32 sig_first_handled_(LxProc *q);
+
+/* "没人可跑"时的现场抢救（M14-2）。
+ *
+ * 以前这里什么都不做：进程被标成 BLOCK 后 resched_ 找不到 READY，就直接切回来，
+ * 于是队列里那个进程状态悬在 BLOCK、内核在 emit_next 里空转，整个系统看起来
+ * 就是死机（B14 的一个具体形态）。三件事要做，顺序不能变：
+ *
+ *   1. 已停止的作业：SIGCONT 是**不阻塞**的作业控制信号，哪怕进程正停在
+ *      SIGSTOP 上也必须能唤醒它。没有这步，shell 一停自己就再也起不来。
+ *   2. 终端读的简化：POSIX 里后台进程读终端会收到 SIGTTIN 停下，那是给
+ *      有作业控制的 shell 用的。我们没有终端驱动线程，照搬只会让 shell
+ *      "读一下键盘就停住"。所以这里只停"作业组不是前台组"的读，且放行
+ *      shell 自己所属的会话首进程 —— 也就是交互 shell 永远读得到。
+ *   3. 死锁兜底：当前进程阻塞着、又没有别人能推进，就把它当"永远醒不来"，
+ *      按 Linux 上同样局面会得到的结果让阻塞方返回（pipe_read_ 拿 0 = EOF，
+ *      wait4 拿 ECHILD，poll 返回 0）。宁可给一个错误答案，也不能挂死。 */
+static u32  g_fore;                  /* 前台进程组（0 = 没有作业控制） */
+u32 lx_proc_fore(void) { return g_fore; }
+
+/* 续**一个**进程（按 pid）。组广播是 lx_proc_send 的职责：它已经逐个成员
+ * 调用 lx_sig_send_one 了，这里再按 pgid 匹配就会把"给单个进程发 SIGCONT"
+ * 误变成"给它所在的整个组发"，而 `kill(pid, SIGCONT)` 的 pid 根本不是
+ * pgid —— 结果谁也没被续上，父子一起挂死（M14 case 7）。 */
+static void job_cont_(u32 pid)
+{
+    u32 i;
+
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || q->state == LX_P_FREE || q->pid != pid) {
+            continue;
+        }
+        q->cont_seen = 1ull;           /* 之后 waitpid(WCONTINUED) 看这个 */
+        if (q->state == LX_P_STOP) {
+            /* 停止态 → 从 lx_proc_block() 的让出点继续；不清 cont_seen，
+             * 让父进程还有机会收到 WIFCONTINUED。 */
+            q->stopsig = 0u;
+            q->resumed = 1u;
+            q->state = LX_P_READY;
+        } else if (q->state == LX_P_BLOCK) {
+            /* 被收着的阻塞调用的进程（比如正读终端）：续行信号对它是可中断
+             * 的，Linux 上会以 EINTR 返回；这里先唤醒，调用点重新检查条件。 */
+            q->stopsig = 0u;
+            q->resumed = 1u;
+            q->state = LX_P_READY;
+        }
+    }
+    wake_all_();
+}
+
+static void stall_check_(LxProc *c)
+{
+    u32 i;
+    int woke = 0;
+
+    if (c == (LxProc *)0 || c->state != LX_P_BLOCK) {
+        /* 已经有 READY 了（pick_next_ 只会在没有 READY 时返回 <0），
+         * 或者当前进程压根没阻塞：都不该动别人的状态。 */
+        return;
+    }
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || q->state != LX_P_STOP) {
+            continue;
+        }
+        if ((q->sig_pending & (1ull << ((u32)LX_SIGCONT - 1u))) != 0ull) {
+            q->sig_pending &= ~(1ull << ((u32)LX_SIGCONT - 1u));
+            job_cont_(q->pid);
+            woke = 1;
+        }
+    }
+    if (woke != 0) {
+        return;
+    }
+    /* 后台作业读终端：停它，让前台（或 shell）接着跑。
+     * 刚被 SIGCONT 续过的那一次放过（Linux 的 SIGTTIN 判定也一样有例外，
+     * 否则 `bg; fg` 之后第一次读就又停了）。 */
+    if (c->wait_kind == LX_WAIT_TTY && c->pgid != g_fore && g_fore != 0u &&
+        c->sid != c->tgid && c->resumed == 0u) {
+        stop_self_(c, (u32)LX_SIGTTIN);
+        return;
+    }
+    /* 最后一招：让阻塞在"永远等不到的唤醒"上的进程自己醒。 */
+    if (!others_live_(g_cur)) {
+        c->state = LX_P_READY;
+    }
+}
+
+/* ---- M14-2：作业控制状态机 ------------------------------------------------
+ *
+ * 停止态的进程不进 pick_next_（LX_P_STOP 既不是 READY 也不是 RUN），所以
+ * c->ksp 停在 lx_proc_block() 让出点的下一行，SIGCONT 只要把状态改回 READY
+ * 就"从暂停处继续"，不需要额外的上下文魔法。
+ *
+ * SIGCHLD 的 si_code 精确到"怎么结束的"：shell 的 `WIFSTOPPED`/`WIFCONTINUED`
+ * 判定依赖它，所以退出/停止/继续三条路径都要各自报码。 */
+static void notify_parent_(LxProc *p, u32 pid, int cld)
+{
+    LxProc *par = lx_proc_find((i64)p->ppid);
+
+    if (par == (LxProc *)0) {
+        return;
+    }
+    par->sig_pending |= 1ull << ((u32)LX_SIGCHLD - 1u);
+    par->sig_code[LX_SIGCHLD] = (u32)cld;
+    wake_(par->pid);
+    wake_(p->ppid);
+}
+
+static void stop_self_(LxProc *c, u32 sig)
+{
+    if (c == (LxProc *)0) {
+        return;
+    }
+    c->stopsig = sig;
+    c->state = LX_P_STOP;
+    notify_parent_(c, c->pid, (int)LX_CLD_STOPPED);
+}
+
+static void stop_(u32 pid, u32 sig)
+{
+    u32 i;
+
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || q->state == LX_P_FREE || q->state == LX_P_ZOMBIE ||
+            q->pid != pid) {
+            continue;
+        }
+        if (q->state == LX_P_STOP) {
+            return;                    /* 已经停着：Linux 不重复上报 */
+        }
+        stop_self_(q, sig);
+        return;
+    }
+}
+
+void lx_proc_job_stop(u32 pid, u32 sig)
+{
+    stop_(pid, sig);
+}
+
+void lx_proc_job_cont(u32 pid)
+{
+    job_cont_(pid);
+}
+
+/* 信号广播（M14-2 的 kill(2) 语义）。进程表在 proc.c 里，sig.c 只负责
+ * "往某个进程投递"，所以选择目标这一步留在这里。
+ *
+ *   pid > 0   → 那个进程所在的**整个线程组**（Linux 的 kill 定义）
+ *   pid == 0  → 调用者所在进程组
+ *   pid == -1 → 除自己以外所有进程
+ *   pid < -1  → 进程组 = |pid| */
+int lx_proc_send(i64 pid, u32 sig)
+{
+    LxProc *self = cur_();
+    u32 i;
+    int hit = 0;
+
+    if (pid > 0) {
+        LxProc *t = lx_proc_find(pid);
+        u32 tgid;
+
+        if (t == (LxProc *)0) {
+            return -1;
+        }
+        tgid = t->tgid;
+        for (i = 0u; i < g_proc_cap; i++) {
+            LxProc *q = g_proc[i].p;
+
+            if (q != (LxProc *)0 && q->state != LX_P_FREE && q->tgid == tgid) {
+                lx_sig_send_one(q, sig, 0);
+                hit = 1;
+            }
+        }
+        return (hit != 0) ? 0 : -1;
+    }
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || q->state == LX_P_FREE) {
+            continue;
+        }
+        if (pid == 0) {
+            if (self == (LxProc *)0 || q->pgid != self->pgid) {
+                continue;
+            }
+        } else if (pid == -1) {
+            if (q == self) {
+                continue;
+            }
+        } else if ((i64)q->pgid != -pid) {
+            continue;
+        }
+        lx_sig_send_one(q, sig, 1);
+        hit = 1;
+    }
+    return (hit != 0) ? 0 : -1;
+}
+
+/* ---- 前台进程组（SIGTTIN/SIGTTOU 的判据）-------------------------------- */
+u64 lx_proc_tcsetpgrp(i64 fd, i64 pgid)
+{
+    LxProc *p = cur_();
+
+    if (p == (LxProc *)0 || fd < 0 || fd > 2) {
+        return n_((u64)LX_ENOTTY);
+    }
+    if (pgid < 0) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (p->sid != p->tgid) {
+        return n_((u64)LX_ENOTTY);     /* 只有会话首进程能改（Linux 同义） */
+    }
+    g_fore = (u32)pgid;
+    return 0ull;
+}
+
+u64 lx_proc_tcgetpgrp(i64 fd)
+{
+    if (fd < 0 || fd > 2) {
+        return n_((u64)LX_ENOTTY);
+    }
+    return (g_fore != 0u) ? (u64)g_fore : lx_proc_getpgrp();
+}
+
+/* alarm(2)：TSC 当作纳秒用（和 clock_gettime 的口径一致）。QEMU 里 TSC
+ * 通常是 1GHz 量级，误差只影响"几点响"，不影响语义。 */
+#define LX_ALARM_HZ  1000000000ull
+
+u64 lx_proc_alarm(u64 secs)
+{
+    LxProc *p = cur_();
+    u64 now;
+    u64 old = 0ull;
+
+    if (p == (LxProc *)0) {
+        return 0ull;
+    }
+    now = port_cycles();
+    if (p->alarm_deadline != 0ull && now < p->alarm_deadline) {
+        old = (p->alarm_deadline - now + LX_ALARM_HZ - 1ull) / LX_ALARM_HZ;
+    }
+    p->alarm_deadline = (secs == 0ull) ? 0ull : now + secs * LX_ALARM_HZ;
+    return old;
+}
+
+/* 到点投递 SIGALRM。两个调用点：
+ *   - resched_()：进程每次 lx_proc_block() 都会走这里。光靠 PIT tick 不够 ——
+ *     被阻塞的进程不占 CPU，而内核态关着中断，tick 根本进不来，闹钟会永远
+ *     不响（在 pipe read 上等SIGALRM 就是这种局面）。
+ *   - lx_sched_preempt()：进程在用户态跑、别的进程设了闹钟时要能及时响。 */
+void lx_proc_alarm_check(void)
+{
+    u64 now = port_cycles();
+    u32 i;
+
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *q = g_proc[i].p;
+
+        if (q == (LxProc *)0 || q->state == LX_P_FREE || q->alarm_deadline == 0ull) {
+            continue;
+        }
+        if (now >= q->alarm_deadline) {
+            q->alarm_deadline = 0ull;
+            lx_sig_send_one(q, (u32)LX_SIGALRM, 0);
+        }
+    }
+}
+
 /* 让出 CPU 一次；没有别的可运行进程时立刻回来。 */
 static void resched_(void)
 {
@@ -372,11 +657,15 @@ static void resched_(void)
     if (c == (LxProc *)0) {
         return;
     }
+    lx_proc_alarm_check();
     if (c->state == LX_P_RUN) {
         c->state = LX_P_READY;
     }
     next = pick_next_(g_cur);
     if (next < 0) {
+        /* 没人可跑：先把"死锁"变成"活锁"，再让当前进程体面地失败，
+         * 而不是永远卡在 emit_next 里空转（见 stall_check_ 的说明）。 */
+        stall_check_(c);
         if (c->state == LX_P_READY) {
             c->state = LX_P_RUN;
         }
@@ -402,6 +691,7 @@ void lx_sched_preempt(void)
     LxProc *c = cur_();
     int before;
 
+    lx_proc_alarm_check();
     if (c == (LxProc *)0 || c->state != LX_P_RUN) {
         return;
     }
@@ -417,6 +707,15 @@ void lx_sched_preempt(void)
     (void)before;
 }
 
+void lx_proc_set_wait(u32 kind)
+{
+    LxProc *c = cur_();
+
+    if (c != (LxProc *)0) {
+        c->wait_kind = kind;
+    }
+}
+
 void lx_proc_block(void)
 {
     LxProc *c = cur_();
@@ -425,10 +724,48 @@ void lx_proc_block(void)
         return;
     }
     c->state = LX_P_BLOCK;
+    c->intr = 0u;
+    c->intr_sig = 0u;
+    if (c->wait_kind == LX_WAIT_NONE) {
+        c->wait_kind = LX_WAIT_PIPE;   /* 没声明的当"别人会来叫醒我" */
+    }
     resched_();
+    c->wait_kind = LX_WAIT_NONE;
     /* 被唤醒后从这里继续：调用点必须重新检查条件 */
 }
 
+/* 刚醒过来：是被信号打断的吗？（M14-3）。取一次就清掉，避免下次误报。 */
+int lx_proc_intr(void)
+{
+    LxProc *c = cur_();
+    int r;
+
+    if (c == (LxProc *)0 || c->intr == 0u) {
+        return 0;
+    }
+    r = 1;
+    c->intr = 0u;                      /* intr_sig 留着给 lx_proc_restart() 查 */
+    return r;
+}
+
+/* 打断它的那个信号是否带 SA_RESTART：带了就不该返回 EINTR，调用点继续等。 */
+int lx_proc_restart(void)
+{
+    LxProc *c = cur_();
+
+    if (c == (LxProc *)0 || c->intr_sig == 0u || c->intr_sig >= (u32)LX_NSIG) {
+        return 0;
+    }
+    if ((c->sa[c->intr_sig].flags & LX_SA_RESTART) == 0ull) {
+        return 0;
+    }
+    c->intr_sig = 0u;
+    return 1;
+}
+
+/* 叫醒一个阻塞进程。M14-3：如果它就是有**装了 handler 的信号**待处理的那个，
+ * 醒来后必须报 EINTR（除非 SA_RESTART），所以顺手把 intr/intr_sig 记上。
+ * 这是唯一能区分"条件满足"和"被信号叫醒"的位置——Linux 也是这样。 */
 static void wake_(u32 pid)
 {
     u32 i;
@@ -436,10 +773,42 @@ static void wake_(u32 pid)
     for (i = 0u; i < g_proc_cap; i++) {
         LxProc *q = g_proc[i].p;
 
-        if (q != (LxProc *)0 && q->pid == pid && q->state == LX_P_BLOCK) {
-            q->state = LX_P_READY;
+        if (q == (LxProc *)0 || q->pid != pid || q->state != LX_P_BLOCK) {
+            continue;
+        }
+        q->state = LX_P_READY;
+        if (q->sig_pending != 0ull) {
+            u32 s = sig_first_handled_(q);
+
+            if (s != 0u) {
+                q->intr = 1u;
+                q->intr_sig = s;
+            }
         }
     }
+}
+
+/* pending 里第一个"会真正执行用户代码"的信号（装了 handler 的）。
+ * 默认动作/忽略的信号不算：它们不会打断系统调用。 */
+static u32 sig_first_handled_(LxProc *q)
+{
+    u32 s;
+
+    for (s = 1u; s < (u32)LX_NSIG; s++) {
+        u64 h;
+
+        if ((q->sig_pending & (1ull << (s - 1u))) == 0ull) {
+            continue;
+        }
+        if ((q->sig_mask & (1ull << (s - 1u))) != 0ull) {
+            continue;                    /* 被屏蔽：等 unblock 才投递，不打断 */
+        }
+        h = q->sa[s].handler;
+        if (h != LX_SIG_DFL && h != LX_SIG_IGN) {
+            return s;
+        }
+    }
+    return 0u;
 }
 
 LxProc *lx_proc_find(i64 pid)
@@ -469,7 +838,18 @@ LxProc *lx_proc_find(i64 pid)
 void lx_proc_wake(LxProc *p)
 {
     if (p->state == LX_P_BLOCK) {
+        u32 s;
+
         p->state = LX_P_READY;
+        /* M14-3：叫醒它的如果是一个装了 handler 的信号，阻塞系统调用必须
+         * 返回 EINTR。以前只有 wake_()（管道/子进程那个）会记 intr，而
+         * lx_sig_send_one 走的是这里 —— 于是信号叫醒的 read 醒来后看不到
+         * intr，会继续回去阻塞，EINTR 永远不发生。 */
+        s = sig_first_handled_(p);
+        if (s != 0u) {
+            p->intr = 1u;
+            p->intr_sig = s;
+        }
     }
 }
 
@@ -506,6 +886,7 @@ u64 lx_proc_setpgid(i64 pid, i64 pgid)
 {
     LxProc *self = cur_();
     LxProc *p;
+    u32 want;
 
     if (self == (LxProc *)0) {
         return n_((u64)LX_ESRCH);
@@ -518,20 +899,66 @@ u64 lx_proc_setpgid(i64 pid, i64 pgid)
     if (p == (LxProc *)0) {
         return n_((u64)LX_ESRCH);
     }
-    if (p->sid == p->pid) {
-        return n_((u64)LX_EPERM);          /* 会话首进程不能再改自己的进程组 */
+    /* pid 指向的必须是"进程"而不是随便一个线程：Linux 只在
+     * pid == 该线程组的 tgid 时才认。 */
+    if (p->tgid != p->pid) {
+        return n_((u64)LX_ESRCH);
     }
-    if (pgid == 0) {
-        p->pgid = p->pid;                  /* 0 = 自己带一个组 */
-        return 0ull;
+    /* Linux 的真实约束只有三条（见 setpgid(2)）：
+     *   ① 不能给**已经 exec 过的会话首进程**改组 —— 我们这里没有
+     *      "是否 exec 过"这个状态，所以只能保留"会话首进程"这一半；
+     *   ② 只能在调用者自己的会话里改组；
+     *   ③ 目标组必须属于同一会话。
+     * 以前把 ① 写成"sid == pid 一概 EPERM"，连 `setpgid(0,0)` 都被拒 ——
+     * 而 0 号进程自成一个会话，于是**所有**进程的 setpgid(0,0) 全失败，
+     * ash 只能退回无作业控制模式。现在按上面三条重写。 */
+    if (pid != 0 && lx_proc_find(pid) == (LxProc *)0) {
+        return n_((u64)LX_ESRCH);
+    }
+    if (p->sid != self->sid && p != self) {
+        return n_((u64)LX_EPERM);          /* ② 跨会话 */
     }
     if (pgid < 0) {
         return n_((u64)LX_EINVAL);
     }
-    if ((u64)pgid != (u64)p->pid && lx_proc_find(pgid) == (LxProc *)0) {
-        return n_((u64)LX_EPERM);          /* 目标组不存在 */
+    if (pgid == 0) {
+        /* 0 = 加入自己的组。已经是组首就是幂等的成功（Linux 允许）。 */
+        want = p->pid;
+    } else {
+        want = (u32)pgid;
+        if ((u64)want != (u64)p->pid) {
+            u32 i;
+            int found = 0;
+
+            for (i = 0u; i < g_proc_cap; i++) {
+                LxProc *q = g_proc[i].p;
+
+                if (q != (LxProc *)0 && q->state != LX_P_FREE && q->pgid == want) {
+                    if (q->sid != p->sid) {
+                        return n_((u64)LX_EPERM);   /* ③ 目标组在别的会话 */
+                    }
+                    found = 1;
+                    break;
+                }
+            }
+            if (found == 0) {
+                return n_((u64)LX_EPERM);       /* 目标组不存在 */
+            }
+        }
     }
-    p->pgid = (u32)pgid;                   /* 线程组（tgid）不受影响 */
+    /* 组内所有线程一起动：pgid 是线程组的属性（proc.c 里每个 LxProc 都存，
+     * clone 出来的兄弟线程跟着走，否则同一个进程里 getpgid 会不一致）。 */
+    {
+        u32 i;
+
+        for (i = 0u; i < g_proc_cap; i++) {
+            LxProc *q = g_proc[i].p;
+
+            if (q != (LxProc *)0 && q->state != LX_P_FREE && q->tgid == p->tgid) {
+                q->pgid = want;
+            }
+        }
+    }
     return 0ull;
 }
 
@@ -637,15 +1064,13 @@ void lx_proc_exit(u64 code)
     c->fd = (LxFdTab *)0;
     c->code = (i64)code;
     c->state = LX_P_ZOMBIE;
-    /* 注意：AS 的最后一个引用留到父进程 wait4 收尸时才放（见 wait4）。 */
-    {
-        LxProc *par = lx_proc_find((i64)c->ppid);
-
-        if (par != (LxProc *)0) {
-            par->sig_pending |= 1ull << ((u32)LX_SIGCHLD - 1u);
-            par->sig_code[LX_SIGCHLD] = (u32)LX_SI_USER;
-        }
-    }
+    c->stopsig = 0u;                       /* 停止态退出：不再报 stop */
+    c->wait_kind = LX_WAIT_NONE;
+    /* 注意：AS 的最后一个引用留到父进程 wait4 收尸时才放（见 wait4）。
+     * SIGCHLD 的 si_code 必须精确到"怎么结束的"：shell 靠 WIFSIGNALED 分支
+     * 决定回显什么，笼统报 SI_USER 会让它把"被信号杀"当成正常退出。 */
+    notify_parent_(c, c->pid,
+                   (c->killed != 0u) ? (int)LX_CLD_KILLED : (int)LX_CLD_EXITED);
     wake_(c->ppid);
     if (c->pid == 1u) {
         port_puts("\n[preempt] ticks=");
@@ -758,14 +1183,80 @@ u64 lx_proc_fork(LxRegs *r)
 
 /* ---- wait4 --------------------------------------------------------------- */
 
+/* 子进程是否落在 wait4 的 pid 选择范围内（Linux 的四条语义，一条都不能省）：
+ *   pid > 0   → 那一个
+ *   pid == 0  → 和调用者同一个进程组
+ *   pid == -1 → 任意
+ *   pid < -1  → 进程组 = |pid|  */
+static int waited_(const LxProc *par, const LxProc *c, i64 pid)
+{
+    if (c->ppid != par->pid) {
+        return 0;
+    }
+    if (pid > 0) {
+        return (i64)c->pid == pid;
+    }
+    if (pid == 0) {
+        return c->pgid == par->pgid;
+    }
+    if (pid == -1) {
+        return 1;
+    }
+    return (i64)c->pgid == -pid;
+}
+
+/* 把一条子进程状态翻译成 wait4 的 status 字（Linux x86-64 布局）。 */
+static u64 wstatus_(const LxProc *c)
+{
+    if (c->state == LX_P_ZOMBIE) {
+        return (c->killed != 0u) ? ((u64)c->code & 0x7full)
+                                 : (((u64)c->code & 0xffull) << 8);
+    }
+    if (c->state == LX_P_STOP) {
+        return ((u64)c->stopsig & 0xffull) << 8 | 0x7full;
+    }
+    return 0xffffull;                      /* WIFCONTINUED：低字节 0xffff */
+}
+
+/* rusage 只要"有且合理"：/usr/bin/time 之外没人细看，但字段不能是垃圾，
+ * 否则 busybox 的 time 会打印出天文数字。32 字节 = 4 个微秒级 u64，
+ * 正好是 glibc `struct rusage` 前 4 项（utime/stime/cutime/cstime）对齐的部分。 */
+static void fill_rusage_(u64 urusage)
+{
+    if (urusage == 0ull) {
+        return;
+    }
+    if (port_as_user_range_ok(cur_()->as, urusage, 32ull, C6OS_PROT_W) == 0) {
+        return;
+    }
+    for (u64 k = 0ull; k < 4ull; k++) {
+        *(u64 *)(urusage + k * 8ull) = 0ull;
+    }
+}
+
+/* wait4(2)（M14-2 重写）。
+ *
+ * 以前这里只认 pid > 0、"有子进程就一直等到僵尸"，`options`/`urusage` 直接
+ * 丢掉。对 `sh -c 'cmd &'`、job control、以及 shell 的 `wait` 内建都不够用：
+ *   - WNOHANG 没有可报告的返回 0（不是 ECHILD，也不是阻塞）；
+ *   - WUNTRACED 让"停下来的子进程"也算可报告事件；
+ *   - WCONTINUED 让"被 SIGCONT 续过的子进程"算可报告事件；
+ *   - pid < -1 按进程组选，pid == 0 按调用者所在的组选。
+ * 非法 option 位必须 EINVAL —— busybox 的 wait 会靠这个判断能不能用 waitid 简化。 */
 u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
 {
     LxProc *par = cur_();
+    int wflags = (int)(options & 0xffffffffull);
 
-    (void)options;
-    (void)urusage;
     if (par == (LxProc *)0) {
-        return (u64)0 - LX_ECHILD;
+        return n_((u64)LX_ECHILD);
+    }
+    if ((options & ~((u64)LX_WNOHANG | (u64)LX_WUNTRACED | (u64)LX_WCONTINUED)) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (ustatus != 0ull &&
+        port_as_user_range_ok(par->as, ustatus, 4ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
     }
     for (;;) {
         u32 i;
@@ -773,37 +1264,73 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
 
         for (i = 0u; i < g_proc_cap; i++) {
             LxProc *c = g_proc[i].p;
+            int report = 0;
+            u32 cpid;
 
-            if (c == (LxProc *)0 || c->state == LX_P_FREE || c->ppid != par->pid) {
-                continue;
-            }
-            if (pid > 0 && (i64)c->pid != pid) {
+            if (c == (LxProc *)0 || c->state == LX_P_FREE || !waited_(par, c, pid)) {
                 continue;
             }
             has_child = 1;
             if (c->state == LX_P_ZOMBIE) {
-                u32 cpid = c->pid;
-                u64 status = (c->killed != 0u)
-                                 ? ((u64)c->code & 0x7full)
-                                 : (((u64)c->code & 0xffull) << 8);
+                report = 1;
+            } else if (c->state == LX_P_STOP && (wflags & (int)LX_WUNTRACED) != 0) {
+                report = 1;
+            } else if (c->state != LX_P_STOP && c->cont_seen != 0ull &&
+                       (wflags & (int)LX_WCONTINUED) != 0) {
+                report = 1;
+            }
+            if (report == 0) {
+                c->cont_seen = 0ull;       /* 没要 WCONTINUED：续行事件就地丢弃 */
+                continue;
+            }
+            cpid = c->pid;
+            if (ustatus != 0ull) {
+                u64 st = wstatus_(c);
 
-                if (ustatus != 0ull) {
-                    if (port_as_user_range_ok(par->as, ustatus, 4ull,
-                                              C6OS_PROT_W) == 0) {
-                        return (u64)0 - LX_EFAULT;
-                    }
-                    *(u32 *)ustatus = (u32)status;
+                *(u32 *)ustatus = (u32)st;
+                fill_rusage_(urusage);
+                /* 不管正常退出还是被信号杀，僵尸都要在这里真正收掉。以前用
+                 * tag==1 表示"被杀"且只有那一支才设 FREE —— 正常退出的子进程
+                 * 永远是 ZOMBIE，sh 的 waitpid(-1) 会一遍遍看到同一个死孩子，
+                 * 后面命令的子进程永远收不到（alpine M12 卡在 uname 之后）。
+                 * killed 只影响 status 字，不影响是否收尸。 */
+                if (c->state == LX_P_ZOMBIE) {
+                    c->state = LX_P_FREE;
+                    port_as_unref(c->as);  /* 最后一个线程的 AS：到这里才真正拆 */
+                    c->as = 0ull;
+                } else if (c->state == LX_P_STOP) {
+                    c->resumed = 0u;       /* 停止事件已交付，停止状态继续保留 */
+                } else {
+                    c->cont_seen = 0ull;   /* 续行事件已交付 */
                 }
-                c->state = LX_P_FREE;
-                port_as_unref(c->as);      /* 最后一个线程的 AS：到这里才真正拆 */
-                c->as = 0ull;
                 return (u64)cpid;
             }
+            /* ustatus == 0：调用者不关心状态字，但事件照收（Linux 同样语义）。 */
+            fill_rusage_(urusage);
+            if (c->state == LX_P_ZOMBIE) {
+                c->state = LX_P_FREE;
+                port_as_unref(c->as);
+                c->as = 0ull;
+            } else if (c->state != LX_P_STOP) {
+                c->cont_seen = 0ull;
+            }
+            return (u64)cpid;
         }
         if (has_child == 0) {
-            return (u64)0 - LX_ECHILD;
+            return n_((u64)LX_ECHILD);
         }
+        if ((wflags & (int)LX_WNOHANG) != 0) {
+            return 0ull;
+        }
+        /* 阻塞前必须声明原因：万一下一次调度发现"没人能叫醒我"，
+         * stall_check_ 会用 LX_WAIT_CHILD 走"父进程等不到子进程"的兜底。 */
+        par->wait_kind = LX_WAIT_CHILD;
         lx_proc_block();
+        /* M14-3：被信号打断的 wait 返回 EINTR（wait 不认 SA_RESTART 之外
+         * 的例外——Linux 上确实是"有 handler 就打断，SA_RESTART 就重来"）。 */
+        if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+            return n_((u64)LX_EINTR);
+        }
     }
 }
 
@@ -1183,6 +1710,10 @@ static void pipe_drop_(LxFile *fe)
     } else if (fe->kind == LX_FD_PIPE_W && pp->writers > 0u) {
         pp->writers--;
     }
+    /* 端点计数是"谁还能读写这个管道"的**唯一**依据：readers 归零要立刻让
+     * 阻塞中的写端看到 EPIPE/SIGPIPE，writers 归零要立刻让读端拿到 EOF。
+     * 这里以前只等两个计数都归零才唤醒，导致 close(读端) 之后写端还在傻等。 */
+    wake_all_();
     if (pp->readers == 0u && pp->writers == 0u) {
         g_pipe[fe->node] = (LxPipe *)0;
         pipe_free_(pp);
@@ -1550,7 +2081,12 @@ static u64 pipe_read_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
         if (pp->writers == 0u) {
             return 0ull;                   /* 写端全关：EOF */
         }
+        lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
+        /* M14-3：被装了 handler 的信号打断 → EINTR。带 SA_RESTART 的继续等。 */
+        if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+            return n_((u64)LX_EINTR);
+        }
     }
 }
 
@@ -1559,9 +2095,18 @@ static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
     LxPipe *pp = pipe_at_(fe->node);
     u64 done = 0ull;
 
-    (void)p;
     if (pp == (LxPipe *)0) {
         return n_((u64)LX_EBADF);
+    }
+    /* B13/M14-3：Linux 在写**之前**就检查读端 —— 管道没有读者时，哪怕缓冲
+     * 还有空间也必须立刻 SIGPIPE + EPIPE（`yes | head` 靠这个让 yes 死掉）。
+     * 以前只在"缓冲写满、准备阻塞"时才查，于是 close(读端) 之后一次小写入
+     * 照样成功，EPIPE/SIGPIPE 永远不出现。 */
+    if (pp->readers == 0u) {
+        if (p != (LxProc *)0) {
+            lx_sig_send_one(p, (u32)LX_SIGPIPE, 0);
+        }
+        return n_((u64)LX_EPIPE);
     }
     /* 阻塞写要"全写完才返回"（Linux）：先把缓冲扩到够用（封顶 64KB），
      * 剩下的部分靠边写边等读者腾地方。 */
@@ -1577,10 +2122,23 @@ static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
             return done;
         }
         if (pp->readers == 0u) {
+            /* B13/M14-3：读者全跑光了 —— Linux 先给写端补一个 SIGPIPE
+             * （默认动作是终止，所以 `yes | head` 才会死），再报 EPIPE。
+             * 装了 handler 或设了 SIG_IGN 的进程要活下来拿到 EPIPE。
+             * SIGPIPE 不打断已经写出去的那部分：先把 done 返回掉。 */
+            if (p != (LxProc *)0) {
+                lx_sig_send_one(p, (u32)LX_SIGPIPE, 0);
+            }
             return (done > 0ull) ? done : n_((u64)LX_EPIPE);
         }
         wake_all_();
+        lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
+        if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+            /* 已经写出去的那部分是"部分写"，Linux 允许——先把它交回去，
+             * 一个字节都没写成才报 EINTR。 */
+            return (done > 0ull) ? done : n_((u64)LX_EINTR);
+        }
     }
 }
 
@@ -1736,7 +2294,11 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
             if (!others_live_(g_cur)) {
                 return cnt;
             }
+            lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
+            if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+                return (cnt > 0ull) ? cnt : n_((u64)LX_EINTR);
+            }
         }
     }
 }

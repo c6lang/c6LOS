@@ -35,6 +35,8 @@
 #define LX_SYS_fstat           5
 #define LX_SYS_lstat           6
 #define LX_SYS_nanosleep      35
+#define LX_SYS_alarm          37
+#define LX_SYS_clock_nanosleep 230
 #define LX_SYS_clock_gettime 228
 #define LX_SYS_lseek           8
 #define LX_SYS_mmap            9
@@ -162,7 +164,11 @@
 #define LX_SIGCHLD  17
 #define LX_SIGCONT  18
 #define LX_SIGSTOP  19
+#define LX_SIGTSTP  20
+#define LX_SIGTTIN  21
+#define LX_SIGTTOU  22
 #define LX_SIGURG   23
+#define LX_SIGXCPU  24
 #define LX_SIGWINCH 28
 
 /* handler 的两个特殊值 + sigaction 标志（与 Linux 同值） */
@@ -171,6 +177,7 @@
 #define LX_SA_SIGINFO    4ull
 #define LX_SA_RESTORER   0x04000000ull
 #define LX_SA_NODEFER    0x40000000ull
+#define LX_SA_RESTART    0x10000000ull
 
 /* rt_sigprocmask 的 how */
 #define LX_SIG_BLOCK     0ull
@@ -211,6 +218,7 @@
 #define LX_EMFILE  24
 #define LX_ESRCH   3
 #define LX_E2BIG   7
+#define LX_EINTR   4
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {

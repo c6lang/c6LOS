@@ -554,4 +554,59 @@ make 轮次里出现早期 #DE 崩溃，未能复现（同一镜像随后 13/13 
 - 遗留：`clone3`（nr 435）仍走 ENOSYS，glibc 会回退到 clone，`pthread_create`
   正常，但内核日志会打一行 `[lx] ENOSYS nr=435`；归入 M14。
 
+### M14 进程/信号语义完整（M14-1 → M14-4）
+
+M14-1（exec/fd/进程组）：`envp` 真正压进新栈、`#!` shebang 解析、`CLOEXEC`
+关 fd、`fcntl` 真语义、`dup3`、`readv/writev` 统一经 `lx_proc_*` 分发；补
+`pgid/sid` 字段和 `setpgid/getpgid/setsid/getpgrp`，修掉 B1（原 `setpgid`
+和 `chdir` 共用一个 case，实际执行的是 `chdir(pid 的指针)`）。
+
+M14-2（作业控制）：新增 `LX_P_STOP` 状态、`LX_WAIT_*` 阻塞原因、`stopsig/
+resumed/cont_seen`；`wait4` 支持 `WNOHANG/WUNTRACED/WCONTINUED` 和 `pid<=0`
+三种收尸语义；`notify_parent_` 精确上报 `CLD_EXITED/STOPPED/CONTINUED`；
+`kill(pid<=0)` 进程组广播；`TIOCSPGRP/TIOCGPGRP`；`stall_check_` 处理"没有
+任何人能叫醒我"的僵局（SIGCONT 优先、后台读终端 SIGTTIN、最后兜底放行）。
+
+M14-3（SIGPIPE + EINTR/SA_RESTART）：
+- **断管检查必须发生在写之前**：以前只在缓冲写满、准备阻塞时才看
+  `readers == 0`，所以 `close(读端)` 之后一次小写入照样成功，`yes | head`
+  里的 `yes` 永远不会死。现在进 `pipe_write_` 先看读端，没有就直接
+  `SIGPIPE + EPIPE`；`pipe_drop_` 在端点计数变化时也立刻 `wake_all_`。
+- `lx_proc_intr/lx_proc_restart` + `intr/intr_sig` 字段：`wake_` 与
+  `lx_proc_wake` 在叫醒一个"有 handler 信号待处理"的进程时记下 intr，
+  pipe read/write、wait4、poll 醒来后据此返回 `EINTR` 或按 `SA_RESTART` 重试。
+- 补 `alarm(37)`（TSC 截止时刻，在 `resched_` 和 PIT tick 两处检查）和
+  `clock_nanosleep(230)`（glibc `sleep()` 实际走它）。
+
+踩到的坑（四个都是真 ABI bug，不是测试问题）：
+
+1. `setpgid` 把"会话首进程"一刀切判 `EPERM`，而 0 号进程自成一个会话 ——
+   于是所有进程的 `setpgid(0,0)` 全失败，ash 退回无作业控制模式。按 Linux
+   真实约束重写（只拦跨会话/目标组不存在），并把 `pgid` 同步给同组所有线程。
+2. `lx_sig_send_one(pid, SIGCONT)` 调用 `lx_proc_job_cont` 时把 pid 当 pgid
+   匹配 —— 子进程 pgid 是父进程 pid，没人被续上，父子一起挂死。改成按 pid
+   续单个进程，组广播留在 `lx_proc_send`（它本来就逐个成员调用）。
+3. 信号投递两处破坏语义：
+   - `switch_to_` 用**进系统调用时**的旧陷入帧投递信号，`build_` 把旧 `rax`
+     存进 signal frame，`rt_sigreturn` 再恢复回来 —— `read` 明明写了 1 字节，
+     返回值却是 0。改成只在 `lx_syscall` 出口投递（那里 `rax` 才是真值）。
+   - `build_` 把 handler 运行期间的 mask 存进 `uc_sigmask`，`rt_sigreturn`
+     又拿它恢复 —— 任何 handler 一返回，该信号就永久被屏蔽。改成保存
+     进 handler **之前**的 mask。
+
+4. `wait4` 只有 `tag == 1`（被信号杀）那一支把僵尸设成 `FREE`，正常退出
+    （`tag == 0`）落进 `else` 只清 `cont_seen`，子进程永远是 ZOMBIE。验收
+    脚本的 fork/waitpid 只查返回值和 status 字，看不出槽位没回收；但
+    `sh -c 'echo; uname; ls; ...'` 的 `waitpid(-1)` 会一遍遍看到同一个死孩子，
+    后续命令的子进程永远收不到 —— alpine M12 卡在 `uname -a` 之后。改成
+    任何 ZOMBIE 都收尸（FREE + `port_as_unref`），`killed` 只影响 status。
+
+验收：`make check-linuxabi-m14`（`tests/linux/procgrp.c` 11 项：进程组、
+WNOHANG/按组收尸、SIGPIPE 忽略与默认动作、SIGSTOP/WUNTRACED/WCONTINUED、
+tcgetpgrp ENOTTY、EINTR、SA_RESTART）→ `PASS: procgrp`；全量回归
+L2–L8/M9/M13–M13d/alpine 无回归。
+
+M14 仍未覆盖：`waitid`/`WNOWAIT`、`clone3`（nr 435，glibc 会回退 clone）、
+`*at` 系列 dirfd 语义 —— 归入后续里程碑。
+
 

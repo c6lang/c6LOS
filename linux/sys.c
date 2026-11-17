@@ -687,11 +687,34 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_kill:
-        r->rax = lx_sig_kill((i64)(i32)a0, (u32)a1);
+        /* M14-2：pid<=0 的三种广播语义（0=本组，-1=全体，<-1=指定组）。
+         * shell 的 `kill -TERM -%d` 和 Ctrl-C 都靠它。 */
+        if (a1 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a1 != 0ull && lx_proc_send((i64)(i32)a0, (u32)a1) == 0) {
+            r->rax = 0ull;
+        } else if (a1 == 0ull && lx_proc_send((i64)(i32)a0, 0u) == 0) {
+            r->rax = 0ull;              /* 0 号信号：只探测存在性 */
+        } else {
+            r->rax = neg(LX_ESRCH);
+        }
         return;
 
     case LX_SYS_tgkill:                    /* tgkill(tgid, tid, sig) */
-        r->rax = lx_sig_kill((i64)(i32)a1, (u32)a2);
+        if (a2 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a2 != 0ull && lx_proc_find((i64)(i32)a1) == (LxProc *)0) {
+            r->rax = neg(LX_ESRCH);
+            return;
+        }
+        if (a2 != 0ull) {
+            lx_sig_send_one(lx_proc_find((i64)(i32)a1), (u32)a2, 0);
+        }
+        r->rax = 0ull;
         return;
 
     /* B1：setpgid 以前和 chdir 共用一个 case，`setpgid(pid, pgid)` 实际执行的是
@@ -740,6 +763,37 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_ioctl:
+        /* M14-2：TIOCSPGRP/TIOCGPGRP 是作业控制的核心 —— ash 启动时会
+         * `tcsetpgrp(0, getpid())` 把前台组设成自己，然后用 kill(-pgid) 给
+         * 整条作业发信号。以前一律 ENOTTY，ash 只能退回"没有作业控制"的模式。 */
+        if (a0 <= 2ull && (a1 == 0x5410ull || a1 == 0x540full)) {
+            if (a1 == 0x5410ull) {         /* TIOCSPGRP：arg 是 pid_t* */
+                i64 v;
+
+                if (lx_user_ok(a2, 4ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                v = (i64)(*(const i32 *)a2);
+                r->rax = lx_proc_tcsetpgrp((i64)(i32)a0, v);
+                return;
+            }
+            if (lx_user_ok(a2, 4ull, C6OS_PROT_W) == 0) {   /* TIOCGPGRP */
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            {
+                u64 v = lx_proc_tcgetpgrp((i64)(i32)a0);
+
+                if ((i64)v < 0) {
+                    r->rax = v;
+                    return;
+                }
+                *(i32 *)a2 = (i32)v;
+            }
+            r->rax = 0ull;
+            return;
+        }
         /* M12：init 调过 lx_tty_init() 之后，0/1/2 是一个真串口终端
          * （TCGETS 给出 38400 8N1 + ICANON/ECHO，isatty() 才会认账）；
          * 没开就还是老行为——一律 ENOTTY，ls 退回单列输出。 */
@@ -777,6 +831,40 @@ void lx_syscall_do(LxRegs *r)
             ms = (u64)sec * 1000ull + (u64)nsec / 1000000ull;
             if (ms > 1000ull) {
                 ms = 1000ull;              /* 上限：这只是个超时兜底 */
+            }
+            if (ms > 0ull) {
+                port_delay_ms((u32)ms);
+            }
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_alarm:
+        /* alarm(2)：SIGALRM 闹钟。TSC 截止时刻存在 LxProc 上，由
+         * resched_/PIT tick 两处检查到点投递（见 proc.c 的 lx_proc_alarm_check）。 */
+        r->rax = lx_proc_alarm(a0);
+        return;
+
+    case LX_SYS_clock_nanosleep:
+        /* glibc 的 sleep() 走这个而不是 nanosleep(2)。参数和 nanosleep 一样在
+         * a2（req）/a3（rem），a0=clockid、a1=flags（TIMER_ABSTIME 时 a2 是绝对
+         * 时刻，但我们没有真时钟基准，统一按相对时长处理）。 */
+        if (lx_user_ok(a2, 16ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        {
+            i64 sec = *(const i64 *)a2;
+            i64 nsec = *(const i64 *)(a2 + 8ull);
+            u64 ms;
+
+            if (sec < 0 || nsec < 0 || nsec >= 1000000000ll) {
+                r->rax = neg(LX_EINVAL);
+                return;
+            }
+            ms = (u64)sec * 1000ull + (u64)nsec / 1000000ull;
+            if (ms > 10000ull) {
+                ms = 10000ull;             /* 上限：别让 test 把 QEMU 挂太久 */
             }
             if (ms > 0ull) {
                 port_delay_ms((u32)ms);

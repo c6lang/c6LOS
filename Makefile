@@ -1452,6 +1452,27 @@ $(SCAL_IMG): $(SCAL_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(SCAL_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
+# ---- M14：进程语义完整（进程组 / 作业控制 / wait4 选项 / SIGPIPE / EINTR）-----
+PROCGRP_ELF := $(X86)/procgrp.elf
+PROCGRP_IMG := $(X86)/procgrp-disk.img
+
+$(PROCGRP_ELF): tests/linux/procgrp.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(PROCGRP_IMG): $(PROCGRP_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(PROCGRP_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m14: $(PROCGRP_IMG)
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(PROCGRP_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m14.log \
+		| grep -q "^PASS: procgrp" \
+	  && echo "PASS: linux-abi M14（进程组/作业控制/wait4 选项/SIGPIPE/EINTR）" \
+	  || { echo "FAIL: linux-abi M14"; tail -30 /tmp/check-m14.log; exit 1; }
+
 check-linuxabi-m13d: $(SCAL_IMG)
 	@timeout 180 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(SCAL_IMG),if=ide \

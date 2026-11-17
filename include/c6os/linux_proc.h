@@ -23,6 +23,28 @@
 #define LX_P_RUN      2u
 #define LX_P_ZOMBIE   3u
 #define LX_P_BLOCK    4u
+#define LX_P_STOP     5u
+
+/* 阻塞原因（M14-2）：只有 stall_check_ 需要区分，用来判断"停还是死等"。
+ * 进程每次 lx_proc_block() 之前自己声明，醒来后置回 LX_WAIT_NONE。 */
+#define LX_WAIT_NONE  0u
+#define LX_WAIT_PIPE  1u
+#define LX_WAIT_TTY   2u
+#define LX_WAIT_CHILD 3u
+#define LX_WAIT_FUTEX 4u
+
+/* wait4 选项（Linux x86-64 的真实位值） */
+#define LX_WNOHANG     1u
+#define LX_WUNTRACED   2u
+#define LX_WCONTINUED  8u
+
+/* 作业控制 / SIGCHLD 的 si_code */
+#define LX_CLD_EXITED    1
+#define LX_CLD_KILLED    2
+#define LX_CLD_DUMPED    3
+#define LX_CLD_TRAPPED   4
+#define LX_CLD_STOPPED   5
+#define LX_CLD_CONTINUED 6
 
 /* fd 表里的特殊标记（与 linux/fs.c 共用） */
 #define LX_FD_NONE    0xffffffffffffffffull
@@ -135,6 +157,14 @@ typedef struct LxProc {
     LxFdTab *fd;                  /* 动态 fd 表：线程组共享，fork 时复制 */
     u32 pgid;                     /* 进程组（B1：以前 setpgid 跟 chdir 共用一个 case） */
     u32 sid;                      /* 会话 */
+    u32 wait_kind;                /* 阻塞原因（LX_WAIT_*），跨系统调用有效 */
+    u32 stopsig;                  /* 停止它的信号：LX_P_STOP 时有效（=报告给父进程的 WSTOPSIG） */
+    u32 resumed;                  /* 已用 SIGCONT 续过：下次上报走 WIFCONTINUED 而不是静默丢弃 */
+    u32 job_pad;
+    u32 intr;                     /* 醒来原因是"有信号待处理"（EINTR 的判据） */
+    u32 intr_sig;                 /* 那个信号号：用来查 SA_RESTART */
+    u64 cont_seen;                /* 续行已发生、还没被 wait4(WCONTINUED) 取走 */
+    u64 alarm_deadline;           /* alarm(2)：TSC 截止时刻，0=没设 */
 } LxProc;
 
 /* 进程表与调度（linux/proc.c） */
@@ -142,6 +172,10 @@ void     lx_proc_attach(u64 as, u64 brk);      /* 把当前上下文登记成 0 
 LxProc  *lx_cur_proc(void);
 void     lx_proc_yield(void);                  /* 系统调用末尾让出一次 */
 void     lx_proc_block(void);                  /* 标 BLOCK 并立刻切走 */
+u64      lx_proc_alarm(u64 secs);              /* alarm(2)：返回旧闹钟剩余秒数 */
+void     lx_proc_alarm_check(void);            /* 到点投递 SIGALRM（resched_/tick 调用） */
+int      lx_proc_intr(void);                    /* 刚醒来是被信号叫醒的？ */
+int      lx_proc_restart(void);                /* 该信号带 SA_RESTART？ */
 void     lx_proc_exit(u64 code);               /* 不返回 */
 void     lx_sched_tick(void);
 u64      lx_proc_fork(LxRegs *r);
@@ -159,6 +193,13 @@ u64      lx_proc_setpgid(i64 pid, i64 pgid);
 u64      lx_proc_getpgid(i64 pid);
 u64      lx_proc_setsid(void);
 u64      lx_proc_getpgrp(void);
+u64      lx_proc_tcsetpgrp(i64 fd, i64 pgid);       /* 作业控制：前台组（M14-2） */
+u64      lx_proc_tcgetpgrp(i64 fd);
+/* 作业控制（linux/proc.c，M14-2）：sig.c 的停止/续行默认动作调这两个。 */
+void     lx_proc_job_stop(u32 pid, u32 sig);       /* SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU */
+void     lx_proc_job_cont(u32 pid);                /* SIGCONT：续行指定进程（组广播由 kill 负责） */
+void     lx_proc_set_wait(u32 kind);               /* 声明本次阻塞原因（LX_WAIT_*） */
+u32      lx_proc_fore(void);                      /* 当前前台进程组（0 = 没有作业控制） */
 u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
@@ -181,7 +222,8 @@ void lx_sig_exec(LxProc *p);
 u64  lx_sig_action(u32 sig, u64 uact, u64 uold);
 u64  lx_sig_procmask(u32 how, u64 uset, u64 uold);
 u64  lx_sig_altstack(u64 uss, u64 uoss);
-u64  lx_sig_kill(i64 pid, u32 sig);
+void lx_sig_send_one(LxProc *t, u32 sig, int to_group);   /* 投递给单个进程 */
+int  lx_proc_send(i64 pid, u32 sig);                      /* kill(2) 选目标 + 广播 */
 u64  lx_sig_return(LxRegs *r);
 void lx_sig_deliver_frame(LxProc *p, LxFrame *f);
 int  lx_sig_deliver_exc(LxProc *p, LxRegs *r, u64 cr2, u32 vec);

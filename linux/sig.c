@@ -229,31 +229,43 @@ u64 lx_sig_altstack(u64 uss, u64 uoss)
     return 0ull;
 }
 
-u64 lx_sig_kill(i64 pid, u32 sig)
+/* 给一个具体进程投递信号。停止/续行类信号是**作业控制**语义：不能只挂
+ * pending 等它自己被调度到——正停着的进程根本不会被调度，那样 SIGCONT 就
+ * 永远送不进去。所以这两类走状态机的直接入口（实现在 linux/proc.c）。 */
+void lx_sig_send_one(LxProc *t, u32 sig, int to_group)
 {
-    LxProc *t;
-
-    if (sig == 0u) {
-        return 0ull;                        /* 0 号信号只探测存在性 */
+    if (t == (LxProc *)0 || t->state == LX_P_FREE) {
+        return;
     }
-    if (sig >= (u32)LX_NSIG) {
-        return (u64)0 - LX_EINVAL;
+    if (sig == (u32)LX_SIGKILL) {
+        lx_proc_exit_sig(sig);
+        return;
     }
-    if (pid <= 0) {
-        t = lx_cur_proc();
-    } else {
-        t = lx_proc_find(pid);
+    if (sig == (u32)LX_SIGSTOP || sig == (u32)LX_SIGTSTP || sig == (u32)LX_SIGTTIN ||
+        sig == (u32)LX_SIGTTOU) {
+        lx_proc_job_stop(t->pid, sig);
+        return;
     }
-    if (t == (LxProc *)0) {
-        return (u64)0 - LX_ESRCH;
+    if (sig == (u32)LX_SIGCONT) {
+        /* 只续这一个目标；`kill(-pgid, SIGCONT)` 的组广播已在
+         * lx_proc_send 里逐个成员做过了。 */
+        lx_proc_job_cont(t->pid);
+        return;
     }
     t->sig_pending |= 1ull << (sig - 1u);
     t->sig_code[sig] = (u32)LX_SI_USER;
+    if (t->state == LX_P_STOP) {
+        /* 停在 SIGSTOP 上的进程继续收其他信号（不影响它的停止状态）。 */
+        return;
+    }
     lx_proc_wake(t);                        /* 阻塞中的话叫醒它去处理 */
-    return 0ull;
 }
 
-/* 默认动作：多数致命，SIGCHLD/SIGCONT/SIGWINCH/SIGURG 默认忽略。 */
+/* 默认动作。被忽略的：SIGCHLD/SIGCONT/SIGWINCH/SIGURG。
+ * 作业控制类（STOP/TSTP/TTIN/TTOU）的默认动作是"停下"而不是"终止"，
+ * 以前一律当致命处理，shell 一 Ctrl-Z 就少一个进程。
+ * 注意：这几类在 lx_sig_send_one 里就已经直接走状态机了，到不了这里；这一支
+ * 只是兜底——比如有人先装了 handler、又把它改回 SIG_DFL。 */
 static int default_(LxProc *p, u32 sig)
 {
     (void)p;
@@ -312,7 +324,11 @@ static void build_(LxProc *p, SigView *v, u32 sig, u32 code)
     if ((p->sa[sig].flags & LX_SA_NODEFER) == 0ull) {
         newmask |= 1ull << (sig - 1u);
     }
-    *(u64 *)(uc + LX_UC_SIGMASK) = newmask;
+    /* uc_sigmask 必须保存**进 handler 之前**的屏蔽字：rt_sigreturn 拿它
+     * 恢复。以前这里存的是 newmask（handler 运行期间的 mask），于是任何
+     * handler 一返回，该信号就被永久屏蔽 —— 下一次同信号的 handler 再也不
+     * 会跑（M14 case 10 的 SIGALRM 把 case 11 的信号挡掉了）。 */
+    *(u64 *)(uc + LX_UC_SIGMASK) = p->sig_mask;
 
     *(u32 *)(base + LX_SF_INFO) = (u32)sig;
     *(u32 *)(base + LX_SF_INFO + 4ull) = 0u;
