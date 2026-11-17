@@ -1566,13 +1566,21 @@ int s3_wifi_scan(void)
 
     for (i = 0; i < 64; i++) { cfg[i] = 0; }
     for (i = 0; i < 256; i++) { rec[i] = 0; }
-    s3_ets_printf("[wifi] scan start（阻塞）\n");
-    r = esp_wifi_scan_start((const void *)cfg, 1);
+    /* §511 诊断：阻塞 scan 一直 12300 超时，改成异步 + 轮询结果，
+     * 区分"射频没扫到 AP"和"scan-done 事件没送到等待者"。 */
+    s3_ets_printf("[wifi] scan start（异步）\n");
+    r = esp_wifi_scan_start((const void *)cfg, 0);
     s3_ets_printf("[wifi] scan_start=%d\n", r);
     if (r != 0) {
         return -1;
     }
-    r = esp_wifi_scan_get_ap_num(&num);
+    for (i = 0; i < 60; i++) {
+        s3_w2c_task_delay(100u);
+        r = esp_wifi_scan_get_ap_num(&num);
+        if (r == 0 && num != 0u) {
+            break;
+        }
+    }
     s3_ets_printf("[wifi] scan_get_ap_num=%d num=%u\n", r, (unsigned)num);
     if (r != 0 || num == 0) {
         return (int)num;

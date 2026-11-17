@@ -17311,3 +17311,39 @@ T2 windowed 主流程返回            ← 系统还活着
    跳过轮询让软件继续，但 RF 可能仍未就绪。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §511 异步扫描确认：一个 AP 都没扫到
+
+把 `s3_wifi_scan()` 从阻塞改成异步 + 每 100ms 轮询 `scan_get_ap_num`（60 次）：
+
+```
+[wifi] scan_start=0            ← 异步启动成功
+（6 秒轮询）
+[wifi] scan_get_ap_num=0 num=0 ← 一个 AP 都没有
+[wifi] connect=0
+[wifi] 关联超时（15000 ms），sta_get_ap_info=12303
+```
+
+所以阻塞版的 `scan_start=12300` **不是事件没送到**，而是射频确实没扫到 beacon。
+
+另外：
+- JTAG 从 CPU 运行中写 `0x60033d14=3` 也不能让 `hal_init` 退出轮询 ⇒ 该位
+  不受软件写控制，是硬件状态位。
+- 导出 ROM `0x40000000..0x40039000`（233472 字节，openocd 到未映射区就停）
+  搜索常量 `0x60033d14`：**没有命中** ⇒ 置位逻辑不在这一段 ROM 里。
+- 放开中断后库会打印 `Haven't to connect to a suitable AP now!`，说明它的
+  状态机在跑，只是收不到任何 AP。
+
+### 下一步
+
+1. 重点回到 §506 的 hal_init 补丁：`0x60033d14` bit1 kick / bit0 应答
+   很可能就是"MAC/BB 硬件 ready"。跳过轮询 = 软件往下跑但 RF 没 ready。
+   要找到真正置位条件（可能要 BBPLL lock / RF 校准完成 / 某个中断应答）。
+2. 核对 PHY 回调链：库调用的 `_phy_enable` 回调里我们只做了
+   `register_chipv7_phy(rc=0)`，IDF 的 `esp_phy_enable` 还做
+   `phy_bbpll_en` / RF 校准 / `phy_disable` 时序，可能缺关键一步。
+3. 在确认有 AP 之前，DHCP/TLS/qq.com 都不用调。
+
+目标未达成，goal 保持 active。
