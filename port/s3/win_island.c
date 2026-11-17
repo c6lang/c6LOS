@@ -154,6 +154,7 @@ void phy_get_romfunc_addr(void);
 /* IDF 用它让 PHY 初始化时**不要抢走内部 USB PHY**（否则 USB-CDC 立刻掉枚举，
  * 串口和 esptool 一起失联，什么都看不到）。必须在 register_chipv7_phy 之前调用。 */
 void phy_bbpll_en_usb(u32 enable);
+void phy_wakeup_init(void);
 
 void s3_win_log(const char *s)
 {
@@ -372,6 +373,11 @@ int s3_win_phy_enable_hook(void)
 int s3_win_phy_enable(void)
 {
     int rc;
+    /* §522：IDF 的 esp_phy_enable() 用 s_is_phy_calibrated 保证
+     * register_chipv7_phy() 全程只跑一次；之后每次 enable 只调
+     * phy_wakeup_init()。我们以前每次回调都重新做完整校准（真板上两次），
+     * 可能把已经调好的 RF 状态冲掉。照 IDF 改成一次性校准。 */
+    static u32 s_phy_calibrated = 0u;
 
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
      * （见 esp_phy/src/phy_init.c）。这里先写死成这块板自己的 MAC
@@ -413,11 +419,20 @@ int s3_win_phy_enable(void)
      * 我们以前直接把 rc=1 带回去 —— 于是 hal_init()（在库回调之前跑）看到的
      * 是**还没初始化好的 RF**，它的 0x60033d14 bit0 握手就永远不完成。
      * 现在先重试两次，让 PHY 在 esp_wifi_init_internal 之前就真的 ready。 */
-    rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-    s3_ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
-    if (rc == 1) {
+    if (s_phy_calibrated != 0u) {
+        s3_ets_printf("[phy] phy_wakeup_init（已校准，跳过重复标定）\n");
+        phy_wakeup_init();
+        rc = 0;
+    } else {
         rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
-        s3_ets_printf("[phy] register_chipv7_phy retry rc=%d\n", rc);
+        s3_ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
+        if (rc == 1) {
+            rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+            s3_ets_printf("[phy] register_chipv7_phy retry rc=%d\n", rc);
+        }
+        if (rc == 0) {
+            s_phy_calibrated = 1u;
+        }
     }
 
     /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */

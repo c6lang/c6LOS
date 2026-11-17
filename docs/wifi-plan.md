@@ -17590,3 +17590,27 @@ A/B 结果：
 直接读它运行时的 0x60033d14 和相关 MAC 寄存器。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §522 PHY 只校准一次（IDF 语义）：无效；IDF 参考工程工具链下载中
+
+IDF `esp_phy_enable()` 用 `s_is_phy_calibrated` 保证 `register_chipv7_phy()`
+只跑一次，后续 enable 只调 `phy_wakeup_init()`。我们真板上一次流程里跑了 3 次
+完整校准，照 IDF 改成：
+```
+static u32 s_phy_calibrated;
+if (!s_phy_calibrated) register_chipv7_phy(...);   /* rc=1 则重试 */
+else phy_wakeup_init();
+```
+串口确认第二次起打印 `phy_wakeup_init（已校准，跳过重复标定）` ✓。
+
+结果：`scan_get_ap_num=0 num=0`、关联超时，与之前完全一致 ⇒ 重复校准不是原因。
+改动符合 IDF 语义、无害，保留。
+
+IDF 参考工程环境：venv + core requirements + esp-rom-elfs 已装好；
+`export.sh` 还差 xtensa-esp-elf / riscv32-esp-elf / esp32ulp-elf 等工具，
+`idf_tools.py install --targets=esp32s3` 正在后台下载（网络较慢）。
+装好后烧官方 station 例程做真板对照，直接看 0x60033d14 与扫描结果。
+
+目标未达成，goal 保持 active。
