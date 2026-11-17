@@ -884,6 +884,25 @@ static int osi_phy_disable(void)
     return 0;
 }
 
+/* §520：IDF 在 wifi_hw_start() 里的顺序是
+ *   _wifi_apb80m_request → _wifi_clock_enable → _phy_enable → _wifi_rtc_disable_iso
+ *   → _wifi_reset_mac → hal_init。
+ * _wifi_reset_mac 映射到 periph_module_reset(PERIPH_WIFI_MODULE)，即脉冲
+ * SYSTEM_WIFIMAC_RST (0x60026018 bit2)。我们以前把这个 OSI 槽位留成 glue_ret0，
+ * MAC 从没在 PHY enable **之后**复位过 —— 而 hal_init 等的 0x60033d14 bit0
+ * 很可能就是"MAC 复位释放/与 BB 同步"的硬件应答。补上它。 */
+static void osi_wifi_reset_mac(void)
+{
+    volatile u32 *rst = (volatile u32 *)0x60026018u;
+    volatile u32 k;
+
+    HIT_OF(_wifi_reset_mac);
+    *rst = *rst | (1u << 2);            /* SYSTEM_WIFIMAC_RST assert */
+    for (k = 0u; k < 400u; k++) { }
+    *rst = *rst & ~(1u << 2);           /* release */
+    s3_ets_printf("[wifi] reset_mac pulse done\n");
+}
+
 static void osi_wifi_rtc_enable_iso(void)
 {
     volatile u32 *iso = (volatile u32 *)0x60008094u;   /* RTC_CNTL_DIG_ISO */
@@ -1356,6 +1375,7 @@ void s3_wifi_osi_init(void)
     OSI_SET(_task_delay,      osi_task_delay);
     OSI_SET(_phy_enable,      osi_phy_enable);
     OSI_SET(_phy_disable,     osi_phy_disable);
+    OSI_SET(_wifi_reset_mac,  osi_wifi_reset_mac);
     OSI_SET(_wifi_rtc_enable_iso,  osi_wifi_rtc_enable_iso);
     OSI_SET(_wifi_rtc_disable_iso, osi_wifi_rtc_disable_iso);
 

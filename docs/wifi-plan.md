@@ -17560,3 +17560,33 @@ bit0 是只读状态位（JTAG `mww 3` 读回仍 0），必须由某个硬件条
    `mac_txrx_init`/`hal_attenna_init` 等 MAC 初始化。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §520/§521 补上 IDF 的 _wifi_reset_mac；PHY 走 OSI 回调；握手仍未满足
+
+深度研究子代理查出 IDF `wifi_hw_start()` 的真实顺序：
+
+```
+_wifi_apb80m_request → _wifi_clock_enable → _phy_enable → _wifi_rtc_disable_iso
+→ _wifi_reset_mac → hal_init → _set_isr/_ints_on → chip_enable
+```
+
+我们此前把 `_wifi_reset_mac` 槽位留成 `glue_ret0`，MAC 从没在 PHY enable
+**之后**复位。已补成真实槽位：`osi_wifi_reset_mac()` 脉冲
+`SYSTEM_WIFIMAC_RST` (0x60026018 bit2)，串口确认 `[wifi] reset_mac pulse done` ✓。
+
+A/B 结果：
+- 打 hal_init 补丁 + reset_mac：仍然 `scan_get_ap_num=0 num=0`。
+- 不打补丁 + reset_mac：仍卡 hal_init（W2 后静止）。
+- `S3_PHY_VIA_OSI=1`（去掉重复的早期 PHY 初始化，让库先 `_phy_enable`
+  再 `hal_init`）+ 不打补丁：日志顺序已与 IDF 一致
+  （register_chipv7_phy rc=1→retry 0 → reset_mac → 卡住），**还是卡住**。
+
+⇒ `0x60033d14` bit0 与 MAC 复位/PHY 时序无关；整库反汇编也只有 hal_init
+和 hal_deinit 引用该地址，没有别的软件写它的 bit0。
+
+下一步：等 IDF 参考工程工具链装好，烧一个官方 station 例程做真板对照，
+直接读它运行时的 0x60033d14 和相关 MAC 寄存器。
+
+目标未达成，goal 保持 active。
