@@ -15999,3 +15999,41 @@ ctx 指针闸门   : 命中 0xBAD7 —— 但这是**误报**：判据写的是"
 （`OsTask` 的 `wait_kind` / `wait_obj`，布局见 §445：
 `wait_kind` 在 +48、`wait_obj` 在 +56，任务表在 `__c99_d2` 里、
 符号表查不到，靠扫 magic `0xC6A50001` 定位）。
+
+## §461 实测：`c6c` 不能编译本仓库（附实证）
+
+`c6c` 的位置是 **`/home/winger/c6/c6c/build/c6c`**（在 `c6` 仓库**内部**，
+不在 `/home/winger/c6c`）。`Makefile:6-10` 早有一条注记说它不能用于本套构建，
+这轮把它实测确认了一遍。
+
+同一个 `.c6` 文件（`tests/t_s3_wifi3.c6`）分别用两个编译器跑同样的命令：
+
+| 编译器 | 命令 | 产出 |
+|---|---|---|
+| `c6c` | `-c -o x.o` | `ELF 64-bit LSB relocatable, **x86-64**`（16664 字节，`ET_REL`，代码 6096/数据 499/符号 153/重定位 123） |
+| `c6`  | `-c -o <目录>/` | **`t_s3_wifi3.c`（C99 源码）** |
+
+另外 `c6c --emit-llvm -o x.ll <文件>` 会报
+`没有 main（可执行文件需要入口）` —— 可见它的 `--emit-llvm` 不是"输出 LLVM IR"，
+而是"用 LLVM 后端出可执行文件"。
+
+而本仓库的构建流程是 **`c6 → C99 源码 → xtensa-esp32s3-elf-gcc`**
+（`Makefile` 里 `-c -o $(BUILD)/c99/` 那批规则，产物是 `.c` 文件）。
+`c6c` 恰恰**没有"输出 C99 源码"这个模式**，所以接不进这条流水线。
+
+⇒ **结论：`c6c` 不能编译本仓库；必须用老 `c6`**
+（`/home/winger/c6/tcc/c6`）。`c6` 本轮已成功构建十余次。
+
+### 顺带解决一个反复踩的坑
+
+`/home/winger/c6/tcc/` 的构建产物（`*.o`、`libtcc.a`、`c6`）本轮被**外部清理
+了 3 次**（每次都是整个产物集消失、源文件还在），导致构建报
+`Makefile:1634 build/wifi/tls/c99/types.c 错误 127`（127 = 命令不存在）。
+
+- 重建：`make -C /home/winger/c6/tcc -j8 c6`（`Makefile:8-9` 早就写了这条）
+- 本轮另外把编好的二进制备份到了 **`~/.c6os/bin/c6.bak`**，
+  下次再丢可以直接 `cp ~/.c6os/bin/c6.bak /home/winger/c6/tcc/c6` 还原，
+  不必等一次完整重编。
+- 稳妥起见，构建命令前面加一句
+  `[ -x /home/winger/c6/tcc/c6 ] || (cd /home/winger/c6/tcc && make c6)`
+  就能免疫这个外部清理。
