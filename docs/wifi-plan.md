@@ -14785,3 +14785,47 @@ libpp 拿到非空的 `s_wifi_queue` 就打出
 
 要查：`port_task_switch` 保存/恢复时 `c->sp` 是否真的指向这次保存的帧
 （之前的观察：`ctx[0].sp` 指向的是一段普通函数帧、不是切换帧）。
+
+## §426 新线索定位：`s3_win_wifi_main` 在同一任务里被"重入"
+
+真板日志（多次运行一致）：
+
+```
+[wifimain] id=1 tick=0     ← 第一次
+...
+[wifimain] id=1 tick=16    ← 第二次（另一次运行是 tick=30）
+```
+
+* 任务号 `id=1` **相同** ⇒ 不是"又建了一个任务"，是**同一个任务**再次执行
+  函数开头的 `ets_printf`。
+* `s3_win_wifi_main_task` 的结构是
+  `rc = s3_win_wifi_main(); *(u32*)0x50001200 = rc; for (;;) { }`，
+  正常绝不可能回到开头。
+* 结合 `TRAP pc=0x3fcef000`（正好是 DRAM 上界，即"返回地址被写成数据区地址"）
+  ⇒ **任务栈帧被破坏了**。
+
+### 现场（JTAG，halt 后读 `g_ctx`）
+`g_ctx` 当前在 `0x3fcc2ed0`（**注意：地址随构建漂移，必须每次用 nm 取**）
+
+```
+ctx[0] sp=3fcbee50 栈=[3fcbced0,3fcbeed0) 4096  EPC=40379896(s3_task_tramp)  ← 新帧，从未跑过
+ctx[1] sp=3fcc0300 栈=[3fcbeed0,3fcc06d0) 6144  EPC=42017f58(os_task_block_wait)
+ctx[2] sp=3fcc1b00 栈=[3fcc06d0,3fcc1ed0) 6144  EPC=42017f58(os_task_block_wait)
+ctx[3] 空
+```
+
+`ctx[0]` 的 `a1sl(+76) == sp == top` ⇒ 它是 `port_task_ctx_create` 造出来、
+**还停在 `s3_task_tramp` 入口没启动**的新帧。
+
+而栈分配诊断 `0x50000460` 显示 wifi 任务的栈基址是 **`3fcd8e90`**
+（贴近 `_stack_top = 0x3FCD9000`），**不是** `g_stack_pool(0x3fcbced0)` 那片。
+
+⇒ **`g_ctx` 里的槽和实际在跑的任务对不上**，这一条要先弄清楚。
+
+### 下一步
+1. 把 `0x50000460` 的分配记录用**正确的列宽**重读（`mdw` 输出按行折行，
+   现在的解析把槽号/栈/大小错位了），确认每个任务拿到的栈范围和大小。
+2. 确认 wifi 任务的栈到底是 8192 还是被削到 4096 —— 若是后者，
+   `s3_win_wifi_main` 里 PHY 那段深调用必然溢出，正好解释"帧被破坏 /
+   PC 跳回开头 / PC 落到 0x3fcef000"。
+3. 若确认溢出，加大该任务栈，或在 `port_task_ctx_check` 里加栈水位记录。
