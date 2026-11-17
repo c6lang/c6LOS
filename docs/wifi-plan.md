@@ -16953,3 +16953,27 @@ windowed 壳里本来就不成立**，得继续补。
    槽位区，要整体沿 `-48` 重新排布。
 2. `_vec_default` 别死循环：先把 PS 恢复到能继续收中断（或直接把当前任务标
    DEAD 再 `ret`），把"冻机"降级成"该任务卡住"，这样串口日志还能继续看。
+
+---
+
+## §492 ⚠️ 别开 `-DS3_AUTO_WDT`：它会把板子推进"USB 掉总线"的重启环
+
+想给"双异常冻机"加个自愈，于是构建时加了 `S3_CDEFS="-DS3_WIN_SPILL -DS3_AUTO_WDT"`。
+`port/s3/irq.c:291` 会在第一次定时器中断里 `os_wdt_start(8)`，之后每次 tick
+`os_wdt_feed()`。冻机后喂不上 ⇒ 8 秒复位 —— 听起来正好。
+
+**实测：板子进入重启环，USB CDC 直接掉总线。**
+
+```
+./tools/flashbl.sh: serial.serialposix..._update_dtr_state: OSError: [Errno 71] Protocol error
+openocd: 127.0.0.1:4444 ConnectionRefusedError
+```
+
+`/dev/ttyACM0` 节点还在，但 ioctl 报协议错；openocd 连不上；串口一个字都收不到。
+和 §370 注释里描述的场景一样：**只能人工断电重插**。
+
+原因大概率是复位环里时基太快，USB-Serial-JTAG 外设还没被固件重新初始化就被
+下一次 RTC 看门狗复位砸掉，主机侧永远等不到枚举完成。所以这条路先别走。
+
+结论：**自愈不要靠 RTC 看门狗**。真要"冻机不落地"，得让 `_vec_default`
+自己把现场收拾干净（恢复 INTLEVEL、把当前任务标 DEAD 并切走），而不是整片复位。
