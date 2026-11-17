@@ -608,7 +608,11 @@ void os_task_start_core(u32 core) {
         if (t != 0) {
             /* 诊断：记录最近 8 次调度选中的 (任务 id, 状态)。
              * 状态 4 = BLOCKED；若这里出现 4，说明选到了不该跑的任务。 */
-            volatile u32 *sd = (volatile u32 *)0x50000B00u;
+            /* §373：原来用 0x50000B00，和 port/s3/wifi_glue.c 的
+             * `IRQ_RING_BASE`（set_isr 环）**完全重叠** —— 两边互相覆盖，
+             * 于是"最近一次 set_isr"读出来是任务 id/状态，
+             * 而调度环里又是中断号。搬到 0x50001B00。 */
+            volatile u32 *sd = (volatile u32 *)0x50001B00u;
             u32 n_ = g_dbg_pick_n;
             g_dbg_pick_n = n_ + 1;
             sd[(n_ & 7) * 2] = t->id;
