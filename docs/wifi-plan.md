@@ -17273,3 +17273,41 @@ T2 windowed 主流程返回            ← 系统还活着
    自然结果，不是 TLS/lwIP 的 bug。
 
 目标（真板取得 https://qq.com 页面）仍未达成，goal 保持 active。
+
+---
+
+## §510 ★ 放开 WiFi MAC 中断源：库开始真正找 AP
+
+`start.S` §290 无条件清掉 `INTENABLE` 的源 1/4..7（WIFI_MAC_NMI / BT），
+注释说"库要用时会自己重新打开"。JTAG 实测 set_isr 环**是空的**，
+库并没有重新打开 —— 所以 MAC 中断永远到不了 CPU。
+
+实验：把那段改成 `movi a3,-1`（不屏蔽任何源）——
+
+之前：
+```
+[wifi] scan_start=12300 (ESP_ERR_WIFI_TIMEOUT)
+（库没有任何搜索 AP 的日志）
+```
+之后：
+```
+[v2]wifi|Haven't to connect to a suitable AP now!   × 十几条
+[wifi] 关联超时（15000 ms），sta_get_ap_info=12303
+```
+⇒ **MAC 中断确实是关键一环**：库现在在真正跑关联状态机、反复找 AP。
+没有出现 §290 的 `_vec_lvl6` 闪灯死循环 / double exception。
+
+### 剩余卡点
+
+`esp_wifi_scan_start(cfg, 1)` 仍返回 12300（超时），所以
+`scan_get_ap_num` / `AP0 ssid=...` 一直没打出来，无法确认射频是否收到 beacon。
+库自己的关联状态机也说找不到合适的 AP。
+
+下一步：
+1. 查 `osi_event_group_wait_bits` / `s3_w2c_event_wait` 是否把 scan-done 事件
+   正确唤醒等待者（blocking scan 超时可能是事件没送到，而不是没扫到 AP）。
+2. 改成非阻塞 scan + 延时后 `scan_get_ap_num`，看是否真的有 AP（含 RSSI）。
+3. 若确实一个 AP 都没有，再回头看 hal_init 的 `0x60033d14` 握手补丁：
+   跳过轮询让软件继续，但 RF 可能仍未就绪。
+
+目标未达成，goal 保持 active。
