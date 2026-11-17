@@ -1,6 +1,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
+#include "c6os/linux_vma.h"
 
 /* ELF64 加载器。
  *  L2：ET_EXEC（静态非 PIE）。
@@ -239,6 +240,11 @@ int lx_elf_load(u64 as, u64 img_pa, u64 img_size, u64 base,
             if (port_as_map(as, va, pa, PAGE, prot) != 0) {
                 return -9;
             }
+            /* 记账：mprotect/munmap 要靠它判断"这段是什么"。相邻页属性相同
+             * 会被 lx_vma_add 合并成一条，不会一页一个节点。 */
+            if (lx_vma_add(as, va, va + PAGE, prot, 0u, 0ull) != 0) {
+                return -11;
+            }
         }
         if (va1 > brk) {
             brk = va1;
@@ -293,6 +299,12 @@ static int build_stack(u64 as, const char *path, const char *const *argv,
         if (port_as_map(as, base + i * PAGE, pa, PAGE, C6OS_PROT_R | C6OS_PROT_W) != 0) {
             return -2;
         }
+    }
+    /* 栈 VMA：页现在是预映射的；LX_VM_STACK 是为了让缺页路径知道"落在栈
+     * 下方的地址是合法增长"，不是野指针（M13-2b-3 起按需扩栈）。 */
+    if (lx_vma_add(as, base, top, C6OS_PROT_R | C6OS_PROT_W,
+                   LX_VM_STACK | LX_VM_ANON, 0ull) != 0) {
+        return -3;
     }
 
     if (argc == 0u || argv == (const char *const *)0) {

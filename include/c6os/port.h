@@ -73,6 +73,8 @@ void port_as_ref(u64 as);
 void port_as_unref(u64 as);
 void port_as_gc(void);
 void port_as_activate(u64 as);
+/* AS 真正拆掉时发事件（上层用它还 VMA 等元信息，避免 port → linux 反向依赖）。 */
+void port_as_set_free_hook(void (*fn)(u64 as));
 /* 建立/拆除映射。paddr==0 表示分配新物理页（匿名映射）；同一 VA 覆盖映射会
  * 先释放旧页框（MAP_FIXED 语义）。 */
 int  port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot);
@@ -96,6 +98,17 @@ void port_phys_put(u64 pa);
 void port_phys_free(u64 pa);
 u64  port_phys_total_kb(void);
 u64  port_phys_free_kb(void);
+/* 连续 n 页物理帧（页对齐起点，失败返回 0）与直接映射窗口基址。 */
+u64  port_phys_alloc_pages(u64 n);
+void port_phys_free_pages(u64 pa, u64 n);
+u64  port_dmap_base(void);
+
+/* 内核堆：小对象走页级 slab（元信息在页头，不占内核镜像），大对象取连续页、
+ * 整块归还。返回的指针在直接映射窗口里，内核可直接读写；port_mmu_init 里初始化。 */
+void  port_kmem_init(void);
+void *port_kmalloc(u64 bytes);
+void *port_kcalloc(u64 n, u64 bytes);
+void  port_kfree(void *p);
 
 /* MMU / 物理帧初始化：必须先于任何 port_as_* 调用。 */
 void port_mmu_init(void);

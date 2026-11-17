@@ -12,9 +12,11 @@
  * 描述 ILP32/LP64 混合的 ABI 表，正是 architecture.md §3 警告的那类风险。
  * 规则：linux/ 下的文件只有在 C6OS_LINUX_ABI=1 时才进入编译单元列表。 */
 
-/* mmap 的两个标志（只用到这两个） */
+/* mmap 的标志（只列用到的） */
 #define LX_AT_EMPTY_PATH  0x1000ull
 #define LX_AT_SYMLINK_NOFOLLOW 0x100ull
+#define LX_MAP_SHARED     0x01ull
+#define LX_MAP_PRIVATE    0x02ull
 #define LX_MAP_FIXED      0x10ull
 #define LX_MAP_ANONYMOUS  0x20ull
 

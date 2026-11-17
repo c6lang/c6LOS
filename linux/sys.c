@@ -2,6 +2,7 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
+#include "c6os/linux_vma.h"
 
 
 /* Linux x86-64 系统调用实现（personality 的语义层）。
@@ -55,6 +56,7 @@ void lx_proc_init(u64 as, u64 brk_start)
     g_brk = brk_start;
     g_brk_init = brk_start;
     g_seed = 0x9e3779b9u;
+    lx_vma_init();                         /* VMA 表 + AS 释放回调 */
     lx_proc_attach(as, brk_start);         /* L5：登记成 0 号进程 */
 }
 
@@ -265,6 +267,9 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     } else {
         at &= ~4095ull;
     }
+    if ((flags & LX_MAP_FIXED) != 0ull && at != 0ull) {
+        lx_vma_remove(g_as, at, at + n);   /* 覆盖映射：旧记账先作废 */
+    }
     if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
         if (port_as_map(g_as, at, 0ull, n, perm) != 0) {
             return neg(LX_ENOMEM);
@@ -302,6 +307,17 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
                 return neg(LX_ENOMEM);
             }
             p += 4096ull;
+        }
+    }
+    /* 记账：munmap/mprotect/栈增长都靠这条链判断"这段地址是什么"。 */
+    {
+        u32 vf = ((flags & LX_MAP_ANONYMOUS) != 0ull) ? LX_VM_ANON : LX_VM_FILE;
+
+        if ((flags & LX_MAP_SHARED) != 0ull) {
+            vf |= LX_VM_SHARED;
+        }
+        if (lx_vma_add(g_as, at, at + n, (u32)perm, vf, off) != 0) {
+            return neg(LX_ENOMEM);         /* 区间冲突/记账 OOM */
         }
     }
     return at;
@@ -435,14 +451,26 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_munmap:
+        /* 先作废记账再还页：反过来会让缺页在"页已还、VMA 还在"的窗口里
+         * 重新分配页，把 munmap 变成空操作。 */
+        lx_vma_remove(g_as, a0, a0 + ((a1 + 4095ull) & ~4095ull));
         (void)port_as_unmap(g_as, a0, (a1 + 4095ull) & ~4095ull);
         r->rax = 0ull;
         return;
 
     case LX_SYS_mprotect:
         {
-            int mrc = port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
-                                      (u32)a2);
+            u64 end = a0 + ((a1 + 4095ull) & ~4095ull);
+            int mrc;
+
+            /* 先过 VMA：Linux 对"保护一段没映射的地址"返回 ENOMEM。只改页表
+             * 而不管记账，会让后续 munmap/栈增长按旧属性判断。 */
+            if (lx_vma_protect(g_as, a0, end, (u32)a2) != 0) {
+                r->rax = neg(LX_ENOMEM);
+                return;
+            }
+            mrc = port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
+                                  (u32)a2);
 
             /* 未映射/参数越界在 Linux 是 ENOMEM；权限位本身只取 R/W/X */
             r->rax = (mrc == 0) ? 0ull : neg(LX_ENOMEM);

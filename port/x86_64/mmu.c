@@ -178,6 +178,64 @@ void port_phys_free(u64 pa)
     port_phys_put(pa);
 }
 
+/* 连续 n 页物理帧：页表页、内核堆的 slab 页都要求"页对齐起点 + 整页"，大对象
+ * 还要物理连续（直接映射窗口里才连续可读写）。失败返回 0。 */
+u64 port_phys_alloc_pages(u64 n)
+{
+    u64 f = g_rover;
+    u64 scanned = 0ull;
+    u64 run = 0ull;
+    u64 base = 0ull;
+
+    if (n == 0ull) {
+        return 0ull;
+    }
+    while (scanned < g_frames) {
+        if (f >= g_frames) {
+            f = 4ull;
+            run = 0ull;                   /* 绕回低端：连续性在这里断掉 */
+        }
+        if (!bmp_get(f)) {
+            if (run == 0ull) {
+                base = f;
+            }
+            run++;
+            if (run >= n) {
+                u64 k;
+
+                for (k = base; k < base + n; k++) {
+                    bmp_set(k);
+                    if (g_ref != (u8 *)0 && k < g_ref_bytes) {
+                        g_ref[k] = 1u;
+                    }
+                    g_free--;
+                }
+                g_rover = base + n;
+                return base << 12;
+            }
+        } else {
+            run = 0ull;
+        }
+        f++;
+        scanned++;
+    }
+    return 0ull;
+}
+
+void port_phys_free_pages(u64 pa, u64 n)
+{
+    u64 k;
+
+    for (k = 0ull; k < n; k++) {
+        port_phys_put(pa + (k << 12));
+    }
+}
+
+u64 port_dmap_base(void)
+{
+    return DMAP_BASE;
+}
+
 /* 当前引用数。COW 用：只剩一个引用时直接放开写，不必复制。
  * 表还没建好时返回 1（退化为"独占"）。 */
 static u32 phys_refs_(u64 pa)
@@ -460,6 +518,7 @@ void port_mmu_init(void)
     port_as_activate(g_kernel_as);
     g_dmap_ready = 1;                     /* 之后所有页表内存走直接映射窗口 */
     ref_table_init();                     /* 引用计数表要等直接映射可用 */
+    port_kmem_init();                     /* 内核堆：内核对象（VMA/动态表）的地基 */
 }
 
 /* ---- 地址空间生命周期 ----------------------------------------------------
@@ -510,6 +569,15 @@ static int as_slot_alloc_(u64 as)
         }
     }
     return -1;
+}
+
+/* AS 释放钩子：上层（linux/vma.c 等）在地址空间真正拆掉前要把自己的元信息还掉。
+ * port 层不认识 VMA/进程，所以只发事件、不反向依赖 linux/。 */
+static void (*g_as_free_hook)(u64 as);
+
+void port_as_set_free_hook(void (*fn)(u64 as))
+{
+    g_as_free_hook = fn;
 }
 
 static void as_free_(u64 as)
@@ -565,6 +633,9 @@ static void as_free_(u64 as)
         port_phys_put(e4 & PTE_ADDR);               /* PDPT 页 */
     }
     port_phys_put(as);                              /* PML4 页 */
+    if (g_as_free_hook != (void (*)(u64))0) {
+        g_as_free_hook(as);                         /* 上层还自己的元信息 */
+    }
 }
 
 u64 port_as_create(void)

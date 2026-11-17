@@ -1002,6 +1002,9 @@ X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
 endif
 
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
+# MMU 与内核堆必须同时在场：kmem 的页来自 PMM、指针在直接映射窗口里。集中成一处，
+# 免得以后再加"跟着 mmu 走"的文件时又要改三个 X86S_NAME 分支。
+X86S_MMU_OBJ := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/kmem.o
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
               $(X86S_DIR)/obj/ctx_asm.o $(X86S_DIR)/obj/irq.o \
@@ -1013,11 +1016,11 @@ ifeq ($(X86S_NAME),user)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
               $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/vma.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
@@ -1025,11 +1028,11 @@ ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o
 endif
 
 # M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
@@ -1037,7 +1040,7 @@ ifeq ($(X86S_NAME),mem)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o
+              $(X86S_MMU_OBJ)
 endif
 
 ifeq ($(C6OS_NET),1)
@@ -1178,6 +1181,10 @@ $(X86S_DIR)/obj/mmu.o: port/x86_64/mmu.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/kmem.o: port/x86_64/kmem.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 $(X86S_DIR)/obj/linux.o: port/x86_64/linux.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
@@ -1219,6 +1226,10 @@ $(X86S_DIR)/obj/tty.o: linux/tty.c
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
 $(X86S_DIR)/obj/sig.o: linux/sig.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/vma.o: linux/vma.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 

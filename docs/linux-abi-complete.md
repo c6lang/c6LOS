@@ -423,3 +423,45 @@ QEMU 报 `qemu_mutex_lock_iothread_impl: assertion failed` 后 abort（现场看
 全 PASS（M9-4 连跑 3 次 PASS；整套循环里偶发一次失败，属环境/镜像时序抖动，
 非本次改动引入）。
 
+### M13-2b 地址空间：内核堆 + VMA 层
+
+M13-2b-1 内核堆：
+
+- `port/x86_64/kmem.c`：小对象走页级 slab（7 个类 32B–2KB，页头存 magic/类号，
+  空闲对象自身串链），大对象取连续页、整块归还。元信息全在页头，`.bss` 里只有
+  7 个类头指针 —— 没有重蹈"表放 `.bss` 长过 0xA0000"的坑。
+- `port/x86_64/mmu.c`：新增 `port_phys_alloc_pages(n)`（连续帧，绕回低端时重置
+  连续性）、`port_phys_free_pages`、`port_dmap_base`；`port_mmu_init` 末尾初始化
+  内核堆。
+- 验收：`tests/t_x86_mem.c6` 扩用例 —— 同类对象地址不重叠、大对象释放后
+  `free_kb` 回升、释放回链后还能再拿到；`check-linuxabi-m13` 仍 PASS。
+
+M13-2b-2 VMA 层：
+
+- `linux/vma.c` + `include/c6os/linux_vma.h`：每个 AS 一条按 start 有序的 VMA
+  链（anon/file/stack/heap/shared/lazy 标记），提供 find/add/remove/protect/
+  free_all；注册表本身也是 `port_kcalloc` 倍增的，没有条数上限。
+- 生命周期：`port_as_set_free_hook` 让 port 层在 AS 真正拆掉时发事件，
+  `linux/vma.c` 借此还掉整链并摘除条目 —— port 层不认识 VMA，不做反向依赖。
+  这一条很关键：PML4 的物理地址会被下一个 AS 复用，不摘除就会把旧 VMA 算到
+  别人头上（只在反复 fork 后偶发）。
+- 接线：ELF 段逐页登记（相邻同属性自动合并）、栈登记为 `LX_VM_STACK`、
+  mmap/MAP_FIXED/munmap/mprotect 全部记账。munmap 先作废记账再还页（反过来会
+  在"页已还、VMA 还在"的窗口里被缺页重新填回来）；mprotect 对未映射区间返回
+  ENOMEM，与 Linux 一致。
+
+拆段 bug（两个，都是"先改后拷"和"边界方向写反"）：
+
+1. `lx_vma_remove` 中间挖洞时先 `cur->end = start` 再 `*tail = *cur`，把
+   `end < start` 的倒挂节点拷进链里；之后所有插入都判重叠，ld.so 加载
+   libresolv 报 `failed to map segment`。
+2. 同一函数"砍头部"分支把 `cur->start` 又设回 `start`（应为 `end`），前缀
+   munmap 变成空操作，MAP_FIXED 覆盖时旧 VMA 残留。
+
+教训：区间切分要么先拷贝再改，要么让新节点从旧节点派生、旧节点最后改；这类
+bug 的表象是"某个共享库偶尔加载失败"，不顺着 VMA 链看根本定位不到。
+
+验收：L4/L5/L6/L7/L8/M9/M13/M13b 全 PASS。COW 用例连跑 13 次全过；其间有一次
+make 轮次里出现早期 #DE 崩溃，未能复现（同一镜像随后 13/13 通过），记为环境
+抖动，若再出现按 §6 风险项单独跟踪。
+

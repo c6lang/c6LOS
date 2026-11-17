@@ -130,6 +130,47 @@ void os_main(void)
         }
     }
 
+    /* 内核堆（M13-2b-1）：小对象按类复用、地址不重叠；大对象走连续页、释放后
+     * 整块还回去（free_kb 必须回升）。slab 页不还页是有意的：那种抖动比漏页更
+     * 伤吞吐，长期上限由真实并发对象数决定。 */
+    if (fail == 0u) {
+        void *a = port_kmalloc(24ull);
+        void *b = port_kmalloc(24ull);
+        void *c = port_kmalloc(300ull);
+        void *d = port_kmalloc(70000ull);
+        u64 kb_big = 0ull;
+
+        if (a == (void *)0 || b == (void *)0 || c == (void *)0 ||
+            d == (void *)0) {
+            fail = 13u;
+        } else if (a == b) {
+            fail = 14u;
+        } else {
+            *(u64 *)a = 0x1122334455667788ull;
+            *(u64 *)c = *(const u64 *)a;
+            *(u64 *)d = *(const u64 *)a;
+            if (*(const u64 *)c != 0x1122334455667788ull ||
+                *(const u64 *)d != 0x1122334455667788ull) {
+                fail = 15u;
+            }
+            kb_big = port_phys_free_kb();
+            port_kfree(d);
+            if (port_phys_free_kb() <= kb_big) {
+                fail = 16u;                /* 大对象没还页 */
+            }
+            port_kfree(a);
+            port_kfree(b);
+            port_kfree(c);
+            a = port_kmalloc(24ull);
+            b = port_kmalloc(24ull);
+            if (a == (void *)0 || b == (void *)0 || a == b) {
+                fail = 17u;                /* 释放回链后必须能再拿到 */
+            }
+            port_kfree(a);
+            port_kfree(b);
+        }
+    }
+
     after = port_phys_free_kb();
     put_kv("m13: free after=", after);
 
