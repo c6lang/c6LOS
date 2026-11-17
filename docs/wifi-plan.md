@@ -17540,3 +17540,23 @@ bit0 是只读状态位（JTAG `mww 3` 读回仍 0），必须由某个硬件条
 没有额外的 lock 状态位可查 —— BBPLL 已开且 0x6001c08c 在变。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §519 排除 ISR 派发与扫描等待时序；外部资料查不到握手位定义
+
+1. **库不装 ROM ISR**：全 ELF 反汇编里没有任何 `call0 0x40001b78`
+   (`ets_isr_attach`) / `ets_isr_unmask` 调用；`osi_set_isr` 环也是空的。
+   ⇒ WiFi 库靠轮询而非中断，`_vec_level1` 没派发库 ISR 不是扫不到 AP 的原因。
+
+2. **扫描等待是真的**：`s3_wifi_scan()` 用 60×100 tick 的
+   `s3_w2c_task_delay(100)`，串口里能看到 ~100 个 `u2` 唤醒标记，
+   不是"循环瞬间跑完"；`esp_wifi_scan_get_ap_num()` 稳定返回 0。
+
+3. **外部查证**：Espressif 公开文档/TRM、头文件、Web 搜索都没有
+   `0x60033d14` 的 bit 定义；第三方 S3 MAC 反演头只到
+   `WIFI_TX_CONFIG=0x60033d04` / `WIFI_TX_PLCP0=0x60033d08`。
+   hal_init 里 0xD14 是一次性置 bit1 请求、等 bit0 应答，之后才跑
+   `mac_txrx_init`/`hal_attenna_init` 等 MAC 初始化。
+
+目标未达成，goal 保持 active。
