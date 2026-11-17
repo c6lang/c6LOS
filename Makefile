@@ -1,7 +1,7 @@
 # c6LOS —— ESP32-S3 构建
 # 用法：make C6_ROOT=/path/to/c6 s3
 
-C6_ROOT ?= $(HOME)/superc
+C6_ROOT ?= $(HOME)/c6
 C6CC    := $(C6_ROOT)/tcc/c6
 XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
 XTGCC   := $(XTP)gcc
