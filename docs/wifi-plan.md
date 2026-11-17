@@ -15323,3 +15323,91 @@ halt 后读 CPU 寄存器：
 3. 也可以考虑：库任务在 `S3_NO_PREEMPT` 下长期不让出 CPU 本身也是个问题 ——
    即使窗口修好，wifi 主任务仍可能饿死。可考虑在 `s3_w2c_*` 壳里定期
    主动 yield，或恢复抢占但**同时**在 ISR 里正确保存 `c->sp`（这才是 §376 想做的事）。
+
+## §447 ★★ `g_s3_win_spill_en` 从来没生效过 —— 修掉后崩溃消失
+
+**发现**：`WIN_SPILL` 的 3 个调用点（`w2c.S:240/325/451`）本来就写了开关检查：
+```asm
+l32r a8, 12b ; l32i a9, a8, 0 ; beqz a9, .Lno_spill ; WIN_SPILL
+```
+**但 `s3_wifi_osi_init()` 里 `#ifdef S3_NO_WIN_SPILL` 的 `#else` 分支把值设成 `1`**
+（默认开），所以这个开关**从加进来那天起就没有关过一次**，spill 一直在跑。
+
+**修法**：
+1. `wifi_glue.c`：`#ifdef S3_NO_WIN_SPILL` → `#ifdef S3_WIN_SPILL`，**默认 0**
+   （需要做对照实验时用 `-DS3_WIN_SPILL` 打开）；
+2. `w2c.S` 的 `WIN_SPILL` 宏内部再加一道守卫（`l32r a8,12b / l32i a8,a8,0 /
+   `beqz a8,5f`，用本文件唯一空闲的数字标号 `5`），让宏自身也是完整的。
+
+**真板效果（决定性对比）**：
+
+| 项目 | 修前 | 修后 |
+|---|---|---|
+| `pc` | `0x40379e54` 卡在 `_vec_level1` 向量里 | `0x40379037` **在 `port_idle` 空闲循环** |
+| `exccause` | `0x1d` StoreProhibited | `0x04`（普通 level-1 中断） |
+| `excvaddr` | `0x0005ffe0` 野写 | **`0`** |
+| `epc1` | `0x42014ee7` = `s3_win_spill+0x40` 的 `call12` | 不再落在 spill 上 |
+| `windowbase` | `0x0e` | `0x0a` |
+| `windowstart` | `0x4935`（位模式异常） | `0x0555`（`0b010101010101`，合法） |
+| `a1` | `0x3fcc0550`（库任务栈） | `0x3fcd9400`（**主栈**） |
+
+**§446 那条根因链确认成立**：spill 把 WINDOWBASE 推满一圈 → 触发窗口溢出异常 →
+溢出处理体读 `[a1-12]` 帧链（call0 内核帧里没有这条链）→ 脏 a9 写飞 →
+进 `_vec_level1` 且 wb 越转越乱 → 永久卡在向量里。
+
+注：`ctx.S` 里的 `S3_SPILL_ALL` 宏（§304）**只定义、从未被引用**，是死代码，不是源头。
+
+## §448 真正的死锁：两个任务在同一个 WiFi 内部对象上 `Q_WAIT_GET`
+
+崩溃修掉之后，串口停在 `bWu1bb`，JTAG 看到 CPU 在 `port_idle`（`a0=0x4037902c`）
+空转 —— 纯"所有任务阻塞"。
+
+任务表实测（两个任务，`g_tasks=0x3fcb971d`，间距 `0x70`：
+
+| 任务 | id | prio | state | wait_kind | wait_obj |
+|---|---|---|---|---|---|
+| wifi 主任务 | 1 | 3 | `4` BLOCKED | **`6` = `Q_WAIT_GET`** | `0x3fcc75b4` |
+| 库任务 | 2 | 2 | `4` BLOCKED | **`6` = `Q_WAIT_GET`** | `0x3fcc75b4` |
+
+**⇒ 两个任务在同一个对象上等"接收"，没有生产者 ⇒ 真死锁。**
+`WSTAGE` 仍是 `0x1005`（`s3_wifi_bringup()` 内部）。
+
+### 布局修正（重要，之前偏移算错）
+`wait_obj` 是 `void*`，c6 按 **8 字节对齐**排到了 **`+56`**（不是 `task.h` 里的 40，
+也不是我先前猜的 52）。`wait_kind` 在 **`+48`**（1 字节）。所以：
+```
++44 = prio|base_prio|state|core   (0x00040303 ⇒ prio3 base3 BLOCKED core0)
++48 = wait_kind                   (6 = Q_WAIT_GET)
++56 = wait_obj                    (void*, 8 字节对齐)
++92 = name
+```
+
+### `0x3fcc75b4` 不是我们的 `OsQueue`
+dump 该片（`0x3fcc75a0..`）：
+```
+0x3fcc75a0 = 0x57484646   "FFHW"（库内部 magic）
+0x3fcc75a4 = 0x00000030   size=48
+0x3fcc75a8 = 0x00000001
+0x3fcc75b0 = 0x3fcc75b0   自指（空链表头）
+0x3fcc75b4 = 0x3fcc75f0
+```
+我们的 `OsQueue` magic 是 `0x51E5C6A5`（`queue.c6:4`），**这一片里没有** ⇒
+`0x3fcc75b4` 是 WiFi 库自己管理的对象（在 `g_wifi_heap_mem` 即 `0x3fcc7060` +
+0xc000 范围内），不是我们 `s3_w2c_queue_create` 出来的。
+
+### 顺带澄清：tick 是正常的
+`0x50000700`(INR)=**13568**、`0x50000708`(tick)=**53** —— 那个 tick 槽是
+"每 256 次才记录一次"的诊断（`irq.c` 里 `if ((st_n & 0xFFu)==0u)`），
+**53×256 = 13568，精确吻合** ⇒ 定时器中断一直在跑，delay 逻辑没问题。
+`S3_NO_PREEMPT` 的 `return 0` 在 `os_sched_tick()` **之后**，不影响 tick。
+
+### 下轮方向
+1. 查 `s3_wifi_bringup()`（WSTAGE 0x1005 之后那段）在等什么：
+   `esp_wifi_init_internal` / `esp_wifi_set_config` / `esp_wifi_start` 哪个会在
+   **库内部对象**上 `queue_recv` —— 那个对象的生产者是谁（WiFi 事件任务？）。
+2. 怀疑点：WiFi 事件的投递依赖 `s_wifi_queue`（ROM `0x3fcef918`）或者库内部的
+   event task。如果事件任务的入口没被调度起来，就永远没有生产者。
+   日志 `bWu1bb` 里那个 `W` 是 give 命中了一个 `Q_WAIT_GET` 等待者（`task.c6:454`），
+   说明确实有过一次投递，之后就没再有。
+3. 也值得确认：库任务自身也阻塞在 `Q_WAIT_GET` 上是否**正常**（很多 IDF 内部
+   任务就是这样等事件队列的），如果是正常的，那问题就纯粹是"上游没喂事件"。

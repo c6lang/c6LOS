@@ -1247,10 +1247,19 @@ void s3_wifi_osi_init(void)
     u32 i = 0;
 
     while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
-#ifdef S3_NO_WIN_SPILL
-    g_s3_win_spill_en = 0u;    /* 对照实验：不 spill 祖先窗口（§230） */
-#else
+    /* §447：**默认关闭**祖先窗口 spill（原先要 `S3_NO_WIN_SPILL` 才关，默认是开）。
+     * 理由见 w2c.S 里 WIN_SPILL 宏的注释：`s3_win_spill` 是 IDF 官方实现，靠把
+     * WINDOWBASE 推满一整圈来触发硬件溢出，而溢出处理体要用 `[a1-12]` 帧链 ——
+     * call0 内核的帧里没有这条链，于是拿脏 a9 写飞（§446 现场：StoreProhibited
+     * excvaddr=0x0005ffe0、epc1=s3_win_spill+0x40 的 call12、windowbase=14）。
+     *
+     * 关掉是安全的：W2C 壳自己已经把 a0..a15 完整存进帧（0..60 那 16 条 s32i），
+     * 窗口快照完整，wb 稳定在 0..4 不会绕圈。
+     * 需要开启做对照实验时用 `-DS3_WIN_SPILL`。 */
+#ifdef S3_WIN_SPILL
     g_s3_win_spill_en = 1u;
+#else
+    g_s3_win_spill_en = 0u;
 #endif
 
     /* 头尾不是函数指针，而是版本号和魔数：
