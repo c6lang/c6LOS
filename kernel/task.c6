@@ -606,18 +606,13 @@ void os_task_start_core(u32 core) {
     while (1) {
         OsTask *t = sched_pick(me);
         if (t != 0) {
-            /* 诊断：记录最近 8 次调度选中的 (任务 id, 状态)。
-             * 状态 4 = BLOCKED；若这里出现 4，说明选到了不该跑的任务。 */
-            /* §373：原来用 0x50000B00，和 port/s3/wifi_glue.c 的
-             * `IRQ_RING_BASE`（set_isr 环）**完全重叠** —— 两边互相覆盖，
-             * 于是"最近一次 set_isr"读出来是任务 id/状态，
-             * 而调度环里又是中断号。搬到 0x50001B00。 */
-            volatile u32 *sd = (volatile u32 *)0x50001B00u;
-            u32 n_ = g_dbg_pick_n;
-            g_dbg_pick_n = n_ + 1;
-            sd[(n_ & 7) * 2] = t->id;
-            sd[(n_ & 7) * 2 + 1] = (u32)t->state;
-            sd[16] = g_dbg_pick_n;
+            /* §374：**调度热路径上不留任何 RTC 诊断写**。
+             * 原来这里每次选中任务都往 RTC 慢存写 3 个字（0x50000B00，后来又
+             * 撞过户、搬到 0x50001B00），而这条循环是每次上下文切换都要跑的；
+             * 诊断本身在"切换帧已经坏了"的场景下会把现场搅成一锅粥
+             *（§364 里 a1 恰好等于这个常量就是它造成的）。
+             * 需要时用 g_dbg_pick_n 在内存里数即可（不写 RTC）。 */
+            g_dbg_pick_n = g_dbg_pick_n + 1u;
         }
         if (t == 0) {
             if (os_task_count() == 0) {

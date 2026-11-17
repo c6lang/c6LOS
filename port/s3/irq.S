@@ -356,6 +356,18 @@ _vec_level1:
     movi    a3, -32
     and     a2, a2, a3
     s32i    a2, a1, 64
+    /* §375（真 bug）：**偏移 68/72 必须写 WINDOWSTART/WINDOWBASE**。
+     *
+     * `port_irq_fill()` 会把这个帧记成任务的保存点，之后走
+     * `RESTORE_FRAME`；而 RESTORE_FRAME 会 `l32i a3, a1, 68` 然后
+     * `wsr windowstart`（非 0 时）。这里原来没写这两格，读出来就是**栈上的
+     * 旧内存**。真板现场：`windowstart=0x00000200`、`windowbase=9`、
+     * `a1=0x0008437f`（垃圾 sp）—— `a1` 就是被 `wsr windowstart` 之后的
+     * 窗口重映射搞坏的。ctx.S 的保存路径一直写这两格，只有中断帧漏了。 */
+    rsr     a2, windowstart
+    s32i    a2, a1, 68
+    rsr     a2, windowbase
+    s32i    a2, a1, 72
     /* §372：帧自描述。本帧在 [sp-128, sp-4)，所以恢复后的 sp = 帧 + 128。
      * 以前这里没有这个槽，`RESTORE_FRAME` 一律 `addi a1, a1, 80`，而
      * `port_irq_fill` 恰好把 c->sp 记成这个 128 字节的帧 ⇒ 被中断过的任务
