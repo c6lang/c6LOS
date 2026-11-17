@@ -13821,3 +13821,43 @@ a1          = 0x0008437f     ← 垃圾 sp（`wsr windowstart` 把窗口重映�
 `a0=0x3fcb9d89` 是 `__c99_d2` 段里的地址（`os_core_ready` 附近），被当成
 指针解引用 ⇒ 说明**某个函数的 a0（返回地址）被数据值顶掉了**，这类现场
 仍然指向"寄存器窗口内容与 WINDOWBASE 不匹配"。
+
+## §376 中断帧**不再记成任务保存点**（默认行为改掉，`-DS3_ISR_SAVE_CTX` 才开）
+
+`port_irq_fill()` 以前把中断帧记进 `c->sp`。但中断帧和 `port_task_switch`
+的帧**语义不同**：
+
+| 字段 | 中断帧（`_vec_level1`） | 任务帧（`port_task_switch`） |
+|---|---|---|
+| 偏移 64 (PS) | 被打断者的 PS **去掉 INTLEVEL** | 任务的 PS（含 CALLINC） |
+| 偏移 68/72 | 被打断那一刻的 WS/WB | 任务自己保存的 WS/WB |
+| 帧长度 | **128** | **80** |
+
+混用会让任务恢复后的窗口基址与寄存器内容不配套。现在默认不记，
+只有 `-DS3_ISR_SAVE_CTX`（将来做抢占时）才记。
+
+## §377 剩下的坎：**库的 windowed 帧被切走时 a0 还带窗口标签**
+
+排除上面所有错误之后，现场稳定成这一副：
+
+```
+trap 记录（0x50000140，第一次异常，没有被打印路径污染）：
+  cause=0x14 (InstrFetchProhibited)   a0=0x8204df12  a1=3fcbebc0  PS=00060c00
+  → 0x8204df12 & 0x3FFFFFFF = 0x4204df12，落在 **bb_init+0xb6**（闭源 PHY 库）
+实时：exccause=1c(LoadProhibited) epc1=42018932 windowbase=9 windowstart=0x200
+      a0=3fcb9d89  a1=0x0008437f
+```
+
+解读：`a0` 的高 2 位是 **CALLINC=2**（call8 的窗口标签），说明这是**库的
+windowed 函数还没 retw** 时被切走/被中断的现场。`rfe` 回到 `EPC` 时把
+`0x82xxxxxx` 这种带标签的地址直接写进 PC ⇒ **InstrFetchProhibited**。
+
+我们已经有的防护是 `port_task_switch` 里 `slli/srli` 清高 2 位，但它只覆盖
+"**我们自己发起**的切换"。**中断路径（`_vec_level1`）存进帧+60 的 EPC 是
+`rsr epc1`**，那本来就不带标签 —— 所以问题不在那里。
+
+真正缺的是：**被中断/被切走的库函数，其 a0 的窗口标签必须原样保留到它自己
+`retw` 那一刻**，而这依赖 **WINDOWBASE 在切换前后完全一致**。现在
+`windowbase=9`（奇数、非法）说明**有人的 rotw 步进没归位**。
+下一步就从这里查：谁在把 WINDOWBASE 弄成 9（`s3_win_spill` 的
+`call4/8/12` 嵌套、`_win_ovf*` 的 `rfwo`、还是库自己的 `entry`）。

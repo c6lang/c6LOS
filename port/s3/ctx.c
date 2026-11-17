@@ -222,7 +222,22 @@ void port_irq_fill(u32 frame_sp)
         u32 hi = lo + c->size;
 
         if (frame_sp >= lo && frame_sp < hi) {
+#ifndef S3_ISR_SAVE_CTX
+            /* §376：**中断帧不能当成任务的保存点**（默认行为已改）。
+             *
+             * 中断帧和 port_task_switch 的帧布局不同：它的 PS 槽是"被打断者
+             * 的 PS 去掉 INTLEVEL"，偏移 68/72 存的是被打断那一刻的
+             * WINDOWSTART/WINDOWBASE；而 `RESTORE_FRAME` 期望的是"这个任务
+             * 自己的、可以原样写回硬件的窗口状态"。两者混用会让任务恢复后的
+             * 窗口基址/起始与它的寄存器内容不配套 —— 真板症状正是
+             * `windowbase=9`（奇数、非法）、`windowstart=0x200`、`a1` 变成
+             * 垃圾（§375 现场）。
+             *
+             * 只有 `-DS3_ISR_SAVE_CTX` 才沿用旧行为（配合抢占实验）。 */
+            (void)frame_sp;
+#else
             c->sp = frame_sp;
+#endif
         } else {
             volatile u32 *r = (volatile u32 *)0x500017C0u;
 
