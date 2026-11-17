@@ -231,6 +231,20 @@
      * 比整机卡死好得多，而且坏值被记下来可以直接看出是哪个帧坏了。 */
     movi    a6, 16
     bgeu    a5, a6, 43f             /* WINDOWBASE >= 16 ⇒ 非法 */
+    /* §470 ★★ 还必须校验"WINDOWBASE 是 4 的倍数"。
+     * Xtensa 硬不变式：windowbase 必须 4 对齐 —— 它同时也是 WINDOWSTART
+     * 的右移量，要求 `(WINDOWSTART >> WINDOWBASE) & 1 == 1`。
+     * 写一个非 4 倍数的值，`wsr windowbase` 自己就会进异常。
+     *
+     * §468 把库任务栈抬到 8192 之后，`_vec_default` 记下的是：
+     *   exccause = 0x1d (LoadStorePIFAddrErrorCause)
+     *   epc1     = 0x40379754   ← 就是下面这条 `wsr windowbase`
+     *   windowbase = 0xa (=10)  ← 非 4 倍数
+     * §464 只查了 `< 16`，10 能通过，所以照样崩。
+     * （上面注释里"库任务把 WINDOWBASE 推到 10"这句，恰恰说明 10 是垃圾值，
+     *  不是合法的库任务窗口 —— 合法值只能是 0/4/8/12。） */
+    extui   a6, a5, 0, 2
+    bnez    a6, 43f                 /* WINDOWBASE 非 4 倍数 ⇒ 非法 */
     /* ★必须是 srli（取高 16 位）而不是 slli。写成 slli a6, a3, 16 时，
      * 只要 low16 != 0 结果就 != 0，于是**每一次**恢复都被误判成非法
      * （§464 实测：诊断区记到 坏WB=0x0 坏WS=0x00000001、次数=8，

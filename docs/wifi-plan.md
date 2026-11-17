@@ -16411,3 +16411,66 @@ a15 = 0x4205388b   ← 与 epc1 相同（向量入口把 epc1 存在这一槽）
 优先怀疑 `pp` 任务被建出来时**栈不足或未初始化**：
 `fn=40381ca0 stack=6144 prio=29(->2)` —— 注意 `osi_task_create` 会把
 `stack<6144` 抬到 6144，这个任务**刚好卡在下限**。
+
+## §469 库任务栈 6144 → 8192（有效，但只解决了一半）
+
+§468 抓到 `a7 = 0xc4b00000` 后，最直接的怀疑是库任务栈溢出
+（`a7` 是 windowed 的 callee-saved，只会存在栈上）。
+`ppTask` 自己只要 3584，`osi_task_create` 抬到 6144；
+`S3_STACK_POOL` 在 §449 已从 24KB 提到 **40KB**，所以抬到 8192 有余量
+（`bringup 8K + pp 8K + lwIP 4K = 20K`）。
+
+改完实测：`[task] 库建任务 ... stack=8192`，`a7=0xc4b00000` 那次崩溃**消失**，
+串口从卡死的 `bWu1bu1Wu2.b` 变成
+
+```
+bWu1bu1Wu2.b.............Wu1
+```
+
+即任务 1 在 13 次调度之后**又被唤醒继续跑**。⇒ 栈确实曾经过小。
+
+## §470 ★★ 真正的窗口崩溃根因：`WINDOWBASE = 0xa`（非 4 的倍数）
+
+栈修好后崩的**不再是** `a7`，而是回到 `_vec_default`。它记下：
+
+```
+magic=0xBAD0  exccause=0x1d (LoadStorePIFAddrErrorCause)
+excvaddr=0xfffffff1  epc1=0x40379754  ps=0x0006091f
+a0=0x3fcbcdf4  a1=0x0000000a  windowbase=0x0a  windowstart=0x400
+```
+
+`epc1 = 0x40379754` 就是 `port_task_switch` 里的 **`wsr windowbase`**，
+而 `windowbase = 0xa = 10` —— **Xtensa 的 windowbase 必须是 4 的倍数**
+（它同时是 WINDOWSTART 的右移量，要满足 `(WINDOWSTART >> WINDOWBASE) & 1 == 1`）。
+写非 4 倍数的值，`wsr windowbase` 自己就进异常。
+
+**§464 的校验只查了 `a5 < 16`，10 能通过，所以照样崩。**
+§457 注释里那句"库任务把 WINDOWBASE 推到 10"其实是**把垃圾值当成了正常现象** ——
+合法值只能是 0/4/8/12（`call4/8/12` 的步进都是 4 的倍数，硬件根本产生不出 10）。
+
+修法（`port/s3/ctx.S` 的 `40:` 分支，紧跟 `bgeu a5, a6, 43f` 之后）：
+
+```
+    extui   a6, a5, 0, 2
+    bnez    a6, 43f                 /* WINDOWBASE 非 4 倍数 ⇒ 非法 */
+```
+
+实测：窗口校验区 `0x50000680` 记下 `坏WB=0xa 坏WS=0x00000400 帧=0x3fcc0b00 次数=3`
+⇒ 校验**确实命中了 3 次**并做了归一化。
+
+**但 PC 仍然停在 `_vec_default+0x2c`（`0x4037a028: j .`）** ——
+说明还有**别的地方**在往 `windowbase` 写非 4 倍数的值。
+`ctx.S` 里写 `windowbase` 的三处（`RESTORE_FRAME`、`68==0` 分支、`43:` 归一化）
+现在都有校验了，**只剩 `port/s3/irq.S` 的 §460 中断恢复段没有**：
+
+```
+/* irq.S 恢复段，§460 */
+rsync
+wsr  <ws>, windowstart
+isync
+wsr  <wb>, windowbase      ← 这里没有 4 对齐校验
+isync
+```
+
+**下一步就是给 §460 加上同样的 `extui`/`bnez` 校验**（非法就归一化到 0/1）。
+另外 `w2c.S` 的 `WIN_SPILL` / `s3_win_spill` 也值得一并核对。

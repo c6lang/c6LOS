@@ -804,8 +804,16 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深，
      * 所以要抬。但栈池只有 24KB（port/s3/ctx.c 的 S3_STACK_POOL，§219），
      * 抬到 8192 的话"bringup 任务 8KB + ppTask 8KB + lwIP tcpip 4KB"就快满了，
-     * 所以这里取 6144：够深调用的余量，又给别的任务留位置。 */
-    if (stack < 6144u) { stack = 6144u; }
+     * 所以这里取 6144：够深调用的余量，又给别的任务留位置。
+     *
+     * §469：**改成 8192**。§468 抓到闭源 `pp` 任务崩溃时 `a7 = 0xc4b00000`
+     * （windowed ABI 的 callee-saved 寄存器，只会存在栈上），
+     * 而 `excvaddr = 0xc4b0002c` 恰好等于 `a7 + 44`，
+     * 那个 `+44` 出现在 `ppTxFragmentProc` 里 —— 也就是这个任务自己。
+     * callee-saved 被写坏 = 自己的栈被覆盖，而库里 `ppTask` 只要 3584、
+     * 我们抬到 6144 仍嫌紧。`S3_STACK_POOL` 在 §449 已从 24KB 提到 40KB
+     * （`bringup 8K + pp 8K + lwIP 4K = 20K`，还剩 20K），够抬。 */
+    if (stack < 8192u) { stack = 8192u; }
     g_next_task_windowed = 1u;   /* 库的任务入口都是 windowed ABI */
 #ifdef S3_NO_LIB_TASKS
     /* §366 排查：**不真的建库任务**，只给个假句柄。用来判定崩溃是
