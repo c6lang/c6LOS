@@ -279,6 +279,12 @@ _vec_default:
     s32i    a3, a2, 28
     rsr     a3, windowstart
     s32i    a3, a2, 32
+    /* §499：纯诊断，不改执行路径。双重异常时 EPC1=第一次故障的 PC、
+     * DEPC=第二次故障的 PC；后者能直接指出第一次异常的处理体崩在哪条指令。 */
+    rsr     a3, depc
+    s32i    a3, a2, 40
+    rsr     a3, excsave1
+    s32i    a3, a2, 44
 1:
     j       1b
 

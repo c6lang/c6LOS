@@ -17041,3 +17041,51 @@ PS/a0/次数/EXCM 魔数）、`0x50000680`（§464 坏 WS/WB 记录）。
   ⇒ 还是窗口映射；若 `a1` 是 0x6000xxxx/0x3fcfxxxx 这类值 ⇒ 是 sp 本身丢了，
   去查 `port/s3/w2c.S` 的 512 字节死区 + `WIN_SPILL`（实测 784 字节）
   叠加后是否把 8192 的库任务栈打穿。
+
+
+---
+
+## §500 A/B 实验定案：§490–§498 的"修复"全部回退，§489 是已知最好状态
+
+### 同板同构建命令，只看串口最后两行（每次都重烧、重采集）
+
+| 版本 | 改动 | 串口 |
+|------|------|------|
+| §489 `3c0acfc` | spill 开、单跳进岛、壳帧 48、EXCSAVE3 修 a3 | `bWu1bu1Wu2.b` ✅ 两个库任务都跑 |
+| §490 `3e90a2e` | + 入口 PS/a0 记录 + **CLR_OWB** | `b` ❌ |
+| §491 `5279f77` | + **WIN_SET**（保留 CLR_OWB） | `b` ❌ |
+| §497/§498 | + DEPC 记录 + WS 归一化 + bltz 守卫 + a1 存回 + 栈 16K | `b` ❌ |
+| 本轮 A | 源码全回退到 §489 + 只留 DEPC 诊断 | `bWu1bu1Wu2.b` ✅ **复现** |
+| 本轮 B | §491 的 WIN_SET，但把 CLR_OWB 改成空宏 | `b` ❌ |
+
+**结论**：任何在 `RESTORE_FRAME` 写窗口状态之前插入的改动（写 PS 的
+`CLR_OWB`、改 WS 值的 `WIN_SET`）都会让 ppTask 在第一次启动就死。
+不是"哪个值算错了"，而是**这段指令序列本身对时序/寄存器极其敏感**。
+在搞清楚之前不要再动这里。
+
+### §489 基线下抓到的现场（DEPC 诊断保留下来）
+
+```
+vecdef: cause=0x1d  va=0xfffffff9  epc1=0x40379764  ← RESTORE_FRAME 的 `wsr windowbase`
+        ps=0x0006091f  a0=0x3fcbcdf4  a1=0x0000000a
+        wb=0x0000000a  ws=0x00000400  depc=0x40378438  ← _win_ovf12
+```
+
+**两件事同时发生**：`wsr windowbase a5` 自己吃异常（epc1），而异常处理里
+又撞上 `_win_ovf12`（depc）⇒ 双异常 ⇒ `_vec_default` 死循环 ⇒ 冻机。
+注意 `a1=0xa` / `wb=0xa` —— 这说明**regs 已经严重错位**（a1 装的是 WB 值），
+不是单纯的"WS 少一个活位"能解释的。
+
+### 下一轮换思路（别再改 RESTORE_FRAME）
+
+1. **修 `port_task_switch` 的保存段**：它现在只在 `ctx.S` 里存了
+   a0..a15/EPC/PS/WS/WB，**但 `wsr windowbase` 会重映射 aN**，
+   而保存段里 a1→物理寄存器的对应关系是否已经稳定，从没验证过。
+   对比 `port_task_yield` 的保存段（多存了 `a1+128` 自描述和 g_s3_cur），
+   两边对齐再谈恢复。
+2. 直接用真板的 `xthal_window_spill`：工具链里找不到独立符号，但
+   `s3_win_spill`（`w2c.S:480`）就是它的抄写版。现在它是"填充寄存器文件
+   靠硬件溢出"的间接实现 —— 换成 IRAM 里**直接逐窗口 spill** 的版本，
+   绕开 `_win_ovf*`/`_win_unf*` 这一整条脆弱链路。
+3. 或者干脆**让 kernel 与库都跑 windowed**（`S3_ABI=windowed`，Makefile:18），
+   消掉交叉 ABI 的壳 —— 这才是根上的解决办法，代价是要重写 ctx.S/w2c.S。
