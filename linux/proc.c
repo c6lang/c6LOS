@@ -1920,6 +1920,9 @@ u64 lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count)
     return done;
 }
 
+static void ep_release_(u64 id);   /* M20：定义在 epoll 块，close 里释放注册表 */
+static u16 poll_events_(LxProc *p, i32 fd);  /* M20：epoll_wait 复用，定义在下方 */
+
 u64 lx_proc_close(u64 fd)
 {
     LxProc *p = cur_();
@@ -1930,6 +1933,13 @@ u64 lx_proc_close(u64 fd)
     }
     if (fe->kind == LX_FD_SOCK) {
         (void)lx_sock_close(fe->node);
+        fe->node = LX_FD_NONE;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
+    if (fe->kind == LX_FD_EPOLL) {
+        ep_release_(fe->pos);
         fe->node = LX_FD_NONE;
         fe->kind = LX_FD_FILE;
         wake_all_();
@@ -2407,6 +2417,248 @@ u64 lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len)
     e->counter += v;
     wake_all_();
     return 8ull;
+}
+
+/* ---- M20：epoll（复用 poll_events_ 的就绪判定 + 等待队列）----
+ * 单全局对象表（类似 eventfd），fd 的 node = 对象 id。注册表按 ADD 倍增。
+ * 不实现 EPOLLONESHOT/EPOLLET（默认水平触发），对 Alpine/busybox 的
+ * poll 替代路径足够；ET 语义可在后续扩展。 */
+#define LX_EPOLL_SENTINEL 0xfffffff6ull
+
+typedef struct {
+    i32 fd;
+    u32 events;                        /* 用户注册的 EPOLL* 位 */
+    u64 data;                          /* 原样回传 */
+} LxEpItem;
+
+typedef struct {
+    LxEpItem *items;
+    u32 n;
+    u32 cap;
+    u32 used;
+} LxEpoll;
+
+static LxEpoll *g_ep;
+static u32 g_ep_cap;
+
+static LxEpoll *ep_at_(u64 id)
+{
+    if (g_ep == (LxEpoll *)0 || id >= g_ep_cap || g_ep[id].used == 0u) {
+        return (LxEpoll *)0;
+    }
+    return &g_ep[id];
+}
+
+/* close(fd) 时释放注册表；定义在 epoll 块，由前置声明供 lx_proc_close 调用。 */
+static void ep_release_(u64 id)
+{
+    LxEpoll *ep = ep_at_(id);
+
+    if (ep == (LxEpoll *)0) {
+        return;
+    }
+    if (ep->items != (LxEpItem *)0) {
+        port_kfree((void *)ep->items);
+        ep->items = (LxEpItem *)0;
+    }
+    ep->n = 0u;
+    ep->cap = 0u;
+    ep->used = 0u;
+}
+
+static int ep_grow_(void)
+{
+    u32 ncap = (g_ep_cap == 0u) ? 8u : g_ep_cap * 2u;
+    LxEpoll *ne;
+
+    if (ncap > 1024u) {
+        return -1;
+    }
+    ne = (LxEpoll *)port_kcalloc((u64)ncap, (u64)sizeof(LxEpoll));
+    if (ne == (LxEpoll *)0) {
+        return -1;
+    }
+    if (g_ep != (LxEpoll *)0) {
+        u32 i;
+
+        for (i = 0u; i < g_ep_cap; i++) {
+            ne[i] = g_ep[i];           /* 对象按值搬，注册表指针一起搬 */
+        }
+        port_kfree((void *)g_ep);
+    }
+    g_ep = ne;
+    g_ep_cap = ncap;
+    return 0;
+}
+
+u64 lx_epoll_create1(u64 flags)
+{
+    LxProc *p = cur_();
+    u64 fd;
+    u32 i;
+
+    if (p == (LxProc *)0 || (flags & ~(u64)0x80000ull) != 0ull) {
+        return n_((u64)LX_EINVAL);     /* 仅 EPOLL_CLOEXEC 合法 */
+    }
+    for (i = 0u; i < g_ep_cap; i++) {
+        if (g_ep[i].used == 0u) { break; }
+    }
+    if (i >= g_ep_cap) {
+        if (ep_grow_() != 0) { return n_((u64)LX_ENOMEM); }
+        for (i = 0u; i < g_ep_cap; i++) {
+            if (g_ep[i].used == 0u) { break; }
+        }
+    }
+    if (i >= g_ep_cap) { return n_((u64)LX_ENOMEM); }
+    fd = lx_fdtab_alloc(p->fd);
+    if (fd == LX_FD_NONE) {
+        return n_((u64)LX_EMFILE);
+    }
+    g_ep[i].used = 1u;
+    g_ep[i].items = (LxEpItem *)0;
+    g_ep[i].n = 0u;
+    g_ep[i].cap = 0u;
+    {
+        LxFile *ent = &p->fd->ent[fd];
+
+        ent->node = LX_EPOLL_SENTINEL;
+        ent->pos = (u64)i;
+        ent->is_dir = 0u;
+        ent->kind = LX_FD_EPOLL;
+        ent->flags = (flags & 0x80000ull) ? LX_FD_CLOEXEC : 0u;
+        ent->oflags = 0u;
+    }
+    return fd;
+}
+
+u64 lx_epoll_ctl(u64 efd, u64 op, u64 fd, u64 uev)
+{
+    LxProc *p = cur_();
+    LxEpoll *ep;
+    LxFile *fe;
+
+    /* efd 是 fd，node 才是对象 id */
+    fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, efd);
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_EPOLL) {
+        return n_((u64)LX_EBADF);
+    }
+    ep = ep_at_(fe->pos);
+    if (ep == (LxEpoll *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    if (lx_fdtab_get(p->fd, fd) == (LxFile *)0) {
+        return n_((u64)LX_EBADF);
+    }
+    if (op == 1ull) {                  /* EPOLL_CTL_ADD */
+        u32 k;
+
+        for (k = 0u; k < ep->n; k++) {
+            if (ep->items[k].fd == (i32)fd) {
+                return n_((u64)LX_EEXIST);
+            }
+        }
+        if (ep->n == ep->cap) {
+            u32 ncap = (ep->cap == 0u) ? 8u : ep->cap * 2u;
+            LxEpItem *ni = (LxEpItem *)port_kcalloc((u64)ncap,
+                                                    (u64)sizeof(LxEpItem));
+
+            if (ni == (LxEpItem *)0) { return n_((u64)LX_ENOMEM); }
+            for (k = 0u; k < ep->n; k++) { ni[k] = ep->items[k]; }
+            if (ep->items != (LxEpItem *)0) { port_kfree((void *)ep->items); }
+            ep->items = ni;
+            ep->cap = ncap;
+        }
+        if (lx_user_ok(uev, 12ull, C6OS_PROT_R) == 0) {
+            return n_((u64)LX_EFAULT);
+        }
+        ep->items[ep->n].fd = (i32)fd;
+        ep->items[ep->n].events = *(const u32 *)uev;
+        ep->items[ep->n].data = *(const u64 *)(uev + 4ull);
+        ep->n++;
+        return 0ull;
+    }
+    if (op == 2ull || op == 3ull) {    /* DEL / MOD */
+        u32 k;
+
+        for (k = 0u; k < ep->n; k++) {
+            if (ep->items[k].fd != (i32)fd) { continue; }
+            if (op == 2ull) {
+                ep->items[k] = ep->items[ep->n - 1u];
+                ep->n--;
+            } else {
+                if (lx_user_ok(uev, 12ull, C6OS_PROT_R) == 0) {
+                    return n_((u64)LX_EFAULT);
+                }
+                ep->items[k].events = *(const u32 *)uev;
+                ep->items[k].data = *(const u64 *)(uev + 4ull);
+            }
+            return 0ull;
+        }
+        return n_((u64)LX_ENOENT);
+    }
+    return n_((u64)LX_EINVAL);
+}
+
+u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, efd);
+    LxEpoll *ep;
+    u64 deadline = 0ull;
+    int have_deadline = (timeout > 0);
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_EPOLL) {
+        return n_((u64)LX_EBADF);
+    }
+    ep = ep_at_(fe->pos);
+    if (ep == (LxEpoll *)0 || maxevents == 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (lx_user_ok(uevents, 12ull * maxevents, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    if (have_deadline) {
+        deadline = port_cycles() + (u64)timeout * 1000000ull;
+    }
+    for (;;) {
+        u64 out = 0ull;
+        u32 k;
+        u32 tty = 0u;
+
+        for (k = 0u; k < ep->n && out < maxevents; k++) {
+            LxEpItem *it = &ep->items[k];
+            u16 rev = poll_events_(p, it->fd);
+            u32 got = (u32)rev & (it->events | 0x18u);  /* ERR/HUP 总报 */
+
+            if (rev != 0u && lx_fdtab_get(p->fd, (u64)it->fd) != (LxFile *)0 &&
+                lx_fdtab_get(p->fd, (u64)it->fd)->node == LX_FD_CONSOLE &&
+                lx_tty_enabled() != 0u) {
+                tty = 1u;
+            }
+            if (got != 0u) {
+                u8 *dst = (u8 *)(uevents + out * 12ull);
+
+                *(u32 *)dst = got;
+                *(u64 *)(dst + 4ull) = it->data;
+                out++;
+            }
+        }
+        if (out > 0ull || timeout == 0) {
+            return out;
+        }
+        if (have_deadline && port_cycles() >= deadline) {
+            return 0ull;
+        }
+        (void)lx_tty_pump();
+        if (tty == 0u) {
+            if (!others_live_(g_cur)) { return 0ull; }
+            lx_proc_set_wait(LX_WAIT_PIPE);
+            lx_proc_block();
+            if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+                return n_((u64)LX_EINTR);
+            }
+        }
+    }
 }
 
 u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)

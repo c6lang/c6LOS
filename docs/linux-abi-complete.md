@@ -774,4 +774,30 @@ df/ps/head/wc/env/pwd + mkdir/rmdir（后两个在 VFS=0 镜像下接受 EROFS�
 busybox/Alpine 程序跑通"，未覆盖项收敛到：真正 pty/控制终端、完整 procfs
 字段、DNS/getaddrinfo、AF_UNIX、musl libc-test 全量 —— 作为后续工作。
 
+### M20 epoll 事件接口
+
+M16 只补了 select/poll/eventfd，现代异步程序（包括 musl/busybox 里用
+epoll 替代 poll 的路径）还缺 epoll 三件套。M20 复用 M16 的 `poll_events_()`
+就绪判定和等待队列：
+
+- `LX_FD_EPOLL` fd kind（`node`=对象 id），`LxEpoll` 对象表按 fd 倍增，
+  注册表 `LxEpItem{fd,events,data}` 按 ADD 倍增，close 时释放注册表。
+- `epoll_create1(291)` / `epoll_ctl(233)` / `epoll_wait(232)` 接 syscall
+  分派：`epoll_event` 按 x86-64 12 字节布局（events@0/data@4）；水平触发，
+  ERR/HUP 总上报；wait 的超时用 `port_cycles` 假时钟口径。
+- 前置声明 `poll_events_`/`ep_release_` 解决定义顺序（对象块在 close 之后）。
+
+`tests/linux/m20epoll.c` 验：eventfd 写→EPOLLIN+data 回传、水平触发读空
+后不报、重复 ADD=EEXIST、MOD/DEL、管道 EPOLLIN、超时返回 0、多 fd 同时
+就绪（一次 wait 返回 2）。验收 `make check-linuxabi-m20` → 39/39 checks
+PASS；全量回归 L2–L8/M9/M14–M19/alpine 无回归。
+
+遗留：ET（EPOLLET）/ONESHOT 语义、epoll_pwait 的信号掩码、timerfd/signalfd、
+真 pty、DNS/AF_UNIX —— 后续里程碑。
+
+> 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
+> `timeout` 时若被 SIGKILL，内部 timeout 会残留 qemu 占住 m19-disk.img 锁，
+> 导致下次跑报 "Failed to get write lock"。这是验收脚本的既有行为，杀掉
+> 残留进程即可，与 M20 代码无关。
+
 

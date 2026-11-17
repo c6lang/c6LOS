@@ -1116,6 +1116,16 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_getgroups:
         r->rax = lx_proc_getgroups(a0, a1);
         return;
+    /* M20：epoll */
+    case LX_SYS_epoll_create1:
+        r->rax = lx_epoll_create1(a0);
+        return;
+    case LX_SYS_epoll_ctl:
+        r->rax = lx_epoll_ctl(a0, a1, a2, a3);
+        return;
+    case LX_SYS_epoll_wait:
+        r->rax = lx_epoll_wait(a0, a1, a2, (i64)a3);
+        return;
 
     /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
     case LX_SYS_socket:

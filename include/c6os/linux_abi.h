@@ -216,6 +216,9 @@
 #define LX_SYS_pselect6      270
 #define LX_SYS_eventfd2      290
 #define LX_SYS_epoll_create1 291
+/* M20：epoll 事件接口 */
+#define LX_SYS_epoll_wait    232
+#define LX_SYS_epoll_ctl     233
 /* M18：socket 族 */
 #define LX_SYS_socket        41
 /* M19：busybox applet 矩阵暴露的缺口 */

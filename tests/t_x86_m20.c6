@@ -1,0 +1,108 @@
+/* M20 验收：epoll_create1/epoll_ctl/epoll_wait。
+ *
+ * 磁盘布局：
+ *   LBA 1024  用户态 ELF（宿主 gcc -static 编译的普通 Linux 程序）
+ *   LBA 4096  8 字节长度前缀 + cpio 流（LBA 4097 起）
+ *
+ * 内核侧不认任何"专用接口"——它看到的只有 Linux 系统调用。 */
+
+#include "c6os/types.h"
+#include "c6os/port.h"
+#include "c6os/linux_abi.h"
+#include "los/los_typedef.h"
+
+#define IMG_PA 0x04000000u          /* 64MB：用户 ELF 映像 */
+#define FS_PA  0x06000000u          /* 96MB：initramfs 映像 */
+
+void os_main(void)
+{
+    u64 as = 0u;
+    u64 size = 0u;
+    u64 sec = 0u;
+    u64 fsz = 0u;
+    u64 fsec = 0u;
+    u64 off = 0u;
+    u64 chunk = 0u;
+    u8 *p = 0;
+
+    port_init();
+    port_puts("c6os linux-abi M20: epoll\n");
+
+    port_mmu_init();
+    port_linux_arch_init();
+    port_phys_reserve(IMG_PA, 0x00400000u);
+    port_phys_reserve(FS_PA, 0x00400000u);
+
+    /* ---- 用户 ELF ---- */
+    if (port_ata_read(1024u, 8u, IMG_PA) != 0) {
+        port_puts("FAIL: 读 ELF 头部\n");
+        return;
+    }
+    size = lx_elf_image_size(IMG_PA, 0x00200000u);
+    if (size == 0u) {
+        port_puts("FAIL: 不是有效的 ELF64 映像\n");
+        return;
+    }
+    sec = (size + 511u) / 512u;
+    off = 8u;
+    while (off < sec) {
+        chunk = sec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read(1024u + (u32)off, (u32)chunk, IMG_PA + off * 512u) != 0) {
+            port_puts("FAIL: 读 ELF 正文\n");
+            return;
+        }
+        off += chunk;
+    }
+    port_puts("elf: 映像已就位\n");
+
+    /* ---- initramfs ---- */
+    if (port_ata_read(4096u, 1u, FS_PA) != 0) {
+        port_puts("FAIL: 读 initramfs 头部\n");
+        return;
+    }
+    p = (u8 *)port_phys_map(FS_PA);
+    fsz = 0u;
+    for (off = 0u; off < 8u; off++) {
+        fsz |= (u64)p[off] << (u8)(8u * off);
+    }
+    if (fsz == 0u || fsz > 0x00300000u) {
+        port_puts("FAIL: initramfs 长度不合理\n");
+        return;
+    }
+    fsec = (fsz + 511u) / 512u;
+    off = 0u;
+    while (off < fsec) {
+        chunk = fsec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read(4097u + (u32)off, (u32)chunk, FS_PA + off * 512u) != 0) {
+            port_puts("FAIL: 读 initramfs 正文\n");
+            return;
+        }
+        off += chunk;
+    }
+    if (lx_fs_init(FS_PA, fsz) != 0) {
+        port_puts("FAIL: cpio 解析失败\n");
+        return;
+    }
+    port_puts("fs: initramfs 已挂载\n");
+
+    /* ---- 装载并进入 ring3 ---- */
+    as = port_as_create();
+    if (as == 0u) {
+        port_puts("FAIL: port_as_create\n");
+        return;
+    }
+    if (lx_exec_prepare(as, IMG_PA, size, "/hello") != 0) {
+        port_puts("FAIL: lx_exec_prepare\n");
+        return;
+    }
+    port_puts("elf: 段与栈就绪，进入用户态\n");
+    port_user_enter(as, lx_exec_entry(), lx_exec_rsp(), 0u);
+
+    port_puts("FAIL: 从用户态返回（不应发生）\n");
+}
