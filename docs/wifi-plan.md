@@ -14551,3 +14551,59 @@ windowed 的 `s3_win_wifi_main`。原来的代码直接 `callx8`，
 （§412/§413 已证明它能把库任务正确启动起来：
 `tramp n=2 entry=40381a38`）。这样 call0 ↔ windowed 的转换点就只有
 tramp 一个，而它是修好并验证过的。
+
+## §420 ★★ 真 bug：新任务启动帧被自己的栈覆盖（`f[19]` 应为 `top`）
+
+### 症状（真板）
+`port_task_switch` 的 sp 闸门（`0x500018E0`）写 `0xBAD4` 并停在
+`pc=0x403796f0`（`j .` 死循环）。dump `ctx[0].sp` 指向的帧，发现它
+**根本不是切换帧**：
+
+```
++00: 8037ac85 3fcbedf0 50000a10 00004100   ← 0x50000a10 是 WSTAGE 地址
++60: 00000001 803798c8 3fcbee30 00000000   ← EPC=1、WS=栈地址、a1sl=0
+```
+
+### 根因
+`port_task_ctx_create` 里：
+
+```c
+top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 128u;  /* 帧 [top, top+128) */
+f[19] = top + 128u;    /* ← 错！任务启动时 a1 = top+128 */
+c->sp = top;
+```
+
+Xtensa 的栈**向低地址增长**，帧是 `[a1, a1+size)`。`a1 = top+128` ⇒
+任务第一条 `entry a1,32` 就把帧写到 `[top+96, top+128)`——**盖在自己的
+启动帧上**；栈再长一点就盖到偏移 76（`a1sl`）。于是 `RESTORE_FRAME`
+读到 `a1sl = 0`，命中 `beqz a1, 83f` 分支。
+
+### 修法
+```c
+f[19] = top;   /* 任务从 a1 = top 起跑、往下用栈 */
+```
+启动帧 `[top, top+128)` 落在**栈顶之上的保留区**里，永远不会被自己的栈覆盖。
+
+### 真板结果（决定性进展）
+- 之前：`[give] t=2 sem#1` 之后**永久卡死**在 `port_task_switch` 的死循环里。
+- 之后：`esp_wifi_init_internal` **正常返回**！
+
+```
+[phy] register_chipv7_phy rc=0
+W1 bringup → B0/B1/B2 ✓ → [lock]/[lockok] ✓ → [unlock] ✓
+[v2]wifi|init: init is in progress
+[wifi] esp_wifi_init_internal -> 12307
+[wifi] bringup rc=12307
+W2 bringup returned
+```
+
+留下的新问题：`esp_wifi_init_internal` 返回 `12307 (0x3013)`，
+且库自己打了 `wifi|init: init is in progress` —— 需要查这个
+"已经在初始化中" 是从哪来的（可能是重复 init，也可能是前一次调用
+留下的状态没清）。
+
+### 顺带确认
+去掉 `-DS3_WIFI_TASK_CALL0`（让 WiFi 主流程跑在**真正的 windowed 任务**里，
+走 §412/§413 修好的 `s3_task_tramp → call8 s3_win_tramp → callx8 入口`
+路径）与 call0 模式在上面的症状上完全一致 ⇒ 说明这条路本身是对的、
+问题一直在 ctx 层。

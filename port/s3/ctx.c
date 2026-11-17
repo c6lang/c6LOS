@@ -126,9 +126,22 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
         f[i] = 0u;
         i++;
     }
-    /* §372：帧自描述 —— 偏移 76 = 恢复这个帧之后的 sp。新建的帧就是
-     * 80 字节（RESTORE_FRAME 以前写死 80），显式写出来以免以后又对不上。 */
-    f[19] = top + 128u;
+    /* §372：帧自描述 —— 偏移 76 = 恢复这个帧之后的 sp。
+     *
+     * §420 ★（真 bug）：**这里必须是 `top`，不能是 `top + 128`。**
+     *
+     * 帧占 `[top, top+128)`，`c->sp = top`。而 Xtensa 的栈是**向低地址
+     * 增长**的，帧是 `[a1, a1+size)`。原来写 `top+128` ⇒ 任务启动时
+     * a1 = top+128 ⇒ 第一条 `entry a1,32` 就把帧写到 `[top+96, top+128)`，
+     * 即**盖在自己的启动帧上**；栈再长一点就盖到偏移 76（`a1sl`）。
+     * 于是 `RESTORE_FRAME` 读到的 a1sl 是 0，命中 sp 闸门
+     * （`0x500018E0` 标记 `0xBAD4`、`pc` 停在 `port_task_switch` 的
+     * `j .` 死循环）—— 真板实测：`ctx[0]` 的帧里 EPC 槽被覆盖成 1、
+     * WS 槽被覆盖成栈地址 `3fcbee30`、`a1sl` 变成 0。
+     *
+     * 写 `top` ⇒ 任务从 a1 = top 起跑、往下用栈，启动帧 `[top, top+128)`
+     * 落在**栈顶之上的保留区**里，永远不会被自己的栈覆盖。 */
+    f[19] = top;
     f[1] = (u32)entry;                 /* a2 */
     f[3] = g_next_task_windowed;       /* a4：入口的 ABI 标志 */
     g_next_task_windowed = 0;
