@@ -40,15 +40,11 @@
 #define C6OS_LINUX_TIER 3
 #endif
 
-#ifndef C6OS_LINUX_MAX_PROC
-#define C6OS_LINUX_MAX_PROC 8
-#endif
-#ifndef C6OS_LINUX_MAX_FD
-#define C6OS_LINUX_MAX_FD 16
-#endif
-#ifndef C6OS_LINUX_NSIG
-#define C6OS_LINUX_NSIG 64
-#endif
+/* 进程表 / fd 表 / 管道都改成按需分配的内核对象（M13-3），这里不再有
+ * "最多几个"的常量；它们的实际上限由内存决定，只留保护性天花板：
+ *   include/c6os/linux_proc.h : LX_PROC_MAX_CAP / LX_FD_MAX_CAP
+ *   linux/proc.c              : LX_PIPE_MAX_CAP / LX_PIPE_MAX
+ * 信号数固定 64（Linux _NSIG）。 */
 
 /* 用户地址空间布局（x86-64 低半核，见 docs/linux-abi.md §3）。
  * 内核必须整体落在 0..C6OS_LINUX_KERNEL_END 之内，由链接期断言保证。 */

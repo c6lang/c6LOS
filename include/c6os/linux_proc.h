@@ -74,8 +74,11 @@ LxFile  *lx_fdtab_get(LxFdTab *t, u64 fd);    /* 越界/空槽返回 0 */
 void     lx_fdtab_set_free_hook(void (*fn)(LxFile *f));
 
 /* L6：信号。内核侧 sa 的布局与 Linux 一致：{handler, flags, restorer, mask}，
- * 因为 glibc 的 sigaction() 就是这样转给 rt_sigaction(2) 的。 */
-#define LX_NSIG 32
+ * 因为 glibc 的 sigaction() 就是这样转给 rt_sigaction(2) 的。
+ *
+ * LX_NSIG 是**数组维数**：Linux 合法信号号是 1..64（_NSIG=64），所以按信号号
+ * 直接下标要 65 项。以前是 32，SIGRTMIN(34) 一来就越界。 */
+#define LX_NSIG 65
 
 typedef struct {
     u64 handler;
@@ -162,6 +165,7 @@ u64  lx_mmap_top_get(void);
 void lx_mmap_top_set(u64 v);
 void lx_set_as(u64 as);
 u64  lx_console_write(u64 fd, u64 ubuf, u64 len);
+u64  lx_console_put(u64 ubuf, u64 len);             /* 按 node 判定后直写控制台 */
 void lx_fs_set_fdtab(LxFdTab *t);                  /* linux/fs.c */
 LxFdTab *lx_fs_get_fdtab(void);                    /* 登记进程时接管兜底表 */
 

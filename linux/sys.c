@@ -96,6 +96,24 @@ u64 lx_console_write(u64 fd, u64 ubuf, u64 len)
     return sys_write(fd, ubuf, len);
 }
 
+/* 按 **node** 而不是 fd 号判断目标是不是控制台：dup 出来的高位 fd 也是终端
+ * （ash/lineedit 真的会那么用），只看 fd==1/2 会把它们判成 EBADF。 */
+u64 lx_console_put(u64 ubuf, u64 len)
+{
+    u64 i;
+
+    if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (lx_tty_enabled() != 0u) {
+        return lx_tty_write(ubuf, len);
+    }
+    for (i = 0ull; i < len; i++) {
+        port_putc((int)(*(const u8 *)(ubuf + i)));
+    }
+    return len;
+}
+
 u64 lx_proc_brk(void)
 {
     return g_brk;
@@ -201,22 +219,21 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     return len;
 }
 
-/* writev：ld.so 打印错误信息走的就是它（没有它连"为什么失败"都看不见）。 */
+/* writev：ld.so 打印错误信息走的就是它（没有它连"为什么失败"都看不见）。
+ * 每一项都交给 lx_proc_write 分发：管道/控制台/VFS 一视同仁，
+ * 否则 dup 出来的控制台 fd 或管道 fd 走 writev 就成了 EBADF。 */
 static u64 sys_writev(u64 fd, u64 iov, u64 cnt)
 {
     u64 i;
     u64 total = 0ull;
 
-    if (fd != 1ull && fd != 2ull) {
-        return neg(LX_EBADF);
-    }
     if (lx_user_ok(iov, cnt * 16ull, C6OS_PROT_R) == 0) {
         return neg(LX_EFAULT);
     }
     for (i = 0; i < cnt; i++) {
         u64 base = *(const u64 *)(iov + i * 16ull);
         u64 len = *(const u64 *)(iov + i * 16ull + 8ull);
-        u64 r = sys_write(fd, base, len);
+        u64 r = lx_proc_write(fd, base, len);
 
         if ((i64)r < 0) {
             return r;

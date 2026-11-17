@@ -1432,6 +1432,27 @@ check-linuxabi-l5: $(SH_IMG)
 	  && echo "PASS: linux-abi L5（fork/execve/pipe/wait4：busybox sh 管道）" \
 	  || { echo "FAIL: linux-abi L5"; exit 1; }
 
+# ---- M13-3：人为上限清零（1000 fd / 32 线程 / 64KB 管道）--------------------
+SCAL_ELF := $(X86)/scal.elf
+SCAL_IMG := $(X86)/scal-disk.img
+
+$(SCAL_ELF): tests/linux/scal.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $< -lpthread
+
+$(SCAL_IMG): $(SCAL_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SCAL_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m13d: $(SCAL_IMG)
+	@timeout 180 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SCAL_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13d.log \
+		| grep -q "^PASS: scal" \
+	  && echo "PASS: linux-abi M13-3（1000 fd / 32 线程 / 64KB 管道）" \
+	  || { echo "FAIL: linux-abi M13-3"; tail -30 /tmp/check-m13d.log; exit 1; }
+
 THR_ELF := $(X86)/thread.elf
 THR_IMG := $(X86)/thread-disk.img
 

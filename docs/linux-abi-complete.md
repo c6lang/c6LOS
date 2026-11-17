@@ -486,3 +486,72 @@ make 轮次里出现早期 #DE 崩溃，未能复现（同一镜像随后 13/13 
   早期 #DE 崩溃（vec=0、ring0、rip 在 0x23xxx），单独重跑即过，未能复现；
   先按环境抖动记录，若再出现按 §6 风险项抓栈跟踪。
 
+### M13-3a fd 表：从 PCB 内嵌数组到带引用计数的对象
+
+问题不只是"16 个不够用"，而是**共享语义错了**：线程组靠 `sync_to/from_leader_`
+在切换点整份抄 `LxFile fd[16]`，任意一条 syscall 忘了写回就丢改动。
+
+- `linux/fdt.c`：`LxFdTab { refs, cap, ent }`，槽位在内核堆，16 起步按 2 的幂倍增，
+  硬上限 `LX_FD_MAX_CAP=1024`（保护性，不是工程上限）。线程组共享同一份（clone
+  时 ref+1），fork 才 `lx_fdtab_copy`；`sync_*` 里的 fd 互抄整段删掉。
+- 表销毁要逐槽通知上层（管道要减 readers/writers），但 fdt 不该认识管道：
+  `lx_fdtab_set_free_hook()` 反向注册，保持 `linux/fdt.c` 不依赖 proc。
+- 兜底表：单进程载荷（L2–L4）在 `lx_proc_init` 之前就 open 过，走的是 fs.c 的
+  静态兜底表。`lx_proc_attach` 改成**接管**这张表（`lx_fs_get_fdtab()`）而不是
+  新建，否则那些 fd 在登记进程的瞬间全丢。
+- `dup2` 允许 newfd 超过当前容量（Linux 里 dup2 到高位 fd 是常规用法），
+  先 `lx_fdtab_grow` 再写槽；`dup` 改成先 `lx_fdtab_alloc` 再转 dup2。
+- 踩坑：`pipe2` 连续两次 `lx_fdtab_alloc`，中间不给第一个槽占位，第二次扫描
+  又从 3 号开始 —— 管道两端拿到**同一个 fd**，`echo x | while read l` 只剩
+  `hello-from-pipe` 没有 `GOT:` 前缀。修法是拿完第一个立刻写占位标记。
+- 回归：L2/L4/L5/L6/L7/L8/M9/M13/M13b/M13c 全 PASS。
+
+### M13-3b 进程表与内核栈：按需分配
+
+`LxProc g_proc[8]` + `u8 g_kstack[8][8192]` 等于"最多 8 个线程"和一个 64KB 的
+`.bss` 大块（还挤在 0xA0000 以下的内核镜像里）。
+
+- `LxSlot { LxProc *p; u8 *kstk; }` 数组在内核堆，8 起步倍增，保护性上限
+  `LX_PROC_MAX_CAP=4096`。槽位空出来后 LxProc 与内核栈**一起留着复用**
+  （等价 task_struct/kernel-stack 的 slab）：内存上限由峰值并发决定，不随历史
+  fork 总数增长，切换路径上也依然没有任何分配。
+- LxProc 与槽位分开分配：`lx_proc_fork` 会拿着父进程 `LxProc*` 去调
+  `slot_alloc_`，如果 LxProc 内嵌在数组里，数组倍增就让那个指针失效。
+- `slot_alloc_` 返回的槽位已清零且 `kstack_top` 就位，fork/clone 不再 `mem_zero`。
+- 顺手补两处泄漏：`thread_exit_` 与 `reap_peers_` 里同组线程各持一份 fd 表引用，
+  退出必须 unref（fd 还是内嵌数组时没有这个概念）。
+- 回归：全量 PASS。
+
+### M13-3c 管道：对象化 + 64KB 动态环缓冲
+
+- `LxPipe` 从静态数组（8 个对象、每个内嵌 4KB 缓冲）改成内核堆对象：指针表
+  倍增（`LX_PIPE_MAX_CAP=4096`），对象 `port_kcalloc`、环缓冲 `port_kmalloc`。
+- 缓冲按需扩容：一次 `write` 要多少给多少，`LX_PIPE_MIN=4KB` 翻倍到
+  `LX_PIPE_MAX=64KB`。扩容时把有效数据按逻辑顺序搬到新缓冲、`head` 归零，
+  所以"往空管道写 64KB"一次调用就完成。
+- 阻塞写语义对齐 Linux：**全写完才返回**（以前部分写入就返回，上层必须自己
+  循环）；只有读端全关才 EPIPE，已写入的部分仍按字节数返回。
+- 引用按端点计数（`pipe_ref_/pipe_drop_`），readers+writers 归零时缓冲与对象
+  一起还给内核堆 —— 管道不再是"用过的槽永远脏着"。
+- 回归：L2/L4/L5/L6/L7/L8/M9 全 PASS。
+
+### M13-3d 顶掉剩余人为上限 + 验收
+
+- 信号表 32→65：Linux 合法信号号 1..64，`SIGRTMIN=34` 在旧表下直接越界；
+  `config.h` 里 `C6OS_LINUX_MAX_PROC/MAX_FD/NSIG` 三个常量删除（已无消费者）。
+- `execve` 的 argv：1KB/16 项 → 128KB/4096 项，且缓冲从内核栈搬进内核堆
+  （128KB 放 8KB 内核栈上会直接压穿）。
+- `write/writev` 判控制台从"fd 号 == 1/2"改成"fd 表里 node == LX_FD_CONSOLE"：
+  dup 出来的高位 fd 也是终端，按号判会把它们误判成 EBADF 或丢给 VFS。
+  新增 `lx_console_put(buf,len)`，`writev` 每项都交给 `lx_proc_write` 分发。
+- 验收 `check-linuxabi-m13d`（`tests/linux/scal.c`）：
+  1. 单进程拿 1000 个 fd（旧上限 16），逐个检查互不重复、高位 fd 可写，
+     全部关掉后重来 3 轮，最后 dup 必须又回到低位（证明槽位真回收）；
+  2. 32 线程（旧上限 8）各自私有栈 + 共享计数 + mutex，join 回来的数字全对；
+  3. 单次 64KB 管道写/读逐字节比对（旧缓冲 4KB），再连做 40 个并发管道
+     （旧上限 8）。
+- 回归：L2/L4/L5/L6/L7/L8/M9/M13/M13b/M13c/M13d 全 PASS。
+- 遗留：`clone3`（nr 435）仍走 ENOSYS，glibc 会回退到 clone，`pthread_create`
+  正常，但内核日志会打一行 `[lx] ENOSYS nr=435`；归入 M14。
+
+

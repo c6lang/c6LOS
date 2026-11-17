@@ -9,8 +9,8 @@
 #include <c6os/linux_proc.h>
 #include <c6os/port.h>
 
-#define LX_ARG_MAX    16u
-#define LX_ARG_BYTES  1024ull
+#define LX_ARG_MAX    4096u
+#define LX_ARG_BYTES  131072ull       /* Linux 的单个参数字符串上限是 128KB */
 
 /* 管道（M13-3c）：对象在 kernel heap，环形缓冲区按需从 4KB 长到 64KB。
  * Linux 的策略就是"写多少给多少、上限 pipe-max-size"，我们照这个做：
@@ -765,8 +765,8 @@ static u32 read_argv_(u64 uargv, char **argv, char *buf, u64 bufbytes)
 u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
 {
     char path[128];
-    char buf[LX_ARG_BYTES];
-    char *argv[LX_ARG_MAX + 1u];
+    char *buf;
+    char **argv;
     u64 as;
     u64 entry = 0ull;
     u64 rsp = 0ull;
@@ -784,7 +784,19 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     if (idx < 0) {
         return (u64)0 - LX_ENOENT;
     }
-    argc = read_argv_(uargv, argv, buf, (u64)sizeof(buf));
+    /* argv 走内核堆：Linux 允许 128KB 的参数区，放内核栈上会直接压穿 8KB 栈。 */
+    buf = (char *)port_kmalloc(LX_ARG_BYTES);
+    argv = (char **)port_kcalloc((u64)LX_ARG_MAX + 1ull, 8ull);
+    if (buf == (char *)0 || argv == (char **)0) {
+        if (buf != (char *)0) {
+            port_kfree((void *)buf);
+        }
+        if (argv != (char **)0) {
+            port_kfree((void *)argv);
+        }
+        return (u64)0 - LX_ENOMEM;
+    }
+    argc = read_argv_(uargv, argv, buf, LX_ARG_BYTES);
     if (argc == 0u) {
         argv[0] = path;
         argc = 1u;
@@ -792,6 +804,8 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     argv[argc] = (char *)0;
     as = port_as_create();
     if (as == 0ull) {
+        port_kfree((void *)buf);
+        port_kfree((void *)argv);
         return (u64)0 - LX_ENOMEM;
     }
     if (lx_exec_build(as, lx_fs_node_data_pa((u32)idx),
@@ -799,8 +813,12 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
                       (const char *const *)argv, argc, &entry, &rsp,
                       &brk) != 0) {
         port_as_destroy(as);
+        port_kfree((void *)buf);
+        port_kfree((void *)argv);
         return (u64)0 - LX_ENOEXEC;
     }
+    port_kfree((void *)buf);              /* 新栈上已经拷好了副本 */
+    port_kfree((void *)argv);
     /* 换掉整个地址空间；fd 表按 Linux 语义保留（CLOEXEC 还没实现）。 */
     {
         u64 old_as = cur_()->as;
@@ -1363,7 +1381,11 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
         }
         return pipe_write_(p, fe, ubuf, len);
     }
-    return lx_console_write(fd, ubuf, len);
+    /* 按 node 判目标，而不是 fd 号：dup 出来的高位 fd 也可能是终端或 VFS 文件。 */
+    if (fe->node == LX_FD_CONSOLE) {
+        return lx_console_put(ubuf, len);
+    }
+    return lx_console_write(fd, ubuf, len);     /* 其余（/tmp 等）走 VFS */
 }
 
 /* ---- L7：线程创建 / 退出 / futex ----------------------------------------- */
