@@ -157,8 +157,9 @@ static void feed_(u8 c)
  *
  * 光标位置固定报 1;1：我们没有屏幕模型，而 lineedit 拿到任何合法应答都会
  * 走"终端支持 DSR"的分支，报第一行第一列最安全。 */
-static u32  g_esc;                     /* 0=正常 1=收到 ESC 2=收到 ESC[ */
-static u32  g_skip;                     /* >0：正在丢弃一个未支持的 CSI，等终止字节 */
+static u32  g_esc;                     /* 0=正常 1=收到 ESC 2=ESC[ 3=ESC[6 */
+static char g_hold[4];                 /* 疑似 DSR 的字节先扣住，不是原样吐出 */
+static u32  g_hlen;
 
 /* 把应答塞进输入缓冲（用户下一次 read(0) 就能读到） */
 static void reply_(const char *s)
@@ -169,6 +170,20 @@ static void reply_(const char *s)
     }
 }
 
+/* 吐出去。**逐字节原样透传**，唯一的例外是 DSR 询问（ESC[6n）：
+ * 那个不能让用户看到，要在输入方向回 ESC[1;1R。所以只把"疑似 DSR 的前 4 个
+ * 字节"扣住，凑齐发现不是就原样吐出 —— 别的做法（边解析边丢参数）会把颜色
+ * 序列和紧跟着的文件名吃掉：深渊实测 `ls /` 会显示成 `in tc ib nt roc`。 */
+static void flush_hold_(void)
+{
+    u32 i;
+
+    for (i = 0u; i < g_hlen; i++) {
+        port_putc((int)g_hold[i]);
+    }
+    g_hlen = 0u;
+}
+
 u64 lx_tty_write(u64 ubuf, u64 len)
 {
     u64 i;
@@ -176,58 +191,31 @@ u64 lx_tty_write(u64 ubuf, u64 len)
     for (i = 0ull; i < len; i++) {
         u8 c = *(const u8 *)(ubuf + i);
 
-        if (g_skip != 0u) {
-            /* 未支持的 CSI：吃到终止字节（0x40..0x7E）为止，整条丢掉 */
-            if (c >= 0x40u && c <= 0x7Eu) {
-                g_skip = 0u;
-            }
-            continue;
-        }
-        if (g_esc == 1u) {
-            if (c == '[') {
-                g_esc = 2u;
-                continue;
-            }
-            /* 不是 CSI（比如 ESC c 复位）：原样透传，退出转义状态 */
-            g_esc = 0u;
-            port_putc((int)0x1B);
+        if (g_hlen == 0u && c != 0x1Bu) {
             port_putc((int)c);
             continue;
         }
-        if (g_esc == 2u) {
-            if (c == '6') {
-                g_esc = 3u;                 /* 可能是 DSR：等最后的 'n' */
-                continue;
-            }
-            /* 其它 CSI：透传 ESC[ 和这个字节，然后按未支持序列丢弃剩余参数 */
-            port_putc((int)0x1B);
-            port_putc((int)'[');
-            port_putc((int)c);
-            g_esc = 0u;
-            if (c < 0x40u || c > 0x7Eu) {
-                g_skip = 1u;                /* 参数还没结束 */
-            }
+        g_hold[g_hlen] = (char)c;
+        g_hlen++;
+        if (g_hlen == 1u) {
+            continue;                       /* 只可能是 ESC */
+        }
+        if (g_hlen == 2u && c != '[') {
+            flush_hold_();                  /* 不是 CSI：ESC + 这个字节都吐出去 */
             continue;
         }
-        if (g_esc == 3u) {
+        if (g_hlen == 3u && c != '6') {
+            flush_hold_();
+            continue;
+        }
+        if (g_hlen == 4u) {
             if (c == 'n') {
-                reply_("\x1b[1;1R");        /* DSR 应答：第 1 行第 1 列 */
-                g_esc = 0u;
-                continue;
+                reply_("\x1b[1;1R");        /* DSR：回第 1 行第 1 列，询问本身吞掉 */
+                g_hlen = 0u;
+            } else {
+                flush_hold_();              /* ESC[6 后面不是 n：原样透传 */
             }
-            /* ESC[6 后面不是 n：把整条补回去 */
-            port_putc((int)0x1B);
-            port_putc((int)'[');
-            port_putc((int)'6');
-            port_putc((int)c);
-            g_esc = 0u;
-            continue;
         }
-        if (c == 0x1Bu) {
-            g_esc = 1u;                     /* 先别输出，看后面是不是 '[' */
-            continue;
-        }
-        port_putc((int)c);
     }
     return len;
 }
