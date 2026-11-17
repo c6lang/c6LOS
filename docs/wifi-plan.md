@@ -17749,3 +17749,30 @@ IDF 的 `wifi_hw_start()` 反汇编显示顺序：
 我们的 shim 只做了复位脉冲，没有 `0x60033084` 的 mask 写（该写由库自身完成）。
 
 诊断代码已回退，目标未达成，goal 保持 active。
+
+---
+
+## §532 精确定位：MAC ready 位在 `esp_wifi_start()` 内翻转
+
+在官方 IDF app 里加了 `hs()` 探针（读 `0x60033d14`）：
+```
+I (251) HS: app_main-start:     00000000
+I (251) HS: before-netif:       00000000
+I (251) HS: before-wifi-init:   00000000
+I (281) HS: after-wifi-init:    00000000
+I (321) HS: after-wifi-start:   00000001   <-- 在这里翻转
+I (321) HS: after-connect:      00000001
+I (371) wifi:connected with weforpay.com ...
+```
+⇒ 缺的不是 bootloader / NVS / PHY 校准阶段，而是
+**`esp_wifi_start()` → `wifi_hw_start()` 内的某一步**。
+`wifi_hw_start()` 顺序（反汇编）：
+`wifi_reset_mac`（OSI `_wifi_reset_mac` + `0x60033084 &= 0x7fffffff`）
+→ `ic_mac_init`(ROM) → `ic_set_interrupt_handler` → `chip_enable`。
+
+对照：c6LOS 的 `esp_wifi_start` 返回 0，但 bit0 始终 0；我们的
+`_wifi_reset_mac` 只脉冲 `0x60026018 bit2`，而 IDF 的
+`periph_ll_reset(PERIPH_WIFI_MODULE)` 也是脉冲同一位，差异可能在
+DPORT 写保护 / 复位释放时序，或库内部的 `ic_mac_init` 前置状态。
+
+目标未达成，goal 保持 active。
