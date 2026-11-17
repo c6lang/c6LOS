@@ -14664,3 +14664,59 @@ if (*wst != 1u) { *wst = 1u; }
 查 `osi_queue_recv_body` 的 `a4` 从哪来，以及 `[v2]...queue not null`
 是库检查了哪个全局 —— 很可能是我们的 `osi_queue_create`/`osi_queue_recv`
 实现或 OSI 表槽位填错，让库以为队列已存在。
+
+## §422 排除假线索：镜像与 `.data` 加载都是正常的
+
+曾怀疑 `esptool elf2image` 把 `.data` 拆成两段时错位了 8 字节
+（`wst` 在 bin 里读到 `0x0F00BF9D`、在 ELF 里读到 `1`）。**这是我自己算错了
+段内偏移**（把段头的 8 字节也多算了一次）：
+
+```
+seg1: vaddr 0x3fca0000 len 0xfec4  data@0x134
+seg2: vaddr 0x42010000 len 0x84cc8 data@0x10000   (.data 被 64KB 边界切开)
+seg3: vaddr 0x3fcafec4 len 0xb83c  data@0x94cd0   ← 数据从 0x94cd0 开始
+seg4: vaddr 0x40378000 len 0xfe60  data@0xa0514
+```
+按 `data@0x94cd0` 重新取 `0x3fcba3f0`，bin 与 ELF **都是 1**。
+运行时对比也证明 `.data` 加载正常：`0x3fcba3f4` 始终等于初值 `0x00010004`。
+软复位后 `wst` 立刻回 1 ⇒ `.data` 被 bootloader 正确重载。
+
+## §423 `wst` 变成 2 是时序相关，不是稳定的因果
+
+同一个镜像两次捕获：
+
+| 运行 | `[wst] entry` | `after phy_cal` | `after phy_enable` |
+|---|---|---|---|
+| 刚烧写完 | 1 | 1 | 1 |
+| 另一次 | 2 | 2 | 2 |
+
+⇒ 有时进 `s3_win_wifi_main` 之前就已经是 2 了，**不总是 `s3_win_phy_enable`
+的锅**。用 halt 打断再读也是 1。判为时序相关，暂不深挖。
+
+**但 `if (*wst != 1u) { *wst = 1u; }` 这条强制复位仍然有效且必须保留** ——
+它保证不管进来时是什么值，`esp_wifi_init_internal` 都能走完整初始化流程。
+
+## §424 当前卡点（本轮结束时的状态）
+
+```
+M1..M5 ✓ → [wifimain] id=1 → W0 phy → register_chipv7_phy rc=0/1 → W1 bringup
+→ B0/B1/B2 ✓ → [wifi] init 前状态=2（已强制复位成 1）
+→ [lock]/[lockok] ✓ → [pp] pp rom version ✓ → [net80211] net80211 rom version ✓
+→ [unlock] ✓
+→ [v2]wifi|create wifi task: queue not null      ← 库认为队列已存在
+→ [semnew] #2 → [task] 库建任务
+→ TRAP cause=0x1c(StoreProhibited) pc=0x4037d338 vaddr=0x18 a0=0x80043d06
+```
+
+`pc` 落在 `osi_queue_recv_body` 里一条 `l32i aN, a4, 24`，`a4 = 0`
+⇒ **`queue not null` 和这个 NULL 队列是同一个问题的两面**：库以为 wifi
+任务的队列已经建好了，于是跳过创建，后面 recv 就拿到 NULL。
+
+### 下一步
+1. 查 `[v2]...queue not null` 是库检查了哪个全局（大概率是
+   `wifi_global` 里的一个 queue 指针）。
+2. 对齐 IDF 的真实顺序：**不要让 PHY 在我们这边单独 enable**，
+   而是让 `esp_wifi_init()` 内部通过 OSI 的 `_phy_enable` 回调去做。
+   `S3_PHY_VIA_OSI` 已经把这个开关写好了（`win_island.c`），
+   但它现在**没有真正阻止 PHY 提前初始化**——因为 `s3_win_phy_cal()`
+   （W0 阶段）本身就会调 `register_chipv7_phy`。要一起处理。
