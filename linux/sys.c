@@ -1170,9 +1170,10 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_sock_recv(a0, a1, a2, a3);
         return;
     case LX_SYS_sendmsg:
+        r->rax = lx_sock_sendmsg(a0, a1, a2);
+        return;
     case LX_SYS_recvmsg:
-        /* msghdr 的 iovec 暂不展开：返回 EOPNOTSUPP，用户态可退回 send/recv。 */
-        r->rax = neg(LX_EOPNOTSUPP);
+        r->rax = lx_sock_recvmsg(a0, a1, a2);
         return;
     case LX_SYS_shutdown:
         r->rax = lx_sock_shutdown(a0, a1);

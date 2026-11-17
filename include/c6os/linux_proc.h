@@ -252,6 +252,9 @@ u64      lx_sock_getsockopt(u64 sd, u64 level, u64 optname,
 u64      lx_sock_shutdown(u64 sd, u64 how);
 u64      lx_sock_getpeername(u64 sd, u64 uaddr, u64 uaddrlen);
 u64      lx_sock_getsockname(u64 sd, u64 uaddr, u64 uaddrlen);
+/* M23：sendmsg/recvmsg（iovec 展开，控制消息暂忽略） */
+u64      lx_sock_sendmsg(u64 sd, u64 umsg, u64 flags);
+u64      lx_sock_recvmsg(u64 sd, u64 umsg, u64 flags);
 void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
 /* M19：busybox id/df/cat 依赖 */
 u64      lx_proc_getgroups(u64 size, u64 ugroups);

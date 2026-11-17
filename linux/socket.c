@@ -327,6 +327,145 @@ u64 lx_sock_getsockname(u64 fd, u64 uaddr, u64 uaddrlen)
     return lxs_name_(fd, uaddr, uaddrlen);
 }
 
+/* ---- M23：sendmsg/recvmsg：iovec 展开到内核中转缓冲 ----
+ * x86-64 msghdr 56B：name@0 namelen@8 iov@16 iovlen@24 control@32
+ * controllen@40 flags@48；iovec 16B：base@0 len@8。
+ *  ancillary(control) 数据暂忽略（返回时 controllen=0）；把多段 iovec
+ *  拼成单个内核缓冲，一次 SalSend/SalRecv，保证 UDP 是一个数据报。 */
+#define LX_IOV_MAX   64u
+#define LX_MSG_BUFMAX 65536u
+
+u64 lx_sock_sendmsg(u64 fd, u64 umsg, u64 flags)
+{
+    LxFile *f = lxs_get_(fd);
+    u64 iov, niov, total = 0ull;
+    u8 *buf;
+    u32 i;
+
+    if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    iov = *(const u64 *)(umsg + 16ull);
+    niov = *(const u64 *)(umsg + 24ull);
+    if (niov == 0ull || niov > LX_IOV_MAX) { return (u64)0 - LX_EINVAL; }
+    if (lx_user_ok(iov, 16ull * niov, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    for (i = 0u; i < (u32)niov; i++) {
+        u64 len = *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+
+        total += len;
+        if (total > LX_MSG_BUFMAX) { return (u64)0 - LX_EINVAL; }
+    }
+    buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
+    if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
+    /* 按 iovec 顺序把用户缓冲段拼到内核中转缓冲 */
+    {
+        u64 pos = 0ull;
+
+        for (i = 0u; i < (u32)niov; i++) {
+            u64 base = *(const u64 *)(iov + (u64)i * 16ull);
+            u64 len = *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+            u64 k;
+
+            if (len == 0ull) { continue; }
+            if (lx_user_ok(base, len, C6OS_PROT_R) == 0) {
+                port_kfree((void *)buf);
+                return (u64)0 - LX_EFAULT;
+            }
+            for (k = 0ull; k < len; k++) {
+                buf[pos + k] = *(const u8 *)(base + k);
+            }
+            pos += len;
+        }
+    }
+    {
+        int rc;
+
+        if (*(const u64 *)(umsg + 8ull) != 0ull) {   /* msg_namelen != 0 */
+            LosSockAddr a;
+            u64 name = *(const u64 *)(umsg + 0ull);
+
+            if (lx_user_ok(name, 16ull, C6OS_PROT_R) == 0) {
+                port_kfree((void *)buf);
+                return (u64)0 - LX_EFAULT;
+            }
+            lxs_addr_in_(name, &a);
+            rc = SalSendTo((int)f->node, (const void *)buf, (u32)total, &a);
+        } else {
+            rc = SalSend((int)f->node, (const void *)buf, (u32)total);
+        }
+        port_kfree((void *)buf);
+        (void)flags;
+        return lxs_err_(rc);
+    }
+}
+
+u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
+{
+    LxFile *f = lxs_get_(fd);
+    u64 iov, niov, total = 0ull;
+    u8 *buf;
+    u32 i;
+    int rc;
+
+    if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    iov = *(const u64 *)(umsg + 16ull);
+    niov = *(const u64 *)(umsg + 24ull);
+    if (niov == 0ull || niov > LX_IOV_MAX) { return (u64)0 - LX_EINVAL; }
+    if (lx_user_ok(iov, 16ull * niov, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    for (i = 0u; i < (u32)niov; i++) {
+        total += *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+        if (total > LX_MSG_BUFMAX) { return (u64)0 - LX_EINVAL; }
+    }
+    buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
+    if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
+    if (*(const u64 *)(umsg + 8ull) != 0ull) {
+        LosSockAddr a;
+        u64 name = *(const u64 *)(umsg + 0ull);
+
+        if (lx_user_ok(name, 16ull, C6OS_PROT_W) == 0) {
+            port_kfree((void *)buf);
+            return (u64)0 - LX_EFAULT;
+        }
+        rc = SalRecvFrom((int)f->node, (void *)buf, (u32)total, &a);
+        if (rc >= 0) { lxs_addr_out_(&a, name); }
+    } else {
+        rc = SalRecv((int)f->node, (void *)buf, (u32)total);
+    }
+    if (rc < 0) {
+        port_kfree((void *)buf);
+        return lxs_err_(rc);
+    }
+    /* 按 iovec 分散回填，返回实际收到的字节数（可能小于 total） */
+    {
+        u64 pos = 0ull;
+        u64 got = (u64)rc;
+        u64 remain = got;
+
+        for (i = 0u; i < (u32)niov && remain > 0ull; i++) {
+            u64 base = *(const u64 *)(iov + (u64)i * 16ull);
+            u64 len = *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+            u64 k = (len < remain) ? len : remain;
+
+            if (lx_user_ok(base, k, C6OS_PROT_W) == 0) {
+                port_kfree((void *)buf);
+                return (u64)0 - LX_EFAULT;
+            }
+            for (pos = 0ull; pos < k; pos++) {
+                *(u8 *)(base + pos) = buf[got - remain + pos];
+            }
+            remain -= k;
+        }
+    }
+    port_kfree((void *)buf);
+    (void)flags;
+    /* msg_flags/controllen 归零 */
+    if (lx_user_ok(umsg + 40ull, 16ull, C6OS_PROT_W) != 0) {
+        *(u64 *)(umsg + 40ull) = 0ull;      /* msg_controllen */
+        *(u64 *)(umsg + 48ull) = 0ull;      /* msg_flags */
+    }
+    return (u64)rc;
+}
+
 #else /* !C6OS_NET */
 
 u64 lx_sock_socket(u64 d, u64 t, u64 p) { (void)d; (void)t; (void)p; return (u64)0 - LX_EAFNOSUPPORT; }
@@ -344,5 +483,7 @@ u64 lx_sock_getsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l;
 u64 lx_sock_shutdown(u64 fd, u64 h) { (void)fd; (void)h; return (u64)0 - LX_EAFNOSUPPORT; }
 u64 lx_sock_getpeername(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
 u64 lx_sock_getsockname(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EAFNOSUPPORT; }
+u64 lx_sock_sendmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
+u64 lx_sock_recvmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EAFNOSUPPORT; }
 
 #endif

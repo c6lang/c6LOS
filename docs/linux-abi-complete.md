@@ -847,7 +847,29 @@ L2–L8/M9/M13–M13d/M14–M21/alpine 无回归。
 `0x00000000ffffffff`（与 AT_FDCWD 同构），按 `(i64)fd<0` 判断会误当成
 "修改已有 fd"而 EBADF；改成同时识别符号扩展和零扩展两种 -1 形式。
 
-遗留：真 pty/控制终端、DNS/getaddrinfo、AF_UNIX、sendmsg iovec、
+遗留：真 pty/控制终端、DNS/getaddrinfo、AF_UNIX、musl libc-test 全量
+—— 后续里程碑。
+
+### M23 sendmsg/recvmsg：iovec 展开
+
+M18 的 socket 面把 `sendmsg/recvmsg` 留成 EOPNOTSUPP 桩， syslog/dbus/
+容器运行时等大量用 iovec 的程序因此不可用。M23 补齐：
+
+- x86-64 `struct msghdr` 56B（name@0/namelen@8/iov@16/iovlen@24/
+  control@32/controllen@40/flags@48），`struct iovec` 16B（base@0/len@8）。
+- `lx_sock_sendmsg/recvmsg`：把 ≤64 段、总长 ≤64KB 的 iovec 展开到
+  内核堆中转缓冲，一次 `SalSend/SalSendTo`/`SalRecv/SalRecvFrom`，保证 UDP
+  仍是单个数据报（逐段 send 会拆包，语义错）；recvmsg 按 iovec 分散回填，
+  返回实际字节数，msg_name/来源地址透传，control/flags 归零。
+- ancillary（SCM_RIGHTS 等）数据暂忽略（msg_controllen=0）；C6OS_NET=0
+  桩返 EAFNOSUPPORT，零侵入。
+
+`tests/linux/m23msg.c` 复用 M18 的 UDP 环回：sendmsg 两段 iovec →
+recvmsg 三段重组一致、msg_name 来源正确、带 msg_name 的 sendmsg（sendto
+语义）、controllen/flags 归零。验收 `make check-linuxabi-m23` → 19/19
+checks PASS；全量回归 L2–L8/M9/M13–M13d/M14–M22/alpine 无回归。
+
+遗留：真 pty/控制终端、DNS/getaddrinfo、AF_UNIX、ancillary 数据、
 musl libc-test 全量 —— 后续里程碑。
 
 > 回归备注：`check-linuxabi-m19` 用内部 `timeout 180` 杀 qemu，外层再叠
