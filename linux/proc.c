@@ -9,18 +9,24 @@
 #include <c6os/linux_proc.h>
 #include <c6os/port.h>
 
-#define LX_MAX_PIPE   8u
-#define LX_PIPE_SZ    4096ull
 #define LX_ARG_MAX    16u
 #define LX_ARG_BYTES  1024ull
 
+/* 管道（M13-3c）：对象在 kernel heap，环形缓冲区按需从 4KB 长到 64KB。
+ * Linux 的策略就是"写多少给多少、上限 pipe-max-size"，我们照这个做：
+ * 一次 write 需要的空间比现有容量大就先把缓冲扩到够（封顶 64KB），
+ * 所以要往空管道里写 64KB 只需一次调用，不需要用户侧循环。 */
+#define LX_PIPE_MIN   4096ull
+#define LX_PIPE_MAX   65536ull
+#define LX_PIPE_MAX_CAP 4096u    /* 管道**对象**数的保护性上限（不是缓冲大小） */
+
 typedef struct LxPipe {
-    u32 used;
     u32 readers;
     u32 writers;
     u64 head;
     u64 tail;
-    u8  buf[LX_PIPE_SZ];
+    u64 cap;
+    u8 *buf;
 } LxPipe;
 
 /* 进程表（M13-3b）：槽位数组在内核堆里按需倍增，每个槽位有独立的 LxProc 与
@@ -36,7 +42,8 @@ typedef struct LxSlot {
 
 static LxSlot *g_proc;             /* 槽位数组：内核堆，倍增 */
 static u32     g_proc_cap;
-static LxPipe  g_pipe[LX_MAX_PIPE];
+static LxPipe **g_pipe;            /* 管道槽位（指针表，内核堆，倍增） */
+static u32       g_pipe_cap;
 static int     g_cur = -1;
 
 /* L8：抢占。定时器每 tick 进来一次，攒够时间片就让出 CPU。 */
@@ -94,6 +101,7 @@ LxProc *lx_cur_proc(void)
 }
 
 static void pipe_drop_(LxFile *fe);
+static void pipe_ref_(const LxFile *fe);
 
 static void mem_zero_(u8 *p, u64 n)
 {
@@ -656,15 +664,10 @@ u64 lx_proc_fork(LxRegs *r)
             return (u64)0 - LX_ENOMEM;
         }
         for (i = 0ull; i < (u64)ch->fd->cap; i++) {
-            if (ch->fd->ent[i].node == LX_FD_NONE ||
-                ch->fd->ent[i].node >= (u64)LX_MAX_PIPE) {
+            if (ch->fd->ent[i].node == LX_FD_NONE) {
                 continue;
             }
-            if (ch->fd->ent[i].kind == LX_FD_PIPE_R) {
-                g_pipe[ch->fd->ent[i].node].readers++;
-            } else if (ch->fd->ent[i].kind == LX_FD_PIPE_W) {
-                g_pipe[ch->fd->ent[i].node].writers++;
-            }
+            pipe_ref_(&ch->fd->ent[i]);        /* 复制出的端点各持一份引用 */
         }
     }
     setup_trampoline_(ch);
@@ -854,38 +857,122 @@ static void wake_all_(void)
     }
 }
 
-static LxPipe *pipe_new_(int *o_idx)
+/* 管道号就是指针表里的槽位号（fd 的 node 字段）。槽位空 = 该槽尚未分配。 */
+static LxPipe *pipe_at_(u64 node)
 {
-    int i;
+    if (node >= (u64)g_pipe_cap) {
+        return (LxPipe *)0;
+    }
+    return g_pipe[node];
+}
 
-    for (i = 0; i < (int)LX_MAX_PIPE; i++) {
-        if (g_pipe[i].used == 0u) {
-            LxPipe *pp = &g_pipe[i];
+static int pipe_tab_grow_(void)
+{
+    u32 ncap = (g_pipe_cap == 0u) ? 8u : (g_pipe_cap * 2u);
+    LxPipe **ns;
+    u32 i;
 
-            pp->used = 1u;
-            pp->readers = 0u;
-            pp->writers = 0u;
-            pp->head = 0ull;
-            pp->tail = 0ull;
-            *o_idx = i;
-            return pp;
+    if (g_pipe_cap >= LX_PIPE_MAX_CAP) {
+        return -1;
+    }
+    if (ncap > LX_PIPE_MAX_CAP) {
+        ncap = LX_PIPE_MAX_CAP;
+    }
+    ns = (LxPipe **)port_kcalloc((u64)ncap, (u64)sizeof(LxPipe *));
+    if (ns == (LxPipe **)0) {
+        return -1;
+    }
+    for (i = 0u; i < g_pipe_cap; i++) {
+        ns[i] = g_pipe[i];
+    }
+    if (g_pipe != (LxPipe **)0) {
+        port_kfree((void *)g_pipe);
+    }
+    g_pipe = ns;
+    g_pipe_cap = ncap;
+    return 0;
+}
+
+/* 建一个管道：对象 + 最小容量环缓冲都从内核堆来。 */
+static LxPipe *pipe_new_(u64 *o_idx)
+{
+    u32 i;
+
+    for (i = 0u; i < g_pipe_cap; i++) {
+        if (g_pipe[i] == (LxPipe *)0) {
+            break;
         }
     }
-    return (LxPipe *)0;
+    if (i >= g_pipe_cap) {
+        if (pipe_tab_grow_() != 0) {
+            return (LxPipe *)0;
+        }
+        for (i = 0u; i < g_pipe_cap; i++) {
+            if (g_pipe[i] == (LxPipe *)0) {
+                break;
+            }
+        }
+        if (i >= g_pipe_cap) {
+            return (LxPipe *)0;
+        }
+    }
+    {
+        LxPipe *pp = (LxPipe *)port_kcalloc(1ull, (u64)sizeof(LxPipe));
+        u8 *buf = (u8 *)port_kmalloc(LX_PIPE_MIN);
+
+        if (pp == (LxPipe *)0 || buf == (u8 *)0) {
+            if (pp != (LxPipe *)0) {
+                port_kfree((void *)pp);
+            }
+            if (buf != (u8 *)0) {
+                port_kfree((void *)buf);
+            }
+            return (LxPipe *)0;
+        }
+        pp->cap = LX_PIPE_MIN;
+        pp->buf = buf;
+        g_pipe[i] = pp;
+        *o_idx = (u64)i;
+        return pp;
+    }
+}
+
+static void pipe_free_(LxPipe *pp)
+{
+    port_kfree((void *)pp->buf);
+    port_kfree((void *)pp);
 }
 
 static void pipe_drop_(LxFile *fe)
 {
-    if (fe->node >= (u64)LX_MAX_PIPE) {
+    LxPipe *pp = pipe_at_(fe->node);
+
+    if (pp == (LxPipe *)0) {
         return;
     }
-    if (fe->kind == LX_FD_PIPE_R && g_pipe[fe->node].readers > 0u) {
-        g_pipe[fe->node].readers--;
-    } else if (fe->kind == LX_FD_PIPE_W && g_pipe[fe->node].writers > 0u) {
-        g_pipe[fe->node].writers--;
+    if (fe->kind == LX_FD_PIPE_R && pp->readers > 0u) {
+        pp->readers--;
+    } else if (fe->kind == LX_FD_PIPE_W && pp->writers > 0u) {
+        pp->writers--;
     }
-    if (g_pipe[fe->node].readers == 0u && g_pipe[fe->node].writers == 0u) {
-        g_pipe[fe->node].used = 0u;
+    if (pp->readers == 0u && pp->writers == 0u) {
+        g_pipe[fe->node] = (LxPipe *)0;
+        pipe_free_(pp);
+    }
+}
+
+/* 增加一个端点引用（dup2 / fork 复制 fd 表时用）。 */
+static void pipe_ref_(const LxFile *fe)
+{
+    LxPipe *pp = pipe_at_(fe->node);
+
+    if (pp == (LxPipe *)0) {
+        return;
+    }
+    if (fe->kind == LX_FD_PIPE_R) {
+        pp->readers++;
+    } else if (fe->kind == LX_FD_PIPE_W) {
+        pp->writers++;
     }
 }
 
@@ -895,7 +982,7 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     LxPipe *pp;
     LxFile *rf;
     LxFile *wf;
-    int pi = -1;
+    u64 pi = 0ull;
     u64 rfd;
     u64 wfd;
     u32 pair[2];
@@ -932,11 +1019,11 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     pp->writers = 1u;
     rf = &p->fd->ent[rfd];
     wf = &p->fd->ent[wfd];
-    rf->node = (u64)pi;
+    rf->node = pi;
     rf->pos = 0ull;
     rf->is_dir = 0u;
     rf->kind = LX_FD_PIPE_R;
-    wf->node = (u64)pi;
+    wf->node = pi;
     wf->pos = 0ull;
     wf->is_dir = 0u;
     wf->kind = LX_FD_PIPE_W;
@@ -1005,36 +1092,66 @@ u64 lx_proc_dup2(u64 oldfd, u64 newfd)
         pipe_drop_(nf);
     }
     *nf = *of;
-    if (nf->kind == LX_FD_PIPE_R && nf->node < (u64)LX_MAX_PIPE) {
-        g_pipe[nf->node].readers++;
-    } else if (nf->kind == LX_FD_PIPE_W && nf->node < (u64)LX_MAX_PIPE) {
-        g_pipe[nf->node].writers++;
-    }
+    pipe_ref_(nf);
     return newfd;
 }
 
 /* ---- 读写：控制台 / 文件 / 管道 ------------------------------------------ */
 
+/* 环缓冲扩容：数据按逻辑顺序搬到新缓冲，head 归零。
+ * 这不是"提前分配"，而是 Linux 语义的一次写尽量一次完成（封顶 LX_PIPE_MAX）。 */
+static int pipe_grow_(LxPipe *pp, u64 need)
+{
+    u64 ncap = pp->cap;
+    u64 data = pp->tail - pp->head;
+    u8 *nb;
+    u64 i;
+
+    if (need <= pp->cap) {
+        return 0;
+    }
+    while (ncap < need) {
+        if (ncap >= LX_PIPE_MAX) {
+            return -1;
+        }
+        ncap *= 2ull;
+        if (ncap > LX_PIPE_MAX) {
+            ncap = LX_PIPE_MAX;
+        }
+    }
+    nb = (u8 *)port_kmalloc(ncap);
+    if (nb == (u8 *)0) {
+        return -1;
+    }
+    for (i = 0ull; i < data; i++) {
+        nb[i] = pp->buf[(pp->head + i) % pp->cap];
+    }
+    port_kfree((void *)pp->buf);
+    pp->buf = nb;
+    pp->cap = ncap;
+    pp->head = 0ull;
+    pp->tail = data;
+    return 0;
+}
+
 static u64 pipe_read_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
 {
-    LxPipe *pp;
+    LxPipe *pp = pipe_at_(fe->node);
 
-    if (fe->node >= (u64)LX_MAX_PIPE || g_pipe[fe->node].used == 0u) {
+    (void)p;
+    if (pp == (LxPipe *)0) {
         return n_((u64)LX_EBADF);
     }
-    pp = &g_pipe[fe->node];
     for (;;) {
         u64 done = 0ull;
 
         while (pp->head != pp->tail && done < len) {
-            u64 i = pp->head % LX_PIPE_SZ;
-
-            *(u8 *)(ubuf + done) = pp->buf[i];
+            *(u8 *)(ubuf + done) = pp->buf[pp->head % pp->cap];
             pp->head++;
             done++;
         }
         if (done > 0ull) {
-            wake_all_();
+            wake_all_();                   /* 腾出空间，写端可能正等着 */
             return done;
         }
         if (pp->writers == 0u) {
@@ -1046,28 +1163,30 @@ static u64 pipe_read_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
 
 static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
 {
-    LxPipe *pp;
+    LxPipe *pp = pipe_at_(fe->node);
+    u64 done = 0ull;
 
     (void)p;
-    if (fe->node >= (u64)LX_MAX_PIPE || g_pipe[fe->node].used == 0u) {
+    if (pp == (LxPipe *)0) {
         return n_((u64)LX_EBADF);
     }
-    pp = &g_pipe[fe->node];
+    /* 阻塞写要"全写完才返回"（Linux）：先把缓冲扩到够用（封顶 64KB），
+     * 剩下的部分靠边写边等读者腾地方。 */
+    (void)pipe_grow_(pp, (pp->tail - pp->head) + len);
     for (;;) {
-        u64 done = 0ull;
-
-        while ((pp->tail - pp->head) < LX_PIPE_SZ && done < len) {
-            pp->buf[pp->tail % LX_PIPE_SZ] = *(const u8 *)(ubuf + done);
+        while ((pp->tail - pp->head) < pp->cap && done < len) {
+            pp->buf[pp->tail % pp->cap] = *(const u8 *)(ubuf + done);
             pp->tail++;
             done++;
         }
-        if (done > 0ull) {
-            wake_all_();
+        if (done == len) {
+            wake_all_();                   /* 有数据了，读者可能正等着 */
             return done;
         }
         if (pp->readers == 0u) {
-            return n_((u64)LX_EPIPE);
+            return (done > 0ull) ? done : n_((u64)LX_EPIPE);
         }
+        wake_all_();
         lx_proc_block();
     }
 }
@@ -1131,9 +1250,12 @@ static u16 poll_events_(LxProc *p, i32 fd)
         return (u16)LX_POLLNVAL;
     }
     if (f->kind == LX_FD_PIPE_R) {
-        const LxPipe *pp = &g_pipe[f->node];
+        const LxPipe *pp = pipe_at_(f->node);
         u16 ev = 0u;
 
+        if (pp == (const LxPipe *)0) {
+            return (u16)LX_POLLNVAL;
+        }
         if (pp->tail != pp->head) {
             ev = (u16)(ev | (u16)LX_POLLIN);
         }
@@ -1143,10 +1265,13 @@ static u16 poll_events_(LxProc *p, i32 fd)
         return ev;
     }
     if (f->kind == LX_FD_PIPE_W) {
-        const LxPipe *pp = &g_pipe[f->node];
+        const LxPipe *pp = pipe_at_(f->node);
         u16 ev = 0u;
 
-        if ((pp->tail - pp->head) < LX_PIPE_SZ) {
+        if (pp == (const LxPipe *)0) {
+            return (u16)LX_POLLNVAL;
+        }
+        if ((pp->tail - pp->head) < pp->cap) {
             ev = (u16)(ev | (u16)LX_POLLOUT);
         }
         if (pp->readers == 0u) {
