@@ -192,6 +192,11 @@ static void s3_win_phy_clock_enable(void)
 {
     volatile u32 *clk = (volatile u32 *)0x60026014u;
 
+#ifdef S3_SKIP_WIFI_CLK_INIT
+    /* §527：经 IDF 二级 bootloader 启动时，WIFI_CLK_EN 已被配成
+     * 0xff87d850；我们原来的 OR 会把它改成 0xfffce7bf，可能破坏 RF 状态。 */
+    return;
+#endif
     *clk = *clk | 0x78078Fu;
     *clk = *clk | 0x400000u;
 }

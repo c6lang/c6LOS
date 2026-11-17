@@ -17660,3 +17660,22 @@ app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替�
 全部模拟/RF 初始化，再跳到 c6LOS。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §527 经 IDF bootloader 启动仍然 0 AP；跳过时钟覆写导致不开机
+
+- 用 `esptool elf2image` 把 c6LOS ELF 转成合法 ESP app image，配 IDF
+  二级 bootloader 启动：**成功启动并跑完整流程**（OPTIONS0 已和官方一致
+  =0x1c008080），但 `0x60033d14` 仍是 0、扫描仍是 0 AP。
+- 发现我们的 `s3_win_phy_clock_enable()` 把 bootloader 配好的
+  `WIFI_CLK_EN=0xff87d850` 覆写成 `0xfffce7bf`。加了
+  `S3_SKIP_WIFI_CLK_INIT` 编译开关跳过覆写后：**真板完全无串口输出**
+  （不开机），说明这些时钟位在启动阶段仍是必需的，不能直接跳过。
+  该改动在 `#ifdef` 后，默认编译不受影响。
+
+⇒ 结论：缺口不是单个寄存器，而是 IDF app 启动阶段
+（`do_core_init`/`rtc_clk_init`/ PHY 状态）与二级 bootloader 组合出的
+完整模拟初始化。真板硬件、路由器、天线、官方协议栈均已验证正常。
+
+目标未达成，goal 保持 active。
