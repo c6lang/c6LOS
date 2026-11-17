@@ -15147,3 +15147,31 @@ usb 2-4: can't set config #1, error -71     ← EPROTO，连配置都设不了
 设备能重新出现在总线上（`Device 081`），但**配置阶段就失败**。
 
 ⇒ **必须断电重插板子**，之后直接用上面的命令烧写即可。
+
+## §440 联网代码路径静态审计：全部完整，只等硬件恢复
+
+趁 USB 恢复不了，把"硬件一好就能一次跑通"的整条链路静态核对了一遍：
+
+| 环节 | 位置 | 状态 |
+|---|---|---|
+| 凭据 | `port/s3/wifi_creds_local.h` | `weforpay.com` / `weforpay` ✓ |
+| 关联 AP | `wifi_glue.c:1482 s3_wifi_associate` | `set_storage(RAM)` → `set_mode(STA)` → `set_config` → `start` → `connect` ✓ |
+| 等连接 | `wifi_glue.c:1574 s3_wifi_wait_connected(15000)` | ✓ |
+| DHCP | `c6_lwip_start_dhcp()` + `c6_lwip_wait_ip(20000)` | ✓ |
+| 打印 IP | `c6_lwip_print_ip()` | ✓ |
+| 取页面 | `c6_https_demo()` → `https_get("qq.com", "/", page, 4096)` | ✓ |
+
+调用顺序在 `win_island.c:805-838`，`WSTAGE` 信标 `0x1021/0x1022/0x1023`
+分别对应"发起关联 / 关联成功 / DHCP 成功"，读 RTC `0x50000A10` 就能知道卡在哪一步。
+
+### 硬件恢复后的完整操作（三条命令）
+```sh
+cd /home/winger/rtos-c6/.git/dsh-worktrees/session-5e5272fb-9503-4864-a426-33ae0205
+pkill -x openocd
+timeout 260 ./tools/flashbl.sh build/wifi/c6os.bin 30
+timeout 55 sudo -n python3 tools/cap.py -t 28
+```
+
+**这次要重点看两件事**：
+1. `[wifimain] id=1 tick=` 是否**只出现一次** —— 若是，说明 §438 的重入真因确实修好了；
+2. 是否走到 `WSTAGE 0x1021`（发起关联）及其之后的 `[wifi] associate ssid=weforpay.com`。
