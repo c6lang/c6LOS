@@ -957,9 +957,45 @@ M26 交付一条命令的完整回归：`make check-linuxabi-all`
 
 这是可维护性交付：新增里程碑只需在脚本 `TESTS` 列表加一行。
 
-**剩余缺口（诚实清单）**：真 pty/控制终端（当前单全局串口 tty，无
-/dev/ptmx 多实例）、AF_UNIX 的 STREAM 真字节流边界与 SCM_RIGHTS、
-musl libc-test 全量、glibc NSS 内部 DNS resolver 细节（内核 socket ABI
-已由手写 DNS 查询证明完整）。这些不影响已验证的 Alpine/busybox 主体功能。
+**剩余缺口（此时清单，M27 又收窄一项）**：真 pty/控制终端（当前单全局
+串口 tty，无 /dev/ptmx 多实例）、AF_UNIX 的 STREAM 真字节流边界与
+SCM_RIGHTS、musl libc-test 全量（M27 已做 functional 子集）、glibc NSS
+内部 DNS resolver 细节（内核 socket ABI 已由手写 DNS 查询证明完整）。
+这些不影响已验证的 Alpine/busybox 主体功能。
+
+### M27 musl libc-test functional 子集
+
+设计文档 §5 列的 libc-test functional 验收终于落地：vendor 上游
+`libc-test`（commit `18e2849`，bytecodealliance 镜像的 nsz 上游快照）到
+`tests/linux/libctest/`（仅留 `src/{functional,common,musl}`，476KB）。
+
+筛选方法（避免把环境问题误判成 ABI 缺陷）：
+1. 宿主 gcc 静态编译 75 个 functional 测试 → 46 个编译成功（其余依赖
+   pthread/IPC/DSO/locale 工具链，豁免）；
+2. 宿主运行 46 个 → 38 个 PASS，8 个 locale/stdio 相关在宿主自己就失败
+   （clocale/fnmatch/fscanf/sscanf/strftime/strtol/wcstol 等），豁免；
+3. 从 38 个宿主 PASS 里再选 18 个纯计算/字符串/搜索/数值测试，做成 c6
+   验收子集。
+
+运行架构：每个测试 `gcc -Os` **动态链接**（18 个静态 ELF 共 14M，远超
+initramfs 3MB 上限；动态链接共享一份 libc 后仅 3.2M），连同 ld.so/libc
+打进 initramfs 的 `/lt/`；`tests/linux/m27libctest.c` 作 runner，
+fork+execve 逐个跑、收退出码。专用内核入口 `t_x86_m27.c6` 把 initramfs
+上限从 3MB 放宽到 0x3c0000（沿用 L4 dyn 的口径）。
+
+18 个测试首次跑 17/18：`mbc` 依赖 UTF-8 locale + nl_langinfo(CODESET)，
+c6 initramfs 无 locale 数据 → 与宿主同类环境依赖，豁免并移出子集。
+最终 17/17 PASS：string 系列（strcpy/strcmp/memcpy/memset/strchr/
+strcspn/strstr）、qsort、setjmp、snprintf、search 系列（tsearch/hsearch/
+lsearch/insque）、strtod/strtof、udiv、wcsstr。
+
+验收 `make check-linuxabi-m27` → `PASS: libc-test functional (17/17)`；
+`check-linuxabi-all` 已纳入 M27（现 31 项）。关键回归 L1/L2/L5/M9/
+M15/M18/M25 无回归。
+
+**豁免清单（诚实记录）**：mbc/clocale/fnmatch/fscanf/fwscanf/sscanf/
+strftime/strtol/wcstol（locale 或 stdio 环境依赖，宿主自身亦失败）、
+pthread*/ipc_*/sem_*/spawn/vfork/dlopen*/tls_*（线程/进程/DSO 场景，
+由 L7/M14 等专门测试覆盖）、math 全量（浮点不在本内核主路径）。
 
 

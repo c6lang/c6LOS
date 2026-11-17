@@ -33,6 +33,7 @@ check-linuxabi-m22
 check-linuxabi-m23
 check-linuxabi-m24
 check-linuxabi-m25
+check-linuxabi-m27
 check-sal
 check-ip
 check-ping
