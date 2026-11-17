@@ -606,7 +606,42 @@ WNOHANG/按组收尸、SIGPIPE 忽略与默认动作、SIGSTOP/WUNTRACED/WCONTIN
 tcgetpgrp ENOTTY、EINTR、SA_RESTART）→ `PASS: procgrp`；全量回归
 L2–L8/M9/M13–M13d/alpine 无回归。
 
-M14 仍未覆盖：`waitid`/`WNOWAIT`、`clone3`（nr 435，glibc 会回退 clone）、
-`*at` 系列 dirfd 语义 —— 归入后续里程碑。
+M14 仍未覆盖：`waitid`/`WNOWAIT`、`clone3`（nr 435，glibc 会回退 clone）
+—— 归入后续里程碑；`*at` dirfd 语义已在 M15-1a 补上。
+
+### M15 VFS 与设备（M15-1 → M15-3）
+
+M15-1a（统一路径解析）：新增 `at_path_/dirfd_base_/get_user_path_`，`*at`
+系列不再 `(void)dirfd`：AT_FDCWD、LX_FD_ROOT、VFS 目录 fd、initramfs 目录
+fd 都能作为相对路径基准（B7）。`statat/access` 同时接上 VFS 挂载点，
+`/tmp` 下的文件终于能被 `stat` 看见（B8）。
+
+M15-1b（写类 syscall）：`mkdirat/mkdir/rmdir/unlinkat/unlink/renameat/rename/
+truncate/ftruncate/chmod/fchmodat/fchmod` 全部接到内核 `LOS_Fs*`（POSIX errno
+数值与 Linux 一致，直接透传）；initramfs 只读的操作返回 EROFS。
+
+M15-1c（属性类）：`statfs/fstatfs`（x86-64 struct statfs 实测 120 字节，
+f_type/bsize/blocks/bfree/bavail/namelen/frsize 填合理值）、`utimensat`
+（内核 mtime 是预留字段，校验路径存在后接受但忽略时间戳）。
+
+M15-2（devfs）：`LxFile` 加 `LX_FD_DEV` 种类，`/dev/null`（吞写、读 EOF）、
+`/dev/zero`（读全 0）、`/dev/full`（写 ENOSPC）、`/dev/urandom`（LCG 伪随机）
+按 fd 分发，不占 VFS 文件槽，也不需要真的挂载 devfs。busybox 的 `2>/dev/null`
+从此可用。
+
+踩到的坑：
+1. AT_FDCWD 在用户态是 `int -100`：musl 符号扩展成 `0xffff…ff9c`，而 gcc
+   把常量零扩展成 `0x00000000ffffff9c` 两种都出现。`dirfd_base_` 只认前者，
+   L4 的 `ls: .` 直接 `ENOTDIR`。改成"低 32 位 == 0xffffff9c 即 AT_FDCWD"。
+2. 把 `LOS_FS_PATH_MAX` 的兜底 `#define` 误插在 `#if C6OS_VFS` 中间，提前
+   `#endif` 导致 VFS=0 构建时所有 VFS 辅助函数暴露、编译失败。挪到 VFS 块
+   真正的结尾。
+3. statfs 的 syscall 号：x86-64 是 `statfs=137/fstatfs=138/sysfs=139`，
+   一开始写成 138/139，glibc 的 `statfs()` 直接 ENOSYS(137)。
+
+验收：`make check-linuxabi-m15`（`tests/linux/m15fs.c`：mkdir/rmdir/
+openat+fstatat 相对路径/挂载点 stat/renameat/ftruncate/truncate/unlinkat/
+statfs 字段非零/dev null zero urandom full）→ `PASS: m15fs`；全量回归
+L2–L8/M9/M13–M13d/M14/alpine 无回归。
 
 

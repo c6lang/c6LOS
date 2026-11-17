@@ -50,12 +50,19 @@
 #define LX_FD_NONE    0xffffffffffffffffull
 #define LX_FD_CONSOLE 0xfffffffffffeull
 #define LX_FD_ROOT    0xfffffffffffdull
+/* /dev/* 设备节点号（M15-2），放在 node 字段，和特殊标记/普通节点不冲突 */
+#define LX_DEV_NULL     0xfffffff0ull
+#define LX_DEV_ZERO     0xfffffff1ull
+#define LX_DEV_FULL     0xfffffff2ull
+#define LX_DEV_RANDOM   0xfffffff3ull
+#define LX_DEV_URANDOM  0xfffffff4ull
 
 /* fd 种类 */
 #define LX_FD_FILE    0u
 #define LX_FD_PIPE_R  1u
 #define LX_FD_PIPE_W  2u
 #define LX_FD_VFS     3u   /* /tmp 等走内核 VFS（M9-4） */
+#define LX_FD_DEV     4u   /* /dev/* 设备（M15-2）：null/zero/full/random… */
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，
@@ -238,6 +245,17 @@ u64  lx_console_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_console_put(u64 ubuf, u64 len);             /* 按 node 判定后直写控制台 */
 void lx_fs_set_fdtab(LxFdTab *t);                  /* linux/fs.c */
 LxFdTab *lx_fs_get_fdtab(void);                    /* 登记进程时接管兜底表 */
+/* M15：写类/属性类 syscall（linux/fs.c；sys.c 只做分派） */
+u64  lx_fs_mkdirat(u64 dirfd, u64 upath, u64 mode);
+u64  lx_fs_rmdir(u64 upath);
+u64  lx_fs_unlinkat(u64 dirfd, u64 upath, u64 flags);
+u64  lx_fs_renameat(u64 odirfd, u64 oldpath, u64 ndirfd, u64 newpath);
+u64  lx_fs_ftruncate(u64 fd, u64 len);
+u64  lx_fs_truncate(u64 upath, u64 len);
+u64  lx_fs_chmod(u64 upath, u64 mode);
+u64  lx_fs_chmod_pathat(u64 dirfd, u64 upath, u64 mode);
+u64  lx_fs_statfs(u64 upath, u64 ubuf);          /* x86-64 struct statfs, 120B */
+u64  lx_fs_utimensat(u64 dirfd, u64 upath, u64 times);
 
 /* ---- 串口控制台的行规程（linux/tty.c，M12）----------------------------
  * 默认关着：fd 0 以前是"永远 EOF"，L2..L6 的既有验收（busybox sh 的管道

@@ -190,8 +190,24 @@
 #define LX_SYS_set_tid_address   218
 #define LX_SYS_exit_group    231
 #define LX_SYS_openat        257
+#define LX_SYS_mkdirat       258
 #define LX_SYS_newfstatat    262
+#define LX_SYS_unlinkat      263
+#define LX_SYS_renameat      264
 #define LX_SYS_readlinkat    267
+#define LX_SYS_fchmodat      268
+/* 写类/属性类（legacy 与 *at 对，M15） */
+#define LX_SYS_rename        82
+#define LX_SYS_mkdir         83
+#define LX_SYS_rmdir         84
+#define LX_SYS_unlink        87
+#define LX_SYS_chmod         90
+#define LX_SYS_fchmod        91
+#define LX_SYS_truncate      76
+#define LX_SYS_ftruncate     77
+#define LX_SYS_statfs        137
+#define LX_SYS_fstatfs       138
+#define LX_SYS_utimensat     280
 #define LX_SYS_set_robust_list   273
 #define LX_SYS_prlimit64     302
 #define LX_SYS_getrandom     318
@@ -219,6 +235,13 @@
 #define LX_ESRCH   3
 #define LX_E2BIG   7
 #define LX_EINTR   4
+#define LX_ENOTDIR 20
+#define LX_ENAMETOOLONG 36
+#define LX_EISDIR  21
+#define LX_EEXIST  17
+#define LX_EACCES  13
+#define LX_EROFS   30
+#define LX_ENOSPC  28
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {

@@ -139,6 +139,9 @@ static int vfs_is_dir_(const char *path)
     }
     return (st.type == (UINT32)LOS_FS_TYPE_DIR) ? 1 : 0;
 }
+#else
+/* 写类 syscall 的路径缓冲在 C6OS_VFS=0 时也要有确定的容量（FS_NAME 足够）。 */
+#define LOS_FS_PATH_MAX FS_NAME
 #endif
 
 static u64 slen_(const char *s)
@@ -149,6 +152,19 @@ static u64 slen_(const char *s)
         n++;
     }
     return n;
+}
+
+/* 不依赖 C6OS_VFS 的定长字符串拷贝（*at 路径辅助用，调用点已保证容量）。 */
+static void scpy_(char *dst, const char *src, u64 n)
+{
+    u64 i;
+
+    for (i = 0ull; i < n; i++) {
+        dst[i] = src[i];
+        if (src[i] == '\0') {
+            break;
+        }
+    }
 }
 
 static int seq_(const char *a, const char *b)
@@ -662,40 +678,203 @@ static int fill_stat(u64 ustat, u32 ino, u64 size, u32 mode)
 
 /* ---- 系统调用实现 ---- */
 
-static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
+/* M15-1a：*at 系列的相对路径解析（B7）。
+ * 以前所有 *at 都 `(void)dirfd`，相对路径一律按 cwd 算 —— 但 busybox 的
+ * `cp -a`/`find`/`unlinkat` 会先 open 一个目录拿 fd，再对那个 fd 做相对
+ * 操作；不认 dirfd 就会操作错目录。这里把 dirfd 翻译成"基准绝对路径"：
+ *   AT_FDCWD (-100) → 当前 cwd
+ *   LX_FD_ROOT      → 根
+ *   VFS 目录 fd     → g_dpath[slot]（/tmp 等挂载点里的子目录）
+ *   initramfs 目录  → 该节点的 name
+ * 返回 0 成功，负数 = -errno。 */
+#define LX_AT_FDCWD ((u64)0 - 100ull)
+
+/* glibc/busybox 里 AT_FDCWD 是 int -100。做系统调用时上游有符号扩展的
+ * （0xffff...ff9c），也有只置低 32 位的（0x00000000ffffff9c）—— 后者是 gcc
+ * 把 int 常量零扩展的结果。两种都认，否则 `stat(".")` 会被当成"fd -100
+ * 不存在"报 ENOTDIR（L4 的 `ls: .: Not a directory`）。 */
+static int is_at_fdcwd_(u64 dirfd)
+{
+    return (dirfd == LX_AT_FDCWD) || ((dirfd & 0xffffffffull) == 0xffffff9cull);
+}
+
+static int dirfd_base_(u64 dirfd, char *base, u64 cap)
+{
+    LxFile *f;
+
+    if (is_at_fdcwd_(dirfd)) {
+        u64 n = slen_(g_cwd);
+
+        base[0] = '\0';
+        if (g_cwd[0] != '\0') {
+            if (n + 2ull >= cap) {
+                return -LX_ENAMETOOLONG;
+            }
+            (void)scpy_(base, g_cwd, cap);
+            base[n] = '/';
+            base[n + 1ull] = '\0';
+        }
+        return 0;
+    }
+    f = fd_get(dirfd);
+    if (f == (LxFile *)0 || f->is_dir == 0u) {
+        return -LX_ENOTDIR;
+    }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS && f->node >= LX_VDIR_BASE) {
+        u32 slot = (u32)(f->node - LX_VDIR_BASE);
+        const char *p;
+        u64 n;
+
+        if (slot >= (u32)LX_MAX_VDIR || g_dpath[slot][0] == '\0') {
+            return -LX_EBADF;
+        }
+        p = g_dpath[slot];
+        n = slen_(p);
+        if (n + 2ull >= cap) {
+            return -LX_ENAMETOOLONG;
+        }
+        (void)scpy_(base, p, cap);
+        base[n] = '/';
+        base[n + 1ull] = '\0';
+        return 0;
+    }
+#endif
+    if (f->node == LX_FD_ROOT) {
+        base[0] = '\0';
+        return 0;
+    }
+    if (f->kind == LX_FD_FILE && f->node < (u64)g_nodes) {
+        const char *p = g_node[(u32)f->node].name;
+        u64 n = slen_(p);
+
+        if (n + 2ull >= cap) {
+            return -LX_ENAMETOOLONG;
+        }
+        (void)scpy_(base, p, cap);
+        base[n] = '/';
+        base[n + 1ull] = '\0';
+        return 0;
+    }
+    return -LX_EBADF;
+}
+
+/* 把用户路径串拷进 buf（返回 0 / -EFAULT / -EINVAL），和原来各处的内联循环等价。 */
+static int get_user_path_(u64 upath, char *buf, u64 cap)
+{
+    u64 i = 0ull;
+
+    if (lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
+        return -LX_EFAULT;
+    }
+    for (;;) {
+        u8 c;
+
+        if (i + 1ull >= cap) {
+            return -LX_EINVAL;
+        }
+        if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
+            return -LX_EFAULT;
+        }
+        c = *(const u8 *)(upath + i);
+        buf[i] = (char)c;
+        if (c == 0u) {
+            return 0;
+        }
+        i++;
+    }
+}
+
+/* dirfd + 用户路径 → 内核规范化的绝对路径（ap，不带前导 '/'）。
+ * 绝对路径直接规范之；相对路径拼到 dirfd_base_ 上（不是 cwd）。 */
+static int at_path_(u64 dirfd, u64 upath, char *ap, u64 cap)
 {
     char path[FS_NAME];
+    char base[FS_NAME];
+    char tmp[FS_NAME * 2u];
+    u64 w = 0ull;
+    u64 i = 0ull;
+    int rc;
+
+    rc = get_user_path_(upath, path, (u64)sizeof path);
+    if (rc != 0) {
+        return rc;
+    }
+    if (path[0] == '/') {
+        return norm_(path, ap, cap) == 0 ? 0 : -LX_ENAMETOOLONG;
+    }
+    rc = dirfd_base_(dirfd, base, (u64)sizeof base);
+    if (rc != 0) {
+        return rc;
+    }
+    while (base[w] != '\0' && w + 1ull < (u64)sizeof tmp - 1ull) {
+        tmp[w] = base[w];
+        w++;
+    }
+    while (path[i] != '\0' && w + 1ull < (u64)sizeof tmp - 1ull) {
+        tmp[w++] = path[i++];
+    }
+    tmp[w] = '\0';
+    return norm_(tmp, ap, cap) == 0 ? 0 : -LX_ENAMETOOLONG;
+}
+
+/* 写类 syscall 用：dirfd+路径 → 带前导 '/' 的绝对路径（喂给 LOS_Fs*）。
+ * 返回 0 / -errno；abspath 至少 LOS_FS_PATH_MAX 字节。 */
+static int at_abspath_(u64 dirfd, u64 upath, char *abspath, u64 cap)
+{
+    char ap[FS_NAME] = {0};
+    u64 n = 0ull;
+    int rc = at_path_(dirfd, upath, ap, (u64)sizeof ap);
+
+    if (rc != 0) {
+        return rc;
+    }
+    if (slen_(ap) + 2ull > cap) {
+        return -LX_ENAMETOOLONG;
+    }
+    if (ap[0] != '\0') {
+        abspath[n++] = '/';
+        while (ap[n - 1ull] != '\0') {
+            abspath[n] = ap[n - 1ull];
+            n++;
+        }
+    }
+    abspath[n] = '\0';
+    return 0;
+}
+
+/* M15-2：把 /dev/xxx 映射到设备节点号（node 字段的特殊值）。
+ * 返回 0 表示不是设备路径。设备走 LX_FD_DEV，不占 VFS 的文件槽。 */
+static u64 dev_node_(const char *s)
+{
+    if (seq_(s, "dev/null") == 1) {
+        return LX_DEV_NULL;
+    }
+    if (seq_(s, "dev/zero") == 1) {
+        return LX_DEV_ZERO;
+    }
+    if (seq_(s, "dev/full") == 1) {
+        return LX_DEV_FULL;
+    }
+    if (seq_(s, "dev/random") == 1 || seq_(s, "dev/urandom") == 1) {
+        return LX_DEV_URANDOM;
+    }
+    return 0ull;
+}
+
+static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
+{
     char ap[FS_NAME] = {0};
     const char *s;
     int idx;
     u64 fd;
 
-    (void)dirfd;
-    if (lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
-        return (u64)0 - LX_EFAULT;
-    }
     {
-        u64 i = 0;
+        int rc = at_path_(dirfd, upath, ap, (u64)sizeof ap);
 
-        for (;;) {
-            u8 c;
-
-            if (i + 1ull >= FS_NAME) {
-                return (u64)0 - LX_EINVAL;
-            }
-            if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
-                return (u64)0 - LX_EFAULT;
-            }
-            c = *(const u8 *)(upath + i);
-            path[i] = (char)c;
-            if (c == 0u) {
-                break;
-            }
-            i++;
+        if (rc != 0) {
+            return (u64)0 - (u64)(-rc);
         }
-    }
-    if (path_(path, ap, (u64)sizeof ap) != 0) {
-        return (u64)0 - LX_ENOENT;
     }
     s = ap;
     if (s[0] == '\0') {                            /* "/" 根目录 */
@@ -705,6 +884,18 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         }
         fd_set(fd, LX_FD_ROOT, 1u, LX_FD_FILE, flags);
         return fd;
+    }
+    {
+        u64 dev = dev_node_(s);
+
+        if (dev != 0ull) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, dev, 0u, LX_FD_DEV, flags);
+            return fd;
+        }
     }
 #if C6OS_VFS
     if (vfs_owns_(s) != 0) {
@@ -762,6 +953,34 @@ u64 lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode)
 }
 
 /* 从文件读，不动 fd 位置（pread64、以及 mmap 的文件内容拷贝都用它）。 */
+/* M15-2：/dev/* 设备的读。node 是 LX_DEV_* 特殊值。
+ * user!=0 时目标在用户空间要先校验可写；user==0 是内核缓冲（pread_k）。 */
+static u32 g_dev_seed = 0x13579bdfu;
+
+static u64 dev_read_(u64 node, u64 dst, u64 len, u32 user)
+{
+    u64 i;
+
+    if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (node == LX_DEV_ZERO) {
+        for (i = 0ull; i < len; i++) {
+            *(u8 *)(dst + i) = 0u;
+        }
+        return len;
+    }
+    if (node == LX_DEV_URANDOM) {
+        for (i = 0ull; i < len; i++) {
+            g_dev_seed = g_dev_seed * 1103515245u + 12345u;
+            *(u8 *)(dst + i) = (u8)((g_dev_seed >> 16) & 0xffu);
+        }
+        return len;
+    }
+    /* /dev/null、/dev/full 读都是 EOF */
+    return 0ull;
+}
+
 static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
 {
     LxFile *f = fd_get(fd);
@@ -792,6 +1011,9 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         return vfs_err_(n);
     }
 #endif
+    if (f->kind == LX_FD_DEV) {
+        return dev_read_(f->node, dst, len, user);
+    }
     if (f->node == LX_FD_CONSOLE) {
         /* M12：console 节点的读以前恒为 EOF。tty 打开之后它就是真终端——
          * 注意这里**不能**只在 fd 0 上判断：ash 启动时会把 stdin dup 成别的
@@ -873,6 +1095,16 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
         return vfs_err_(n);
     }
 #endif
+    if (f->kind == LX_FD_DEV) {
+        if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        f->pos += len;
+        if (f->node == LX_DEV_FULL) {
+            return (u64)0 - LX_ENOSPC;             /* /dev/full：写永远失败 */
+        }
+        return len;                                /* /dev/null 等：吞掉 */
+    }
     return (u64)0 - LX_EBADF;
 }
 
@@ -1100,40 +1332,21 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
 
 u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
 {
-    char path[FS_NAME];
+    char upath_buf[FS_NAME];
     char ap[FS_NAME] = {0};
     const char *s;
     int idx;
-    u64 i;
 
-    (void)dirfd;
-    if (lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
-        return (u64)0 - LX_EFAULT;
-    }
-    for (i = 0;; i++) {
-        u8 c;
+    /* AT_EMPTY_PATH 要先看原始 path 串是否为空，不能先经 at_path_ 规范
+     * （空串解析成 cwd，就分不出"真的是空"还是"."）。 */
+    {
+        int rc = get_user_path_(upath, upath_buf, (u64)sizeof upath_buf);
 
-        if (i + 1ull >= FS_NAME) {
-            return (u64)0 - LX_EINVAL;
-        }
-        if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
-            return (u64)0 - LX_EFAULT;
-        }
-        c = *(const u8 *)(upath + i);
-        path[i] = (char)c;
-        if (c == 0u) {
-            break;
+        if (rc != 0) {
+            return (u64)0 - (u64)(-rc);
         }
     }
-    if (path_(path, ap, (u64)sizeof ap) != 0) {
-        return (u64)0 - LX_ENOENT;
-    }
-    s = ap;
-    if (s[0] == '\0') {
-        /* AT_EMPTY_PATH：path 为空时按 dirfd 取文件自己的 stat。
-         * glibc 的 fstat 就走这条路；不认它的话所有文件都会拿到根目录那
-         * 一套 dev/ino，动态链接器据此判定"这个库已经加载过"，
-         * 于是第二个库整个被跳过（busybox 需要 libresolv + libc 时必踩）。 */
+    if (upath_buf[0] == '\0') {
         if ((flags & LX_AT_EMPTY_PATH) != 0ull && (i64)dirfd >= 0) {
             return lx_fs_fstat(dirfd, ustat);
         }
@@ -1142,6 +1355,40 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
         }
         return 0ull;
     }
+    {
+        int rc = at_path_(dirfd, upath, ap, (u64)sizeof ap);
+
+        if (rc != 0) {
+            return (u64)0 - (u64)(-rc);
+        }
+    }
+    s = ap;
+    if (s[0] == '\0') {                    /* "/" 根目录（AT_EMPTY_PATH 已在上面处理） */
+        if (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        return 0ull;
+    }
+#if C6OS_VFS
+    /* B8：挂载点（/tmp 的 ramfs、/data 的 fatfs）必须能被 stat 看见。
+     * 以前只查 initramfs 的扁平表，挂载点下的文件一律 ENOENT。 */
+    if (vfs_owns_(s) != 0) {
+        LosFsStat st = {0};
+        char vpath[LOS_FS_PATH_MAX] = {0};
+        u32 mode = 0100644u;
+
+        vpath[0] = '/';
+        (void)os_str_cpy(vpath + 1, s, (u32)(LOS_FS_PATH_MAX - 1));
+        if (LOS_FsStat((const CHAR *)vpath, &st) != 0) {
+            return (u64)0 - LX_ENOENT;
+        }
+        if (st.type == (UINT32)LOS_FS_TYPE_DIR) {
+            mode = 0040755u;
+        }
+        return (fill_stat(ustat, 1u, (u64)st.size, mode) != 0) ?
+               (u64)0 - LX_EFAULT : 0ull;
+    }
+#endif
     idx = fs_find(s);
     if (idx < 0) {
         return (u64)0 - LX_ENOENT;
@@ -1154,40 +1401,257 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
 
 u64 lx_fs_access(u64 upath, u64 mode)
 {
+    char ap[FS_NAME] = {0};
+    const char *s;
+    int rc;
+
     (void)mode;
-    {
-        char path[FS_NAME];
-        char ap[FS_NAME] = {0};
-        const char *s;
-        u64 i;
+    rc = at_path_(LX_AT_FDCWD, upath, ap, (u64)sizeof ap);
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    s = ap;
+    if (s[0] == '\0') {
+        return 0ull;                       /* 根目录 */
+    }
+#if C6OS_VFS
+    if (vfs_owns_(s) != 0) {
+        LosFsStat st = {0};
+        char vpath[LOS_FS_PATH_MAX] = {0};
 
-        if (lx_user_ok(upath, 1ull, C6OS_PROT_R) == 0) {
-            return (u64)0 - LX_EFAULT;
-        }
-        for (i = 0;; i++) {
-            u8 c;
-
-            if (i + 1ull >= FS_NAME) {
-                return (u64)0 - LX_EINVAL;
-            }
-            if (lx_user_ok(upath + i, 1ull, C6OS_PROT_R) == 0) {
-                return (u64)0 - LX_EFAULT;
-            }
-            c = *(const u8 *)(upath + i);
-            path[i] = (char)c;
-            if (c == 0u) {
-                break;
-            }
-        }
-        if (path_(path, ap, (u64)sizeof ap) != 0) {
-            return (u64)0 - LX_ENOENT;
-        }
-        s = ap;
-        if (s[0] == '\0' || fs_find(s) >= 0) {
-            return 0ull;
-        }
+        vpath[0] = '/';
+        (void)os_str_cpy(vpath + 1, s, (u32)(LOS_FS_PATH_MAX - 1));
+        return (LOS_FsStat((const CHAR *)vpath, &st) == 0) ? 0ull
+                                                            : (u64)0 - LX_ENOENT;
+    }
+#endif
+    if (fs_find(s) >= 0) {
+        return 0ull;
     }
     return (u64)0 - LX_ENOENT;
+}
+
+/* ---- M15-1b：写类 syscall ------------------------------------------------
+ * 一律转成绝对路径后交给内核 VFS（LOS_Fs*）。内核 errno 与 Linux errno 数值
+ * 一致（都是 POSIX），直接透传即可。initramfs 只读：相关操作返回 EROFS。
+ * C6OS_VFS=0 的 port（L2–L8 载荷）这些操作全部返回 EROFS，行为确定。 */
+static u64 vfs_errno_(int rc)
+{
+    return (rc < 0) ? ((u64)0 - (u64)(0 - rc)) : 0ull;
+}
+
+u64 lx_fs_mkdirat(u64 dirfd, u64 upath, u64 mode)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    (void)mode;
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+#if C6OS_VFS
+    return vfs_errno_(LOS_FsMkdir((const CHAR *)abspath));
+#else
+    (void)abspath;
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+u64 lx_fs_rmdir(u64 upath)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(LX_AT_FDCWD, upath, abspath, (u64)sizeof abspath);
+
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+#if C6OS_VFS
+    return vfs_errno_(LOS_FsRmdir((const CHAR *)abspath));
+#else
+    (void)abspath;
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+u64 lx_fs_unlinkat(u64 dirfd, u64 upath, u64 flags)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    if ((flags & 0x200ull /* AT_REMOVEDIR */) != 0ull) {
+#if C6OS_VFS
+        return vfs_errno_(LOS_FsRmdir((const CHAR *)abspath));
+#else
+        return (u64)0 - LX_EROFS;
+#endif
+    }
+#if C6OS_VFS
+    return vfs_errno_(LOS_FsUnlink((const CHAR *)abspath));
+#else
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+u64 lx_fs_renameat(u64 odirfd, u64 oldpath, u64 ndirfd, u64 newpath)
+{
+    char from[LOS_FS_PATH_MAX] = {0};
+    char to[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(odirfd, oldpath, from, (u64)sizeof from);
+
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    rc = at_abspath_(ndirfd, newpath, to, (u64)sizeof to);
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+#if C6OS_VFS
+    return vfs_errno_(LOS_FsRename((const CHAR *)from, (const CHAR *)to));
+#else
+    (void)from; (void)to;
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+u64 lx_fs_truncate(u64 upath, u64 len)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(LX_AT_FDCWD, upath, abspath, (u64)sizeof abspath);
+
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+#if C6OS_VFS
+    return vfs_errno_(LOS_FsTruncate((const CHAR *)abspath, (UINT32)len));
+#else
+    (void)abspath; (void)len;
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+u64 lx_fs_ftruncate(u64 fd, u64 len)
+{
+    LxFile *f = fd_get(fd);
+    char abspath[LOS_FS_PATH_MAX] = {0};
+
+    if (f == (LxFile *)0 || fd <= 2ull) {
+        return (u64)0 - LX_EBADF;
+    }
+#if C6OS_VFS
+    if (f->kind != LX_FD_VFS || f->node >= LX_VDIR_BASE ||
+        f->node >= (u64)OS_MAX_FILES || g_vpath[(u32)f->node][0] == '\0') {
+        return (u64)0 - LX_EINVAL;         /* initramfs 只读 / 管道不可截断 */
+    }
+    (void)os_str_cpy(abspath, g_vpath[(u32)f->node], (u32)sizeof abspath);
+    f->pos = 0ull;
+    return vfs_errno_(LOS_FsTruncate((const CHAR *)abspath, (UINT32)len));
+#else
+    (void)f; (void)len; (void)abspath;
+    return (u64)0 - LX_EROFS;
+#endif
+}
+
+static u64 chmod_path_(u64 dirfd, u64 upath, u64 mode)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    (void)mode;                            /* 单用户：mode 只有 ro 语义，无权限校验 */
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    {
+        int idx = fs_find(abspath + 1);
+
+        if (idx >= 0) {
+            return 0ull;                   /* initramfs 存在：假装改成功（只读） */
+        }
+    }
+#if C6OS_VFS
+    {
+        LosFsStat st = {0};
+        return (LOS_FsStat((const CHAR *)abspath, &st) == 0) ? 0ull
+                                                              : (u64)0 - LX_ENOENT;
+    }
+#else
+    return (u64)0 - LX_ENOENT;
+#endif
+}
+
+u64 lx_fs_chmod(u64 upath, u64 mode)
+{
+    return chmod_path_(LX_AT_FDCWD, upath, mode);
+}
+
+u64 lx_fs_chmod_pathat(u64 dirfd, u64 upath, u64 mode)
+{
+    return chmod_path_(dirfd, upath, mode);
+}
+
+/* statfs(2)：x86-64 struct statfs 共 120 字节（实测 offsets:
+ * type 0/bsize 8/blocks 16/bfree 24/bavail 32/files 40/ffree 48/
+ * fsid 56/namelen 64/frsize 72/flags 80/f_spare 88，末尾 32B 保留）。
+ * busybox df 读 f_bsize/f_blocks/f_bfree/f_bavail，其余留 0 即可。
+ * 报一组合理常量：4KB 块、65536 块（256MB）、空闲一半 —— df 有数显、不除零。 */
+u64 lx_fs_statfs(u64 upath, u64 ubuf)
+{
+    u8 st[120];
+    u64 i;
+
+    if (lx_user_ok(ubuf, 120ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    for (i = 0ull; i < 120ull; i++) {
+        st[i] = 0u;
+    }
+    put64(st + 0u, 0x858458f6ull);            /* f_type = RAMFS_MAGIC */
+    put64(st + 8u, 4096ull);                  /* f_bsize */
+    put64(st + 16u, 65536ull);                /* f_blocks */
+    put64(st + 24u, 32768ull);                /* f_bfree */
+    put64(st + 32u, 32768ull);                /* f_bavail */
+    put64(st + 64u, 255ull);                  /* f_namelen */
+    put64(st + 72u, 4096ull);                 /* f_frsize */
+    (void)upath;
+    for (i = 0ull; i < 120ull; i++) {
+        *(u8 *)(ubuf + i) = st[i];
+    }
+    return 0ull;
+}
+
+/* utimensat(2)：内核 VFS 的 mtime 是预留字段（ramfs/romfs 恒 0），
+ * 没有地方存。但 `touch`/`cp -p` 会调它，不能 ENOSYS。语义取"校验路径存在、
+ * 时间戳接受但忽略"：path 有效且 times 可读就成功，空 times(=NULL) 表示当前时间
+ * （同样忽略）。AT_FDCWD 与 *at 的 dirfd 都按常规解析。 */
+u64 lx_fs_utimensat(u64 dirfd, u64 upath, u64 times)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    if (times != 0ull && lx_user_ok(times, 32ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    {
+        int idx = fs_find(abspath + 1);
+
+        if (idx >= 0) {
+            return 0ull;                   /* initramfs 中的路径 */
+        }
+    }
+#if C6OS_VFS
+    {
+        LosFsStat st = {0};
+        return (LOS_FsStat((const CHAR *)abspath, &st) == 0) ? 0ull
+                                                              : (u64)0 - LX_ENOENT;
+    }
+#else
+    return (u64)0 - LX_ENOENT;
+#endif
 }
 
 #if C6OS_VFS

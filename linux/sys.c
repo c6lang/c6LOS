@@ -389,6 +389,55 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_openat(a0, a1, a2, a3);
         return;
 
+    /* M15-1b：写类 syscall（*at 的 dirfd 按 int 符号/零扩展兼容，fs.c 里处理） */
+    case LX_SYS_mkdirat:
+        r->rax = lx_fs_mkdirat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_mkdir:
+        r->rax = lx_fs_mkdirat((u64)0 - 100ull, a0, a1);
+        return;
+    case LX_SYS_rmdir:
+        r->rax = lx_fs_rmdir(a0);
+        return;
+    case LX_SYS_unlinkat:
+        r->rax = lx_fs_unlinkat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_unlink:
+        r->rax = lx_fs_unlinkat((u64)0 - 100ull, a0, 0ull);
+        return;
+    case LX_SYS_renameat:
+        r->rax = lx_fs_renameat((i64)(i32)a0, a1, (i64)(i32)a2, a3);
+        return;
+    case LX_SYS_rename:
+        r->rax = lx_fs_renameat((u64)0 - 100ull, a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_truncate:
+        r->rax = lx_fs_truncate(a0, a1);
+        return;
+    case LX_SYS_ftruncate:
+        r->rax = lx_fs_ftruncate(a0, a1);
+        return;
+    case LX_SYS_chmod:
+        r->rax = lx_fs_chmod(a0, a1);
+        return;
+    case LX_SYS_fchmodat:
+        /* fchmodat(dirfd, path, mode, flags)：dirfd 按 int 解析 */
+        r->rax = lx_fs_chmod_pathat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_fchmod:
+        /* fchmod(fd, mode)：fd 有效就成功（单用户无权限校验） */
+        r->rax = (lx_fdtab_get((lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->fd
+                               : (LxFdTab *)0, a0) != (LxFile *)0) ? 0ull
+                                                                   : neg(LX_EBADF);
+        return;
+    case LX_SYS_statfs:
+    case LX_SYS_fstatfs:
+        r->rax = lx_fs_statfs(a0, a1);
+        return;
+    case LX_SYS_utimensat:
+        r->rax = lx_fs_utimensat((i64)(i32)a0, a1, a2);
+        return;
+
     case LX_SYS_close:
         r->rax = lx_proc_close(a0);
         return;
