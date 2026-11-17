@@ -109,7 +109,8 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     c->stack = (void *)(g_stack_pool + g_pool_off);
     c->size = want;
     g_pool_off = g_pool_off + want;
-    top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 80u;
+    /* §379：帧从 `[top-128, top-48)` 开始 —— 必须整体低于 sp-48（溢出槽区）。 */
+    top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 128u;
     f = (u32 *)top;
 
     /* §339：**必须把整帧 20 个字都清零**。原来只清 17 个字（a0..a15 + EPC
@@ -124,7 +125,7 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     }
     /* §372：帧自描述 —— 偏移 76 = 恢复这个帧之后的 sp。新建的帧就是
      * 80 字节（RESTORE_FRAME 以前写死 80），显式写出来以免以后又对不上。 */
-    f[19] = top + 80u;
+    f[19] = top + 128u;
     f[1] = (u32)entry;                 /* a2 */
     f[3] = g_next_task_windowed;       /* a4：入口的 ABI 标志 */
     g_next_task_windowed = 0;

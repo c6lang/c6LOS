@@ -13861,3 +13861,59 @@ windowed 函数还没 retw** 时被切走/被中断的现场。`rfe` 回到 `EPC
 `windowbase=9`（奇数、非法）说明**有人的 rotw 步进没归位**。
 下一步就从这里查：谁在把 WINDOWBASE 弄成 9（`s3_win_spill` 的
 `call4/8/12` 嵌套、`_win_ovf*` 的 `rfwo`、还是库自己的 `entry`）。
+
+## §378 **重大更正**：`WINDOWBASE=9 / WINDOWSTART=0x200` 是**合法的**，不是 bug
+
+我在一个**已知良好**的状态下（`s3_win_wifi_main` 断点处）读到：
+
+```
+pc=0x40379ea8  windowbase=6  windowstart=0x40  ps=0x00060010
+```
+
+`WS == 1<<WB`，且 `WB=6` 也不是 4 的倍数。⇒ ESP32-S3 上 WINDOWBASE 就是
+按"窗口序号"编码的（call12 步进 3 个单位），**6 和 9 都是合法值**。
+之前十几轮里"WINDOWBASE=9 非法 ⇒ 寄存器映射全错"的推论**是错的**，
+围绕它的那些实验（§344 的 WB 探针、§357 的按任务 WB 恢复…）都建立在
+错误前提上。
+
+## §379 这一轮真正修掉的三处"帧压溢出槽"（都是真 bug）
+
+windowed ABI 把 **`[sp-48, sp-4]`** 当作"被调用者把 caller 的 a0..a11
+溢出到栈上"的槽位区（call4 用 -16..-4，call8 用 -32..-4，call12 用 -48..-4）。
+
+| 位置 | 原来 | 现在 | 后果 |
+|---|---|---|---|
+| `_vec_level1` 中断帧 | `-80`（占 `[sp-80,sp)`） | `-128`（占 `[sp-128,sp-48)`） | §361 已修；**这一条是对的** |
+| `port_task_switch` 帧 | `-80` ← **盖住整个槽位区** | `-128` | 我们存的 a0..a15 与硬件溢出槽互相覆盖 |
+| `port_task_yield` 帧 | `-80` ← 同上 | `-128` | 同上 |
+| `port_ctx_create` 初始帧 | `-80` | `-128` | 同上 |
+| `W2C` 壳的 spill 死区 | `-128` | **`-768`** | `s3_win_spill` 的级联调用（call8 + 4×call12 + 若干 entry）在壳 sp 下方压约 **480 字节**溢出槽，原来只降 128 就 `callx0` 进内核 ⇒ **内核帧直接盖掉刚 spill 出来的祖先窗口** |
+
+⚠️ 顺手记一个坑：`addi` 的立即数上限是 **127**，写 `addi a1,a1,128` 汇编直接
+报错，而 `make` 的错误被 grep 过滤后看起来像"构建成功"，于是有几轮实际在跑
+旧镜像。回退 -768 必须用 `movi a9,768; add a1,a1,a9`。
+
+## §380 仍然卡在同一处，且**不是**窗口/栈帧问题
+
+修完上面全部五处之后，串口依然停在 `[give] t=2 sem#1` + `b`。活寄存器：
+
+```
+pc=0x40379ea8 (自旋)   exccause=1c(LoadProhibited)   epc1=os_task_start_core
+a0=0x3fcb9d89(_data_start)   a1=0x000845bf  ← **恰好等于 flash text 段大小**
+windowbase=9  windowstart=0x200
+```
+
+`a1` 等于一个**字面量池里的常量**（`flash_diag` 打印过的 text size）⇒ 某个
+"a1"读到的物理寄存器里装的是我们的字面量。
+
+已加两道闸门来定位，**都没有触发**：
+- `RESTORE_FRAME` 的 EPC 闸门（0x50001880）
+- `RESTORE_FRAME` 的 sp 闸门（0x500018E0）
+
+⇒ 说明崩溃**不在恢复路径里**，而是恢复之后、某段代码自己把 a1 弄丢了。
+
+真实结构（本轮新认识）：`cause=1c` 发生在 `os_task_start_core` 里
+`a1` 被用作基址的那条 `l32i` 上；而 `default` 记录里的 `a0`/`a1` 是
+"调度器主循环的帧指针已经不对"。下一步应该直接在
+`port_task_yield` 返回点（`os_task_block_wait` 里 `call0 port_task_yield`
+的下一句）下硬件断点，看**返回时 a1 是不是还等于调用前的值**。

@@ -178,8 +178,25 @@
      * 都会毁掉刚恢复的值。基址用的是旧 a1，所以一条指令就够。
      * 所有会产出帧的地方（port_task_switch / port_task_yield / _vec_level1 /
      * port_task_ctx_create）都写这个槽。 */
+    /* §380：sp 闸门 —— 偏移 76 读出来的必须是 DRAM 栈区里的地址。
+     * 不合理就记录 (帧, 该值, EPC, a0) 到 0x500018E0 并停住，
+     * 而不是带着垃圾 sp 跑下去（真板症状：a1=0x0008437f 恰好是 flash text 大小）。 */
     l32i    a1, a1, 76
+    l32r    a3, .Lstklo2
+    bltu    a1, a3, 81f
+    l32r    a3, .Lstkhi2
+    bgeu    a1, a3, 81f
     rfe
+81:
+    l32r    a3, .Lbadsp
+    s32i    a1, a3, 0
+    s32i    a0, a3, 4
+    s32i    a2, a3, 8
+    rsr     a4, epc1
+    s32i    a4, a3, 12
+    movi    a4, 0xBAD3
+    s32i    a4, a3, 16
+82: j       82b
     .endm
 
     .global port_task_switch
@@ -201,7 +218,16 @@ port_task_switch:
      * 核号不能问 port_core_id()：切换路径上一次 `callx0` 进 C 函数不转窗口，
      * 会把 a12-a15 冲掉；这里直接读 PRID 和 g_prid_base[0] 比较（PRID 本身
      * 在这颗 S3 上是脏值，但两核不同且稳定）。 */
-    addi    a1, a1, -80
+    /* §379（真 bug）：**帧必须整体低于 sp-48**。
+     *
+     * windowed ABI 把 `[sp-48 .. sp-4]` 当作"被调用者把 caller 的
+     * a0..a11 溢出到栈上"的槽位区（call4 用 -16..-4，call8 用 -32..-4，
+     * call12 用 -48..-4）。原来这里 `addi a1, a1, -80`，帧占
+     * `[sp-80, sp)`，**正好盖住整个槽位区** —— 我们保存的 a0..a15 与
+     * 硬件溢出槽互相覆盖，`retw`/下溢时读到的就是别人的帧数据。
+     * 改成 -128，帧占 `[sp-128, sp-48)`，与槽位区完全不相交。
+     * （`_vec_level1` 早就用 -128 了，见 §361；这里漏改了。） */
+    addi    a1, a1, -128
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -224,7 +250,7 @@ port_task_switch:
      * 被中断过的任务恢复时 sp 都会**低 48 字节**（踩在别人栈上，症状是垃圾
      * a1 与随机 TRAP）。帧大小写死在两处迟早还会错，所以改成每一帧自带这个
      * 数字，恢复方只负责读。 */
-    addi    a14, a1, 80
+    addi    a14, a1, 128
     s32i    a14, a1, 76
     /* EPC 槽存的是恢复后的执行地址。a0 在 windowed 调用中是**带 CALLINC
      * 标记**的返回地址（高 2 位，如 0x82xxxxxx）；直接存进 EPC 再 rfe，
@@ -340,7 +366,16 @@ port_task_yield:
     add     a4, a4, a5
     l32i    a4, a4, 0
     beqz    a4, 1f
-    addi    a1, a1, -80
+    /* §379（真 bug）：**帧必须整体低于 sp-48**。
+     *
+     * windowed ABI 把 `[sp-48 .. sp-4]` 当作"被调用者把 caller 的
+     * a0..a11 溢出到栈上"的槽位区（call4 用 -16..-4，call8 用 -32..-4，
+     * call12 用 -48..-4）。原来这里 `addi a1, a1, -80`，帧占
+     * `[sp-80, sp)`，**正好盖住整个槽位区** —— 我们保存的 a0..a15 与
+     * 硬件溢出槽互相覆盖，`retw`/下溢时读到的就是别人的帧数据。
+     * 改成 -128，帧占 `[sp-128, sp-48)`，与槽位区完全不相交。
+     * （`_vec_level1` 早就用 -128 了，见 §361；这里漏改了。） */
+    addi    a1, a1, -128
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -363,7 +398,7 @@ port_task_yield:
      * 被中断过的任务恢复时 sp 都会**低 48 字节**（踩在别人栈上，症状是垃圾
      * a1 与随机 TRAP）。帧大小写死在两处迟早还会错，所以改成每一帧自带这个
      * 数字，恢复方只负责读。 */
-    addi    a14, a1, 80
+    addi    a14, a1, 128
     s32i    a14, a1, 76
     /* EPC 槽存的是恢复后的执行地址。a0 在 windowed 调用中是**带 CALLINC
      * 标记**的返回地址（高 2 位，如 0x82xxxxxx）；直接存进 EPC 再 rfe，
@@ -473,3 +508,10 @@ s3_task_tramp:
     .literal .Lepclo,  0x40000000
     .literal .Lepchi,  0x44000000
     .literal .Lbadrec, 0x50001880
+
+    .section .text, "ax", @progbits
+    .align  4
+    .literal_position
+    .literal .Lstklo2, 0x3FCA0000
+    .literal .Lstkhi2, 0x3FCEF000
+    .literal .Lbadsp,  0x500018E0
