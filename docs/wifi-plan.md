@@ -17679,3 +17679,18 @@ app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替�
 完整模拟初始化。真板硬件、路由器、天线、官方协议栈均已验证正常。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §528 skip-clock 实验使板子 USB/JTAG 掉枚举，需用户断电重插
+
+`S3_SKIP_WIFI_CLK_INIT` 镜像烧录后板子完全无串口输出；随后
+`flashbl.sh` 报 `OSError: Errno 71 Protocol error`，openocd 报
+`libusb_get_string_descriptor_ascii() failed with -1`、4444 端口拒绝连接。
+与之前 `S3_AUTO_WDT` 事故同类的 USB  PHY/枚举死锁。
+
+**当前板上镜像**：IDF 二级 bootloader + skip-clock 版 c6LOS（不开机）。
+标准固件源码已恢复到无该宏的默认配置并重新编译
+（`build/wifi/c6os.bin` 是好的），但需要用户断电重插后才能重新烧录。
+
+目标未达成，goal 保持 active。
