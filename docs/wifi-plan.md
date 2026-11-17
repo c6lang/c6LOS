@@ -15003,3 +15003,109 @@ W1 bringup → [wifi] init 前状态=2  ← 状态被第二次 PHY/init 污染
    注意现在 `ctx[0].stack` 非 0（8192），但那是**最后一次**分配的结果，
    中间可能被 free 过又建回来。
    下轮在 `port_task_ctx_free` 里加串口打印就能确认。
+
+## §435 回滚 §429/§430 —— 我搞错了 `g_sched` 的角色
+
+**`g_sched[core].sp` 不是"当前任务的 ctx"，它是"调度器主循环的返回点"。**
+
+架构是这样的（`kernel/task.c6:629-640`）：
+
+```
+调度器主循环:
+    port_enter_task();          // 空函数
+    port_task_ctx_check(t->ctx);
+    port_task_switch(t->ctx);   // ① 存调度器 sp 到 g_sched[core].sp
+                                // ② g_s3_cur[core] = t->ctx
+                                // ③ 从 t->ctx->sp 恢复 → 任务开始跑
+任务 t:
+    ... os_task_block_wait() → port_task_yield()
+                                // ④ 存 t 的 sp 到 g_s3_cur[core]->sp
+                                // ⑤ 从 g_sched[core].sp 恢复 → 回到调度器
+调度器:
+    port_leave_task();          // g_s3_cur = 0
+```
+
+**两个函数分工是反的**：`switch` 存调度器、`yield` 存任务。
+我按"switch 应该存任务"去改，等于把两半都改坏了。
+
+### 决定性证据：`b` 的数量
+`kernel/task.c6:343` 在 `os_task_block_wait` 里 `port_putc('b')`。
+§430 之后串口刷出 **120 个 `b`**；回滚后变回 **1 个**。
+
+原因：`os_task_block_wait()` 在 `state = BLOCKED` 之后**只调 `port_task_yield()`**，
+它**依赖 yield 切回调度器**。yield 若原地恢复自己，阻塞就退化成忙等，
+同一句话被重试上百次。
+
+## §436 栈池 26624 → 36864：库要 **4 个** 6144 任务
+
+真板读 `g_pool_off = 26624`（池满）同时 `0x50000BE0` 记着"需要=6144"
+—— 还有第 4 个库任务建不出来。于是
+
+```
+8192（我们的 wifi 主任务）+ 6144 * 4（ppTask/wifi/net80211/还有一个）= 32768
+```
+
+给到 **36864** 留余量。之后 `g_pool_off = 32768`，5 个任务的 ctx 全部有效。
+
+## §437 WiFi 堆 32KB → 48KB：32KB 会让库拿到空指针
+
+§432 把 `g_wifi_heap_mem` 砍到 32KB 后，真板崩在：
+
+```
+TRAP sp=3fcbe880 cause=0x1c pc=42056f25 vaddr=0x168 a0=80035810
+```
+
+`0x42056f25` = `ram_chip_i2c_readReg` 里的
+
+```asm
+42056f21: l32i.n a8, a3, 0      ; a8 = *(void**)a3 = 0
+42056f25: l32i   a8, a8, 0x168  ; ← 崩，vaddr = 0x168 = 0 + 0x168
+```
+
+即**某个 i2c 函数表指针没分配出来**。48KB 就能过 PHY 了。
+（64KB 当然更稳，但 `.bss` 会顶穿主栈 —— 见 §432。）
+
+## §438 ★★ `S3_NO_PREEMPT` 是 **make 变量**，不是 `-D`
+
+```make
+ifneq ($(S3_NO_PREEMPT),)
+WIFI_CDEFS += -DS3_NO_PREEMPT
+endif
+```
+
+而 `WIFI_CDEFS` 通过 `HTTPS_CDEFS = $(WIFI_CDEFS) …` 传给 **C 文件**。
+
+**正确构建命令**：
+
+```sh
+make C6_ROOT=/home/winger/c6 S3_APP_BASE=0x20000 \
+     S3_NO_PREEMPT=1 S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON" https
+```
+
+之前一直写成 `S3_C6FLAGS="-DS3_NO_PREEMPT"` —— 那只给 `.c6` 编译器，
+**`port/s3/irq.c` 里的定时器抢占切换从来没被关掉**。
+
+### 这与"重入"直接相关
+`port_switch_trace` 环（`0x50001500`，8 项）实测**全是 `tag=2`**：
+
+```
+#0 tag=2 id=1 ctx=0x3fcc5ed0 n=73
+#1 tag=2 id=1 ctx=0x3fcc5ed0 n=74
+...
+```
+
+`tag=2` 就是 `kernel/task.c6:598` 的 **"ISR 抢占切换"**，而 `ctx=0x3fcc5ed0`
+正是 `&g_ctx[0]`（当前构建 `g_ctx` 就在 `0x3fcc5ed0`，紧贴栈池末尾，**不重叠**）。
+
+**⇒ 整个重入是"定时器中断抢占切换"造成的**：
+ISR 路径只 `port_set_cur_ctx(next)` 就恢复 next，**从不保存被打断任务的 `c->sp`**
+（`port_irq_fill` 受 §376 约束默认不写），所以 wifi 任务每次被抢占再回来，
+都是从 `port_task_ctx_create` 造的那个 tramp 帧重新开始。
+
+这也解释了为什么 `ctx[1..4]`（库任务，都是主动阻塞）帧都正常，
+而 `ctx[0]`（被抢占的）永远是 `a1sl == sp == top` 的 tramp 帧。
+
+### 待验证
+`S3_NO_PREEMPT=1` 的新镜像**已经构建成功**，但板子的 USB 在半死状态
+（`/dev/ttyACM0` 消失、`OSError: [Errno 71] Protocol error`、设备号已经
+枚举到 `Device 081`），需要**断电重插**才能继续烧写/抓串口。

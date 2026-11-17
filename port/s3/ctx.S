@@ -357,41 +357,12 @@ port_task_switch:
     beq     a5, a6, 1f
     movi    a12, 1
 1:
-    /* §429 ★★（真 bug）：**保存 sp 必须写进"当前任务"的 ctx**。
-     *
-     * 原来是存进 `g_sched[core]` —— 那是**一个** per-core 的固定槽，
-     * 而任务实际用的是 `ctx.c` 里 `static S3Ctx g_ctx[]`（由
-     * `port_task_ctx_create` 分配、`g_s3_cur[core]` 指向）。
-     * `g_sched` 从来没人当任务的 ctx 用 ⇒ **被切走的任务，它的 `sp`
-     * 一次都没有被保存过** ⇒ 恢复时永远读 `port_task_ctx_create` 造的那个
-     * "新任务帧"（EPC = `s3_task_tramp`、`a1sl == top`）
-     * ⇒ **任务每次被调度都从函数开头重新执行**。
-     *
-     * 真板症状（全都能对上）：
-     *   - `[wifimain] id=1 tick=0` … 然后 `[wifimain] id=1 tick=16/30` 又打一次
-     *     （同一个任务重新跑函数开头）
-     *   - JTAG 读 `g_ctx[0]`：EPC = `s3_task_tramp`、`a1sl(+76) == sp == top`
-     *     —— 明明在跑，帧却还是"从未启动"的样子
-     *   - `TRAP pc=0x3fcef000`（返回地址被写坏）
-     *
-     * 现在改成先取 `g_s3_cur[core]` 指向的那个 ctx，再写它的 `sp`(偏移 64)。
-     * 取不到（0）就跳过，别把 0 当指针写。 */
-    l32r    a3, .Lg_cur
-    slli    a5, a12, 2
+    movi    a6, 76
+    mull    a5, a12, a6
+    l32r    a3, .Lg_sched
     add     a3, a3, a5
-    l32i    a3, a3, 0
-    beqz    a3, 81f
     s32i    a1, a3, 64
-    /* §433 诊断：记录每次 switch 保存的 (ctx, 帧sp) 与次数，写到 RTC
-     * 0x50001D00（[0]=ctx [4]=sp [8]=次数）。用来分清"保存没发生"与
-     * "保存了但恢复用错了 sp"。 */
-    l32r    a6, .Lrtc_cs
-    s32i    a3, a6, 0
-    s32i    a1, a6, 4
-    l32i    a5, a6, 8
-    addi    a5, a5, 1
-    s32i    a5, a6, 8
-81:
+
     /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
     l32r    a14, .Ldbg2
     s32i    a1, a14, 0
@@ -497,13 +468,21 @@ port_task_yield:
     s32i    a4, a14, 16
     s32i    a1, a14, 20
 
-    /* §430：**yield 恢复的是自己**，所以要读自己那个 ctx 的 sp。
+    /* 恢复到 `g_sched[core].sp` —— 那是**调度器主循环**的上下文
+     * （`port_task_switch` 从调度器调用时存进去的）。
      *
-     * 原来从 `g_sched[core].sp` 读 —— 那是"最近一次 `port_task_switch`
-     * 外出的 sp"，属于**别的**任务。§429 把 switch 的写入挪走后这里更明显：
-     * 会恢复到一个空槽/垃圾 sp。`a4` 在保存之前就已经是
-     * `g_s3_cur[core]`（当前任务的 ctx），用它。 */
-    l32i    a1, a4, 64
+     * §435：这里一度被我改成"恢复自己"，是**错的**。
+     * `kernel/task.c6` 的 `os_task_block_wait()` 在 `state = BLOCKED` 之后
+     * 只调 `port_task_yield()`，然后 `return g_cur->wait_result;` ——
+     * 它**依赖 yield 切回调度器**。yield 若原地恢复自己，阻塞就退化成忙等：
+     * 真板现象是串口刷出上百个 'b'（`task.c6:343` 每阻塞一次打一个）
+     * 然后同一个任务重新进 `s3_win_wifi_main`。 */
+    l32r    a3, .Lg_sched
+    movi    a6, 76
+    mull    a5, a11, a6
+    add     a3, a3, a5
+    l32i    a1, a3, 64
+    mov     a4, a3
     RESTORE_FRAME
 1:
 #ifdef __XTENSA_CALL0_ABI__

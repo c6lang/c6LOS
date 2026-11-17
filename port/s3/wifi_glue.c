@@ -65,7 +65,11 @@ static u32 glue_ret0(void)
  * 全局变量被自己踩烂，什么怪现象都出得来。
  *
  * 32KB 之后 `_bss_end = 0x3fcd0c6e`，主栈有 ~32KB，恢复正常。 */
-static u32 g_wifi_heap_mem[8192];       /* 32KB */
+/* §437：32KB **不够** —— 真板崩在 `ram_chip_i2c_readReg`：
+ *   `l32i a8, a8, 0x168` 且 vaddr=0x168，即 a8 是 0
+ * （某个 i2c 函数表指针没分配出来）。库在 PHY 阶段就要这么多堆。
+ * 48KB 是"能装下库"与"给主栈留够"之间的折中。 */
+static u32 g_wifi_heap_mem[12288];      /* 48KB */
 #define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
 #define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 
