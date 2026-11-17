@@ -17374,3 +17374,26 @@ ROM 前 0x39000 字节里没有对这个常量的引用。
 能扫到 → 问题在我们缺失的 PHY/MAC 初始化；扫不到 → 天线/频段硬件问题。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §513 参考例程验证走不通（环境缺 IDF Python venv）
+
+想用官方 `examples/wifi/getting_started/station` 在同一块板上扫一次，
+区分"我们缺初始化"和"天线/频段硬件问题"。结果环境不具备：
+
+```
+$ . esp-idf/export.sh
+ERROR: ESP-IDF Python virtual environment
+       /home/winger/.espressif/python_env/idf6.0_py3.12_env/bin/python not found
+$ ls ~/.espressif   → 空
+$ command -v idf.py → 缺失（tools/idf.py 在，但依赖不全）
+```
+
+装完整 IDF 环境要去网上下工具链（~GB 级），本会话先不做。
+所以"硬件到底能不能收到 AP"仍没有独立证据。
+
+另外记录：完整 RF 校准 `-DS3_PHY_CAL_MODE=2` 重烧后 `num=0` 不变，
+已排除；WiFi 库目录 `components/esp_wifi/lib/esp32s3` 确认是 S3 版本。
+
+目标未达成，goal 保持 active。
