@@ -644,4 +644,31 @@ openat+fstatat 相对路径/挂载点 stat/renameat/ftruncate/truncate/unlinkat/
 statfs 字段非零/dev null zero urandom full）→ `PASS: m15fs`；全量回归
 L2–L8/M9/M13–M13d/M14/alpine 无回归。
 
+### M16 事件与时间（M16-1 → M16-3）
+
+M16-1a（select/pselect6）：新增 `lx_proc_select`，把三个 fd_set 位图
+（x86-64 上 16 个 64 位 long = 1024 位）按位转成 `poll_events_` 的就绪
+判据，复用 poll 的阻塞/超时骨架，不另立一套事件逻辑。select 的
+`struct timeval{sec,usec}`、pselect6 的 `struct timespec{sec,nsec}`
+在 sys.c 统一转成毫秒；pselect6 的 sigmask 在单线程模型下忽略。
+
+M16-1b（eventfd2）：`LxFile` 加 `LX_FD_EVENTFD` 种类，`LxEfd` 对象表从
+内核堆按需倍增（不占 .bss），`pos` 复用为对象 id。write 把用户 64 位值
+累加到计数并 `wake_all_`，read 返回当前计数并清零，poll/select 用
+`counter != 0` 判 POLLIN。EFD_CLOEXEC/EFD_NONBLOCK 接受，其余标志 EINVAL。
+
+M16-2（时间）：`gettimeofday`、`clock_getres`、`clock_settime` 补齐。
+前两者与既有 `clock_gettime/time` 同源（TSC 推算、起点 1700000000 秒），
+不会互相矛盾；`clock_settime` 因为没有可写 RTC 源，明确返回 EPERM
+而不是假成功（busybox `date -s` 能据此判断）。
+
+踩到的坑：`lx_proc_eventfd2` 里 `if (g_efd == 0 || efd_grow_() == 0)`
+因 C 的短路求值，首次 g_efd==0 时 `efd_grow_()` 根本不执行 → 表永远是
+NULL → eventfd2 返回 ENOMEM。改成"先找空位，找不到再扩容"。
+
+验收：`make check-linuxabi-m16`（`tests/linux/m16ev.c`：select 超时/
+就绪/位置位、pselect6 超时、eventfd2 write→read→清零→select POLLIN、
+gettimeofday/clock_getres 字段）→ `PASS: m16ev`；全量回归
+L2–L8/M9/M13–M13d/M14/M15/alpine 无回归。
+
 

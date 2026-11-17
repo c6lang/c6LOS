@@ -590,6 +590,49 @@ void lx_syscall_do(LxRegs *r)
         }
         return;
 
+    /* M16-1a：select/pselect6。select 的 timeout 是 struct timeval{sec,usec}，
+     * pselect6 是 struct timespec{sec,nsec} + 第 5 参 sigmask（单线程下忽略）。
+     * 统一转成毫秒喂给 lx_proc_select；timeout=NULL → -1（无限等）。 */
+    case LX_SYS_select:
+        {
+            i64 to = -1;
+
+            if (a4 != 0ull) {
+                if (lx_user_ok(a4, 16ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                to = *(const i64 *)a4 * 1000ll + *(const i64 *)(a4 + 8ull) / 1000ll;
+                if (to < 0) {
+                    to = -1;
+                }
+            }
+            r->rax = (u64)lx_proc_select((i32)(i32)a0, a1, a2, a3, to);
+        }
+        return;
+
+    case LX_SYS_eventfd2:
+        r->rax = lx_proc_eventfd2(a0, a1);
+        return;
+
+    case LX_SYS_pselect6:
+        {
+            i64 to = -1;
+
+            if (a4 != 0ull) {
+                if (lx_user_ok(a4, 16ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                to = *(const i64 *)a4 * 1000ll + *(const i64 *)(a4 + 8ull) / 1000000ll;
+                if (to < 0) {
+                    to = -1;
+                }
+            }
+            r->rax = (u64)lx_proc_select((i32)(i32)a0, a1, a2, a3, to);
+        }
+        return;
+
     case LX_SYS_arch_prctl:
         if (a0 == LX_ARCH_SET_FS) {
             if (lx_cur_proc() != (LxProc *)0) {
@@ -858,6 +901,54 @@ void lx_syscall_do(LxRegs *r)
             *(u64 *)a0 = 1700000000ull;
         }
         r->rax = 1700000000ull;            /* 没有 RTC：给个固定时刻 */
+        return;
+
+    /* M16-2：gettimeofday/clock_getres/clock_settime。统一用 TSC 推算的
+     * "假时钟"：起点 1700000000 秒 + 开机以来的毫秒，和 clock_gettime 同源，
+     * 保证 time()/gettimeofday()/clock_gettime() 不会互相矛盾。 */
+    case LX_SYS_gettimeofday:
+        {
+            u64 now = 1700000000ull + port_cycles() / 1000000000ull;
+            u64 usec = (port_cycles() / 1000ull) % 1000000ull;
+
+            if (a0 != 0ull) {
+                if (lx_user_ok(a0, 16ull, C6OS_PROT_W) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                *(u64 *)a0 = (i64)now;
+                *(u64 *)(a0 + 8ull) = (i64)usec;
+            }
+            if (a1 != 0ull && lx_user_ok(a1, 8ull, C6OS_PROT_W) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            r->rax = 0ull;                 /* 没有时区：不写 tz 也成功 */
+        }
+        return;
+
+    case LX_SYS_clock_getres:
+        if (lx_user_ok(a1, 16ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        if (a0 > 5ull) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        *(u64 *)a1 = 0ull;                 /* sec = 0 */
+        *(u64 *)(a1 + 8ull) = 1000000ull;  /* nsec = 1ms */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_clock_settime:
+        /* 没有 RTC 也没有可写的墙上时钟源：校验参数后明确返回 EPERM，
+         * 不假成功（busybox date -s 会据此判断能不能设时间）。 */
+        if (a0 > 5ull || lx_user_ok(a1, 16ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        r->rax = neg(LX_EPERM);
         return;
 
     case LX_SYS_nanosleep:

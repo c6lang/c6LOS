@@ -208,6 +208,14 @@
 #define LX_SYS_statfs        137
 #define LX_SYS_fstatfs       138
 #define LX_SYS_utimensat     280
+/* M16：事件与时间 */
+#define LX_SYS_select        23
+#define LX_SYS_gettimeofday  96
+#define LX_SYS_clock_settime 227
+#define LX_SYS_clock_getres  229
+#define LX_SYS_pselect6      270
+#define LX_SYS_eventfd2      290
+#define LX_SYS_epoll_create1 291
 #define LX_SYS_set_robust_list   273
 #define LX_SYS_prlimit64     302
 #define LX_SYS_getrandom     318

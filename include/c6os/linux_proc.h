@@ -63,6 +63,7 @@
 #define LX_FD_PIPE_W  2u
 #define LX_FD_VFS     3u   /* /tmp 等走内核 VFS（M9-4） */
 #define LX_FD_DEV     4u   /* /dev/* 设备（M15-2）：null/zero/full/random… */
+#define LX_FD_EVENTFD 5u   /* eventfd2（M16-1b）：pos = 对象 id */
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，
@@ -210,6 +211,10 @@ u32      lx_proc_fore(void);                      /* 当前前台进程组（0 =
 u64      lx_proc_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_write(u64 fd, u64 ubuf, u64 len);
 i64      lx_proc_poll(u64 ufds, u64 nfds, i64 timeout);
+i64      lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout);
+u64      lx_proc_eventfd2(u64 initval, u64 flags);
+u64      lx_proc_eventfd_read(u64 fd, u64 ubuf, u64 len);
+u64      lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len);
 void     lx_proc_exit_sig(u32 sig);
 void     lx_proc_exit_group(u64 code);
 void     lx_sched_preempt(void);

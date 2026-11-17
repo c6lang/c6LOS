@@ -2142,6 +2142,147 @@ static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
     }
 }
 
+/* M16-1b：eventfd2 —— 一个 64 位计数器。read 返回计数并清零（阻塞语义在
+ * 协作调度下简化为"无计数就返回 0"，与 select 的 POLLIN 判据一致）；write
+ * 把用户给的 64 位值加到计数上。对象表在内核堆上按需倍增，不占 .bss。
+ * LxFile.pos 存对象 id，node 固定为 LX_FD_EVENTFD 的哨兵。 */
+#define LX_EFD_SENTINEL 0xfffffff5ull
+
+typedef struct {
+    u64 counter;
+    u32 used;
+    u32 flags;
+} LxEfd;
+static LxEfd *g_efd;
+static u32 g_efd_cap;
+
+static int efd_grow_(void)
+{
+    u32 ncap = (g_efd_cap == 0u) ? 8u : g_efd_cap * 2u;
+    LxEfd *ne;
+
+    if (ncap > 1024u) {
+        ncap = 1024u;
+    }
+    if (g_efd_cap >= 1024u) {
+        return -1;
+    }
+    ne = (LxEfd *)port_kcalloc((u64)ncap, (u64)sizeof(LxEfd));
+    if (ne == (LxEfd *)0) {
+        return -1;
+    }
+    if (g_efd != (LxEfd *)0) {
+        u32 i;
+        for (i = 0u; i < g_efd_cap; i++) {
+            ne[i] = g_efd[i];
+        }
+        port_kfree((void *)g_efd);
+    }
+    g_efd = ne;
+    g_efd_cap = ncap;
+    return 0;
+}
+
+u64 lx_proc_eventfd2(u64 initval, u64 flags)
+{
+    LxProc *p = cur_();
+    u64 fd;
+    u32 i;
+
+    if (p == (LxProc *)0) {
+        return n_((u64)LX_EINVAL);
+    }
+    /* EFD_CLOEXEC(0x80000)/EFD_NONBLOCK(0x800) 之外的位非法 */
+    if ((flags & ~(u64)(0x80000ull | 0x800ull)) != 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (initval == 0xffffffffffffffffull) {
+        return n_((u64)LX_EINVAL);
+    }
+    /* 先找一个空位；表不存在或全满就扩容（扩完再找一次）。 */
+    for (i = 0u; i < g_efd_cap; i++) {
+        if (g_efd[i].used == 0u) {
+            break;
+        }
+    }
+    if (i >= g_efd_cap) {
+        if (efd_grow_() != 0) {
+            return n_((u64)LX_ENOMEM);
+        }
+        for (i = 0u; i < g_efd_cap; i++) {
+            if (g_efd[i].used == 0u) {
+                break;
+            }
+        }
+    }
+    if (i >= g_efd_cap) {
+        return n_((u64)LX_ENOMEM);
+    }
+    g_efd[i].used = 1u;
+    g_efd[i].flags = (u32)flags;
+    g_efd[i].counter = initval;
+    fd = lx_fdtab_alloc(p->fd);
+    if (fd == LX_FD_NONE) {
+        g_efd[i].used = 0u;
+        return n_((u64)LX_EMFILE);
+    }
+    {
+        LxFile *ent = &p->fd->ent[fd];
+
+        ent->node = LX_EFD_SENTINEL;
+        ent->pos = (u64)i;                 /* pos 复用为对象 id */
+        ent->is_dir = 0u;
+        ent->kind = LX_FD_EVENTFD;
+        ent->flags = 0u;
+        ent->oflags = 0u;
+        if ((flags & 0x80000ull) != 0ull) {
+            ent->flags = LX_FD_CLOEXEC;
+        }
+    }
+    return fd;
+}
+
+u64 lx_proc_eventfd_read(u64 fd, u64 ubuf, u64 len)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxEfd *e;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_EVENTFD || len < 8ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (port_as_user_range_ok(p->as, ubuf, 8ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    e = &g_efd[fe->pos];
+    *(u64 *)ubuf = e->counter;
+    e->counter = 0ull;
+    return 8ull;
+}
+
+u64 lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len)
+{
+    LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    LxEfd *e;
+    u64 v;
+
+    if (fe == (LxFile *)0 || fe->kind != LX_FD_EVENTFD || len < 8ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (port_as_user_range_ok(p->as, ubuf, 8ull, C6OS_PROT_R) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    v = *(const u64 *)ubuf;
+    if (v == 0xffffffffffffffffull) {
+        return n_((u64)LX_EINVAL);
+    }
+    e = &g_efd[fe->pos];
+    e->counter += v;
+    wake_all_();
+    return 8ull;
+}
+
 u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
@@ -2159,6 +2300,9 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     }
     if (fe->kind == LX_FD_PIPE_R) {
         return pipe_read_(p, fe, ubuf, len);
+    }
+    if (fe->kind == LX_FD_EVENTFD) {
+        return lx_proc_eventfd_read(fd, ubuf, len);
     }
     if (fd <= 2ull) {
         /* M12：init 显式开了行规程之后，fd 0 才是真终端（阻塞读一行）；
@@ -2199,6 +2343,10 @@ static u16 poll_events_(LxProc *p, i32 fd)
     f = lx_fdtab_get(p->fd, (u64)fd);
     if (f == (const LxFile *)0) {
         return (u16)LX_POLLNVAL;
+    }
+    if (f->kind == LX_FD_EVENTFD) {
+        return (g_efd != (LxEfd *)0 && f->pos < g_efd_cap &&
+                g_efd[f->pos].counter != 0ull) ? (u16)LX_POLLIN : (u16)0;
     }
     if (f->kind == LX_FD_PIPE_R) {
         const LxPipe *pp = pipe_at_(f->node);
@@ -2303,6 +2451,97 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
     }
 }
 
+/* M16-1a：select/pselect6。fd_set 是"每个 long 一位图"的用户缓冲
+ * （x86-64 上沿用了历史 ABI：FD_SETSIZE=1024，即 16 个 64 位 long）。
+ * 复用 poll_events_ 的就绪判定 + 和 poll 一样的阻塞/超时骨架，避免两套
+ * 事件逻辑分叉。timeout=NULL 表示无限等；struct timeval={sec,usec}。 */
+static int fdset_test_(u64 set, i32 fd)
+{
+    if (set == 0ull || fd < 0 || fd >= 1024) {
+        return 0;
+    }
+    if (lx_user_ok(set + (u64)(fd >> 6u) * 8ull, 8ull, C6OS_PROT_R) == 0) {
+        return 0;
+    }
+    return ((*(const u64 *)(set + (u64)(fd >> 6u) * 8ull) >> (fd & 63)) & 1ull) != 0ull;
+}
+
+i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
+{
+    LxProc *p = cur_();
+    u64 deadline = 0ull;
+    int have_deadline = 0;
+    i32 i;
+
+    if (p == (LxProc *)0 || nfds < 0 || nfds > 1024) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (timeout > 0) {                     /* 已经是毫秒（pselect6 转换后传进来） */
+        deadline = port_cycles() + (u64)timeout * 1000000ull;
+        have_deadline = 1;
+    } else if (timeout < 0) {              /* NULL = 无限等 */
+        have_deadline = 0;
+    }
+    /* 先把除结果集之外的三个集清零的语义交给调用方：select 会就地改写入集。
+     * 我们在每轮开头把 wset/eset 的结果位单独收集，最后一次性写回，避免
+     * 边判断边写导致"上一轮的就绪位残留"。 */
+    for (;;) {
+        i64 cnt = 0;
+        u64 ready_r[16] = {0};
+        u64 ready_w[16] = {0};
+        u64 ready_e[16] = {0};
+        u32 tty = 0u;
+
+        for (i = 0; i < nfds; i++) {
+            u16 rev = poll_events_(p, i);
+            const LxFile *f = lx_fdtab_get(p->fd, (u64)i);
+
+            if (f != (LxFile *)0 && f->node == LX_FD_CONSOLE && lx_tty_enabled() != 0u) {
+                tty = 1u;
+            }
+            if (fdset_test_(rset, i) && (rev & (LX_POLLIN | LX_POLLHUP)) != 0u) {
+                ready_r[i >> 6u] |= 1ull << (i & 63);
+                cnt++;
+            }
+            if (fdset_test_(wset, i) && (rev & (LX_POLLOUT | LX_POLLERR)) != 0u) {
+                ready_w[i >> 6u] |= 1ull << (i & 63);
+                cnt++;
+            }
+            if (fdset_test_(eset, i) && (rev & (LX_POLLERR | LX_POLLHUP)) != 0u) {
+                ready_e[i >> 6u] |= 1ull << (i & 63);
+                cnt++;
+            }
+        }
+        if (cnt > 0 || timeout == 0 || (have_deadline && port_cycles() >= deadline)) {
+            u64 k;
+
+            for (k = 0ull; k < 16ull; k++) {
+                if (rset != 0ull && lx_user_ok(rset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(rset + k * 8ull) = ready_r[k];
+                }
+                if (wset != 0ull && lx_user_ok(wset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(wset + k * 8ull) = ready_w[k];
+                }
+                if (eset != 0ull && lx_user_ok(eset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(eset + k * 8ull) = ready_e[k];
+                }
+            }
+            return cnt;
+        }
+        (void)lx_tty_pump();
+        if (tty == 0u) {
+            if (!others_live_(g_cur)) {
+                return 0;
+            }
+            lx_proc_set_wait(LX_WAIT_PIPE);
+            lx_proc_block();
+            if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+                return n_((u64)LX_EINTR);
+            }
+        }
+    }
+}
+
 u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
@@ -2317,6 +2556,9 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
             return n_((u64)LX_EFAULT);
         }
         return pipe_write_(p, fe, ubuf, len);
+    }
+    if (fe->kind == LX_FD_EVENTFD) {
+        return lx_proc_eventfd_write(fd, ubuf, len);
     }
     /* 按 node 判目标，而不是 fd 号：dup 出来的高位 fd 也可能是终端或 VFS 文件。 */
     if (fe->node == LX_FD_CONSOLE) {
