@@ -16136,3 +16136,131 @@ count=1  q.magic=51e5c6a5  waiters_get=0  waiters_put=0  WQ.magic=51554531("QUE1
 - `glue_ret0`（36 个未实现 OSI 的统一桩，`0x4037b800`）在真板上
   **24 次采样 0 命中** ⇒ 未实现的 OSI **确实不在关键路径上**
   （`wifi_glue.c:1451` 的静态统计结论是对的，`_timer_*` 不是死锁原因）。
+
+## §463 诊断区大扫除：`0x50001A00` / `0x50001C00` 都是重叠的
+
+`kernel/task.c6` 的 `os_task_block_prepare` 一直把阻塞诊断写到 **`0x50001A00`**，
+而 `port/s3/ctx.S` §452 的 yield 轨迹**也在 `0x50001A00`**
+（trail 8 项×8 字节 = `0x50001A00`..`0x50001A3F`，idx 在 `0x50001A40`）。
+两边完全重叠，实测读出来是混合垃圾（一个槽里同时出现 ctx 指针和 sem 指针）。
+
+第一次挪到 `0x50001C00`，**又撞上** `port/s3/wifi_glue.c:317` 的信号量环形追踪
+和 `port/s3/console.c:493`。最终挪到 **`0x50000600`**
+（`0x50000600`..`0x5000073F` 全空闲，`0x50000740` 起才被 wifi_glue 占用）。
+
+顺带订正一个读法：这块诊断**每槽是 5 字**，不是 4 字：
+
+```
+[+0]=obj  [+1]=kind  [+2]=port_cur_ctx()  [+3]=g_cur->ctx  [+4]=epcv
+4 槽共 20 字 = 80 字节，按 (n_&3)*5 索引
+```
+
+修好后第一次拿到干净的阻塞快照：
+
+| 槽 | 等待对象 | kind | 归属任务 ctx |
+|---|---|---|---|
+| 0 | `0x3fcc85b0`（xphyQueue 的 WQ） | -1 | `0x3fcc6ed0` wifimain |
+| 1 | `0x3fcc85b4`（= `&WQ->q`，`WQ+4`） | 6 = Q_WAIT_GET | `0x3fcc6f1c` ppTask |
+| 2 | `0x3fcc8c70`（SEM1） | 1 = 对象等待 | `0x3fcc6ed0` wifimain |
+
+（槽 1 的 `+4` 是对的：`osi_queue_recv_body` 把内嵌的 `&q->q` 交给
+`os_queue_get_item`，而 `WQ { u32 self; WOsQueue q; u32 magic; }`，
+所以 `&q->q == WQ+4`。）
+
+### 但「逻辑死锁」这个判断是错的 —— CPU 其实掉进了未知异常
+
+上一轮 §462 根据「两个任务 EPC 都是 `0x42018088`」判定为纯逻辑死锁。
+**实际不是**：halt 下来读寄存器是
+
+```
+pc = 0x40379fac   ← 反汇编出来是 `j 40379fac`，即 _vec_default+0x2c 的死循环
+ps = 0x0006091f   ← INTLEVEL=15、EXCM=1，在异常上下文里
+a1 = 0x0000000a   ← 栈指针是 10，早就是垃圾
+```
+
+`_vec_default` 会把现场写进 **`a2` 当时指向的地方**：
+
+```
+s32i a3, a2, 0   ← magic 0xbad0
+         , 4     ← exccause
+         , 8     ← excvaddr
+         , 12    ← epc1
+         , 16    ← ps
+         , 20    ← 异常发生时的 a0
+         , 24    ← 异常发生时的 a1
+         , 28    ← windowbase
+         , 32    ← windowstart
+```
+
+这次 `a2` 恰好是 **`0x50000100`**，读出来：
+
+```
+magic=0xbad0  exccause=29(0x1d LoadStorePIFAddrErrorCause)
+excvaddr=0xfffffff1  epc1=0x40379746  ps=0x0006091f
+a0=0x3fcbcdf4  a1=0x0000000a  wb=0xa  ws=0x400
+```
+
+`0x40379746` 反汇编出来正是 **`wsr.windowbase a5`**：
+
+```
+4037973b: l32r   a4, g_ctx_tmp_sp
+4037973e: s32i.n a1, a4, 0
+40379740: wsr.windowstart a3
+40379746: wsr.windowbase  a5      ← 崩在这里
+```
+
+⇒ **§457 加的窗口还原本身是对的**（sp 错位确实消失了），但它**没有校验**：
+`l32i a5, a1, 72` 从帧里读出的 `WINDOWBASE` 一旦是垃圾，`wsr` 直接进未预期异常，
+CPU 停在 `_vec_default+0x2c` 的 `j .` 上，**整机卡死且现场全丢**。
+
+## §464 给窗口还原加校验（并踩了自己的一个坑）
+
+在 `RESTORE_FRAME` 的 `40:` 分支、两条 `wsr` **之前**加校验：
+
+```
+movi a6, 16
+bgeu a5, a6, 43f          /* WINDOWBASE 必须 < 16（NUM_AREGS/64/4） */
+srli a6, a3, 16
+bnez a6, 43f              /* WINDOWSTART 只有低 16 位有意义 */
+```
+
+`43:` 是兜底：把坏 `WB`/坏 `WS`/帧指针/累计次数记到 **`0x50000680`**
+（`ctx.S` 新增字面量 `.Lwbdiag`），然后把窗口归一化
+（`windowstart=1` / `windowbase=0`，与 `68 == 0` 那条分支一致）再继续。
+归一会让这个任务的 `retw` 落错窗口，但那是可恢复的逻辑错误，
+比整机卡死且丢现场好得多。
+
+**踩的坑：** 第一版把「高位非 0」写成了 `slli a6, a3, 16`，
+只要 low16 != 0 结果就非 0 ⇒ **每一次**恢复都被误判成非法。
+诊断区实测 `坏WB=0x0 坏WS=0x00000001 次数=8` —— 两个值其实都完全合法，
+窗口被一路归一化掉。改成 `srli` 才对。
+
+修完效果：`pc` 不再落在 `_vec_default`，`a1` 恢复正常栈指针
+（`0x3fcd9400`），`ps=0x00060800`，`wb=0`，窗口校验计数保持 0。
+
+## §465 下一层：`phy_rx_table_init` 里 `*(a3) == NULL`
+
+修掉 `wsr.windowbase` 崩溃后，崩溃推进到 ROM 里的 `phy_rx_table_init`
+（`0x4205386c`）：
+
+```
+*** TRAP sp=3fcbebd0 cause=0000001c pc=4205388b ps=00060c10 vaddr=0000002c callinc=00000002 a0=8204e945
+```
+
+反汇编：
+
+```
+42053886: l32i.n a8, a3, 0       ← a8 = *(a3)
+42053888: l32r   a11, 0x40200000
+4205388b: l32i.n a8, a8, 44      ← a8 = *(a8+44)
+4205388d: l32r   a10, 0x10080
+42053890: or     a12, a2, a2
+42053893: callx8 a8              ← 跳到垃圾
+42053896: addi.n a2, a2, 1
+42053898: movi   a8, 82
+4205389a: bne    a2, a8, 42053886   ← 循环 82 次
+```
+
+`vaddr=0x2c` 正好是 `0x2c = 44`，且 `cause=0x1c`(28) 是**取指**错 ⇒
+`callx8 a8` 跳到了 `0x2c`。也就是 `*(a3) == NULL` ⇒ `a8 = *(NULL+44)` 是垃圾。
+**下一个要查的：`phy_rx_table_init` 的 `a3` 是哪个表、谁该把它填好。**

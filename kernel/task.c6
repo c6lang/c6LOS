@@ -294,9 +294,21 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
         return -4; /* 调度锁内不允许阻塞 */
     }
     {
-        /* 诊断：记录最近 8 次阻塞的 (任务 id, kind, obj) 到 RTC 0x50001A00。
-         * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。 */
-        volatile u32 *bd = (volatile u32 *)0x50001A00u;
+        /* 诊断：记录每个任务最后一次阻塞的信息到 RTC 0x50001C00。
+         * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。
+         *
+         * §463：这块原来在 0x50001A00，**和 port/s3/ctx.S §452 的 yield 轨迹
+         * 用的地址完全重叠**（trail 在 0x50001A00..0x50001A3F，idx 在 0x50001A40），
+         * 两边互相覆盖，实测读出来是混合垃圾（一个槽里同时出现 ctx 指针和
+         * sem 指针），根本没法解读。中间试过 0x50001C00，又撞上
+         * wifi_glue.c:317 的信号量追踪和 console.c:493，也不行。
+         * 现在放 0x50000600（0x50000600..0x5000073F 全空闲，
+         * 0x50000740 起才被 wifi_glue 占用）。
+         *
+         * 槽格式是**每槽 5 字**（不是 4）：
+         *   [+0]=obj [+1]=kind [+2]=port_cur_ctx() [+3]=g_cur->ctx [+4]=epcv
+         * 4 个槽共 20 字 = 80 字节。 */
+        volatile u32 *bd = (volatile u32 *)0x50000600u;
         u32 n_ = g_dbg_blk_n;
         g_dbg_blk_n = n_ + 1;
         u32 ctxv = (u32)(void *)g_cur->ctx;

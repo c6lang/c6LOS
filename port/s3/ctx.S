@@ -6,6 +6,10 @@
     .literal_position
     .literal .Lg_sched, g_sched
     .literal .Lrtc_cs,  0x50001E80
+    /* §464：窗口还原校验失败时的现场记录区（坏 WB / 坏 WS / 帧 / 次数）。
+     * 0x50000600..0x5000064F 是 kernel/task.c6 §463 的阻塞诊断，
+     * 0x50000740 起被 wifi_glue 占用，0x50000680 这一格是空的。 */
+    .literal .Lwbdiag,  0x50000680
     .literal .Lg_cur,   g_s3_cur
     .literal .Lprid_base, g_prid_base
     .literal .Lrtc_dbg, 0x50000A00
@@ -203,12 +207,63 @@
      * 中间那一瞬 (新 WS, 旧 WB) 可能违反 `(WS>>WB)&1==1`，但硬件只在
      * `retw`/`call` 时才检查，而这一段整个在 `rsil 15` 关中断内、
      * 两条 `wsr` 之间没有任何指令，所以没有窗口可被观察。 */
+    /* §464 ★ 写前校验：帧里的 WINDOWBASE / WINDOWSTART 可能是垃圾。
+     *
+     * §464 真板实测的崩溃现场（`_vec_default` 记在 a2 指向处，这次正好是
+     * 0x50000100）：
+     *     magic=0xbad0  exccause=29(0x1d = LoadStorePIFAddrErrorCause)
+     *     excvaddr=0xfffffff1  epc1=0x40379746  a1=0x0000000a
+     *     wb=0xa  ws=0x400  ps=0x0006091f
+     * 而 0x40379746 反汇编出来正是这一行的 `wsr a5, windowbase`：
+     *     40379740: wsr.windowstart a3
+     *     40379746: wsr.windowbase  a5     ← 崩在这里
+     * 也就是说 `l32i a5, a1, 72` 从"帧"里取出来的 WINDOWBASE 是越界值，
+     * `wsr` 直接进未预期异常，CPU 停在 `_vec_default+0x2c` 的 `j .` 上。
+     *
+     * 这是 §457 那次修复引入的新失败模式：窗口还原本身是对的（§457 之后
+     * sp 错位确实消失了），但**没有校验**，一旦帧被踩坏就整机卡死，
+     * 而且现场全丢（只能靠 JTAG 读 ps/exccause 猜）。
+     *
+     * NUM_AREGS=64 ⇒ WINDOWBASE ∈ [0,16)；WINDOWSTART 只有低 16 位有意义。
+     * 两者任一越界就走 `43:` 的兜底：记录坏值到 0x50000680，然后把窗口
+     * 归一化（windowstart=1 / windowbase=0，与上面 `68 == 0` 分支一致），
+     * 保证不崩。归一会让这个任务的 retw 落错窗口，但那是可恢复的逻辑错误，
+     * 比整机卡死好得多，而且坏值被记下来可以直接看出是哪个帧坏了。 */
+    movi    a6, 16
+    bgeu    a5, a6, 43f             /* WINDOWBASE >= 16 ⇒ 非法 */
+    /* ★必须是 srli（取高 16 位）而不是 slli。写成 slli a6, a3, 16 时，
+     * 只要 low16 != 0 结果就 != 0，于是**每一次**恢复都被误判成非法
+     * （§464 实测：诊断区记到 坏WB=0x0 坏WS=0x00000001、次数=8，
+     *  两个值其实都完全合法），窗口全被归一化掉。 */
+    srli    a6, a3, 16
+    bnez    a6, 43f                 /* WINDOWSTART 高位非 0 ⇒ 非法 */
     wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
     isync
     wsr     a5, windowbase
     isync
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0               /* 取回帧指针（此时窗口已是本任务的）*/
+    j       44f
+43:
+    /* 兜底：先记现场（坏 WB / 坏 WS / 帧 / 累计次数），再归一化窗口。 */
+    l32r    a4, .Lwbdiag
+    s32i    a5, a4, 0
+    s32i    a3, a4, 4
+    s32i    a1, a4, 8
+    l32i    a7, a4, 12
+    addi    a7, a7, 1
+    s32i    a7, a4, 12
+    l32r    a4, .Ltmpsp
+    s32i    a1, a4, 0               /* 藏帧指针：wsr windowbase 会重映射 a1 */
+    movi    a6, 1
+    wsr     a6, windowstart
+    isync
+    movi    a6, 0
+    wsr     a6, windowbase
+    isync
+    l32r    a4, .Ltmpsp
+    l32i    a1, a4, 0
+44:
 11:
     /* §363 健全性闸门：EPC 必须落在合法代码区（ROM/IRAM 0x40000000-0x43FFFFFF）。
      * 不合法就说明"这个帧"是垃圾（错误 ctx / 已释放栈 / sp 差了几十字节），
