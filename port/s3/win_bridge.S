@@ -429,14 +429,32 @@ s3_win_call_wifi_main:
      * 这一步和 §412/§413 在 ctx.S 里踩的是同一个坑；那边跳板之后不再依赖
      * 窗口状态所以侥幸没事，这里必须显式把 CALLINC 恢复成 2。 */
     mov     a8, a2
-    /* §476 ★★★ 必须是 `callx0`：目标 `s3_win_wifi_main` 是
-    /* call0 编译的普通 C 函数，它用 `ret`；`callx8` 会把 a0 设成 CALLINC=2
-    /* ⇒ 目标一返回就非法。真板：cause=0x14、pc=a0=0x8037b1bc。 */
-    callx0  a8
+    /* §476/§478：`callx8` 是**正确的**！
+     * `win_island.c` 用 `-mabi=windowed` 编译（见 Makefile:242），
+     * 所以 `s3_win_wifi_main` 的调用约定是 windowed：它内部用 `call8`/`callx8`
+     * 调别的函数、末尾用 `retw` 返回、栈参数在 `a1+16` 起。
+     * 这里必须用 `callx8`，返回值在调用者的 `a10`。 */
+    callx8  a8
+    mov     a2, a10
     l32i    a0, a1, 0
     retw
 
 /* u32 s3_win_call_phy_cal_word(u32 i) —— 读回校准数据里的一个 32bit 字 */
+/* §479 void s3_win_puts(const char *s) —— windowed 调 call0 的 port_puts。
+ * windowed 进来时参数已在 a2；要把 a0 先存起来，call0 返回后放回、再 retw。 */
+    .align  4
+    .literal_position
+    .literal .Lputs, port_puts
+    .global s3_win_puts
+    .type   s3_win_puts, @function
+s3_win_puts:
+    entry   a1, 16
+    s32i    a0, a1, 0
+    l32r    a8, .Lputs
+    callx0  a8
+    l32i    a0, a1, 0
+    retw
+
     .align  4
     .global s3_win_call_phy_cal_word
     .type   s3_win_call_phy_cal_word, @function

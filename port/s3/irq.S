@@ -442,8 +442,6 @@ _vec_level1:
      * 还在裸写。帧偏移 72 里如果是垃圾（`0xa`），这条 `wsr` 立刻炸。 */
     movi    a6, 16
     bgeu    a3, a6, 45f             /* WINDOWBASE >= 16 ⇒ 非法 */
-    extui   a6, a3, 0, 2
-    bnez    a6, 45f                 /* WINDOWBASE 非 4 倍数 ⇒ 非法 */
     srli    a6, a2, 16
     bnez    a6, 45f                 /* WINDOWSTART 高位非 0 ⇒ 非法（只有低 16 位有意义） */
     l32r    a6, .Ltmpsp_i

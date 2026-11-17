@@ -16648,3 +16648,77 @@ a0=0xfffffffe  a1=0x3fcbed60  windowbase=0x6  windowstart=0x5555
   只把现场写 `0x50000100`），要读那里才看得到；
 - 首要动作是**先撤掉那条错误的 4 对齐校验**再复测，
   否则每轮都会被它自己搅乱。
+
+## §479 ★★★★ 关键突破：扔掉 ROM 的 `ets_printf`，用我们自己的
+
+### 根因回顾
+
+`ets_printf` 一直是这个项目里最深的坑。它的真实实现（`0x4004423c`）是
+**windowed** 函数：`entry a1, 80` 开场、末尾 `retw.n`、参数在 `a2..a7`、
+栈参数在 `a1+16..`。而我们的调用点分布在两种 ABI 单元里，
+无论怎么加壳都会在某个方向上错配 —— 这一轮把剩余错配都清掉之后，
+**它自己的输出循环还是会跳飞**：
+
+```
+*** TRAP sp=3fcbec70 cause=0000001c pc=40044188 ps=00060610
+        vaddr=00000017 callinc=00000002 a0=80044284
+```
+
+`cause=0x1c` = `InstPIFAddrErrorCause`（取指错、目标 `0x17`），
+`epc1=0x40044188` 落在 `ets_printf` 内部那个
+`l8ui a10, a3, 0 / bnez / callx8` 的输出循环里。
+读完整异常帧：`a1=0`、`a6=0xfffffffe`、`a7=0x80044186`（返回地址带着
+CALLINC=2）—— 它的栈/返回账目在我们这套混合 ABI 环境里根本站不住。
+
+### 修法：完全不用 ROM
+
+仓库里本来就有手写的格式化器：`port/s3/idf_shim.c:vsprintf_internal()`
+（支持 `%s %c %d %i %u %x %X %p %%` 与宽度）。把它接上就行：
+
+- `port/s3/idf_shim.c` 新增 `s3_ets_printf()`（本文件按 `-mabi=windowed`
+  编译，正好和所有 `call8 s3_ets_printf` 调用点匹配）：
+  格式化进 `char[200]`，再交给 `s3_win_puts()`。
+- `port/s3/win_bridge.S` 新增 `s3_win_puts()`：windowed → call0 `port_puts`
+  的标准桥（`entry a1,16` / 存 `a0` / `callx0` / 取回 / `retw`）。
+- `port/s3/w2c.S` 里原来的 asm 版 `s3_ets_printf` **删掉**；
+  只保留给 call0 单元用的 `s3_ets_printf_call0`（把 `a2..a7` 搬到
+  `a10..a15` 再 `callx8`，返回值从 `a10` 取）。
+
+### 效果（决定性）
+
+同一份固件，烧上去串口第一次跑过了 PHY 和 WiFi bringup：
+
+```
+[wifimain] id=1 tick=1
+[wst] entry=1
+W0 phy start
+[wst] after phy_cal=1
+[phy] g_phyFuns=0x3fcef3d8
+[phy] MAC 0x6001c08c=03fffa00 OPTIONS0=1c00a000
+[phy] calling register_chipv7_phy(mode=0)
+[phy] register_chipv7_phy rc=1
+[wst] after phy_enable=1
+W1 bringup
+B0 osi0=00000000 osi@00000000 calls@3fcc7ab4
+B1 slot13=4037c79c slot18=4037c634 magic=deadbeaf ver=00000008
+B2 cfg@3fcc79a4 osi=3fcc7cb4 magic@144=1f2f3f4f
+[wifi] init 前的库状态 @3fcba3f4 = 1
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+.[task] 库建任务 fn=40381ccc id=2 stack=8192 prio=29(->2)
+bWu1b
+```
+
+**`register_chipv7_phy` 返回 1、`pp`/`net80211` 的 ROM 版本号都打出来了、
+闭源库开始建自己的任务** —— 这是这个项目第一次走到这一步。
+
+注意 `[phy] calling register_chipv7_phy` 那行**完整打印**了，
+之前几轮它总被截断成 `[phy] calli` —— 那是 ROM printf 半个字节地往外吐、
+被下一次异常打断的痕迹，现在这个现象也一并消失了。
+
+### 教训
+
+**跨越 ABI 的"壳"能糊住一时，但永远糊不住一个会自己递归调用的函数。**
+`ets_printf` 内部还有 `call8`/`callx8` 和它自己的栈参数约定，
+只要我们的栈帧形状和它的假设差一丁点，就会在它的循环里炸。
+**该自己实现的东西就自己实现**（这个仓库已经有格式化器了，接上就行）。

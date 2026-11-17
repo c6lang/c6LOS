@@ -203,7 +203,7 @@ void s3_wdt_kick(void)
     *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0u;
 }
 
-extern int s3_ets_printf(const char *fmt, ...);
+extern int s3_ets_printf_call0(const char *fmt, ...);
 
 /* 诊断快照：在空闲循环里周期性地把关键计数/记录一次性打到串口。
  * 这样得到的是**同一次启动**的完整快照 —— esptool read-mem 每次都会复位，
@@ -259,13 +259,13 @@ __attribute__((section(".flash.text"))) void port_diag_dump(void)
     volatile u32 *b  = (volatile u32 *)0x50000C00u;
     volatile u32 *st = (volatile u32 *)0x50000A00u;
 
-    s3_ets_printf("D1 starts=%u switch=%u yield=%u ylctx=%08x ylsp=%08x ylcaller=%08x\n",
+    s3_ets_printf_call0("D1 starts=%u switch=%u yield=%u ylctx=%08x ylsp=%08x ylcaller=%08x\n",
                (unsigned)st[0], (unsigned)*(volatile u32 *)0x50001000u,
                (unsigned)y[7], (unsigned)y[4], (unsigned)y[5], (unsigned)y[8]);
-    s3_ets_printf("D2 blk0=%08x/%u/%08x blk1=%08x/%u/%08x\n",
+    s3_ets_printf_call0("D2 blk0=%08x/%u/%08x blk1=%08x/%u/%08x\n",
                (unsigned)b[0], (unsigned)b[1], (unsigned)b[2],
                (unsigned)b[4], (unsigned)b[5], (unsigned)b[6]);
-    s3_ets_printf("D3 blk2=%08x/%u/%08x blk3=%08x/%u/%08x\n",
+    s3_ets_printf_call0("D3 blk2=%08x/%u/%08x blk3=%08x/%u/%08x\n",
                (unsigned)b[8], (unsigned)b[9], (unsigned)b[10],
                (unsigned)b[12], (unsigned)b[13], (unsigned)b[14]);
 }

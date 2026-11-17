@@ -527,27 +527,52 @@ s3_win_spill:
  * `ets_printf` 的桩（0x400005d0）是 `l32r a9,[0x400005cc] / jx a9`，
  * 纯跳转、不改 CALLINC，于是 CALLINC=2 一路带到真实实现的
  * `entry a1, 80`。参数 a2..a7 在 call8 前后是重叠的，不需要搬。 */
+    /* §479：`s3_ets_printf` 改由 `port/s3/idf_shim.c` 的 C 版提供
+     * （windowed 编译），**不再碰 ROM 的 ets_printf**。 */
+
+    /* §478：给 **call0 编译单元**（`console.c` 等）专用的 printf 桥。
+     * windowed 目标要求 CALLINC=2，所以必须 `call8` 进去；
+     * 参数 a2..a7 在 call8 前后重叠、不用搬（`call8` 轮转后
+     * 被调者的 a2..a7 = 我的 a10..a15… 这里要小心！）。
+     *
+     * call8 的轮转规则（§385 实测）：
+     *     callee 的 a0..a7  = caller 的 a8..a15
+     *     callee 的 a8..a15 = caller 的 a0..a7
+     * ⇒ **callee 的 a2..a7 来自我的 a10..a15**，callee 的 a0 来自我的 a8。
+     * 所以要把参数先搬到 a10..a15，并且 a0 会丢（不影响，call8 本来就不写 a0）。
+     *
+     * 返回值：callee 的 a2 在我的 a10。
+     */
     .align 4
-15: .word   0x50001FF0            /* §475：壳保存 a1/a0 的固定槽（+0=a1，+4=a0）*/
-    .align 4
-14: .word   ets_printf
+16: .word   s3_ets_printf
 
     .align 4
-    .global s3_ets_printf
-    .type   s3_ets_printf, @function
-s3_ets_printf:
-    /* §475 ★ 修正：`callx8` 之后**任何 aN 都不能假设不变**。
-     * 用固定 RTC 槽（0x50001FF0）保存 a1/a0，前后都靠 `l32r` 取绝对地址，
-     * 完全不依赖寄存器在窗口轮转后的稳定性。
-     * 代价：`s3_trap` 打印时会与普通调用共用这个槽（嵌套），
-     * 只影响打印，不影响正确性。 */
-    l32r    a8, 15b
-    s32i    a1, a8, 0
-    s32i    a0, a8, 4
-    addi    a1, a1, -64            /* 给 callx8 的硬件溢出槽留空间 */
-    l32r    a8, 14b
+    .global s3_ets_printf_call0
+    .type   s3_ets_printf_call0, @function
+s3_ets_printf_call0:
+    addi    a1, a1, -48
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    s32i    a10, a1, 20            /* 存原 a10（返回值落点） */
+    /* call0 的栈参数在 a1+0 起；call8 之后被调者看到的是 a1+16 起（entry 推 16）。
+     * 这里**只支持 0 个栈参数**的调用（fmt + 最多 5 个字面参数都走寄存器），
+     * console.c 的调用点全是这种。 */
+    mov     a10, a2                /* fmt  → callee 的 a2 */
+    mov     a11, a3                /* arg1 → callee 的 a3 */
+    mov     a12, a4                /* arg2 → callee 的 a4 */
+    mov     a13, a5                /* arg3 → callee 的 a5 */
+    mov     a14, a6                /* arg4 → callee 的 a6 */
+    mov     a15, a7                /* arg5 → callee 的 a7 */
+    l32r    a8, 16b
     callx8  a8
-    l32r    a8, 15b
-    l32i    a1, a8, 0               /* 还原 a1 */
-    l32i    a0, a8, 4               /* 还原 call0 的返回地址 */
+    mov     a2, a10                /* 返回值 */
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 48
     ret
