@@ -28,8 +28,10 @@ typedef struct {
 
 static LxNode g_node[FS_MAX_FILES];
 static u32    g_nodes;
-static LxFile g_fdt0[C6OS_LINUX_MAX_FD];
-static LxFile *g_fd = g_fdt0;
+/* 单进程载荷（L2–L4）在 lx_proc_init 之前就会 open：那段时间用这张兜底表，
+ * 进程登记后 proc.c 会 lx_fs_set_fdtab() 换成进程自己的动态表。 */
+static LxFdTab *g_fdtab;
+static LxFile *g_fd;
 static u64    g_fs_pa;
 /* 当前目录（不带前导 '/'，空串 = 根）。M12-4：cd 之前是个空操作，
  * getcwd 恒回 "/"，相对路径一律当根路径查 —— 所以 `cd /bin; ls` 列的还是 /。 */
@@ -530,19 +532,22 @@ static int in_dir(const char *name, const char *dir)
 
 static LxFile *fd_get(u64 fd)
 {
-    if (fd >= (u64)C6OS_LINUX_MAX_FD) {
-        return 0;
-    }
-    if (g_fd[fd].node == LX_FD_NONE) {
-        return 0;
-    }
-    return &g_fd[fd];
+    return lx_fdtab_get(g_fdtab, fd);
 }
 
-/* L5：fd 表跟着进程走。单进程的 L2/L3/L4 目标继续用默认表 g_fdt0。 */
-void lx_fs_set_fdtab(LxFile *t)
+/* fd 表跟着进程走：proc.c 在切换/登记时传入进程自己的表。NULL 表示退回
+ * "内核自带那张表"（还没登记进程的单进程载荷）。 */
+void lx_fs_set_fdtab(LxFdTab *t)
 {
-    g_fd = (t != (LxFile *)0) ? t : g_fdt0;
+    if (t == (LxFdTab *)0) {
+        if (g_fdtab == (LxFdTab *)0) {
+            g_fdtab = lx_fdtab_new();
+        }
+        g_fd = (g_fdtab != (LxFdTab *)0) ? g_fdtab->ent : (LxFile *)0;
+        return;
+    }
+    g_fdtab = t;
+    g_fd = t->ent;
 }
 
 /* execve 用：把路径换成节点号；<0 表示不存在。 */
@@ -556,23 +561,35 @@ i64 lx_fs_lookup(const char *path)
     return (i64)fs_find(s);
 }
 
+/* 进程登记时接管可能已经存在的那张兜底表：单进程载荷在 lx_proc_init 之前就会
+ * open（比如 initramfs 里的运行时），那些 fd 属于第一个进程，不能丢。 */
+LxFdTab *lx_fs_get_fdtab(void)
+{
+    return g_fdtab;
+}
+
 static u64 fd_alloc(void)
 {
-    u64 i;
+    u64 fd = lx_fdtab_alloc(g_fdtab);
 
-    for (i = 3ull; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-        if (g_fd[i].node == LX_FD_NONE) {
-            return i;
-        }
-    }
-    return LX_FD_NONE;
+    g_fd = (g_fdtab != (LxFdTab *)0) ? g_fdtab->ent : (LxFile *)0;
+    return fd;
 }
 
 void lx_fs_fd_reset(void)
 {
     u64 i;
+    u64 n;
 
-    for (i = 0; i < (u64)C6OS_LINUX_MAX_FD; i++) {
+    if (g_fdtab == (LxFdTab *)0) {
+        g_fdtab = lx_fdtab_new();
+        g_fd = (g_fdtab != (LxFdTab *)0) ? g_fdtab->ent : (LxFile *)0;
+        if (g_fd == (LxFile *)0) {
+            return;
+        }
+    }
+    n = (u64)g_fdtab->cap;
+    for (i = 0; i < n; i++) {              /* execve：除 0/1/2 全关掉（同 Linux） */
         g_fd[i].node = LX_FD_NONE;
         g_fd[i].pos = 0ull;
         g_fd[i].is_dir = 0u;

@@ -1020,7 +1020,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
               $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/vma.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/fdt.o $(X86S_DIR)/obj/vma.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
@@ -1032,7 +1032,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o \
+              $(X86S_DIR)/obj/fdt.o
 endif
 
 # M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
@@ -1218,6 +1219,10 @@ $(X86S_DIR)/obj/fs.o: linux/fs.c
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
 $(X86S_DIR)/obj/proc.o: linux/proc.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/fdt.o: linux/fdt.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 

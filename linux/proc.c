@@ -117,6 +117,18 @@ void lx_proc_attach(u64 as, u64 brk)
         p->ppid = 0u;
     }
     p = &g_proc[g_cur];
+    if (p->fd == (LxFdTab *)0) {
+        /* 单进程载荷可能在登记进程之前就 open 过（走 fs.c 的兜底表）：接管它，
+         * 那些 fd 属于这个进程，不能丢。 */
+        p->fd = lx_fs_get_fdtab();
+        if (p->fd == (LxFdTab *)0) {
+            p->fd = lx_fdtab_new();
+        }
+        if (p->fd == (LxFdTab *)0) {
+            port_puts("[lx] 没有内存分配 fd 表\n");
+            port_panic_halt();
+        }
+    }
     lx_fs_set_fdtab(p->fd);                /* fd 表从此跟着进程走 */
     lx_fs_set_cwd(p->cwd);
     p->state = LX_P_RUN;
@@ -145,10 +157,11 @@ static int slot_alloc_(void)
 
 /* ---- L7：线程 -------------------------------------------------------------
  *
- * 线程共享地址空间 / brk / mmap_top / fd 表 / sa 表。这里不引入新的共享对象，
- * 而是让同组任务各存一份，在**切换点**与组长做双向同步：让出前写回组长，
- * 上 CPU 前从组长取新值。这样 fork/exec/wait/信号那些已经在跑的路径一行不用改，
- * 也不会出现"某个 syscall 忘了刷"的漏网点。
+ * 线程共享地址空间 / brk / mmap_top / fd 表 / sa 表。fd 表现在已经是带引用计数
+ * 的共享对象（M13-3a，clone 时 ref+1），不再需要抄数组；as/brk/mmap_top/sa 仍然
+ * 在**切换点**与组长做双向同步：让出前写回组长，上 CPU 前从组长取新值。这样
+ * fork/exec/wait/信号那些已经在跑的路径一行不用改，也不会出现"某个 syscall
+ * 忘了刷"的漏网点。
  */
 static void sync_to_leader_(LxProc *p)
 {
@@ -165,9 +178,6 @@ static void sync_to_leader_(LxProc *p)
     lead->as = p->as;
     lead->brk = p->brk;
     lead->mmap_top = p->mmap_top;
-    for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
-        lead->fd[k] = p->fd[k];
-    }
     for (k = 0ull; k < (u64)LX_NSIG; k++) {
         lead->sa[k] = p->sa[k];
     }
@@ -188,9 +198,6 @@ static void sync_from_leader_(LxProc *p)
     p->as = lead->as;
     p->brk = lead->brk;
     p->mmap_top = lead->mmap_top;
-    for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
-        p->fd[k] = lead->fd[k];
-    }
     for (k = 0ull; k < (u64)LX_NSIG; k++) {
         p->sa[k] = lead->sa[k];
     }
@@ -442,16 +449,10 @@ void lx_proc_exit(u64 code)
         return;                            /* 不返回 */
     }
     reap_peers_(c);                        /* 组长退出 = 整个线程组没了 */
-    {
-        u64 i;
-
-        for (i = 0ull; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-            if (c->fd[i].node != LX_FD_NONE && c->fd[i].kind != LX_FD_FILE) {
-                pipe_drop_(&c->fd[i]);
-                c->fd[i].node = LX_FD_NONE;
-            }
-        }
-    }
+    /* 关掉自己那份 fd 表（引用归零时才逐槽通知管道减 readers/writers）。
+     * 线程组共享一份：组长退出时最后一个引用在自己手上，正好一起释放。 */
+    lx_fdtab_unref(c->fd);
+    c->fd = (LxFdTab *)0;
     c->code = (i64)code;
     c->state = LX_P_ZOMBIE;
     /* 注意：AS 的最后一个引用留到父进程 wait4 收尸时才放（见 wait4）。 */
@@ -507,6 +508,7 @@ u64 lx_proc_fork(LxRegs *r)
     LxFrame *pf = (LxFrame *)r;
     LxProc *ch;
     u64 as;
+    u64 i;
     int slot;
 
     if (par == (LxProc *)0) {
@@ -552,18 +554,23 @@ u64 lx_proc_fork(LxRegs *r)
         }
     }
     {
-        u64 i;
-
-        for (i = 0ull; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-            ch->fd[i] = par->fd[i];
-            if (par->fd[i].node == LX_FD_NONE ||
-                par->fd[i].node >= (u64)LX_MAX_PIPE) {
+        /* fd 表：fork 是**复制**（父子各自的 open/close 互不影响）。管道端点
+         * 的引用计数在 copy 成功后逐槽补上。 */
+        ch->fd = lx_fdtab_copy(par->fd);
+        if (ch->fd == (LxFdTab *)0) {
+            ch->state = LX_P_FREE;
+            port_as_destroy(as);
+            return (u64)0 - LX_ENOMEM;
+        }
+        for (i = 0ull; i < (u64)ch->fd->cap; i++) {
+            if (ch->fd->ent[i].node == LX_FD_NONE ||
+                ch->fd->ent[i].node >= (u64)LX_MAX_PIPE) {
                 continue;
             }
-            if (par->fd[i].kind == LX_FD_PIPE_R) {
-                g_pipe[par->fd[i].node].readers++;
-            } else if (par->fd[i].kind == LX_FD_PIPE_W) {
-                g_pipe[par->fd[i].node].writers++;
+            if (ch->fd->ent[i].kind == LX_FD_PIPE_R) {
+                g_pipe[ch->fd->ent[i].node].readers++;
+            } else if (ch->fd->ent[i].kind == LX_FD_PIPE_W) {
+                g_pipe[ch->fd->ent[i].node].writers++;
             }
         }
     }
@@ -789,10 +796,11 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
 {
     LxProc *p = cur_();
     LxPipe *pp;
+    LxFile *rf;
+    LxFile *wf;
     int pi = -1;
-    int rfd = -1;
-    int wfd = -1;
-    int i;
+    u64 rfd;
+    u64 wfd;
     u32 pair[2];
 
     (void)flags;
@@ -802,33 +810,39 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
     if (port_as_user_range_ok(p->as, ufds, 8ull, C6OS_PROT_W) == 0) {
         return n_((u64)LX_EFAULT);
     }
-    for (i = 3; i < (int)C6OS_LINUX_MAX_FD; i++) {
-        if (p->fd[i].node == LX_FD_NONE) {
-            if (rfd < 0) {
-                rfd = i;
-            } else {
-                wfd = i;
-                break;
-            }
-        }
+    rfd = lx_fdtab_alloc(p->fd);
+    if (rfd == LX_FD_NONE) {
+        return n_((u64)LX_EMFILE);
     }
-    if (wfd < 0) {
+    /* 先占位再要第二个：alloc 靠"node != LX_FD_NONE"判断空闲，不占位的话
+     * 第二次扫描会从 3 号重新开始，把同一个槽发两遍（管道两端变成同一个 fd）。 */
+    p->fd->ent[rfd].node = LX_FD_ROOT;
+    p->fd->ent[rfd].pos = 0ull;
+    p->fd->ent[rfd].is_dir = 0u;
+    p->fd->ent[rfd].kind = LX_FD_FILE;
+    wfd = lx_fdtab_alloc(p->fd);
+    if (wfd == LX_FD_NONE) {                   /* 装不下第二个：把第一个还回去 */
+        p->fd->ent[rfd].node = LX_FD_NONE;
         return n_((u64)LX_EMFILE);
     }
     pp = pipe_new_(&pi);
     if (pp == (LxPipe *)0) {
+        p->fd->ent[rfd].node = LX_FD_NONE;
+        p->fd->ent[wfd].node = LX_FD_NONE;
         return n_((u64)LX_EMFILE);
     }
     pp->readers = 1u;
     pp->writers = 1u;
-    p->fd[rfd].node = (u64)pi;
-    p->fd[rfd].pos = 0ull;
-    p->fd[rfd].is_dir = 0u;
-    p->fd[rfd].kind = LX_FD_PIPE_R;
-    p->fd[wfd].node = (u64)pi;
-    p->fd[wfd].pos = 0ull;
-    p->fd[wfd].is_dir = 0u;
-    p->fd[wfd].kind = LX_FD_PIPE_W;
+    rf = &p->fd->ent[rfd];
+    wf = &p->fd->ent[wfd];
+    rf->node = (u64)pi;
+    rf->pos = 0ull;
+    rf->is_dir = 0u;
+    rf->kind = LX_FD_PIPE_R;
+    wf->node = (u64)pi;
+    wf->pos = 0ull;
+    wf->is_dir = 0u;
+    wf->kind = LX_FD_PIPE_W;
     pair[0] = (u32)rfd;
     pair[1] = (u32)wfd;
     *(u32 *)ufds = pair[0];
@@ -839,66 +853,65 @@ u64 lx_proc_pipe2(u64 ufds, u64 flags)
 u64 lx_proc_close(u64 fd)
 {
     LxProc *p = cur_();
+    LxFile *fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
 
-    if (p == (LxProc *)0 || fd >= (u64)C6OS_LINUX_MAX_FD) {
+    if (fe == (LxFile *)0) {
         return n_((u64)LX_EBADF);
     }
-    if (p->fd[fd].node == LX_FD_NONE) {
-        return n_((u64)LX_EBADF);
-    }
-    if (p->fd[fd].kind != LX_FD_FILE) {
-        pipe_drop_(&p->fd[fd]);
-        p->fd[fd].node = LX_FD_NONE;
+    if (fe->kind != LX_FD_FILE) {
+        pipe_drop_(fe);
+        fe->node = LX_FD_NONE;
         wake_all_();
         return 0ull;
     }
-    p->fd[fd].node = LX_FD_NONE;           /* 只读 initramfs：文件没有可回收的状态 */
+    fe->node = LX_FD_NONE;                 /* 只读 initramfs：文件没有可回收的状态 */
     return 0ull;
 }
 
 u64 lx_proc_dup(u64 oldfd)
 {
     LxProc *p = cur_();
-    u64 i;
+    u64 newfd;
 
-    if (p == (LxProc *)0 || oldfd >= (u64)C6OS_LINUX_MAX_FD) {
+    if (p == (LxProc *)0 || lx_fdtab_get(p->fd, oldfd) == (LxFile *)0) {
         return n_((u64)LX_EBADF);
     }
-    if (p->fd[oldfd].node == LX_FD_NONE) {
-        return n_((u64)LX_EBADF);
+    newfd = lx_fdtab_alloc(p->fd);
+    if (newfd == LX_FD_NONE) {
+        return n_((u64)LX_EMFILE);
     }
-    for (i = 3ull; i < (u64)C6OS_LINUX_MAX_FD; i++) {
-        if (p->fd[i].node == LX_FD_NONE) {
-            return lx_proc_dup2(oldfd, i);
-        }
-    }
-    return n_((u64)LX_EMFILE);
+    return lx_proc_dup2(oldfd, newfd);
 }
 
 u64 lx_proc_dup2(u64 oldfd, u64 newfd)
 {
     LxProc *p = cur_();
+    LxFile *of;
+    LxFile *nf;
 
-    if (p == (LxProc *)0 || oldfd >= (u64)C6OS_LINUX_MAX_FD ||
-        newfd >= (u64)C6OS_LINUX_MAX_FD) {
+    if (p == (LxProc *)0) {
         return n_((u64)LX_EBADF);
     }
-    if (p->fd[oldfd].node == LX_FD_NONE) {
+    of = lx_fdtab_get(p->fd, oldfd);
+    if (of == (LxFile *)0) {
         return n_((u64)LX_EBADF);
     }
     if (oldfd == newfd) {
         return newfd;
     }
-    if (p->fd[newfd].node != LX_FD_NONE && p->fd[newfd].kind != LX_FD_FILE) {
-        pipe_drop_(&p->fd[newfd]);
+    /* newfd 可以超过当前容量：dup2 到高位 fd 是合法用法 */
+    if (lx_fdtab_grow(p->fd, newfd + 1ull) != 0) {
+        return n_((u64)LX_EBADF);
     }
-    p->fd[newfd] = p->fd[oldfd];
-    if (p->fd[newfd].kind == LX_FD_PIPE_R &&
-        p->fd[newfd].node < (u64)LX_MAX_PIPE) {
-        g_pipe[p->fd[newfd].node].readers++;
-    } else if (p->fd[newfd].kind == LX_FD_PIPE_W &&
-               p->fd[newfd].node < (u64)LX_MAX_PIPE) {
-        g_pipe[p->fd[newfd].node].writers++;
+    nf = &p->fd->ent[newfd];
+    if (nf->node != LX_FD_NONE && nf->kind != LX_FD_FILE) {
+        pipe_drop_(nf);
+    }
+    *nf = *of;
+    if (nf->kind == LX_FD_PIPE_R && nf->node < (u64)LX_MAX_PIPE) {
+        g_pipe[nf->node].readers++;
+    } else if (nf->kind == LX_FD_PIPE_W && nf->node < (u64)LX_MAX_PIPE) {
+        g_pipe[nf->node].writers++;
     }
     return newfd;
 }
@@ -965,8 +978,10 @@ static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
 u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
+    LxFile *fe;
 
-    if (p == (LxProc *)0 || fd >= (u64)C6OS_LINUX_MAX_FD) {
+    fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    if (fe == (LxFile *)0) {
         return n_((u64)LX_EBADF);
     }
     if (len == 0ull) {
@@ -975,8 +990,8 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     if (port_as_user_range_ok(p->as, ubuf, len, C6OS_PROT_W) == 0) {
         return n_((u64)LX_EFAULT);
     }
-    if (p->fd[fd].kind == LX_FD_PIPE_R) {
-        return pipe_read_(p, &p->fd[fd], ubuf, len);
+    if (fe->kind == LX_FD_PIPE_R) {
+        return pipe_read_(p, fe, ubuf, len);
     }
     if (fd <= 2ull) {
         /* M12：init 显式开了行规程之后，fd 0 才是真终端（阻塞读一行）；
@@ -1009,11 +1024,11 @@ static u16 poll_events_(LxProc *p, i32 fd)
 {
     const LxFile *f;
 
-    if (fd < 0 || fd >= (i32)C6OS_LINUX_MAX_FD) {
+    if (fd < 0) {
         return (u16)LX_POLLNVAL;
     }
-    f = &p->fd[fd];
-    if (f->node == LX_FD_NONE) {
+    f = lx_fdtab_get(p->fd, (u64)fd);
+    if (f == (const LxFile *)0) {
         return (u16)LX_POLLNVAL;
     }
     if (f->kind == LX_FD_PIPE_R) {
@@ -1075,9 +1090,13 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
             i32 fd = *(i32 *)e;
             u16 rev;
 
-            if (fd >= 0 && fd < (i32)C6OS_LINUX_MAX_FD &&
-                p->fd[fd].node == LX_FD_CONSOLE && lx_tty_enabled() != 0u) {
-                tty = 1u;
+            if (fd >= 0) {
+                const LxFile *qe = lx_fdtab_get(p->fd, (u64)fd);
+
+                if (qe != (const LxFile *)0 && qe->node == LX_FD_CONSOLE &&
+                    lx_tty_enabled() != 0u) {
+                    tty = 1u;
+                }
             }
             rev = poll_events_(p, fd);
             *(u16 *)(e + 6ull) = rev;
@@ -1108,15 +1127,17 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
 u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
 {
     LxProc *p = cur_();
+    LxFile *fe;
 
-    if (p == (LxProc *)0 || fd >= (u64)C6OS_LINUX_MAX_FD) {
+    fe = lx_fdtab_get(p != (LxProc *)0 ? p->fd : (LxFdTab *)0, fd);
+    if (fe == (LxFile *)0) {
         return n_((u64)LX_EBADF);
     }
-    if (p->fd[fd].kind == LX_FD_PIPE_W) {
+    if (fe->kind == LX_FD_PIPE_W) {
         if (port_as_user_range_ok(p->as, ubuf, len, C6OS_PROT_R) == 0) {
             return n_((u64)LX_EFAULT);
         }
-        return pipe_write_(p, &p->fd[fd], ubuf, len);
+        return pipe_write_(p, fe, ubuf, len);
     }
     return lx_console_write(fd, ubuf, len);
 }
@@ -1159,14 +1180,10 @@ u64 lx_proc_clone_thread(LxRegs *r, u64 flags, u64 child_stack, u64 ptid,
     ch->clear_tid = ((flags & LX_CLONE_CHILD_CLEARTID) != 0ull) ? ctid : 0ull;
     ch->fs_base = ((flags & LX_CLONE_SETTLS) != 0ull) ? tls : par->fs_base;
     lx_sig_fork(ch, par);                  /* 继承 handler/屏蔽，清挂起 */
-    ch->fs_base = ((flags & LX_CLONE_SETTLS) != 0ull) ? tls : par->fs_base;
-    {
-        u64 k;
-
-        for (k = 0ull; k < (u64)C6OS_LINUX_MAX_FD; k++) {
-            ch->fd[k] = par->fd[k];        /* 同一个 fd 表 */
-        }
-    }
+    /* 线程共享**同一个** fd 表对象（ref+1），不复制数组：同一线程组里一个线程
+     * open 出来的 fd，另一个线程立刻能看到；关闭也是整组生效。 */
+    ch->fd = par->fd;
+    lx_fdtab_ref(ch->fd);
     setup_trampoline_(ch);
     if (ptid != 0ull && lx_user_ok(ptid, 4ull, C6OS_PROT_W) != 0) {
         *(u32 *)ptid = tid;

@@ -49,6 +49,29 @@ typedef struct LxFile {
     u32 kind;                 /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
 } LxFile;
 
+/* 动态 fd 表（linux/fdt.c，M13-3a）。
+ *
+ * 以前 fd 是 PCB 里的定长数组（16 槽封顶），线程组靠"切换时整份抄给组长"假装
+ * 共享。现在是一个带引用计数的对象：线程组共享同一份（clone 时 ref+1），fork
+ * 才复制；容量按需倍增，槽位数组在内核堆里，不占内核镜像也没有编译期上限。 */
+#define LX_FD_MAX_CAP  1024u
+
+typedef struct LxFdTab {
+    u32 refs;
+    u32 cap;
+    LxFile *ent;
+} LxFdTab;
+
+LxFdTab *lx_fdtab_new(void);
+LxFdTab *lx_fdtab_copy(const LxFdTab *src);
+void     lx_fdtab_ref(LxFdTab *t);
+void     lx_fdtab_unref(LxFdTab *t);
+int      lx_fdtab_grow(LxFdTab *t, u64 need);
+u64      lx_fdtab_alloc(LxFdTab *t);          /* 无空闲槽返回 LX_FD_NONE */
+LxFile  *lx_fdtab_get(LxFdTab *t, u64 fd);    /* 越界/空槽返回 0 */
+/* 表销毁前通知每个非空槽（管道要减 readers/writers）。fdt 不认识管道，走钩子。 */
+void     lx_fdtab_set_free_hook(void (*fn)(LxFile *f));
+
 /* L6：信号。内核侧 sa 的布局与 Linux 一致：{handler, flags, restorer, mask}，
  * 因为 glibc 的 sigaction() 就是这样转给 rt_sigaction(2) 的。 */
 #define LX_NSIG 32
@@ -87,7 +110,7 @@ typedef struct LxProc {
     u32 sig_code[LX_NSIG];
     LxSigAction sa[LX_NSIG];
     char cwd[96];                 /* 当前目录（不带前导 '/'，空串=根）：必须跟进程走 */
-    LxFile fd[C6OS_LINUX_MAX_FD];
+    LxFdTab *fd;                  /* 动态 fd 表：线程组共享，fork 时复制 */
 } LxProc;
 
 /* 进程表与调度（linux/proc.c） */
@@ -138,7 +161,8 @@ u64  lx_mmap_top_get(void);
 void lx_mmap_top_set(u64 v);
 void lx_set_as(u64 as);
 u64  lx_console_write(u64 fd, u64 ubuf, u64 len);
-void lx_fs_set_fdtab(LxFile *t);                  /* linux/fs.c */
+void lx_fs_set_fdtab(LxFdTab *t);                  /* linux/fs.c */
+LxFdTab *lx_fs_get_fdtab(void);                    /* 登记进程时接管兜底表 */
 
 /* ---- 串口控制台的行规程（linux/tty.c，M12）----------------------------
  * 默认关着：fd 0 以前是"永远 EOF"，L2..L6 的既有验收（busybox sh 的管道
