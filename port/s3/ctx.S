@@ -356,11 +356,32 @@ port_task_switch:
     beq     a5, a6, 1f
     movi    a12, 1
 1:
-    movi    a6, 76
-    mull    a5, a12, a6
-    l32r    a3, .Lg_sched
+    /* §429 ★★（真 bug）：**保存 sp 必须写进"当前任务"的 ctx**。
+     *
+     * 原来是存进 `g_sched[core]` —— 那是**一个** per-core 的固定槽，
+     * 而任务实际用的是 `ctx.c` 里 `static S3Ctx g_ctx[]`（由
+     * `port_task_ctx_create` 分配、`g_s3_cur[core]` 指向）。
+     * `g_sched` 从来没人当任务的 ctx 用 ⇒ **被切走的任务，它的 `sp`
+     * 一次都没有被保存过** ⇒ 恢复时永远读 `port_task_ctx_create` 造的那个
+     * "新任务帧"（EPC = `s3_task_tramp`、`a1sl == top`）
+     * ⇒ **任务每次被调度都从函数开头重新执行**。
+     *
+     * 真板症状（全都能对上）：
+     *   - `[wifimain] id=1 tick=0` … 然后 `[wifimain] id=1 tick=16/30` 又打一次
+     *     （同一个任务重新跑函数开头）
+     *   - JTAG 读 `g_ctx[0]`：EPC = `s3_task_tramp`、`a1sl(+76) == sp == top`
+     *     —— 明明在跑，帧却还是"从未启动"的样子
+     *   - `TRAP pc=0x3fcef000`（返回地址被写坏）
+     *
+     * 现在改成先取 `g_s3_cur[core]` 指向的那个 ctx，再写它的 `sp`(偏移 64)。
+     * 取不到（0）就跳过，别把 0 当指针写。 */
+    l32r    a3, .Lg_cur
+    slli    a5, a12, 2
     add     a3, a3, a5
+    l32i    a3, a3, 0
+    beqz    a3, 81f
     s32i    a1, a3, 64
+81:
     /* 诊断：switch 的外出 sp（主循环）与目标 ctx */
     l32r    a14, .Ldbg2
     s32i    a1, a14, 0

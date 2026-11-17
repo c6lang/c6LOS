@@ -14849,3 +14849,62 @@ ctx[3] 空
 下轮改成在 `port_task_ctx_create` 里直接
 `ets_printf("[ctx] slot=%u stack=%08x size=%u\n", ...)`，
 或者把诊断挪到 `0x50001E00` 这类没被其它环占用的位置。
+
+## §429 ★★★ 决定性 bug：`port_task_switch` 把 sp 存进了 `g_sched[core]`，而不是当前任务的 ctx
+
+### 症状链（全都能对上）
+* `[wifimain] id=1 tick=0` … 过一会儿 `[wifimain] id=1 tick=16/30` **又打一次**
+  —— 同一个任务重新执行函数开头
+* JTAG 读 `g_ctx[0]`：`EPC = s3_task_tramp`、`a1sl(+76) == sp == top`
+  —— 明明在跑，帧却还是"从未启动"的样子
+* `TRAP pc=0x3fcef000`（返回地址被写坏）
+
+### 根因
+`port/s3/ctx.S` 的 `port_task_switch` 里：
+
+```asm
+movi    a6, 76
+mull    a5, a12, a6
+l32r    a3, .Lg_sched      ; ← 错！这是 per-core 的**一个**固定槽
+add     a3, a3, a5
+s32i    a1, a3, 64         ; 保存 sp
+```
+
+任务实际用的是 `ctx.c` 里 `static S3Ctx g_ctx[]`（由 `port_task_ctx_create`
+分配、`g_s3_cur[core]` 指向）。**`g_sched` 从来没人当任务的 ctx 用** ⇒
+
+> 被切走的任务，它的 `sp` **一次都没有被保存过**
+
+⇒ 恢复时永远读 `port_task_ctx_create` 造的那个"新任务帧"
+（EPC = `s3_task_tramp`、`a1sl == top`）
+⇒ **任务每次被调度都从函数开头重新执行**。
+
+### 修法
+先取 `g_s3_cur[core]` 指向的那个 ctx，再写它的 `sp`(偏移 64)：
+
+```asm
+l32r    a3, .Lg_cur
+slli    a5, a12, 2
+add     a3, a3, a5
+l32i    a3, a3, 0
+beqz    a3, 81f            ; 取不到就跳过，别把 0 当指针写
+s32i    a1, a3, 64
+81:
+```
+
+### 真板结果（同一镜像前后对比）
+| | 修之前 | 修之后 |
+|---|---|---|
+| `[wifimain] id=1` | 打 **2~3 次** | **只打 1 次** ✓ |
+| `[wifi] init 前的库状态` | **2**（污染） | **1**（正常）✓ |
+| `register_chipv7_phy` | 第二次调用时崩 | 干净一次 |
+| `[give] t=2 sem#1` 之后 | 重入→崩 | 稳定停住 |
+
+⇒ §421 里那个"`wst` 莫名其妙变成 2"的时序谜团**也解释了**：那是任务重入
+导致 PHY enable 被跑第二遍。**不是时序，是重入。**
+
+### 顺带确认
+`port_enter_task()`（`console.c:82`）是**空函数**，而 `port_set_cur_ctx` 只在
+`irq.c` 的 `#ifndef S3_NO_PREEMPT` 分支里调用。也就是说 `g_s3_cur` 只能靠
+`port_task_switch` 自己维护 —— 这正是上面这个 bug 一开始没被发现的原因：
+两条更新路径，一条是空的、另一条写错了地方。

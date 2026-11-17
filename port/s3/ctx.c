@@ -112,6 +112,21 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     c->stack = (void *)(g_stack_pool + g_pool_off);
     c->size = want;
     g_pool_off = g_pool_off + want;
+    /* §428：把每次分配的 (槽号, 入口, 请求大小, 实际大小) 记到 RTC 的
+     * **0x50001E00**（§427 确认 0x50000460 已被恢复环写穿）。
+     * 注意：这里**不能**调 ets_printf —— 实测一加就退化成
+     * `TRAP pc=0x40044188`（在 M4 阶段就崩），这个时机串口不安全。 */
+    {
+        volatile u32 *ad = (volatile u32 *)0x50001E00u;
+        u32 n_ = ad[0];
+        if (n_ < 6u) {
+            ad[1u + n_ * 4u] = i + 1u;
+            ad[2u + n_ * 4u] = (u32)entry;
+            ad[3u + n_ * 4u] = stack_size;   /* 调用者**请求**的大小 */
+            ad[4u + n_ * 4u] = want;         /* 实际分配的大小 */
+            ad[0] = n_ + 1u;
+        }
+    }
     /* §379：帧从 `[top-128, top-48)` 开始 —— 必须整体低于 sp-48（溢出槽区）。 */
     top = ((u32)(g_stack_pool + g_pool_off) & ~15u) - 128u;
     f = (u32 *)top;
