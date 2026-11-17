@@ -22,6 +22,12 @@
      * 0x50001900 目前没人用（0x50001880/0x500018C0/0x500018E0 分别是
      * 坏帧记录 / sp 记录 / sp 闸门，0x50001D00 被 port_snapshot 占）。 */
     .literal .Lmis,     0x50001900
+    /* §452：yield 轨迹环形缓冲，8 项 × 8 字节（每项 = ctx, sp），
+     * 索引在 0x50001A40。用来回答"`ctx[0].sp` 是第几次 yield 离开自己
+     * 栈区的" —— §450/§451 的两道闸门只能给出"某一次越界"，看不出
+     * 它是从一开始就错，还是跑了一段才漂出去的。 */
+    .literal .Ltrail,     0x50001A00
+    .literal .Ltrail_idx, 0x50001A40
     .literal .Lwscratch, g_win_scratch
     .literal .Ltmpsp,   g_ctx_tmp_sp
     .literal .Lyl_cnt,  g_yl_cnt
@@ -381,6 +387,37 @@ port_task_switch:
     l32i    a1, a4, 64
     l32r    a14, .Ldbg2
     s32i    a1, a14, 8              /* 恢复出来的目标 sp */
+    /* §451 恢复前校验：比 yield 那道闸门更靠前，能抓到**第一次越界恢复**。
+     *
+     * §450 的 yield 闸门第一次命中时 sp 已经是 `0x3fcc2300`，说明在这次 yield
+     * **之前**任务就已经在越界区里跑了 —— 也就是 `port_task_switch` 把它恢复
+     * 到了别人的栈上。真正的源头在一次"越界恢复"，而那次恢复本身不经过
+     * `s32i a1, a4, 64`，所以 yield 闸门看不到它。
+     *
+     * 这里拿 `a4`（= 本次要恢复的目标 ctx）自己的 `stack`/`size` 核对
+     * `a1`（= `c->sp`，帧基址）。帧基址必须落在 `[stack, stack+size)` 内。
+     * 同样**只记录不修正**，只记首次（标志用 `0x450B`，与 yield 闸门的
+     * `0x450A` 分开，两者互不干扰）。 */
+    l32i    a6, a4, 68              /* c->stack */
+    l32i    a7, a4, 72              /* c->size  */
+    beqz    a6, 8f
+    beqz    a7, 8f
+    add     a7, a6, a7
+    bltu    a1, a6, 7f
+    bgeu    a1, a7, 7f
+    j       8f
+7:
+    l32r    a8, .Lmis
+    l32i    a9, a8, 28
+    movi    a6, 0x450B
+    beq     a9, a6, 8f
+    movi    a6, -17706              /* 0xBAD6 */
+    s32i    a6, a8, 16
+    s32i    a4, a8, 20
+    s32i    a1, a8, 24
+    movi    a6, 0x450B
+    s32i    a6, a8, 28
+8:
     RESTORE_FRAME
 
     .global port_task_yield
@@ -473,6 +510,20 @@ port_task_yield:
     l32r    a14, .Ldbg2
     s32i    a4, a14, 16
     s32i    a1, a14, 20
+    /* §452：yield 轨迹（环形 8 项）。寄存器纪律：
+     *   - 不动 a11/a12（core 号）、a4/a1（闸门和保存都要用）；
+     *   - 只用 a8..a10 和 **a15**（a15 已在帧的 56 槽存过，之后
+     *     RESTORE_FRAME 会从帧里恢复，破坏它无害）。 */
+    l32r    a8, .Ltrail
+    l32r    a9, .Ltrail_idx
+    l32i    a10, a9, 0
+    extui   a15, a10, 0, 3
+    slli    a15, a15, 3
+    add     a15, a8, a15
+    s32i    a4, a15, 0              /* 本项：ctx   */
+    s32i    a1, a15, 4              /* 本项：sp    */
+    addi    a10, a10, 1
+    s32i    a10, a9, 0              /* 计数自增（不回绕，索引取低 3 位）*/
     /* §450 错位闸门：刚写进 `a4` 的那个 sp，必须落在 `a4` 自己记录的栈区间里。
      *
      * §449 的真板实测：`ctx[0]`（wifi 主任务，栈 size=16384）的 `sp` 被写成了
