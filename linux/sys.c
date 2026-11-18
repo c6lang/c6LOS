@@ -430,6 +430,41 @@ void lx_syscall_do(LxRegs *r)
                                : (LxFdTab *)0, a0) != (LxFile *)0) ? 0ull
                                                                    : neg(LX_EBADF);
         return;
+    /* M57：chown 族（单用户：接受并忽略 uid/gid，只做存在性校验）。 */
+    case LX_SYS_chown:
+        r->rax = lx_fs_chownat((u64)0 - 100ull, a0, a1, a2, 0u);
+        return;
+    case LX_SYS_lchown:
+        r->rax = lx_fs_chownat((u64)0 - 100ull, a0, a1, a2, 1u);
+        return;
+    case LX_SYS_fchownat:
+        r->rax = lx_fs_chownat(a0, a1, a2, a3,
+                               (a4 & 0x100ull) != 0ull ? 1u : 0u); /* AT_SYMLINK_NOFOLLOW */
+        return;
+    case LX_SYS_fchown:
+        r->rax = (lx_fdtab_get((lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->fd
+                               : (LxFdTab *)0, a0) != (LxFile *)0) ? 0ull
+                                                                   : neg(LX_EBADF);
+        return;
+    /* M57：链接/设备节点族。 */
+    case LX_SYS_symlink:
+        r->rax = lx_fs_symlinkat(a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_symlinkat:
+        r->rax = lx_fs_symlinkat(a0, (i64)(i32)a2, a1);   /* old, newdirfd, new */
+        return;
+    case LX_SYS_link:
+        r->rax = lx_fs_linkat((u64)0 - 100ull, a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_linkat:
+        r->rax = lx_fs_linkat((i64)(i32)a0, a1, (i64)(i32)a2, a3);
+        return;
+    case LX_SYS_mknod:
+        r->rax = lx_fs_mknodat((u64)0 - 100ull, a0, a1, a2);
+        return;
+    case LX_SYS_mknodat:
+        r->rax = lx_fs_mknodat((i64)(i32)a0, a1, a2, a3);
+        return;
     case LX_SYS_statfs:
     case LX_SYS_fstatfs:
         r->rax = lx_fs_statfs(a0, a1);

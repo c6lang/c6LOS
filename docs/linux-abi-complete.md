@@ -1531,6 +1531,32 @@ EINVAL、不存在 ENOENT、readlinkat、/proc/self/exe 特例，全 PASS。验�
 `make check-linuxabi-m56` → PASS；统一回归纳入（52 项）；关键回归 M15/M54
 PASS。
 
-**最终剩余待办**（均需 VFS 后端扩展，属较大工程）：
-`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、`mknod` 族。
+### M57 所有权/链接/设备节点族（ABI 最后一族）
+
+补齐 x86-64 最后一族 syscall（10 个号码，均无冲突）：
+`link`(86)/`symlink`(88)/`chown`(92)/`fchown`(93)/`lchown`(94)/
+`mknod`(133)/`mknodat`(259)/`fchownat`(260)/`linkat`(265)/`symlinkat`(266)。
+
+- **chown 族**：单用户内核无有效 uid/gid（stat 恒报 0），仿照 chmod 族
+  accept-and-ignore uid/gid，只做路径存在性校验；`lchown`/`fchownat`
+  带 AT_SYMLINK_NOFOLLOW 时用 `fs_find_raw`（不跟随链接）。`fchown` 校验 fd。
+- **symlink/symlinkat**：新增运行时节点能力 —— `LxNode` 加 `ram_data`
+  指针（非 0 时优先于 cpio 的 off），`node_add_` 追加节点，`node_data_`
+  统一数据访问。符号链接目标原样存入 RAM，之后 `fs_find`（路径解析）、
+  `lx_fs_readlinkat`、`getdents` 全部经 `node_data_`，新建链接立刻可见。
+  重复创建 EEXIST。
+- **link/linkat**：硬链接 = 新增指向同一份数据的目录项（cpio 数据复制到
+  RAM 节点，资源不受限），跟随符号链接到最终目标。
+- **mknod/mknodat**：无设备后端（无 LOS_FsMknod）、FIFO 走独立管道对象，
+  特殊文件请求诚实返回 EOPNOTSUPP；S_IFREG 等价于 open(O_CREAT|O_EXCL)
+  交 VFS 后端，无 VFS 时 EROFS。
+
+`tests/linux/m57meta.c` 验 18 项：chown 四变体成功/不存在 ENOENT、
+symlink 创建/readlink 读回/open 跟随/link 硬链接读取/重复 EEXIST、
+mknod EOPNOTSUPP，全 PASS。验收 `make check-linuxabi-m57` → PASS；
+统一回归纳入（53 项）；关键回归 M15/M54/M56/alpine-apps PASS。
+
+至此 M43–M57 共 15 个里程碑把审计发现的全部 syscall 缺口补齐。剩余均属
+**T4 范畴**：overlayfs、glibc NSS（musl/Alpine 不适用）、musl locale 全量
+libc-test（环境依赖），不在 Linux ABI 本体范围。
 

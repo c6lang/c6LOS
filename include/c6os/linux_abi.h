@@ -222,6 +222,17 @@
 #define LX_SYS_statfs        137
 #define LX_SYS_fstatfs       138
 #define LX_SYS_utimensat     280
+/* M57：所有权/链接/设备节点族 */
+#define LX_SYS_link          86
+#define LX_SYS_symlink       88
+#define LX_SYS_chown         92
+#define LX_SYS_fchown        93
+#define LX_SYS_lchown        94
+#define LX_SYS_mknod         133
+#define LX_SYS_mknodat       259
+#define LX_SYS_fchownat      260
+#define LX_SYS_linkat        265
+#define LX_SYS_symlinkat     266
 /* M16：事件与时间 */
 #define LX_SYS_select        23
 #define LX_SYS_gettimeofday  96
@@ -429,6 +440,11 @@ u64  lx_fs_access(u64 upath, u64 mode);
 u64  lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags);
 u64  lx_fs_fchdir(u64 fd);
 u64  lx_fs_readlinkat(u64 dirfd, u64 upath, u64 ubuf, u64 bufsiz);  /* M56 */
+/* M57：所有权/链接/设备节点族 */
+u64  lx_fs_chownat(u64 dirfd, u64 upath, u64 uid, u64 gid, u32 nofollow);
+u64  lx_fs_symlinkat(u64 oldpath, u64 newdirfd, u64 newpath);
+u64  lx_fs_linkat(u64 olddirfd, u64 oldpath, u64 newdirfd, u64 newpath);
+u64  lx_fs_mknodat(u64 dirfd, u64 upath, u64 mode, u64 dev);
 u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);

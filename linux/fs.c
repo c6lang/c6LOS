@@ -24,6 +24,7 @@ typedef struct {
     u64  off;                              /* 数据在 initramfs 物理映像内的偏移 */
     u64  size;
     u32  mode;
+    u8  *ram_data;                         /* M57：运行时节点的数据（非 0 时优先于 off） */
 } LxNode;
 
 static LxNode g_node[FS_MAX_FILES];
@@ -380,6 +381,9 @@ static int norm_(const char *in, char *out, u64 cap)
     return 0;
 }
 
+/* M57：节点数据统一访问 —— 运行时节点用 ram_data，固件 cpio 节点走物理映射。 */
+static const u8 *node_data_(u32 i);
+
 /* 纯查表，不跟符号链接 */
 static int fs_find_raw(const char *path)
 {
@@ -429,7 +433,7 @@ static int fs_find(const char *path)
         }
         depth++;
         n = g_node[(u32)i].size;
-        src = (const u8 *)port_phys_map(g_fs_pa + g_node[(u32)i].off);
+        src = node_data_((u32)i);
         if (n == 0ull || n >= (u64)sizeof(nxt) - 2ull) {
             return -1;
         }
@@ -477,6 +481,57 @@ static int fs_find(const char *path)
             return -1;
         }
     }
+}
+
+/* M57：节点数据统一访问 —— 运行时节点用 ram_data，固件 cpio 节点走物理映射。 */
+static const u8 *node_data_(u32 i)
+{
+    if (g_node[i].ram_data != (u8 *)0) {
+        return (const u8 *)g_node[i].ram_data;
+    }
+    return (const u8 *)port_phys_map(g_fs_pa + g_node[i].off);
+}
+
+/* M57：追加一个运行时节点（符号链接/硬链接），借用 g_node[] 的连续空间。 */
+static int node_add_(const char *name, u32 mode, const u8 *data, u64 size)
+{
+    u32 i;
+
+    if (g_nodes >= FS_MAX_FILES || name[0] == '\0') {
+        return -1;
+    }
+    for (i = 0u; name[i] != '\0' && i < FS_NAME - 1u; i++) {
+        g_node[g_nodes].name[i] = name[i];
+    }
+    g_node[g_nodes].name[i] = '\0';
+    g_node[g_nodes].mode = mode;
+    g_node[g_nodes].size = size;
+    g_node[g_nodes].ram_data = (u8 *)port_kmalloc(size > 0ull ? size : 1ull);
+    if (g_node[g_nodes].ram_data == (u8 *)0) {
+        g_node[g_nodes].name[0] = '\0';
+        return -1;
+    }
+    if (size > 0ull && data != (const u8 *)0) {
+        u64 k;
+        for (k = 0ull; k < size; k++) {
+            g_node[g_nodes].ram_data[k] = data[k];
+        }
+    }
+    g_node[g_nodes].off = 0ull;
+    return (int)g_nodes++;
+}
+
+/* M57：按名字找可写节点（含运行时节点），存在返回下标，否则 -1。 */
+static int node_find_rw_(const char *name)
+{
+    u32 i;
+
+    for (i = 0u; i < g_nodes; i++) {
+        if (seq_(g_node[i].name, name)) {
+            return (int)i;
+        }
+    }
+    return -1;
 }
 
 static const char *fs_node_name(u32 i)
@@ -1320,7 +1375,6 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     u32 idx;
     u64 left;
     u64 n;
-    u64 pa;
     const u8 *src;
     u64 i;
 
@@ -1398,8 +1452,7 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     if (user != 0u && lx_user_ok(dst, n, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
-    pa = g_fs_pa + g_node[idx].off + off;
-    src = (const u8 *)port_phys_map(pa);
+    src = node_data_(idx) + off;
     for (i = 0; i < n; i++) {
         *(u8 *)(dst + i) = src[i];
     }
@@ -2276,6 +2329,41 @@ u64 lx_fs_chmod_pathat(u64 dirfd, u64 upath, u64 mode)
     return chmod_path_(dirfd, upath, mode);
 }
 
+/* M57：chown 族。单用户内核无有效 uid/gid（fill_stat 恒报 0），接受并忽略
+ * uid/gid，只做存在性校验（与 chmod_path_ 同构）。nofollow=1 用不跟随链接
+ * 的 fs_find_raw_（lchown / AT_SYMLINK_NOFOLLOW）。 */
+static u64 chown_path_(u64 dirfd, u64 upath, u64 uid, u64 gid, u32 nofollow)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    (void)uid; (void)gid;                  /* 单用户：无所有权校验 */
+    if (rc != 0) {
+        return (u64)0 - (u64)(-rc);
+    }
+    {
+        int idx = nofollow ? fs_find_raw(abspath + 1) : fs_find(abspath + 1);
+
+        if (idx >= 0) {
+            return 0ull;                   /* 存在：假装改成功 */
+        }
+    }
+#if C6OS_VFS
+    {
+        LosFsStat st = {0};
+        return (LOS_FsStat((const CHAR *)abspath, &st) == 0) ? 0ull
+                                                              : (u64)0 - LX_ENOENT;
+    }
+#else
+    return (u64)0 - LX_ENOENT;
+#endif
+}
+
+u64 lx_fs_chownat(u64 dirfd, u64 upath, u64 uid, u64 gid, u32 nofollow)
+{
+    return chown_path_(dirfd, upath, uid, gid, nofollow);
+}
+
 /* statfs(2)：x86-64 struct statfs 共 120 字节（实测 offsets:
  * type 0/bsize 8/blocks 16/bfree 24/bavail 32/files 40/ffree 48/
  * fsid 56/namelen 64/frsize 72/flags 80/f_spare 88，末尾 32B 保留）。
@@ -2587,9 +2675,93 @@ u64 lx_fs_readlinkat(u64 dirfd, u64 upath, u64 ubuf, u64 bufsiz)
     if (lx_user_ok(ubuf, n, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
-    src = (const u8 *)port_phys_map(g_fs_pa + g_node[(u32)i].off);
+    src = node_data_((u32)i);
     for (k = 0ull; k < n; k++) {
         *(u8 *)(ubuf + k) = src[k];
     }
     return n;
+}
+
+/* M57：symlink(target, linkpath) / symlinkat。
+ * 目标字符串原样存入运行时节点（S_IFLNK），之后 fs_find 跟随、readlinkat
+ * 读取都经 node_data_，因此新建的链接立刻对全路径解析可见。 */
+u64 lx_fs_symlinkat(u64 oldpath, u64 newdirfd, u64 newpath)
+{
+    char target[LOS_FS_PATH_MAX] = {0};
+    char ap[FS_NAME] = {0};
+    int rc;
+
+    rc = get_user_path_(oldpath, target, (u64)sizeof target);
+    if (rc != 0) { return (u64)0 - (u64)(-rc); }
+    if (at_path_(newdirfd, newpath, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENAMETOOLONG;
+    }
+    if (node_find_rw_(ap) >= 0 || fs_find_raw(ap) >= 0) {
+        return (u64)0 - LX_EEXIST;
+    }
+    {
+        u64 n = 0ull;
+        while (target[n] != '\0' && n < (u64)sizeof target) { n++; }
+        if (node_add_(ap, 0120777u, (const u8 *)target, n) < 0) {
+            return (u64)0 - LX_ENOMEM;
+        }
+    }
+    return 0ull;
+}
+
+/* M57：link(oldpath, newpath) / linkat。硬链接 = 新增一个指向同一份数据的
+ * 目录项。cpio 节点共享 off（数据仍在固件映像），运行时节点共享 ram_data；
+ * 这里统一用 ram_data 复制一份（资源不受限），保证 unlink 单个名字不影响
+ * 其它名字。nofollow 时 oldpath 用 fs_find_raw。 */
+u64 lx_fs_linkat(u64 olddirfd, u64 oldpath, u64 newdirfd, u64 newpath)
+{
+    char old[FS_NAME] = {0};
+    char ap[FS_NAME] = {0};
+    int idx;
+
+    if (at_path_(olddirfd, oldpath, old, (u64)sizeof old) != 0) {
+        return (u64)0 - LX_ENAMETOOLONG;
+    }
+    idx = fs_find(old);                 /* 跟随符号链接，链接到最终目标 */
+    if (idx < 0) { return (u64)0 - LX_ENOENT; }
+    if (at_path_(newdirfd, newpath, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENAMETOOLONG;
+    }
+    if (node_find_rw_(ap) >= 0 || fs_find_raw(ap) >= 0) {
+        return (u64)0 - LX_EEXIST;
+    }
+    if (node_add_(ap, g_node[(u32)idx].mode,
+                  node_data_((u32)idx), g_node[(u32)idx].size) < 0) {
+        return (u64)0 - LX_ENOMEM;
+    }
+    return 0ull;
+}
+
+/* M57：mknod(path, mode, dev) / mknodat。
+ * 本内核无块/字符设备后端（无 LOS_FsMknod），FIFO 也走独立管道对象而非
+ * 文件系统节点。这里对"特殊文件"请求给出诚实的 EOPNOTSUPP；普通文件
+ * （S_IFREG）等价于 open(O_CREAT|O_EXCL)，交给 VFS 后端创建。 */
+u64 lx_fs_mknodat(u64 dirfd, u64 upath, u64 mode, u64 dev)
+{
+    char abspath[LOS_FS_PATH_MAX] = {0};
+    int rc = at_abspath_(dirfd, upath, abspath, (u64)sizeof abspath);
+
+    (void)dev;
+    if (rc != 0) { return (u64)0 - (u64)(-rc); }
+    if ((mode & 0170000ull) != 0100000ull &&   /* 非 S_IFREG */
+        (mode & 0170000ull) != 0ull) {         /* 且显式给了类型 */
+        return (u64)0 - LX_EOPNOTSUPP;
+    }
+#if C6OS_VFS
+    {
+        int fd = LOS_FsOpen((const CHAR *)abspath,
+                            (UINT32)(LOS_O_WRONLY | LOS_O_CREAT | LOS_O_EXCL));
+        if (fd < 0) { return (u64)0 - (u64)(-fd); }
+        LOS_FsClose(fd);
+        return 0ull;
+    }
+#else
+    (void)abspath;
+    return (u64)0 - LX_EROFS;
+#endif
 }
