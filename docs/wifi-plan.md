@@ -18261,3 +18261,12 @@ JTAG `reset halt` 后（二级 bootloader 尚未执行）读：
 补上 `WIFI_CLK_EN &= ~0x78078F`，真板打印一行 `[phy] MAC ... CLK=ff84e030`
 后就再无输出（卡在 PHY 校准）。说明我们这条链路上时钟不能被关掉；已回退。
 goal 保持 active。
+
+---
+
+## §570 尝试用 JTAG 写观察点定位 ca0 的写入者，因 USB/JTAG 掉线失败
+
+在参考 app 里设 `wp 0x60033ca0 4 w` 后 resume，OpenOCD 报
+`missing data from bitq interface` / `Debug controller was reset`，
+目标被 RTC WDT 复位（PC=0x4037B002）。这是已知的板载 USB-JTAG 不稳定，
+不是固件问题。该实验需后续在 JTAG 稳定时重试。goal 保持 active。
