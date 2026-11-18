@@ -18368,3 +18368,11 @@ offset   IDF(after start)   c6(after start)
 ⇒ 修正 §577 的措辞：块里**部分**寄存器（如 0x60033c10/44/90）可读，
 但真正需要初始化的那几个（含 ca0/d14）在 c6LOS 里写不进去。
 这与"对应硬件子模块未上电"一致。改动已回退。goal 保持 active。
+
+---
+
+## §579 清掉 c6 独有的 WiFi 时钟位仍无效
+
+在 start 后把 0x60026014 从 0xfffce7bf 清成 0xff84c010（去掉 c6-only 的
+0x7827af 位），读回确认生效，但 ca0 仍 0、扫描仍 0 AP、关联超时。
+改动已回退。goal 保持 active。
