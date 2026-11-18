@@ -18391,3 +18391,12 @@ offset   IDF(after start)   c6(after start)
 
 写后读回确认值已变成 0xff87d850（与官方 after-wifi-init 一致），
 但 ca0/d14 仍 0、扫描 0 AP、关联超时。改动已回退。goal 保持 active。
+
+---
+
+## §582 reset_mac 钩子确实被调用；加长复位脉宽无效
+
+日志确认 `osi_wifi_reset_mac()` 在 init 阶段执行了一次（在 start 之前）。
+把 SYSTEM_WIFIMAC_RST 的脉宽从 400 次空转拉长到 20000 次（~100us，对齐
+IDF 的 esp_rom_delay_us(50) 量级）后：ca0/d14 仍 0、扫描 0 AP、关联超时。
+改动已回退。goal 保持 active。
