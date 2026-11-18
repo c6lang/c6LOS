@@ -1202,4 +1202,42 @@ INET 桩（走 SAL，对 AF_UNIX fd 返回 EOPNOTSUPP）。M41 补齐：
 遗留：AF_UNIX STREAM 的真字节流边界、抽象名字空间、非 SCM_RIGHTS 的
 ancillary 类型。
 
+---
+
+## 最终状态与权威遗留清单（M42 后）
+
+本文件前面各里程碑段落末尾的"遗留"是**当时**的快照，已被后续里程碑逐项
+收窄。以本节为准。已达成：
+
+- **T0**：busybox sh/ls/cat/uname 等基础命令（L1–L8 + check-alpine）。
+- **T1 POSIX 功能正确**：musl libc-test functional 子集 17/17（M27），
+  内核侧返回值/errno/阻塞/唤醒/错误码按 POSIX（M13–M16、M35/M36/M38–M40）。
+- **T2 Alpine base applet**：busybox applet 矩阵 14/14（M19）+ Alpine 真实程序
+  cat/tar/FAT 读写句柄回收（M28）。
+- **Linux ABI 面**：内存/进程/fd/VFS/信号/定时器/设备/proc（M13–M17）；
+  事件循环 epoll/timerfd/signalfd（M20–M22）；socket 全族含 sendmsg
+  iovec/AF_UNIX DGRAM+STREAM+SCM_RIGHTS/DNS 网络修正（M18、M23–M25、M41/M42）；
+  现代 syscall waitid/statx/copy_file_range（M38–M40）。
+- **验收体系**：`check-linuxabi-all` 38 项可一条命令复现，单项失败自动
+  重试清理（M26/M28 后加固）。
+- **零侵入**：`check-vfs-zero`/`check-net-zero` 证明 C6OS_VFS=0/NET=0 时
+  S3 等其它 port 不受影响；Linux ABI 由 C6OS_LINUX_ABI=1 门禁限定在
+  有 MMU/USER/IRQ_USER 能力的 port。
+
+**权威遗留清单**（均为非阻塞的边际项，不影响上述 T0–T2 与 Alpine 主体）：
+
+1. **真 pty/多实例控制终端**：当前单全局串口 tty（M12/M17 的行规程），
+   无 /dev/ptmx + /dev/pts/N 多实例；交互式 shell 作业控制用全局模型近似。
+   影响：需要独立 session/pty 的程序（script、sshd 的 pty 分配）。
+2. **musl libc-test 全量**：functional 子集已过 17/17；regression/math
+   全量与少数依赖 locale 的 functional 用例未纳入（豁免清单见 M27）。
+3. **glibc NSS 内部 DNS resolver**：内核 socket ABI 已由手写 DNS 查询
+   证明完整（M24）；glibc getaddrinfo 真名仍 EAI_NONAME（NSS 模块内部
+   行为，目标 Alpine 用 musl，路径不同）。
+4. **AF_UNIX STREAM 字节流边界**：当前按消息成槽（M41），SCM_RIGHTS 仅
+   SOL_SOCKET/SCM_RIGHTS（M42）；抽象名字空间、ET/ONESHOT、
+   epoll_pwait 信号掩码属同类边际项。
+
+**T4（namespace/cgroup/overlayfs/seccomp）在 §8 明确不做**，另由 OCI 微虚机
+主线承接，不计入本目标缺口。
 
