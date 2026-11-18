@@ -18034,3 +18034,21 @@ goal 保持 active。
 `esp_wifi_start()`，真板仍 0 AP、关联超时。该字段（以及 §549 里其它
 差异字段，如 0x0d4..0x0e4 的已连接 AP BSSID/SSID）不是 MAC ready 的
 决定因素。改动已回退。goal 保持 active。
+
+---
+
+## §551 更正：ic_mac_init / wifi_hw_start 在 c6LOS 里确实被调用（此前断点残留误导）
+
+用 JTAG 断点追踪时若不在 `reset halt` 后先 `rbp all` 清除残留断点，
+新断点会因 "Duplicate Breakpoint address" 设置失败，导致误判为
+"函数未执行"。清除后确认：
+```
+bp 0x42036cb4 (wifi_hw_start)   -> hit
+bp 0x4038620c (ic_mac_init)     -> hit
+```
+在 `ic_mac_init` 断点处读寄存器：
+`0x60033ca0=0`, `0x60033d14=0`, `0x60026014=fffce7bf`；
+step 几条指令后 ca0 / d14 仍为 0。
+
+⇒ 软件调用链完整，差异纯粹在 ROM `hal_mac_init` 执行时硬件未响应。
+§545/§548 中"调用路径"相关推测以此条为准。goal 保持 active。
