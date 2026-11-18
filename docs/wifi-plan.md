@@ -18189,3 +18189,11 @@ c6LOS 真板日志（PHY 回调进入时）：
 在 `esp_wifi_start()` 前再调一次 `s3_win_phy_enable_hook()`，
 返回 0，但 `ca0/d14` 仍为 0，扫描仍 0 AP、关联超时。改动已回退。
 goal 保持 active。
+
+---
+
+## §563 feature_caps 对齐参考 app 无效
+
+把 `wifi_init_config_t.feature_caps` 从 0 改成参考 app 的 0xA1
+（WPA3_SAE|GMAC|ENTERPRISE），真板仍 0 AP、关联超时。改动已回退。
+goal 保持 active。
