@@ -18384,3 +18384,10 @@ offset   IDF(after start)   c6(after start)
 把 `intenable` 从 bit1-only 改成 0xff 后板子卡在 ROM bootloader 反复重启，
 串口无任何 c6os 输出。说明其它挂起源（1/4..7）必须保持屏蔽。
 改动已回退。goal 保持 active。
+
+---
+
+## §581 在 init 后对齐 WIFI_CLK_EN=0xff87d850 仍无效
+
+写后读回确认值已变成 0xff87d850（与官方 after-wifi-init 一致），
+但 ca0/d14 仍 0、扫描 0 AP、关联超时。改动已回退。goal 保持 active。
