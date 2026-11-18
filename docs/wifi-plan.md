@@ -17979,3 +17979,20 @@ goal 保持 active。
 理论上无关；若后续仍无进展可检查 `g_ic` 内容是否被正确初始化。
 
 goal 保持 active。
+
+---
+
+## §547 OSI 函数表两侧结构一致，排除表损坏
+
+JTAG dump `g_osi_funcs_p` 指向的表：
+```
+                c6LOS              IDF
+version         8                  8
+slot@4          0x4037bb7c        0x403799b4
+slot@16         0x4037d070        0x4209943c
+slot@32         0x4037c724        0x420886c8
+_wifi_reset_mac 0x4037c204        0x42099214
+nonzero words   80                 80
+```
+表的关键字段齐全，`_wifi_reset_mac` 槽位有效，不是空实现。
+⇒ 差异在硬件侧而非软件表。goal 保持 active。
