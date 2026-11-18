@@ -741,6 +741,12 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_proc_wait4((i64)(i32)a0, a1, a2, a3);
         return;
 
+    case LX_SYS_waitid:
+        /* waitid(idtype, id, siginfo*, options, rusage*)
+         * idtype/id 都是 int 语义，按 32 位截断。 */
+        r->rax = lx_proc_waitid((u32)a0, (u32)a1, a2, a3, a4);
+        return;
+
     case LX_SYS_pipe:
         /* pipe(2) 只有 1 个参数：rsi 是残留值，绝不能当 pipe2 的 flags。
          * glibc busybox 恰好 rsi=0 蒙混过关，musl ash 的 rsi 是栈地址，

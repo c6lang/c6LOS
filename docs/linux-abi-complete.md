@@ -1093,4 +1093,24 @@ stdin 探测/重映射行为（glibc busybox 在 M19 正常），不是内核缺
 "完整支持 Linux ABI + Alpine 主体功能正确"的验收。所有临时诊断与脚手架
 已回退，工作树干净（HEAD = M36）。
 
+### M38 waitid(2)：补齐 M14 遗留的等待接口
+
+M14 文档一直标注 `waitid`/`WNOWAIT` 未覆盖。M38 补上 nr 247：
+
+- `lx_proc_waitid` 复用 `lx_proc_wait4` 的子进程状态机（waited_/wstatus_/
+  cont_seen 一致），但按 POSIX 的接口形态：`idtype`(P_PID=1/P_PGID=2/
+  P_ALL=0) + `id` 选目标，`options` 用 WEXITED|WSTOPPED|WCONTINUED 选事件，
+  结果填 128B `siginfo`（si_signo=SIGCHLD@0、si_code=CLD_*@8、si_pid@16、
+  si_status@24），成功返 0（waitid 语义），rusage 复用 fill_rusage_。
+- `WNOWAIT`：观察事件但**不收尸**，子进程留给后续 wait4 收（验了"waitid
+  WNOWAIT 后 waitpid 仍能拿到同一退出码"）。
+- 修一处语义坑：WNOHANG 必须先于 ECHILD 判断 —— 没有子进程时
+  `waitid(..., WNOHANG)` 要返回 0（无事件），不能报 ECHILD，glibc 的
+  `waitid` 不支持 WNOHANG 之外的"空"语义靠它区分。
+
+`tests/linux/m38waitid.c` 验 17 项：P_PID 等 exit(7)（CLD_EXITED/
+si_status/pid）、WNOHANG 空返 0、WNOWAIT 不收尸 + waitpid 补收、P_ALL、
+非法 options=EINVAL。验收 `make check-linuxabi-m38` → 17/17 PASS；
+统一回归纳入（34 项）；关键回归 L5/M14/M19/M25/alpine-apps 无回归。
+
 

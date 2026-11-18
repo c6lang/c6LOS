@@ -1335,6 +1335,120 @@ u64 lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage)
     }
 }
 
+/* waitid(2)（nr 247）：和 wait4 共用同一套子进程状态机，但事件选择用
+ * WEXITED|WSTOPPED|WCONTINUED 位、目标用 idtype(P_PID/P_PGID/P_ALL)+id，
+ * 结果填 128B siginfo（si_signo=SIGCHLD, si_code=CLD_*, si_pid/si_status）。
+ * WNOWAIT 只观察不收尸（僵尸留给后续 wait4）。 */
+u64 lx_proc_waitid(u64 idtype, u64 id, u64 uinfo, u64 options, u64 urusage)
+{
+    LxProc *par = cur_();
+    u64 want = options & ((u64)LX_WEXITED | (u64)LX_WUNTRACED |
+                          (u64)LX_WCONTINUED);
+    i64 sel = -1;
+    u64 extra = options & ~((u64)LX_WEXITED | (u64)LX_WUNTRACED |
+                            (u64)LX_WCONTINUED | (u64)LX_WNOHANG |
+                            (u64)LX_WNOWAIT);
+    int nowait = (options & (u64)LX_WNOWAIT) != 0u;
+
+    if (par == (LxProc *)0) {
+        return n_((u64)LX_ECHILD);
+    }
+    if (extra != 0ull || want == 0ull) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (uinfo != 0ull &&
+        port_as_user_range_ok(par->as, uinfo, 128ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    /* idtype → wait4 风格的 pid 选择器 */
+    if (idtype == 1ull) {                  /* P_PID */
+        sel = (i64)(i32)id;
+        if (sel <= 0) { return n_((u64)LX_EINVAL); }
+    } else if (idtype == 2ull) {           /* P_PGID */
+        i64 pg = (i64)(i32)id;
+        if (pg <= 0) { return n_((u64)LX_EINVAL); }
+        sel = -pg;
+    } else if (idtype == 0ull) {           /* P_ALL：id 被忽略 */
+        sel = -1;
+    } else {
+        return n_((u64)LX_EINVAL);
+    }
+    for (;;) {
+        u32 i;
+        int has_child = 0;
+
+        for (i = 0u; i < g_proc_cap; i++) {
+            LxProc *c = g_proc[i].p;
+            int code = 0;
+            int status = 0;
+            int report = 0;
+
+            if (c == (LxProc *)0 || c->state == LX_P_FREE ||
+                !waited_(par, c, sel)) {
+                continue;
+            }
+            has_child = 1;
+            if (c->state == LX_P_ZOMBIE && (want & (u64)LX_WEXITED) != 0ull) {
+                report = 1;
+                code = (c->killed != 0u) ?
+                       (((c->code & 0x7f) == 6) ? 3 : 2) : 1;  /* CLD_DUMPED/KILLED/EXITED */
+                status = (c->killed != 0u) ? (int)(c->code & 0x7full)
+                                           : (int)(c->code & 0xffull);
+            } else if (c->state == LX_P_STOP && (want & (u64)LX_WUNTRACED) != 0ull) {
+                report = 1;
+                code = 5;                  /* CLD_STOPPED */
+                status = (int)c->stopsig;
+            } else if (c->state != LX_P_STOP && c->cont_seen != 0ull &&
+                       (want & (u64)LX_WCONTINUED) != 0ull) {
+                report = 1;
+                code = 6;                  /* CLD_CONTINUED */
+                status = (int)((c->code & 0xffull) ? (c->code & 0xffull) : 17u); /* SIGCONT */
+            }
+            if (report == 0) {
+                c->cont_seen = 0ull;
+                continue;
+            }
+            if (uinfo != 0ull) {
+                u8 *s = (u8 *)uinfo;
+                u32 k;
+
+                for (k = 0u; k < 128u; k++) { s[k] = 0u; }
+                *(u32 *)(s + 0u) = (u32)17;    /* si_signo = SIGCHLD */
+                *(i32 *)(s + 8u) = code;       /* si_code @8 */
+                *(u32 *)(s + 16u) = c->pid;    /* si_pid @16 */
+                *(i32 *)(s + 24u) = status;    /* si_status @24 */
+                /* si_utime/stime @32/40：填 0，下层不关心 */
+            }
+            fill_rusage_(urusage);
+            if (!nowait) {
+                if (c->state == LX_P_ZOMBIE) {
+                    c->state = LX_P_FREE;
+                    port_as_unref(c->as);
+                    c->as = 0ull;
+                } else if (c->state == LX_P_STOP) {
+                    c->resumed = 0u;
+                } else {
+                    c->cont_seen = 0ull;
+                }
+            }
+            return 0ull;                   /* waitid 成功返 0，结果在 siginfo */
+        }
+        /* WNOHANG：没有可报告事件一律返回 0（即使没有子进程），Linux 语义。
+         * 必须先于 ECHILD 判断，否则 waitid(WNOHANG) 会误报 ECHILD。 */
+        if ((options & (u64)LX_WNOHANG) != 0ull) {
+            return 0ull;
+        }
+        if (has_child == 0) {
+            return n_((u64)LX_ECHILD);
+        }
+        par->wait_kind = LX_WAIT_CHILD;
+        lx_proc_block();
+        if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+            return n_((u64)LX_EINTR);
+        }
+    }
+}
+
 /* ---- execve -------------------------------------------------------------- */
 
 /* 从用户态读一个字符串向量（argv 或 envp）：指针数组 + 字符串一起搬进内核缓冲。

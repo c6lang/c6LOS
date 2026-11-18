@@ -37,6 +37,8 @@
 #define LX_WNOHANG     1u
 #define LX_WUNTRACED   2u
 #define LX_WCONTINUED  8u
+#define LX_WEXITED     4u                 /* waitid: WEXITED */
+#define LX_WNOWAIT     0x1000000u         /* waitid: WNOWAIT（不收尸） */
 
 /* 作业控制 / SIGCHLD 的 si_code */
 #define LX_CLD_EXITED    1
@@ -206,6 +208,7 @@ void     lx_proc_exit(u64 code);               /* 不返回 */
 void     lx_sched_tick(void);
 u64      lx_proc_fork(LxRegs *r);
 u64      lx_proc_wait4(i64 pid, u64 ustatus, u64 options, u64 urusage);
+u64      lx_proc_waitid(u64 idtype, u64 id, u64 uinfo, u64 options, u64 urusage);
 u64      lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r);
 u64      lx_proc_pipe2(u64 ufds, u64 flags);
 u64      lx_proc_close(u64 fd);

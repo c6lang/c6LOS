@@ -112,6 +112,7 @@
 #define LX_SYS_geteuid       107
 #define LX_SYS_getegid       108
 #define LX_SYS_getpid         39
+#define LX_SYS_waitid         247
 #define LX_SYS_clone          56
 #define LX_SYS_execve         59
 #define LX_SYS_wait4          61

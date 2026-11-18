@@ -42,6 +42,7 @@ check-tcp
 check-alpine
 check-alpine-apps
 check-linuxabi-m35
+check-linuxabi-m38
 "
 
 pass=0
