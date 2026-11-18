@@ -18232,3 +18232,13 @@ c6 PHY 回调中        00000000  00000080  fffce7bf    00000000  1c008080
 
 `S3_PHY_CAL_MODE=2`（FULL）真板：rc=1→retry rc=0，仍 0 AP。
 说明 CAL_DATA_CHECK_FAIL 后的重试路径不是 MAC 寄存器未激活的原因。
+
+---
+
+## §567 wifi_hw_start / chip_enable 调用序列两侧一致
+
+逐条对比 `wifi_hw_start`（c6 0x42036cb4 / IDF 0x420490c8）与
+`chip_enable`（c6 0x42036c20 / IDF 0x42049028）的 call 序列：
+`wifi_reset_mac → ic_mac_init → ic_set_interrupt_handler → chip_enable →
+pm_noise_check_enable → ... → pm_disconnected_start`，完全一致。
+⇒ WiFi 库内部硬件启动顺序不是差异来源。goal 保持 active。
