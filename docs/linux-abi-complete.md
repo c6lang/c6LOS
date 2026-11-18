@@ -1390,3 +1390,21 @@ termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unloc
 验收 `make check-linuxabi-m49` → PASS；统一回归纳入（45 项）。
 关键回归 M20/M44/M47 全 PASS。
 
+### M50 pty per-instance termios / winsize
+
+上一条遗留里的 pty termios 收窄。此前 `TCGETS` 返回硬编码全局默认、
+`TCSETS*` 直接丢弃、`TIOCSWINSZ` 不支持 —— `tcsetattr` 后读不回，
+多个 pty 实例状态互相串。M50：
+
+- `Pty` 加 `termios[60]` 与 `ws_row/ws_col`，open master 时初始化默认。
+- `TCGETS` 读回本实例 termios；`TCSETS/TCSETSW/TCSETSF` 存下状态
+  （`TCSETSF` 额外清掉未读输入，符合 TCSAFLUSH）。
+- `TIOCGWINSZ`/`TIOCSWINSZ` 读写本实例窗口大小；两实例互不影响。
+
+`tests/linux/m50ptytermios.c` 验 16 项：tcsetattr 读回、两实例独立
+termios、winsize 独立设置/读取，全 PASS。验收 `make check-linuxabi-m50`
+→ PASS；统一回归纳入（46 项）；关键回归 M45/M15 全 PASS。
+
+遗留：musl libc-test 全量与 glibc NSS（目标 Alpine 用 musl，路径不同）
+属边际项，不影响 T0–T2 与 Alpine 主体。
+

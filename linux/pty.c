@@ -33,7 +33,23 @@ typedef struct {
     u32 slave_open;                    /* 从设备是否被打开过 */
     PtyRing to_slave;                  /* master 写 → slave 读 */
     PtyRing to_master;                 /* slave 写 → master 读 */
+    u8  termios[60];                   /* 本 pty 独立 termios（TCGETS/TCSETS*） */
+    u16 ws_row;                        /* 窗口大小（TIOCGWINSZ/TIOCSWINSZ） */
+    u16 ws_col;
 } Pty;
+
+static void pty_default_termios_(u8 *t)
+{
+    for (u32 k = 0u; k < 60u; k++) { t[k] = 0u; }
+    *(u32 *)(t + 0)  = 0x00000500u;    /* ICRNL | IXON */
+    *(u32 *)(t + 4)  = 0x00000005u;    /* OPOST | ONLCR */
+    *(u32 *)(t + 8)  = 0x000000BFu;    /* B38400 | CS8 | CREAD */
+    *(u32 *)(t + 12) = 0x00008A3Bu;    /* ISIG|ICANON|ECHO|... */
+    t[17] = 1u; t[18] = 4u; t[19] = 0x7Fu;  /* VINTR/VEOF/VERASE */
+    t[32] = 1u;                        /* VMIN */
+    *(u32 *)(t + 36) = 38400u;
+    *(u32 *)(t + 40) = 38400u;
+}
 
 static Pty g_pty[PTY_MAX];
 
@@ -72,6 +88,8 @@ u64 lx_pty_open_master(void)
         pt->slave_open = 0u;
         pt->to_slave.head = 0u; pt->to_slave.tail = 0u; pt->to_slave.count = 0u;
         pt->to_master.head = 0u; pt->to_master.tail = 0u; pt->to_master.count = 0u;
+        pty_default_termios_(pt->termios);
+        pt->ws_row = 24u; pt->ws_col = 80u;
     }
     return (u64)i;
 }
@@ -168,27 +186,26 @@ i64 lx_pty_ioctl(u64 node, u64 req, u64 arg, u32 is_master)
         *(u32 *)arg = (u32)node;
         return 0;
     }
-    /* 自己答 termios，不依赖全局串口 tty（lx_tty_ioctl 在 g_on==0 时
-     * 返回 ENOTTY，而 pty 可以在没有控制台行规程的场景里独立使用）。 */
-    if (req == 0x5401ull) {                /* TCGETS：最小 termios，60B */
-        u8 *t = (u8 *)arg;
-
-        if (t == (u8 *)0 || lx_user_ok(arg, 60ull, C6OS_PROT_W) == 0) {
+    /* M50：termios/winsize 是**每个 pty 独立**的状态 —— 之前是硬编码
+     * 全局默认且 TCSETS 直接丢弃，导致 tcsetattr 后 tcgetattr 读不回。 */
+    if (req == 0x5401ull) {                /* TCGETS */
+        if (arg == 0ull || lx_user_ok(arg, 60ull, C6OS_PROT_W) == 0) {
             return (i64)0 - (i64)LX_EFAULT;
         }
-        for (u32 k = 0u; k < 60u; k++) { t[k] = 0u; }
-        *(u32 *)(t + 0)  = 0x00000500u;    /* ICRNL | IXON */
-        *(u32 *)(t + 4)  = 0x00000005u;    /* OPOST | ONLCR */
-        *(u32 *)(t + 8)  = 0x000000BFu;    /* B38400 | CS8 | CREAD */
-        *(u32 *)(t + 12) = 0x00008A3Bu;    /* ISIG|ICANON|ECHO|... */
-        t[17] = 1u; t[18] = 4u; t[19] = 0x7Fu;  /* VINTR/VEOF/VERASE */
-        t[32] = 1u;                        /* VMIN */
-        *(u32 *)(t + 36) = 38400u;
-        *(u32 *)(t + 40) = 38400u;
+        for (u32 k = 0u; k < 60u; k++) { ((u8 *)arg)[k] = pt->termios[k]; }
         return 0;
     }
     if (req == 0x5402ull || req == 0x5403ull || req == 0x5404ull) {
-        return 0;                          /* TCSETS*：接受但无硬件可设 */
+        /* TCSETS/TCSETSW/TCSETSF：存下本 pty 的 termios。
+         * TCSETSF(0x5404) 还会丢掉未读输入（TCSAFLUSH 语义）。 */
+        if (arg == 0ull || lx_user_ok(arg, 60ull, C6OS_PROT_R) == 0) {
+            return (i64)0 - (i64)LX_EFAULT;
+        }
+        for (u32 k = 0u; k < 60u; k++) { pt->termios[k] = ((const u8 *)arg)[k]; }
+        if (req == 0x5404ull) {
+            pt->to_slave.head = 0u; pt->to_slave.tail = 0u; pt->to_slave.count = 0u;
+        }
+        return 0;
     }
     if (req == 0x5413ull) {                /* TIOCGWINSZ */
         u8 *w = (u8 *)arg;
@@ -196,10 +213,20 @@ i64 lx_pty_ioctl(u64 node, u64 req, u64 arg, u32 is_master)
         if (w == (u8 *)0 || lx_user_ok(arg, 8ull, C6OS_PROT_W) == 0) {
             return (i64)0 - (i64)LX_EFAULT;
         }
-        *(u16 *)(w + 0) = 24u;
-        *(u16 *)(w + 2) = 80u;
+        *(u16 *)(w + 0) = pt->ws_row;
+        *(u16 *)(w + 2) = pt->ws_col;
         *(u16 *)(w + 4) = 0u;
         *(u16 *)(w + 6) = 0u;
+        return 0;
+    }
+    if (req == 0x5414ull) {                /* TIOCSWINSZ */
+        const u8 *w = (const u8 *)arg;
+
+        if (w == (u8 *)0 || lx_user_ok(arg, 8ull, C6OS_PROT_R) == 0) {
+            return (i64)0 - (i64)LX_EFAULT;
+        }
+        pt->ws_row = *(const u16 *)(w + 0);
+        pt->ws_col = *(const u16 *)(w + 2);
         return 0;
     }
     return (i64)0 - (i64)LX_ENOTTY;
