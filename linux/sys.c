@@ -870,7 +870,8 @@ void lx_syscall_do(LxRegs *r)
             r->rax = 6ull;
             return;
         }
-        r->rax = neg(LX_ENOENT);
+        /* M56：真实 initramfs 符号链接（/proc/self/exe 特例上面已处理）。 */
+        r->rax = lx_fs_readlinkat((u64)0 - 100ull, a0, a1, a2);
         return;
 
     case LX_SYS_readlinkat:
@@ -892,7 +893,8 @@ void lx_syscall_do(LxRegs *r)
             r->rax = 6ull;
             return;
         }
-        r->rax = neg(LX_ENOENT);
+        /* M56：真实 initramfs 符号链接（dirfd 版本）。 */
+        r->rax = lx_fs_readlinkat(a0, a1, a2, a3);
         return;
 
     case LX_SYS_getrandom:

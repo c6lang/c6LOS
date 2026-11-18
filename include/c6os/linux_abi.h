@@ -428,6 +428,7 @@ u64  lx_fs_fallocate(u64 fd, u64 mode, u64 off, u64 len);
 u64  lx_fs_access(u64 upath, u64 mode);
 u64  lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags);
 u64  lx_fs_fchdir(u64 fd);
+u64  lx_fs_readlinkat(u64 dirfd, u64 upath, u64 ubuf, u64 bufsiz);  /* M56 */
 u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);

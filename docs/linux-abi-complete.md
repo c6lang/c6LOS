@@ -1512,6 +1512,25 @@ fchdir 后 getcwd、accept4+CLOEXEC，全 PASS。验收 `make check-linuxabi-m54
 → PASS；统一回归纳入（51 项）；关键回归 M14/M21/M25/M38 日志全 PASS
 （qemu 退出后 hang 属环境 quirk）。
 
+### M56 readlink 读取真实符号链接
+
+此前 `readlink`/`readlinkat` 只特判 `/proc/self/exe`，对发行版根文件系统里
+大量符号链接（Alpine minirootfs 有 334 个，如 `/bin/sh → /bin/busybox`）返回
+ENOENT，`ls -l`/`readlink -f`/`realpath` 类工具拿不到目标。
+
+initramfs 生成器早先把符号链接按 cpio S_IFLNK 条目存入数据区，`fs_find`
+解析路径时也会跟随链接；缺的只是"读取链接目标本身"这一系统调用。新增
+`lx_fs_readlinkat(dirfd, path, buf, bufsiz)`：复用 `at_path_` 解析路径，用
+`fs_find_raw_`（不跟随）查表，校验 S_IFLNK 后把 cpio 数据区的目标字符串拷到
+用户缓冲（不补 NUL，bufsiz 不足则截断），返回写入长度；非链接 EINVAL、
+不存在 ENOENT。`/proc/self/exe` 特例保留。readlink=AT_FDCWD 版本。
+
+测试 fsroot 增加 `/hello-link → /hello.txt` 符号链接。
+`tests/linux/m56readlink.c` 验 12 项：真实链接目标、bufsiz 截断、非链接
+EINVAL、不存在 ENOENT、readlinkat、/proc/self/exe 特例，全 PASS。验收
+`make check-linuxabi-m56` → PASS；统一回归纳入（52 项）；关键回归 M15/M54
+PASS。
+
 **最终剩余待办**（均需 VFS 后端扩展，属较大工程）：
 `symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、`mknod` 族。
 

@@ -2558,3 +2558,38 @@ u64 lx_fs_getdents64(u64 fd, u64 ubuf, u64 len)
         f->pos++;
     }
 }
+
+/* M56：readlink/readlinkat —— 读取符号链接目标（不跟随）。
+ * initramfs 的符号链接目标存在 cpio 数据区（mode=S_IFLNK，数据是目标字符串），
+ * 直接用 fs_find_raw_（不跟随）查表后拷贝目标。filename 不补 NUL（Linux 语义），
+ * 返回写入的字节数；bufsiz 太小则截断到 bufsiz。 */
+u64 lx_fs_readlinkat(u64 dirfd, u64 upath, u64 ubuf, u64 bufsiz)
+{
+    char ap[FS_NAME];
+    int i;
+    u64 n, m, k;
+    const u8 *src;
+
+    if (at_path_(dirfd, upath, ap, (u64)sizeof ap) != 0) {
+        return (u64)0 - LX_ENAMETOOLONG;
+    }
+    i = fs_find_raw(ap);
+    if (i < 0) {
+        return (u64)0 - LX_ENOENT;
+    }
+    m = (u64)g_node[(u32)i].mode;
+    if ((m & 0170000ull) != 0120000ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    n = g_node[(u32)i].size;
+    if (n > bufsiz) { n = bufsiz; }
+    if (n == 0ull) { return 0ull; }
+    if (lx_user_ok(ubuf, n, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    src = (const u8 *)port_phys_map(g_fs_pa + g_node[(u32)i].off);
+    for (k = 0ull; k < n; k++) {
+        *(u8 *)(ubuf + k) = src[k];
+    }
+    return n;
+}
