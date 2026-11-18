@@ -1513,6 +1513,12 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
     if (f == 0 || f->node == LX_FD_CONSOLE) {
         return (u64)0 - LX_EBADF;
     }
+    /* 管道/fifo 不可定位：Linux 要求 lseek 返回 ESPIPE。以前把管道 fd 的
+     * node（小整数管道 id）当 g_node[] 下标，返回伪造的 success，busybox/
+     * musl 的 cat 探测 stdin 时据此走错路径，动态 exec 的管道输入静默丢失。 */
+    if (f->kind == LX_FD_PIPE_R || f->kind == LX_FD_PIPE_W) {
+        return (u64)0 - LX_ESPIPE;
+    }
 #if C6OS_VFS
     if (f->kind == LX_FD_VFS) {
         INT32 wh = (INT32)LOS_SEEK_SET;

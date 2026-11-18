@@ -1052,4 +1052,24 @@ FIFO、ioctl(TCGETS) 返 ENOTTY、同进程 dup2+read 数据正确。
 fd 语义层复现（静态 exec 同路径完全正常）。记为后续，不阻塞已验证的
 Alpine/busybox 主体功能。
 
+### M36 管道 lseek = ESPIPE
+
+继续上面的定位：受控实验显示**文件重定向到 fd0**（`cat < file`）正常，
+只有 **pipe 在 fd0** 时动态 cat 不读。检查发现第三个 ABI bug：
+`lx_fs_lseek` 没有管道分支，把管道 fd 的 node（小整数管道 id）当
+`g_node[]` 下标，返回伪造的 success —— busybox/musl 的 `cat` 在探测
+stdin 时调 `lseek(0,0,SEEK_CUR)`，拿到假成功就走错了数据路径。
+修复：管道 fd（LX_FD_PIPE_R/W）的 lseek 返回 `ESPIPE(29)`（补常量），
+并把断言折进 `tests/linux/m35fifo.c`。
+
+结果：fstat/isatty/lseek 三项管道 fd 语义全部正确，`check-linuxabi-m35`
+仍 PASS；关键回归 L5/M9/M13/M14/M15/M17/M18/M19(直跑 14/14)/M23/
+alpine-apps 无回归。
+
+**仍未解决**：即便三项 fd 语义修好后，动态 exec 的 stdin 管道仍会在
+cat 读之前掉读者（内核诊断显示 `[pr]` 读路径从未命中、cat 未调 read
+即退出）；静态 exec 同路径完全正常。根因收敛到 PT_INTERP 动态链接器
+装载期间的某一处行为，超出本轮 fd 语义修复范围。保持 M35 的"剩余限制"
+记录，不为它新增失败验收目标。
+
 

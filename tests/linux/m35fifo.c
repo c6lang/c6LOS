@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 int main(void)
 {
@@ -37,6 +38,12 @@ int main(void)
     errno = 0;
     if (ioctl(0, TCGETS, &sb) != -1 || errno != ENOTTY) {
         dprintf(1, "FAIL: ioctl(TCGETS) on pipe fd0 errno=%d\n", errno);
+        return 1;
+    }
+    /* lseek 在管道上必须返回 ESPIPE（busybox cat 探测 stdin 时依赖）。 */
+    errno = 0;
+    if (lseek(0, 0, SEEK_CUR) != (off_t)-1 || errno != ESPIPE) {
+        dprintf(1, "FAIL: lseek(pipe fd0) errno=%d (want ESPIPE)\n", errno);
         return 1;
     }
     /* 管道数据路径本身正常（同进程 dup2 后 read）。 */
