@@ -1113,4 +1113,23 @@ si_status/pid）、WNOHANG 空返 0、WNOWAIT 不收尸 + waitpid 补收、P_ALL
 非法 options=EINVAL。验收 `make check-linuxabi-m38` → 17/17 PASS；
 统一回归纳入（34 项）；关键回归 L5/M14/M19/M25/alpine-apps 无回归。
 
+### M39 statx(2)：现代 stat 路径
+
+宿主 strace 显示真实 `ls` 除了 newfstatat 还会调 `statx`(nr 332) 取
+目录元数据，而内核此前没有这条 syscall（glibc 会收到 ENOSYS）。M39 补上：
+
+- `lx_fs_statx` **复用 `lx_fs_statat` 的完整路径解析**（initramfs/proc/
+  VFS 挂载点/AT_EMPTY_PATH/*at 相对路径），不另写一套解析逻辑：先把
+  legacy stat(144B) 暂存到用户给的 256B statx 缓冲前部，读出
+  ino/mode/size 后原地改写成 statx 布局。
+- x86-64 `struct statx` 256B 布局：mask@0（报 STATX_BASIC_STATS=0x7ff）、
+  blksize@4、nlink@16、uid/gid@20/24、mode@28、ino@32、size@40、
+  blocks@48；时间戳字段保持 0（本内核无可靠 wall-clock）。
+- 参数 `mask`(a3) 只作提示（统一返回 BASIC_STATS），结果缓冲是 a4。
+
+`tests/linux/m39statx.c` 验 12 项：/hello.txt 的 mask/mode/size(31)/
+ino/blksize、目录模式、ENOENT、相对路径 + dirfd。验收
+`make check-linuxabi-m39` → 12/12 PASS；统一回归纳入（35 项）；
+关键回归 L5/M9/M15/M19/M38/alpine-apps 无回归。
+
 

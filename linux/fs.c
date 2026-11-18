@@ -676,6 +676,52 @@ static int fill_stat(u64 ustat, u32 ino, u64 size, u32 mode)
     return 0;
 }
 
+/* statx(2)（nr 332）：真实程序（如 glibc 的 ls）用它取目录/文件元数据。
+ * 复用 lx_fs_statat 的完整路径解析（initramfs/proc/VFS 挂载点/*at），
+ * 做法是先把 legacy stat(144B) 暂存到用户给的 256B statx 缓冲前部，
+ * 读出 ino/mode/size 后原地改写成 statx 布局，省掉重复一套路径解析。
+ * x86-64 struct statx 256B：mask@0 blksize@4 attributes@8 nlink@16
+ * uid@20 gid@24 mode@28 ino@32 size@40 blocks@48 btime@80 ctime@96 mtime@112。 */
+u64 lx_fs_statx(u64 dirfd, u64 upath, u64 flags, u64 ustatx)
+{
+    u32 i;
+
+    if (lx_user_ok(ustatx, 256ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    {
+        u64 r = lx_fs_statat(dirfd, upath, ustatx, flags);
+
+        if ((i64)r < 0) {
+            return r;                      /* ENOENT/EFAULT 等原样透传 */
+        }
+    }
+    /* 从刚写好的 legacy stat 取字段：ino@8 / mode@24 / size@48 */
+    {
+        u64 ino = *(const u64 *)(ustatx + 8ull);
+        u64 size = *(const u64 *)(ustatx + 48ull);
+        u32 mode = *(const u32 *)(ustatx + 24ull);
+        u8 sx[256];
+
+        for (i = 0u; i < 256u; i++) { sx[i] = 0u; }
+        /* STATX_BASIC_STATS = 0x7ff；VFS 只能可靠提供 mode/size/ino/nlink */
+        put32(sx + 0u, 0x7ffu);            /* stx_mask */
+        put32(sx + 4u, 4096u);             /* stx_blksize */
+        put32(sx + 16u, 1u);               /* stx_nlink */
+        sx[20] = 0u; sx[21] = 0u;          /* stx_uid (u16) */
+        sx[24] = 0u; sx[25] = 0u;          /* stx_gid (u16) */
+        sx[28] = (u8)(mode & 0xffu);       /* stx_mode (u16) */
+        sx[29] = (u8)((mode >> 8) & 0xffu);
+        put64(sx + 32u, ino);              /* stx_ino */
+        put64(sx + 40u, size);             /* stx_size */
+        put64(sx + 48u, (size + 511ull) / 512ull);  /* stx_blocks */
+        for (i = 0u; i < 256u; i++) {
+            *(u8 *)(ustatx + i) = sx[i];
+        }
+    }
+    return 0ull;
+}
+
 /* ---- 系统调用实现 ---- */
 
 /* M15-1a：*at 系列的相对路径解析（B7）。

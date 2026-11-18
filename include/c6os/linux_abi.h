@@ -193,6 +193,7 @@
 #define LX_SYS_openat        257
 #define LX_SYS_mkdirat       258
 #define LX_SYS_newfstatat    262
+#define LX_SYS_statx         332
 #define LX_SYS_unlinkat      263
 #define LX_SYS_renameat      264
 #define LX_SYS_readlinkat    267
@@ -353,6 +354,7 @@ u64  lx_fs_close(u64 fd);
 u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
 u64  lx_fs_fstat(u64 fd, u64 ustat);
 u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags);
+u64  lx_fs_statx(u64 dirfd, u64 upath, u64 flags, u64 ustatx);
 u64  lx_fs_access(u64 upath, u64 mode);
 u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);

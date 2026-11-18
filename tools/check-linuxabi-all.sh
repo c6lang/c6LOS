@@ -43,6 +43,7 @@ check-alpine
 check-alpine-apps
 check-linuxabi-m35
 check-linuxabi-m38
+check-linuxabi-m39
 "
 
 pass=0
