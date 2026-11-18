@@ -30,16 +30,23 @@ typedef struct {
     u32 used;
 } UnixMsg;
 
+#define UNIX_BACKLOG 8u
+
 typedef struct {
     char path[UNIX_PATH_MAX];
     u32  bound;
     u32  type;                       /* LX_SOCK_DGRAM / LX_SOCK_STREAM */
+    u32  listening;                  /* STREAM：已 listen */
     u64  peer;                       /* 对端对象 id，~0=未连接 */
     UnixMsg q[UNIX_QDEPTH];
     u32  head;
     u32  tail;
     u32  count;
     u32  used;
+    u64  pending[UNIX_BACKLOG];      /* STREAM listen：待 accept 的对端 id */
+    u32  phead;
+    u32  ptail;
+    u32  pcount;
     u64  listener;                   /* STREAM：accept 用的监听对端 */
 } UnixSock;
 
@@ -203,6 +210,128 @@ u64 lx_unix_bind(u64 fd, u64 uaddr, u64 ulen)
     return 0ull;
 }
 
+u64 lx_unix_listen(u64 fd, u64 backlog)
+{
+    UnixSock *s = unix_fd_(fd);
+
+    if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->type != 1u || s->bound == 0u) { return (u64)0 - LX_EINVAL; }
+    (void)backlog;
+    s->listening = 1u;
+    return 0ull;
+}
+
+/* 新建一个 AF_UNIX 对象，只返回对象 id（不分配 fd）。
+ * connect 时用它造"服务端接受端"，accept 时再把该 id 挂到新 fd。 */
+static u64 unix_new_obj_(const UnixSock *tmpl, u64 peer)
+{
+    u32 i;
+
+    for (i = 0u; i < g_unix_cap; i++) {
+        if (g_unix[i].used == 0u) { break; }
+    }
+    if (i >= g_unix_cap) {
+        if (unix_grow_() != 0) { return (u64)0 - LX_ENOMEM; }
+        for (i = 0u; i < g_unix_cap; i++) {
+            if (g_unix[i].used == 0u) { break; }
+        }
+    }
+    if (i >= g_unix_cap) { return (u64)0 - LX_ENOMEM; }
+    {
+        UnixSock *s = &g_unix[i];
+
+        s->used = 1u;
+        s->bound = tmpl->bound;
+        s->type = tmpl->type;
+        s->listening = 0u;
+        s->peer = peer;
+        s->head = 0u; s->tail = 0u; s->count = 0u;
+        s->phead = 0u; s->ptail = 0u; s->pcount = 0u;
+        s->listener = ~0ull;
+        for (u32 k = 0u; k < UNIX_PATH_MAX; k++) { s->path[k] = tmpl->path[k]; }
+    }
+    return (u64)i;
+}
+
+/* 把对象 id 挂到当前进程的一个新 fd 上。 */
+static u64 unix_fd_of_obj_(u64 id)
+{
+    LxProc *p = lx_cur_proc();
+    u64 fd;
+    LxFile *f;
+
+    if (p == (LxProc *)0 || unix_at_(id) == (UnixSock *)0) {
+        return (u64)0 - LX_EBADF;
+    }
+    fd = lx_fdtab_alloc(p->fd);
+    if (fd == LX_FD_NONE) { return (u64)0 - LX_EMFILE; }
+    f = &p->fd->ent[fd];
+    f->node = id;
+    f->pos = 0ull;
+    f->is_dir = 0u;
+    f->kind = LX_FD_UNIX;
+    f->flags = 0u;
+    f->oflags = 0u;
+    return fd;
+}
+
+/* connect 对 STREAM 监听 socket：造一个服务端接受端对象，把它的 id
+ * 挂到监听者的 pending 队列；客户端 peer 指向它。 */
+static u64 unix_connect_stream_(UnixSock *s, UnixSock *t)
+{
+    if (t->listening == 0u) { return (u64)0 - LX_ECONNREFUSED; }
+    if (t->pcount >= UNIX_BACKLOG) { return (u64)0 - LX_EAGAIN; }
+    {
+        u64 me = (u64)(s - g_unix);
+        u64 server_end = unix_new_obj_(t, me);
+
+        if ((i64)server_end < 0) { return server_end; }
+        s->peer = server_end;
+        s->listener = (u64)(t - g_unix);
+        t->pending[t->ptail] = server_end;
+        t->ptail = (t->ptail + 1u) % UNIX_BACKLOG;
+        t->pcount++;
+        lx_unix_wake();                    /* 唤醒阻塞在 accept() 的服务端 */
+    }
+    return 0ull;
+}
+
+u64 lx_unix_accept(u64 fd, u64 uaddr, u64 uaddrlen)
+{
+    UnixSock *s = unix_fd_(fd);
+
+    if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->type != 1u || s->listening == 0u) { return (u64)0 - LX_EINVAL; }
+    while (s->pcount == 0u) {
+        LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+
+        if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
+            return (u64)0 - LX_EAGAIN;
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);
+        lx_proc_block();
+    }
+    {
+        u64 server_end = s->pending[s->phead];
+        UnixSock *se = unix_at_(server_end);
+        u64 cfd;
+
+        s->phead = (s->phead + 1u) % UNIX_BACKLOG;
+        s->pcount--;
+        cfd = unix_fd_of_obj_(server_end);
+        if ((i64)cfd < 0) { return cfd; }
+        /* 接受端与客户端对象互相绑定（都用对象 id） */
+        if (se != (UnixSock *)0) {
+            UnixSock *ce = unix_at_(se->peer);
+
+            if (ce != (UnixSock *)0) { ce->peer = server_end; }
+        }
+        (void)uaddr;
+        (void)uaddrlen;
+        return cfd;
+    }
+}
+
 u64 lx_unix_connect(u64 fd, u64 uaddr, u64 ulen)
 {
     UnixSock *s = unix_fd_(fd);
@@ -215,11 +344,11 @@ u64 lx_unix_connect(u64 fd, u64 uaddr, u64 ulen)
     t = unix_by_path_(path, len);
     if (t == (UnixSock *)0) { return (u64)0 - LX_ECONNREFUSED; }
     if (s->type != t->type) { return (u64)0 - LX_EINVAL; }
+    if (s->type == 1u) {
+        return unix_connect_stream_(s, t);
+    }
     s->peer = (u64)(t - g_unix);
     t->peer = (u64)(s - g_unix);
-    if (s->type == 1u) {                 /* STREAM：登记监听方 */
-        t->listener = (u64)(s - g_unix);
-    }
     return 0ull;
 }
 
@@ -304,10 +433,4 @@ u16 lx_unix_poll(u64 id)
 
     if (s == (UnixSock *)0) { return LX_POLLNVAL; }
     return (s->count != 0u) ? (u16)LX_POLLIN : 0u;
-}
-
-void lx_unix_wake(void)
-{
-    /* 单核协作调度：send 后对端由 lx_proc_block 的等待队列自然唤醒，
-     * 这里保留钩子供后续多等待者扩展。 */
 }

@@ -266,6 +266,8 @@ u16      lx_sock_poll_one(u64 sd);   /* 返回 LX_POLLIN/POLLOUT 等就绪位 */
 u64      lx_unix_socket(u64 type);
 u64      lx_unix_bind(u64 fd, u64 uaddr, u64 ulen);
 u64      lx_unix_connect(u64 fd, u64 uaddr, u64 ulen);
+u64      lx_unix_listen(u64 fd, u64 backlog);
+u64      lx_unix_accept(u64 fd, u64 uaddr, u64 uaddrlen);
 u64      lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen);
 u64      lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen);
 u64      lx_unix_close(u64 fd);

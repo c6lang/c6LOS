@@ -2040,6 +2040,12 @@ static u16 poll_events_(LxProc *p, i32 fd);  /* M20：epoll_wait 复用，定义
 static void tfd_release_(u64 id);  /* M21：定义在 timerfd 块，close 里释放对象 */
 static void sfd_release_(u64 id);  /* M22：定义在 signalfd 块，close 里释放对象 */
 
+/* AF_UNIX connect 唤醒阻塞在 accept() 的服务端（wake_all_ 是 proc.c 私有）。 */
+void lx_unix_wake(void)
+{
+    wake_all_();
+}
+
 u64 lx_proc_close(u64 fd)
 {
     LxProc *p = cur_();

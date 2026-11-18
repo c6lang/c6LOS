@@ -1149,4 +1149,30 @@ off_in/off_out 回写+内容正确、EOF 短拷贝、非法 flags。验收
 `make check-linuxabi-m40` → 17/17 PASS；统一回归纳入（36 项）；
 关键回归 L5/M9/M15/M19/M39 无回归。
 
+### M41 AF_UNIX SOCK_STREAM：listen/accept
+
+M25 的 AF_UNIX 只支持 DGRAM 直接对连，STREAM 的 `listen`/`accept` 是
+INET 桩（走 SAL，对 AF_UNIX fd 返回 EOPNOTSUPP）。M41 补齐：
+
+- `UnixSock` 加 `listening` 标志 + `pending[8]` 待接受队列（对象 id）。
+- `lx_unix_listen`：bound SOCK_STREAM 置 listening=1。
+- `connect` 对监听者：造一个**服务端接受端对象**（path/type 复制自监听
+  者、peer 指向客户端对象 id，不占 fd），把它的 id 挂到监听者 pending
+  队列；客户端 peer 指向它；`lx_unix_wake()` 唤醒阻塞在 accept 的服务端。
+- `lx_unix_accept`：从 pending 取对象 id，挂到当前进程新 fd 返回；
+  非阻塞空队列 EAGAIN，阻塞时空队列走等待队列。
+- 关键架构点：`lx_unix_wake()` 的实现放在 proc.c（`wake_all_` 是它的私有
+  函数），afunix.c 只声明调用 —— 避免把调度器内部符号暴露到 linux 层。
+- peer 全程用**对象 id**（不是 fd 号）：fork/dup 后 fd 号与对象解耦。
+- `lx_sock_listen`/`lx_sock_accept` 两条编译分支（C6OS_NET=1/0）都按
+  `LX_FD_UNIX` 路由到新实现。
+
+`tests/linux/m41unixstream.c` 用 fork 验：父 listen+accept、子 connect，
+双向 send/recv 内容正确（`from-client`/`from-serve`），10/10 PASS。
+验收 `make check-linuxabi-m41` → PASS；统一回归纳入（37 项）；
+关键回归 M25/M38/M40 无回归。
+
+遗留：AF_UNIX STREAM 仍是消息边界（未做真正无边界字节流）、
+SCM_RIGHTS ancillary、抽象名字空间。
+
 

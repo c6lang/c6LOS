@@ -215,6 +215,7 @@ u64 lx_sock_listen(u64 fd, u64 backlog)
     LxFile *f = lxs_get_(fd);
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) { return lx_unix_listen(fd, backlog); }
     return lxs_err_(SalListen((int)f->node, (int)backlog));
 }
 
@@ -227,6 +228,7 @@ u64 lx_sock_accept(u64 fd, u64 uaddr, u64 uaddrlen)
     u64 cfd;
 
     if (f == (LxFile *)0 || p == (LxProc *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) { return lx_unix_accept(fd, uaddr, uaddrlen); }
     if (uaddr != 0ull && lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
@@ -633,8 +635,18 @@ u64 lx_sock_connect(u64 fd, u64 a, u64 l)
 {
     return lxs_is_unix_(fd) ? lx_unix_connect(fd, a, l) : (u64)0 - LX_EAFNOSUPPORT;
 }
-u64 lx_sock_listen(u64 fd, u64 b) { (void)fd; (void)b; return (u64)0 - LX_EOPNOTSUPP; }
-u64 lx_sock_accept(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_listen(u64 fd, u64 b)
+{
+    LxFile *f = lxs_get_(fd);
+    return (f != (LxFile *)0 && f->kind == LX_FD_UNIX)
+           ? lx_unix_listen(fd, b) : (u64)0 - LX_EOPNOTSUPP;
+}
+u64 lx_sock_accept(u64 fd, u64 a, u64 l)
+{
+    LxFile *f = lxs_get_(fd);
+    return (f != (LxFile *)0 && f->kind == LX_FD_UNIX)
+           ? lx_unix_accept(fd, a, l) : (u64)0 - LX_EOPNOTSUPP;
+}
 u64 lx_sock_sendto(u64 fd, u64 b, u64 l, u64 f, u64 a, u64 al)
 {
     (void)f;
