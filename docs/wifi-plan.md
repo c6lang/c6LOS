@@ -18052,3 +18052,20 @@ step 几条指令后 ca0 / d14 仍为 0。
 
 ⇒ 软件调用链完整，差异纯粹在 ROM `hal_mac_init` 执行时硬件未响应。
 §545/§548 中"调用路径"相关推测以此条为准。goal 保持 active。
+
+---
+
+## §552 hal_init / hal_mac_init 两侧实现逐指令一致
+
+IDA 对比（虽然链接地址不同：c6LOS hal_mac_init=0x40386554，
+IDF=0x40384688，hal_init c6=0x420245d4 / IDF=0x4205f354）：
+- `hal_init`：读 `0x60033d14`，OR bit1 写回，然后轮询 bit0；
+  之后写 `0x60033c34=0`、`0x60033c40=-1`，`call8 mac_txrx_init`，
+  再对 `0x600330d8[...]` OR 5。两边完全相同。
+- `hal_mac_init`：`callx8 pm_get_tx_blocks_retention_mask` →
+  `&0x00ff0000 |0x1000` → `~` → `& [0x60033ca0]` → 写回。两边完全相同。
+
+⇒ 排除"库版本差异导致初始化逻辑不同"。`0x60033ca0` 的初值
+（IDF 里 hal_mac_init 执行前应为 0x00ff2000，执行后 0x00ff1000）
+只能由硬件产生；c6LOS 里该寄存器一直为 0 说明 MAC 硬件模块从未上电/解锁。
+goal 保持 active。
