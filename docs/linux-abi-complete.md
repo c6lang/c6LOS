@@ -1430,3 +1430,29 @@ prlimit64 往返、fork 继承、nice 往返、rusage/mlock/sethostname，全 PA
 验收 `make check-linuxabi-m51` → PASS；统一回归纳入（47 项）；
 关键回归 M38/M19/check-alpine-apps 全 PASS。
 
+### M52 flock / fsync / fdatasync / sync
+
+一次针对"真实 Alpine 程序高频 syscall"的审计（对照 unistd_64.h 逐号
+比对定义与分派）发现这些此前全落默认 ENOSYS —— `apk add` 的锁、
+DB 提交路径、`busybox flock` 都会踩到。M52：
+
+- `fsync`(74)/`fdatasync`(75)：校验 fd 存在后返 0 —— VFS 后端
+  `LOS_FsSync` 是写通（无脏页）的 no-op 成功。非法 fd 报 EBADF。
+- `flock`(73)：`LxFile` 加 `lock` 字段记 SH/EX 咨询锁；LOCK_UN 解锁，
+  LOCK_SH/EX 上锁（单进程协作内核无争用，LOCK_NB 恒成功），非法 op
+  报 EINVAL。
+- `sync`(162)/`syncfs`(306)：写通无脏页，恒成功。
+
+`tests/linux/m52sync.c` 验 14 项：fsync/fdatasync 合法/非法 fd、
+flock 上锁解锁往返与非法 op、sync/syncfs，全 PASS。验收
+`make check-linuxabi-m52` → PASS；统一回归纳入（48 项）；
+关键回归 M15/M44/M51 全 PASS。
+
+**审计发现待办**（非 M52，供后续收窄）：`setitimer`(38)/`getitimer`(36)、
+`symlink`(88)/`symlinkat`(266)、`link`(86)/`linkat`(265)、`chown` 族、
+`mknod` 族、`readlink`(89)、`fchdir`(81)、`faccessat`(269)、
+`accept4`(288)、`rt_sigtimedwait`(128)。另 `LX_SYS_send`/`recv` 错占
+x86-64 的 `semget`(64)/`semop`(65) 号 —— 真实程序走 sendto/recvfrom，
+不影响 Alpine，但 SysV 信号量号被劫持。VFS 后端无 symlink/link/chown/
+mknod 原语（FAT 限定），这些需后端扩展，属较大工程。
+

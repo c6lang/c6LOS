@@ -272,6 +272,17 @@
 #define LX_SYS_munlock       150
 #define LX_SYS_setrlimit     160
 #define LX_SYS_sethostname   170
+/* M52：文件同步与咨询锁 */
+#define LX_SYS_flock         73
+#define LX_SYS_fsync         74
+#define LX_SYS_fdatasync     75
+#define LX_SYS_sync         162
+#define LX_SYS_syncfs       306
+/* flock 操作位（Linux 同值） */
+#define LX_LOCK_SH           0x01u
+#define LX_LOCK_EX           0x02u
+#define LX_LOCK_NB           0x04u
+#define LX_LOCK_UN           0x08u
 /* RLIMIT_* 资源 id（Linux 通用） */
 #define LX_RLIMIT_CPU        0u
 #define LX_RLIMIT_FSIZE      1u

@@ -117,6 +117,8 @@ typedef struct LxFile {
     u32 kind;                 /* LX_FD_FILE / LX_FD_PIPE_R / LX_FD_PIPE_W */
     u32 flags;                /* FD_CLOEXEC 等 fd 标志 */
     u32 oflags;               /* O_APPEND / O_NONBLOCK / 访问模式 */
+    u32 lock;                 /* M52：flock 咨询锁类型（0/SH/EX），fork/dup 共享 fd 表 */
+    u32 file_pad;
 } LxFile;
 
 /* 动态 fd 表（linux/fdt.c，M13-3a）。

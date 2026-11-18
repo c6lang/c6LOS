@@ -809,6 +809,46 @@ void lx_syscall_do(LxRegs *r)
         if (a1 > 64ull) { r->rax = neg(LX_EINVAL); return; }
         r->rax = 0ull;
         return;
+    case LX_SYS_fsync:
+    case LX_SYS_fdatasync: {
+        /* fsync/fdatasync(fd)：把 fd 的脏数据刷盘。VFS 后端 LOS_FsSync
+         * 当前是无缓冲写通（no-op 成功），故只校验 fd 存在并返 0。 */
+        LxProc *p = lx_cur_proc();
+        LxFile *f = lx_fdtab_get((p != (LxProc *)0) ? p->fd : (LxFdTab *)0, a0);
+
+        if (f == (LxFile *)0) { r->rax = neg(LX_EBADF); return; }
+        r->rax = 0ull;                 /* LOS_FsSync 成功（写通，无脏页） */
+        return;
+    }
+    case LX_SYS_flock: {
+        /* flock(fd, operation)：咨询锁。单进程协作内核 + 无共享写者，
+         * 锁状态记在 LxFile 上即可。LOCK_UN 解锁；LOCK_SH/EX 上锁；
+         * LOCK_NB  contention 才返回 EWOULDBLOCK（我们无争用，恒成功）。 */
+        LxProc *p = lx_cur_proc();
+        LxFile *f = lx_fdtab_get((p != (LxProc *)0) ? p->fd : (LxFdTab *)0, a0);
+
+        if (f == (LxFile *)0) { r->rax = neg(LX_EBADF); return; }
+        {
+            u32 op = (u32)a1;
+            u32 typ = op & 0x3u;        /* SH=1 EX=2 UN=3(UN&3)，NB=4 位在外 */
+
+            if ((op & LX_LOCK_UN) != 0u) {
+                f->lock = 0u;
+            } else if (typ == LX_LOCK_SH || typ == LX_LOCK_EX) {
+                f->lock = typ;         /* 无争用，直接记为已锁 */
+            } else {
+                r->rax = neg(LX_EINVAL);
+                return;
+            }
+        }
+        r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_sync:
+    case LX_SYS_syncfs:
+        /* sync()/syncfs(fd)：全局/单 fs 刷盘，写通无脏页，恒成功。 */
+        r->rax = 0ull;
+        return;
 
     case LX_SYS_readlinkat:
         if (user_streq(a1, "/proc/self/exe") != 0) {
