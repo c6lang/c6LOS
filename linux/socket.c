@@ -474,6 +474,7 @@ u64 lx_sock_sendmsg(u64 fd, u64 umsg, u64 flags)
     u32 i;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) { return lx_unix_sendmsg(fd, umsg, flags); }
     if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     iov = *(const u64 *)(umsg + 16ull);
     niov = *(const u64 *)(umsg + 24ull);
@@ -538,6 +539,7 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
     int rc;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
+    if (f->kind == LX_FD_UNIX) { return lx_unix_recvmsg(fd, umsg, flags); }
     if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     iov = *(const u64 *)(umsg + 16ull);
     niov = *(const u64 *)(umsg + 24ull);
@@ -666,7 +668,17 @@ u64 lx_sock_getsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l;
 u64 lx_sock_shutdown(u64 fd, u64 h) { (void)fd; (void)h; return (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_getpeername(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_getsockname(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
-u64 lx_sock_sendmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EOPNOTSUPP; }
-u64 lx_sock_recvmsg(u64 fd, u64 m, u64 f) { (void)fd; (void)m; (void)f; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_sendmsg(u64 fd, u64 m, u64 f)
+{
+    LxFile *x = lxs_get_(fd);
+    return (x != (LxFile *)0 && x->kind == LX_FD_UNIX)
+           ? lx_unix_sendmsg(fd, m, f) : (u64)0 - LX_EOPNOTSUPP;
+}
+u64 lx_sock_recvmsg(u64 fd, u64 m, u64 f)
+{
+    LxFile *x = lxs_get_(fd);
+    return (x != (LxFile *)0 && x->kind == LX_FD_UNIX)
+           ? lx_unix_recvmsg(fd, m, f) : (u64)0 - LX_EOPNOTSUPP;
+}
 
 #endif

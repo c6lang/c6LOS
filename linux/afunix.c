@@ -24,10 +24,17 @@
 #define UNIX_MSG_MAX  4096u
 #define UNIX_MAX      64u
 
+/* 每条消息可附带一个 SCM_RIGHTS fd：存 LxFile 的值副本（含 kind/node/pos/
+ * flags），接收方 install 到自己 fd 表；管道类 fd 需要 pipe_ref_ 增引用，
+ * 但那是 proc.c 私有函数，这里通过 lx_unix_fd_pass_ 钩子完成。 */
+#define UNIX_PASS_MAX 4u
+
 typedef struct {
     u8  data[UNIX_MSG_MAX];
     u32 len;
     u32 used;
+    u32 nfd;                          /* 附带的 fd 个数 */
+    LxFile fds[UNIX_PASS_MAX];        /* fd 状态副本 */
 } UnixMsg;
 
 #define UNIX_BACKLOG 8u
@@ -352,19 +359,24 @@ u64 lx_unix_connect(u64 fd, u64 uaddr, u64 ulen)
     return 0ull;
 }
 
-/* 把一条消息入队；返回 0 成功、-EAGAIN 队列满。 */
-static int unix_enq_(UnixSock *s, const u8 *buf, u32 len)
+/* 把一条消息入队；可附带最多 UNIX_PASS_MAX 个 fd 状态副本。 */
+static int unix_enq_(UnixSock *s, const u8 *buf, u32 len,
+                     const LxFile *pass, u32 nfd)
 {
     UnixMsg *m;
+    u32 i;
 
     if (s->count >= UNIX_QDEPTH) { return -LX_EAGAIN; }
     if (len > UNIX_MSG_MAX) { len = UNIX_MSG_MAX; }
     m = &s->q[s->tail];
-    for (u32 i = 0u; i < len; i++) { m->data[i] = buf[i]; }
+    for (i = 0u; i < len; i++) { m->data[i] = buf[i]; }
     m->len = len;
     m->used = 1u;
+    m->nfd = (nfd > UNIX_PASS_MAX) ? UNIX_PASS_MAX : nfd;
+    for (i = 0u; i < m->nfd; i++) { m->fds[i] = pass[i]; }
     s->tail = (s->tail + 1u) % UNIX_QDEPTH;
     s->count++;
+    lx_unix_wake();                        /* 唤醒阻塞在 recvmsg/recvfrom 的对端 */
     return 0;
 }
 
@@ -383,7 +395,7 @@ u64 lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen)
     kbuf = (u8 *)port_kcalloc(1ull, len);
     if (kbuf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
     for (u64 i = 0ull; i < len; i++) { kbuf[i] = *(const u8 *)(ubuf + i); }
-    rc = unix_enq_(t, kbuf, (u32)len);
+    rc = unix_enq_(t, kbuf, (u32)len, (const LxFile *)0, 0u);
     port_kfree((void *)kbuf);
     if (rc != 0) { return (u64)0 - LX_EAGAIN; }
     return len;
@@ -411,6 +423,173 @@ u64 lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen)
     for (u32 i = 0u; i < n; i++) { *(u8 *)(ubuf + i) = m->data[i]; }
     s->head = (s->head + 1u) % UNIX_QDEPTH;
     s->count--;
+    return (u64)n;
+}
+
+/* SCM_RIGHTS over AF_UNIX：sendmsg 解析 cmsg 中的 fd 数组，随消息入队；
+ * recvmsg 把 LxFile 副本安装到接收方 fd 表。x86-64 cmsghdr 16B：
+ * cmsg_len@0 cmsg_level@8 cmsg_type@12，数据从 +16 起。 */
+#define UNIX_CMSG_DATA 16u
+
+u64 lx_unix_sendmsg(u64 fd, u64 umsg, u64 flags)
+{
+    UnixSock *s = unix_fd_(fd);
+    UnixSock *t;
+    u64 iov, niov, ctl, ctllen, total = 0ull;
+    u8 *buf;
+    LxFile pass[UNIX_PASS_MAX];
+    u32 nfd = 0u;
+    u32 i;
+    int rc;
+
+    if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    (void)flags;
+    if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    iov = *(const u64 *)(umsg + 16ull);
+    niov = *(const u64 *)(umsg + 24ull);
+    if (niov > 64ull || (niov != 0ull && lx_user_ok(iov, niov * 16ull, C6OS_PROT_R) == 0)) {
+        return (u64)0 - LX_EINVAL;
+    }
+    for (i = 0u; i < (u32)niov; i++) {
+        total += *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+        if (total > UNIX_MSG_MAX) { return (u64)0 - LX_EINVAL; }
+    }
+    /* 解析 control：SOL_SOCKET/SCM_RIGHTS → fd 数组 */
+    ctl = *(const u64 *)(umsg + 32ull);
+    ctllen = *(const u64 *)(umsg + 40ull);
+    if (ctllen != 0ull) {
+        if (ctl == 0ull || lx_user_ok(ctl, ctllen, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        {
+            u64 c = ctl;
+            u64 end = ctl + ctllen;
+
+            while (c + UNIX_CMSG_DATA <= end) {
+                u64 clen = *(const u64 *)c;
+                u32 lev = *(const u32 *)(c + 8ull);
+                u32 typ = *(const u32 *)(c + 12ull);
+
+                if (clen < UNIX_CMSG_DATA || c + clen > end) { break; }
+                if (lev == 1u && typ == 1u && clen > UNIX_CMSG_DATA) {
+                    u32 nf = (u32)((clen - UNIX_CMSG_DATA) / 4ull);
+
+                    if (nf > UNIX_PASS_MAX) { nf = UNIX_PASS_MAX; }
+                    for (i = 0u; i < nf; i++) {
+                        u32 fdesc = *(const u32 *)(c + UNIX_CMSG_DATA + (u64)i * 4ull);
+                        LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fdesc);
+
+                        if (f != (LxFile *)0) { pass[nfd++] = *f; }
+                    }
+                }
+                c += clen;
+            }
+        }
+    }
+    t = s->peer != ~0ull ? unix_at_(s->peer) : (UnixSock *)0;
+    if (t == (UnixSock *)0) { return (u64)0 - LX_ECONNREFUSED; }
+    buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
+    if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
+    {
+        u64 pos = 0ull;
+
+        for (i = 0u; i < (u32)niov; i++) {
+            u64 base = *(const u64 *)(iov + (u64)i * 16ull);
+            u64 len = *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+            u64 k;
+
+            if (len == 0ull) { continue; }
+            if (lx_user_ok(base, len, C6OS_PROT_R) == 0) {
+                port_kfree((void *)buf);
+                return (u64)0 - LX_EFAULT;
+            }
+            for (k = 0ull; k < len; k++) { buf[pos + k] = *(const u8 *)(base + k); }
+            pos += len;
+        }
+    }
+    rc = unix_enq_(t, buf, (u32)total, pass, nfd);
+    port_kfree((void *)buf);
+    if (rc != 0) { return (u64)0 - LX_EAGAIN; }
+    return total;
+}
+
+u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
+{
+    UnixSock *s = unix_fd_(fd);
+    u64 iov, niov, ctl, ctllen, total = 0ull;
+    u8 *buf;
+    u32 i;
+    int n;
+
+    if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    (void)flags;
+    if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    iov = *(const u64 *)(umsg + 16ull);
+    niov = *(const u64 *)(umsg + 24ull);
+    if (niov > 64ull || (niov != 0ull && lx_user_ok(iov, niov * 16ull, C6OS_PROT_R) == 0)) {
+        return (u64)0 - LX_EINVAL;
+    }
+    for (i = 0u; i < (u32)niov; i++) {
+        total += *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+        if (total > UNIX_MSG_MAX) { return (u64)0 - LX_EINVAL; }
+    }
+    while (s->count == 0u) {
+        LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+
+        if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
+            return (u64)0 - LX_EAGAIN;
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);
+        lx_proc_block();
+    }
+    buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
+    if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
+    {
+        UnixMsg *m = &s->q[s->head];
+        u64 pos = 0ull;
+        u64 got;
+
+        got = (m->len < total) ? m->len : total;
+        for (i = 0u; i < (u32)niov && pos < got; i++) {
+            u64 base = *(const u64 *)(iov + (u64)i * 16ull);
+            u64 len = *(const u64 *)(iov + (u64)i * 16ull + 8ull);
+            u64 k = (len < got - pos) ? len : got - pos;
+            u64 j;
+
+            if (lx_user_ok(base, k, C6OS_PROT_W) == 0) {
+                port_kfree((void *)buf);
+                return (u64)0 - LX_EFAULT;
+            }
+            for (j = 0u; j < k; j++) { *(u8 *)(base + j) = m->data[pos + j]; }
+            pos += k;
+        }
+        n = (int)got;
+        /* SCM_RIGHTS：安装附带的 fd 到接收方表 */
+        ctl = *(const u64 *)(umsg + 32ull);
+        ctllen = *(const u64 *)(umsg + 40ull);
+        if (m->nfd != 0u && ctl != 0ull && ctllen >= UNIX_CMSG_DATA + m->nfd * 4ull &&
+            lx_user_ok(ctl, ctllen, C6OS_PROT_W) != 0) {
+            u8 c[UNIX_CMSG_DATA];
+            u32 k;
+
+            for (k = 0u; k < UNIX_CMSG_DATA; k++) { c[k] = 0u; }
+            *(u64 *)c = (u64)(UNIX_CMSG_DATA + m->nfd * 4ull);
+            *(u32 *)(c + 8ull) = 1u;        /* SOL_SOCKET */
+            *(u32 *)(c + 12ull) = 1u;       /* SCM_RIGHTS */
+            for (k = 0u; k < UNIX_CMSG_DATA; k++) { *(u8 *)(ctl + k) = c[k]; }
+            for (k = 0u; k < m->nfd; k++) {
+                u64 nfd = lx_unix_fd_install(&m->fds[k]);
+
+                if ((i64)nfd >= 0) {
+                    *(u32 *)(ctl + UNIX_CMSG_DATA + (u64)k * 4ull) = (u32)nfd;
+                }
+            }
+            *(u64 *)(umsg + 40ull) = UNIX_CMSG_DATA + m->nfd * 4ull;
+        }
+        s->head = (s->head + 1u) % UNIX_QDEPTH;
+        s->count--;
+    }
+    port_kfree((void *)buf);
     return (u64)n;
 }
 

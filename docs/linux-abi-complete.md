@@ -1173,6 +1173,33 @@ INET 桩（走 SAL，对 AF_UNIX fd 返回 EOPNOTSUPP）。M41 补齐：
 关键回归 M25/M38/M40 无回归。
 
 遗留：AF_UNIX STREAM 仍是消息边界（未做真正无边界字节流）、
-SCM_RIGHTS ancillary、抽象名字空间。
+抽象名字空间。
+
+### M42 AF_UNIX SCM_RIGHTS：fd 传递
+
+补上 M23/M41 明确遗留的 ancillary 数据（只做 SOL_SOCKET/SCM_RIGHTS，
+其他 cmsg 类型仍忽略）：
+
+- `UnixMsg` 扩展为最多携带 4 个 `LxFile` 值副本（fd 状态：kind/node/pos/
+  flags），随数据一起入 AF_UNIX 消息队列。
+- `lx_unix_sendmsg` 解析 56B msghdr 的 control 区（x86-64 cmsghdr 16B：
+  len@0 level@8 type@12，数据从 +16 起），把 SCM_RIGHTS 的 fd 数组快照
+  存入消息；`lx_unix_recvmsg` 把副本通过 `lx_unix_fd_install` 装到接收方
+  新 fd 槽，并按 kind 增引用（管道走 `pipe_ref_`）。
+- 架构点：`lx_unix_fd_install`/`lx_unix_fd_acquire` 实现在 proc.c
+  （`pipe_ref_` 私有），afunix.c 只声明调用；与 M41 的 `lx_unix_wake`
+  同一模式 —— linux/afunix.c 不碰调度器/引用计数内部符号。
+- 修一处唤醒 bug：`unix_enq_`（AF_UNIX 所有消息入队的公共路径）以前不
+  唤醒阻塞在 recvmsg/recvfrom 的对端，父先收子后发的场景会永久 hang；
+  入队后统一调 `lx_unix_wake()`。
+
+`tests/linux/m42scmright.c` 用 fork 验：子把管道写端经 SCM_RIGHTS 发给
+父，父 recvmsg 收到 fd 后写入，子从自己保留的读端读回确认 —— 证明收到
+的是真内核对象引用而非空洞 fd，15/15 PASS。验收
+`make check-linuxabi-m42` → PASS；统一回归纳入（38 项）；
+关键回归 M23/M25/M41 无回归。
+
+遗留：AF_UNIX STREAM 的真字节流边界、抽象名字空间、非 SCM_RIGHTS 的
+ancillary 类型。
 
 

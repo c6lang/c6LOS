@@ -268,11 +268,17 @@ u64      lx_unix_bind(u64 fd, u64 uaddr, u64 ulen);
 u64      lx_unix_connect(u64 fd, u64 uaddr, u64 ulen);
 u64      lx_unix_listen(u64 fd, u64 backlog);
 u64      lx_unix_accept(u64 fd, u64 uaddr, u64 uaddrlen);
+u64      lx_unix_sendmsg(u64 fd, u64 umsg, u64 flags);
+u64      lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags);
 u64      lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen);
 u64      lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen);
 u64      lx_unix_close(u64 fd);
 u16      lx_unix_poll(u64 id);
 void     lx_unix_wake(void);
+/* SCM_RIGHTS：把 fd 状态副本安装到当前进程 fd 表，并按 kind 增引用。
+ * 返回新 fd 或负 errno。src 是 LxFile 值副本。 */
+u64      lx_unix_fd_install(const LxFile *src);
+void     lx_unix_fd_acquire(u32 node, u32 kind);
 void     lx_sock_poll(int sd, u64 ubuf, u64 nfds); /* fill pollfd revents */
 /* M19：busybox id/df/cat 依赖 */
 u64      lx_proc_getgroups(u64 size, u64 ugroups);

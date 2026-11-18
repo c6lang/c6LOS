@@ -2046,6 +2046,36 @@ void lx_unix_wake(void)
     wake_all_();
 }
 
+/* SCM_RIGHTS：按 kind 增加 fd 携带对象的引用计数。 */
+void lx_unix_fd_acquire(u32 node, u32 kind)
+{
+    LxFile tmp;
+
+    tmp.node = (u64)node;
+    tmp.kind = kind;
+    if (kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W) {
+        pipe_ref_(&tmp);
+    }
+}
+
+/* SCM_RIGHTS：把对端发来的 LxFile 值副本安装到当前进程的新 fd 槽。 */
+u64 lx_unix_fd_install(const LxFile *src)
+{
+    LxProc *p = cur_();
+    u64 fd;
+
+    if (p == (LxProc *)0 || src == (LxFile *)0) {
+        return (u64)0 - LX_EBADF;
+    }
+    fd = lx_fdtab_alloc(p->fd);
+    if (fd == LX_FD_NONE) {
+        return (u64)0 - LX_EMFILE;
+    }
+    p->fd->ent[fd] = *src;
+    lx_unix_fd_acquire((u32)src->node, src->kind);
+    return fd;
+}
+
 u64 lx_proc_close(u64 fd)
 {
     LxProc *p = cur_();
