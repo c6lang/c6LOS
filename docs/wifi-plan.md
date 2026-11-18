@@ -17949,3 +17949,21 @@ goal 保持 active。
 真板卡在 `calling register_chipv7_phy(mode=0)`，没有后续日志。
 ⇒ 官方值是 WiFi 完整启动后的**结果**，不是初始化输入；照抄无效。已回退。
 goal 保持 active。
+
+---
+
+## §545 当前结论与下一步（第 135 轮）
+
+已排除：硬件/天线/路由器/DNS/TLS（官方 app 完整取到 qq.com，§529）；
+bootloader（两种 boot 路径都 0 AP）；hal_init 轮询本身（补丁能跳过，
+但只是让软件往下走）；MAC 复位次数、0x60033084、0x60033ca0、
+DIG_ISO 对齐、时钟位对齐、电源域序列照搬（§533–§544 全部无效）。
+
+唯一未解释的现象：`esp_wifi_start()` 里 ROM `hal_mac_init()` 在官方 app
+能把 `0x60033ca0` 从 0 变成 0x00ff1000 并置起 `0x60033d14 bit0`，
+在 c6LOS 里两者都始终为 0，且 CPU/JTAG 都写不进去。
+下一步应直接对比 **传给 `ic_mac_init`/`hal_mac_init` 的软件状态**
+（`g_ic` 结构、`pm_get_tx_blocks_retention_mask()` 返回值、
+`g_osi_funcs_p` 表），而不是继续猜寄存器位。
+
+goal 保持 active。
