@@ -18225,3 +18225,10 @@ c6 PHY 回调中        00000000  00000080  fffce7bf    00000000  1c008080
   和 MAC 寄存器块本身。
 
 保留诊断打印，goal 保持 active。
+
+---
+
+## §566 完整 PHY 校准模式（mode=2）无效
+
+`S3_PHY_CAL_MODE=2`（FULL）真板：rc=1→retry rc=0，仍 0 AP。
+说明 CAL_DATA_CHECK_FAIL 后的重试路径不是 MAC 寄存器未激活的原因。
