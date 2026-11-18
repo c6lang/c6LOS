@@ -18242,3 +18242,13 @@ c6 PHY 回调中        00000000  00000080  fffce7bf    00000000  1c008080
 `wifi_reset_mac → ic_mac_init → ic_set_interrupt_handler → chip_enable →
 pm_noise_check_enable → ... → pm_disconnected_start`，完全一致。
 ⇒ WiFi 库内部硬件启动顺序不是差异来源。goal 保持 active。
+
+---
+
+## §568 复位瞬间寄存器基线
+
+JTAG `reset halt` 后（二级 bootloader 尚未执行）读：
+`0x60033ca0=0, 0x60033d14=0, 0x60008090=0, 0x60008094=0`,
+`0x60026014=0xfffce030`（芯片复位默认值），`0x60026018=0`。
+说明 MAC 寄存器块从来就没有非零初值，必须由软件触发硬件上电后才能出现
+0x00ff2000 之类的值；c6LOS 始终没触发到那一步。goal 保持 active。
