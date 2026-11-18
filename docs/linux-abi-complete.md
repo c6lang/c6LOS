@@ -1495,7 +1495,23 @@ fchdir 后 getcwd、accept4+CLOEXEC，全 PASS。验收 `make check-linuxabi-m54
 → PASS；统一回归纳入（50 项）；关键回归 M15/M42/alpine-apps 正常
 （M42 日志 PASS 15/15，仅 qemu 退出后 hang 属环境 quirk）。
 
-**最终剩余待办**（均需 VFS 后端扩展或 SysV 信号量，属较大工程）：
-`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、`mknod` 族、
-`rt_sigtimedwait`(128)、`send`/`recv` 号冲突（应让出 64/65 给 semget/semop）。
+### M55 rt_sigtimedwait + send/recv 号冲突修复
+
+- `rt_sigtimedwait`(128)：新增 `lx_sig_timedwait`，在等待期间把等待集并入
+  进程 sig_mask（避免装了 handler 的信号被先投递清掉 pending），退出时恢复；
+  从 sig_pending 位图取最低号、清位、填 128B siginfo 返回信号号。timespec
+  超时按微秒口径换算（`port_cycles` 同 epoll_wait）；无信号且超时到返回
+  EAGAIN，信号到达经 `lx_proc_wake` 叫醒后重检。
+- `send`/`recv` 号冲突：x86-64 的 64/65 实际是 semget/semop，glibc 的
+  send()/recv() 走 sendto(44)/recvfrom(45)，从不使用这两个号。移除误接的
+  case 后 64/65 落入 default → ENOSYS（未实现 SysV 信号量，语义正确）；
+  `lx_sock_send`/`recv` 仍由 read/write 内部路径直接调用，不受影响。
+
+`tests/linux/m55sigtimedwait.c` 验 8 项：零超时 EAGAIN、pending 命中、
+阻塞+子进程定时发信号、siginfo 正确，全 PASS。验收 `make check-linuxabi-m55`
+→ PASS；统一回归纳入（51 项）；关键回归 M14/M21/M25/M38 日志全 PASS
+（qemu 退出后 hang 属环境 quirk）。
+
+**最终剩余待办**（均需 VFS 后端扩展，属较大工程）：
+`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、`mknod` 族。
 

@@ -474,3 +474,71 @@ u64 lx_sig_return(LxRegs *r)
     p->sig_mask = *(const u64 *)(uc + LX_UC_SIGMASK);
     return r->rax;
 }
+
+/* M55：rt_sigtimedwait(set, info, timeout, sigsetsize)
+ * 等待 set 中任一信号变为 pending，取出最低号、填 128B siginfo、返回信号号。
+ * timeout 是 timespec{sec,nsec}（NULL=无限），sigsetsize 必须为 8。
+ * 用与 epoll_wait 相同的 deadline + lx_proc_block 模式；信号到达时
+ * lx_sig_send_one 会 lx_proc_wake，醒来后重新检查。 */
+u64 lx_sig_timedwait(u64 uset, u64 uinfo, u64 utimeout, u64 sigsetsize)
+{
+    LxProc *p = lx_cur_proc();
+    u64 want, old_mask, ret;
+    u64 deadline = 0ull;
+    int have_deadline = 0;
+
+    if (p == (LxProc *)0) { return (u64)0 - LX_EINVAL; }
+    if (sigsetsize != 8ull || uset == 0ull ||
+        lx_user_ok(uset, 8ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EINVAL;
+    }
+    want = *(const u64 *)uset;
+    if (uinfo != 0ull && lx_user_ok(uinfo, 128ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (utimeout != 0ull) {
+        i64 sec, nsec;
+        if (lx_user_ok(utimeout, 16ull, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        sec = *(const i64 *)utimeout;
+        nsec = *(const i64 *)(utimeout + 8ull);
+        if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+            return (u64)0 - LX_EINVAL;
+        }
+        have_deadline = 1;
+        /* port_cycles 口径是微秒（见 epoll_wait 的 ms*1000000 换算）。 */
+        deadline = port_cycles() + (u64)sec * 1000000ull + (u64)nsec / 1000ull;
+    }
+    /* 等待期间屏蔽 want：否则装了 handler 的信号会先被投递走、清掉 pending，
+     * lx_sig_timedwait 就再也看不到它。退出时恢复原 mask。 */
+    old_mask = p->sig_mask;
+    p->sig_mask |= want;
+    for (;;) {
+        u64 avail = p->sig_pending & want;
+
+        if (avail != 0ull) {
+            u32 sig = 1u;
+            while (sig < (u32)LX_NSIG && (avail & (1ull << (sig - 1u))) == 0ull) {
+                sig++;
+            }
+            p->sig_pending &= ~(1ull << (sig - 1u));
+            if (uinfo != 0ull) {
+                u8 *b = (u8 *)uinfo;
+                for (u32 i = 0u; i < 128u; i++) { b[i] = 0u; }
+                *(u32 *)(b + 0u) = sig;                        /* si_signo */
+                *(i32 *)(b + 8u) = (i32)p->sig_code[sig];      /* si_code */
+            }
+            ret = (u64)sig;
+            break;
+        }
+        if (have_deadline && port_cycles() >= deadline) {
+            ret = (u64)0 - LX_EAGAIN;
+            break;
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);   /* 信号到达经 lx_proc_wake 叫醒 */
+        lx_proc_block();
+    }
+    p->sig_mask = old_mask;
+    return ret;
+}

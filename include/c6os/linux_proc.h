@@ -328,6 +328,7 @@ void lx_sig_exec(LxProc *p);
 u64  lx_sig_action(u32 sig, u64 uact, u64 uold);
 u64  lx_sig_procmask(u32 how, u64 uset, u64 uold);
 u64  lx_sig_altstack(u64 uss, u64 uoss);
+u64  lx_sig_timedwait(u64 uset, u64 uinfo, u64 utimeout, u64 sigsetsize);  /* M55 */
 void lx_sig_send_one(LxProc *t, u32 sig, int to_group);   /* 投递给单个进程 */
 int  lx_proc_send(i64 pid, u32 sig);                      /* kill(2) 选目标 + 广播 */
 u64  lx_sig_return(LxRegs *r);

@@ -275,6 +275,8 @@
 #define LX_SYS_munlock       150
 #define LX_SYS_setrlimit     160
 #define LX_SYS_sethostname   170
+/* M55：信号定时等待 */
+#define LX_SYS_rt_sigtimedwait 128
 /* M54：目录 fd/访问/socket 标志类 syscall */
 #define LX_SYS_fchdir       81
 #define LX_SYS_readlink     89

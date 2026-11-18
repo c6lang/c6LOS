@@ -971,6 +971,10 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_sig_procmask((u32)a0, a1, a2);
         return;
 
+    case LX_SYS_rt_sigtimedwait:   /* M55 */
+        r->rax = lx_sig_timedwait(a0, a1, a2, a3);
+        return;
+
     case LX_SYS_rt_sigreturn:
         r->rax = lx_sig_return(r);
         return;
@@ -1478,12 +1482,10 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_recvfrom:
         r->rax = lx_sock_recvfrom(a0, a1, a2, a3, a4, a5);
         return;
-    case LX_SYS_send:
-        r->rax = lx_sock_send(a0, a1, a2, a3);
-        return;
-    case LX_SYS_recv:
-        r->rax = lx_sock_recv(a0, a1, a2, a3);
-        return;
+    /* M55：x86-64 的 64/65 是 semget/semop，不是 send/recv。glibc 的
+     * send()/recv() 实际发 sendto(44)/recvfrom(45)，从不走这两个号；
+     * 移除误接的 case 后它们落入 default → ENOSYS（未实现 SysV 信号量）。
+     * lx_sock_send/recv 仍由 proc.c 的 read/write 内部路径直接调用。 */
     case LX_SYS_sendmsg:
         r->rax = lx_sock_sendmsg(a0, a1, a2);
         return;
