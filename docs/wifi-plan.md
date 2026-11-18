@@ -18302,3 +18302,21 @@ SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
 `after-wifi-start d14=1 ca0=00ff1000`、连上 AP、DHCP 拿到
 192.168.68.120、`HTTP status=200 content_length=131853`。
 ⇒ 持久化分区数据不是 MAC 上电的前提，排除这条路径。goal 保持 active。
+
+---
+
+## §574 参考 app 改用 esp_wifi_init_internal 后卡在 after-wifi-init
+
+把参考 app 的公开 `esp_wifi_init()` 换成 c6LOS 用的
+`esp_wifi_init_internal()`：日志停在 `after-wifi-init`，
+此时 PWC=0x00020000 / ISO=0x10000080（WiFi 电源域**未**开启），
+后续无连接。说明公开 wrapper 里 `esp_phy_modem_init()` 等步骤
+是内部 API 调用方需要自行补齐的；c6LOS 用自己的 `_phy_enable` 回调补了
+（见 §575），所以这条不解释 c6LOS 的 ca0=0。改动已回退。
+
+## §575 start 前电源域状态确认
+
+c6LOS 在 `esp_wifi_start()` 前读：
+`PWC=0 ISO=0x80 CLK=0xfffce7bf RST=0 ca0=0 d14=0`——
+电源域已开（与参考 app 的 after-wifi-init 一致），但 MAC 寄存器仍为 0。
+诊断打印已回退。goal 保持 active。
