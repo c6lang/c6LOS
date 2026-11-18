@@ -460,6 +460,11 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_statx(a0, a1, a2, a4);
         return;
 
+    case LX_SYS_copy_file_range:
+        /* copy_file_range(fd_in, off_in*, fd_out, off_out*, len, flags) */
+        r->rax = lx_fs_copy_file_range(a0, a1, a2, a3, a4, a5);
+        return;
+
     case LX_SYS_stat:
         /* M12：老的 stat(path, buf)（x86_64 上是 4 号）。musl 编的是
          * newfstatat，但 Alpine 里的 busybox 是**静态老版本调用**混着用，

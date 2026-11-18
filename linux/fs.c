@@ -1419,6 +1419,103 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
     return (u64)0 - LX_EBADF;
 }
 
+/* 内核缓冲写（copy_file_range 的中转页在内核堆，不能过用户范围检查）。
+ * 支持 VFS 文件与 /dev/*，与 lx_fs_write 的分支保持一致。 */
+static u64 fs_write_k_(u64 fd, const u8 *src, u64 len)
+{
+    LxFile *f = fd_get(fd);
+
+    if (f == 0) {
+        return (u64)0 - LX_EBADF;
+    }
+#if C6OS_VFS
+    if (f->kind == LX_FD_VFS) {
+        int n;
+
+        if (LOS_FsLseek((INT32)f->node, (UINT32)f->pos, (INT32)LOS_SEEK_SET) < 0) {
+            return (u64)0 - LX_EINVAL;
+        }
+        n = (int)LOS_FsWrite((INT32)f->node, (const VOID *)src, (UINT32)len);
+        if (n > 0) {
+            f->pos += (u64)n;
+        }
+        return vfs_err_(n);
+    }
+#endif
+    if (f->kind == LX_FD_DEV) {
+        f->pos += len;
+        return (f->node == LX_DEV_FULL) ? (u64)0 - LX_ENOSPC : len;
+    }
+    return (u64)0 - LX_EBADF;
+}
+
+/* copy_file_range(2)（nr 326）：GNU cp 等用它做内核态文件拷贝。
+ * offset 指针非 NULL 时从该偏移读/写并回写新偏移（且不改 fd 的 pos）；
+ * 为 NULL 时用 fd 当前位置并推进。用 4KB 内核中转缓冲，跨 VFS/ramfs。 */
+u64 lx_fs_copy_file_range(u64 fd_in, u64 uoff_in, u64 fd_out,
+                          u64 uoff_out, u64 len, u64 flags)
+{
+    u8 *tmp;
+    u64 in_off = 0ull, out_off = 0ull;
+    u64 done = 0ull;
+    u64 saved_out_pos;
+    int have_in = (uoff_in != 0ull), have_out = (uoff_out != 0ull);
+    LxFile *fi, *fo;
+
+    if (flags != 0ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    fi = fd_get(fd_in);
+    fo = fd_get(fd_out);
+    if (fi == 0 || fo == 0) {
+        return (u64)0 - LX_EBADF;
+    }
+    saved_out_pos = fo->pos;
+    if (have_in && lx_user_ok(uoff_in, 8ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (have_out && lx_user_ok(uoff_out, 8ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (have_in) { in_off = *(const u64 *)uoff_in; }
+    else { in_off = fi->pos; }
+    if (have_out) { out_off = *(const u64 *)uoff_out; }
+    else { out_off = fo->pos; }
+    tmp = (u8 *)port_kcalloc(1ull, 4096ull);
+    if (tmp == (u8 *)0) {
+        return (u64)0 - LX_ENOMEM;
+    }
+    while (done < len) {
+        u64 chunk = (len - done < 4096ull) ? len - done : 4096ull;
+        u64 nr = lx_fs_pread_k(fd_in, (u64)tmp, chunk, in_off);
+        u64 nw;
+
+        if ((i64)nr <= 0) { break; }
+        /* fs_write_k_ 按 fd 当前 pos 写：显式 out_off 时先把 pos 对齐到它 */
+        fo->pos = out_off;
+        nw = fs_write_k_(fd_out, tmp, nr);
+        if ((i64)nw <= 0) {
+            if (done == 0ull) { done = nw; }
+            break;
+        }
+        done += nw;
+        in_off += nw;
+        out_off += nw;
+        fo->pos = out_off;
+        if (nw < nr) { break; }
+    }
+    port_kfree((void *)tmp);
+    /* 显式 offset 语义：调用者的 pos 不应被改动 */
+    if (!have_in) { fi->pos = in_off; }
+    else if (lx_user_ok(uoff_in, 8ull, C6OS_PROT_W) != 0) { *(u64 *)uoff_in = in_off; }
+    if (!have_out) { fo->pos = out_off; }
+    else {
+        *(u64 *)uoff_out = out_off;
+        fo->pos = saved_out_pos;
+    }
+    return done;
+}
+
 u64 lx_fs_fd_size(u64 fd)
 {
     LxFile *f = fd_get(fd);

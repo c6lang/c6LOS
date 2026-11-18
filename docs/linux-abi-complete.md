@@ -1132,4 +1132,21 @@ ino/blksize、目录模式、ENOENT、相对路径 + dirfd。验收
 `make check-linuxabi-m39` → 12/12 PASS；统一回归纳入（35 项）；
 关键回归 L5/M9/M15/M19/M38/alpine-apps 无回归。
 
+### M40 copy_file_range(2)：GNU cp 的内核态拷贝路径
+
+宿主 strace 显示 GNU `cp` 用 `copy_file_range`(nr 326) 做文件拷贝，
+此前是 ENOSYS。M40 补上：
+
+- `lx_fs_copy_file_range`：4KB 内核中转缓冲，`lx_fs_pread_k` 读 →
+  `fs_write_k_`（内核缓冲写，跳过用户范围检查）写；跨 VFS/ramfs/dev 分支。
+- offset 语义：指针非 NULL 时从指定偏移读写并回写新偏移、**不改 fd 的 pos**
+  （修了一处 bug：`fs_write_k_` 按 `f->pos` 写，显式 out_off 时须先把 pos
+  对齐并在结束时恢复）；NULL 时用并推进 fd 当前位置。
+- 到 EOF 返回实际拷贝字节数；非法 flags → EINVAL。
+
+`tests/linux/m40cfr.c` 验 17 项：NULL offset 拷贝+pos 推进、显式
+off_in/off_out 回写+内容正确、EOF 短拷贝、非法 flags。验收
+`make check-linuxabi-m40` → 17/17 PASS；统一回归纳入（36 项）；
+关键回归 L5/M9/M15/M19/M39 无回归。
+
 
