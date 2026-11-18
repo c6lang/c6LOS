@@ -18448,3 +18448,26 @@ c6LOS 从 ROM 直跳，PWC/ISO 读回 0x00545010 / 0xaa805080（ROM 残余），
 而 IDF 经二级 bootloader 后是 0 / 0x80。强制写成 IDF 值后诊断打印确实
 变成 PWC=0 ISO=0x80，但 ca0/d14 仍 0、扫描 0 AP、关联超时。
 ⇒ 这两个寄存器的残余值不是原因。改动已回退。goal 保持 active。
+
+---
+
+## §587～§589 两个关键发现
+
+### §587 hal_init 的 spin patch 不是根因
+把工作正常的 IDF 参考 app 也用 `patch_halinit.py` 同样的补丁
+（`bbci` → `j .+3`，并修正 checksum + SHA256）后真板仍：
+`d14=1 ca0=00ff1000` → 关联 → DHCP 192.168.68.120 → HTTP 200/132400 字节。
+所以 c6LOS 跳过 spin 本身不会导致 MAC 不 ready。
+
+### §588 nvs_enable=0 会让 IDF app 关联失败
+把参考 app 的 `cfg.nvs_enable` 改成 0（其它全部默认）：
+MAC 硬件依然 `d14=1 ca0=00ff1000`，但反复
+`connect to the AP fail`、最终 DNS 失败。说明 NVS 路径是关联的必要条件，
+与 MAC ready 是两件独立的事。
+
+### §589 c6LOS NVS 槽位改成"空分区"语义后 init 成功
+c6LOS 的 `_nvs_open` 原来返回 0x1101(NOT_INITIALIZED)，
+所以 §564 打开 nvs_enable=1 时 init 返回 0x1101。现在改成：
+open/set/commit/erase 返回 0，get/get_blob 返回 0x1102(NOT_FOUND)，
+并把 `wcfg(96)` 改成 1。真板结果：`esp_wifi_init_internal -> 0`（原来 0x1101），
+但扫描仍 0 AP、关联超时。此改动保留（是真改进）。

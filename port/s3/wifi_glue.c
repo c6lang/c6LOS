@@ -1094,8 +1094,10 @@ static int osi_nvs_open(const char *name, u32 mode, u32 *out)
 {
     HIT_OF(_nvs_open);
     (void)name; (void)mode;
-    if (out != 0) { *out = 0u; }
-    return OSI_NVS_ERR_NOT_INITIALIZED;
+    /* §589: 模拟一个已初始化但**全空**的 NVS 分区：open 必须成功，
+     * 后续 get_* 返回 NOT_FOUND 让库走默认值分支。 */
+    if (out != 0) { *out = 1u; }
+    return 0;
 }
 static void osi_nvs_close(u32 h) { HIT_OF(_nvs_close); (void)h; }
 static int osi_nvs_get(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_FOUND; }
@@ -1106,7 +1108,7 @@ static int osi_nvs_put(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_INIT
     { HIT_OF(slot); (void)h; (void)k; (void)out; return OSI_NVS_ERR_NOT_FOUND; }
 #define OSI_NVS_STUB_SET(name, slot) \
     static int name(u32 h, const char *k, void *val) \
-    { HIT_OF(slot); (void)h; (void)k; (void)val; return OSI_NVS_ERR_NOT_INITIALIZED; }
+    { HIT_OF(slot); (void)h; (void)k; (void)val; return 0; }
 
 OSI_NVS_STUB_GET(osi_nvs_get_i8,   _nvs_get_i8)
 OSI_NVS_STUB_GET(osi_nvs_get_u8,   _nvs_get_u8)
@@ -1126,10 +1128,10 @@ static int osi_nvs_set_blob(u32 h, const char *k, const void *val, u32 len)
 {
     HIT_OF(_nvs_set_blob);
     (void)h; (void)k; (void)val; (void)len;
-    return OSI_NVS_ERR_NOT_INITIALIZED;
+    return 0;
 }
-static int osi_nvs_commit(u32 h) { HIT_OF(_nvs_commit); (void)h; return OSI_NVS_ERR_NOT_INITIALIZED; }
-static int osi_nvs_erase_key(u32 h, const char *k) { HIT_OF(_nvs_erase_key); (void)h; (void)k; return OSI_NVS_ERR_NOT_FOUND; }
+static int osi_nvs_commit(u32 h) { HIT_OF(_nvs_commit); (void)h; return 0; }
+static int osi_nvs_erase_key(u32 h, const char *k) { HIT_OF(_nvs_erase_key); (void)h; (void)k; return 0; }
 
 
 /* 库对同一份实现会用不同槽位调用（内部堆 / wifi 专用堆），分开包装
@@ -1734,7 +1736,7 @@ u32 s3_wifi_bringup(void)
     wcfg(84u,  1u);             /* ampdu_rx_enable        default y           */
     wcfg(88u,  1u);             /* ampdu_tx_enable        default y           */
     wcfg(92u,  0u);             /* amsdu_tx_enable        default n           */
-    wcfg(96u,  0u);             /* nvs_enable             官方默认 y，但需要 NVS 子系统，先关 */
+    wcfg(96u,  1u);             /* §589: nvs_enable 打开（NVS 槽位已改成空分区语义） */
     wcfg(100u, 0u);             /* nano_enable            default n           */
     wcfg(104u, 6u);             /* rx_ba_win              default 6           */
     wcfg(108u, 0u);             /* wifi_task_core_id      单核跑，用 0 号核    */
