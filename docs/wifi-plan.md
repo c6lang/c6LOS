@@ -18197,3 +18197,11 @@ goal 保持 active。
 把 `wifi_init_config_t.feature_caps` 从 0 改成参考 app 的 0xA1
 （WPA3_SAE|GMAC|ENTERPRISE），真板仍 0 AP、关联超时。改动已回退。
 goal 保持 active。
+
+---
+
+## §564 打开 nvs_enable 直接让 init 失败
+
+`nvs_enable=1` 时库调用 `osi_nvs_open`（我们的桩返回 0 但给无效句柄），
+`esp_wifi_init_internal -> 4353(0x1101)`，bringup 直接失败。已回退。
+goal 保持 active。
