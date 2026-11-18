@@ -17865,3 +17865,12 @@ JTAG 对照（都 halt 在 CPU）：
 `DIG_ISO.WIFI_FORCE_ISO(bit28)` 并 OR 了 `WIFI_CLK_EN`，仍缺 IDF
 `modem_clock_module_enable(PERIPH_WIFI_MODULE)` 里的关键步骤。
 改动已回退，目标未达成，goal 保持 active。
+
+---
+
+## §538 对齐 DIG_ISO 官方值（0x80）无效
+
+c6LOS 的 `RTC_CNTL_DIG_ISO(0x60008094)=0xaa805080`，官方 app 是
+`0x00000080`。把整个寄存器写成 0x80（清掉 bit23/25/27/29/31）后真板
+依旧 `scan_get_ap_num=0`、关联超时。已回退。
+目标未达成，goal 保持 active。
