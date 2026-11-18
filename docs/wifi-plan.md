@@ -18025,3 +18025,12 @@ nonzero words   80                 80
 `（lib 侧）ic_init` 填的，若缺关键字段可能影响 `hal_mac_init`。
 具体字段含义需对照 IDF `wifi_hw_start`/`pp` 结构体定义进一步确认。
 goal 保持 active。
+
+---
+
+## §550 补齐 g_ic+0x1c bit10 无效
+
+把 `g_ic+0x1c` 从 0x00040000 补成官方的 0x00040400 后再
+`esp_wifi_start()`，真板仍 0 AP、关联超时。该字段（以及 §549 里其它
+差异字段，如 0x0d4..0x0e4 的已连接 AP BSSID/SSID）不是 MAC ready 的
+决定因素。改动已回退。goal 保持 active。
