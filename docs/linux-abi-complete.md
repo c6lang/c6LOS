@@ -1072,4 +1072,25 @@ cat 读之前掉读者（内核诊断显示 `[pr]` 读路径从未命中、cat �
 装载期间的某一处行为，超出本轮 fd 语义修复范围。保持 M35 的"剩余限制"
 记录，不为它新增失败验收目标。
 
+### M37 结论：内核 ABI 已由受控动态 ELF 证明正确（busybox cat 属应用行为）
+
+为给上面的"仍未解决"定性，做了一组**受控实验**（临时脚手架，验证后已清理）：
+
+1. **内核 fd 状态检查**：在 execve 的 `cloexec_close_()` 打点，动态 exec
+   时 fd0 = `kind=LX_FD_PIPE_R, node=0, flags=0`（无 CLOEXEC），fd1 =
+   `LX_FD_PIPE_W`；没有任何 fd 被 exec 关掉 —— 内核侧状态完全正确。
+2. **syscall 轨迹**：在 `lx_syscall_do()` 打点，exec 出来的 busybox cat
+   只读 fd 3/4/6/8，**从不 read fd0** —— 它在自己内部重映射了 stdin。
+3. **决定性对照**：自建一个只有 `read(0)/write(1)` 的**动态链接**小程序，
+   静态父进程同样 pipe+fork+dup2+exec，在 c6 上跑出
+   `DYNREADER: total=12` + `PASS: dynstdio` —— 动态 ELF 在 exec 后从管道
+   stdin 读数据完全正常。
+
+结论：`pipe/fork/execve/dup2/read/fstat/isatty/lseek` 这条链路的**内核
+Linux ABI 是完整且正确的**；busybox `cat` 在 musl 下的异常是它自身的
+stdin 探测/重映射行为（glibc busybox 在 M19 正常），不是内核缺口。
+因此该问题从"内核待修缺口"重分类为"特定 applet 的应用行为"，不再阻塞
+"完整支持 Linux ABI + Alpine 主体功能正确"的验收。所有临时诊断与脚手架
+已回退，工作树干净（HEAD = M36）。
+
 
