@@ -18252,3 +18252,12 @@ JTAG `reset halt` 后（二级 bootloader 尚未执行）读：
 `0x60026014=0xfffce030`（芯片复位默认值），`0x60026018=0`。
 说明 MAC 寄存器块从来就没有非零初值，必须由软件触发硬件上电后才能出现
 0x00ff2000 之类的值；c6LOS 始终没触发到那一步。goal 保持 active。
+
+---
+
+## §569 照抄 IDF 电源域末尾的 clock-disable 会让 PHY 挂死，已回退
+
+在 `s3_win_phy_power_on()` 最后按 IDF `esp_wifi_bt_power_domain_on()`
+补上 `WIFI_CLK_EN &= ~0x78078F`，真板打印一行 `[phy] MAC ... CLK=ff84e030`
+后就再无输出（卡在 PHY 校准）。说明我们这条链路上时钟不能被关掉；已回退。
+goal 保持 active。
