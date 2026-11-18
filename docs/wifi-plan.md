@@ -17929,3 +17929,14 @@ goal 保持 active。
 c6LOS 走到同一 ROM 函数却没有这个效果，说明 `hal_mac_init` 的
 前置硬件状态仍不满足（不是启动早期的寄存器值差异）。
 goal 保持 active。
+
+---
+
+## §543 JTAG 直写 `0x60033ca0` 同样无效
+
+在 c6LOS halted 状态下用 OpenOCD `mww 0x60033ca0 0x00ff2000`，
+随后 `mdw` 读回仍是 `0x00000000`。连 JTAG 都写不进去，确认整个 MAC
+寄存器块处于"未上电/未解锁"状态，而不是 CPU 侧写保护或软件时序问题。
+
+参考 app 侧时间线（§542）显示 ca0 在 `ic_mac_init` 后由硬件变成
+0x00ff1000；c6LOS 缺这一步硬件解锁的上游条件。goal 保持 active。
