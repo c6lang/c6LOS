@@ -542,6 +542,21 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_pread(a0, a1, a2, a3);
         return;
 
+    case LX_SYS_pwrite64:
+        /* pwrite(fd, buf, count, offset)：a3=r10 是 offset 低 32 位 */
+        r->rax = lx_fs_pwrite(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_preadv:
+        /* preadv(fd, iov, iovcnt, offset) */
+        r->rax = lx_fs_preadv(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_pwritev:
+        /* pwritev(fd, iov, iovcnt, offset) */
+        r->rax = lx_fs_pwritev(a0, a1, a2, a3);
+        return;
+
     case LX_SYS_munmap:
         /* 先作废记账再还页：反过来会让缺页在"页已还、VMA 还在"的窗口里
          * 重新分配页，把 munmap 变成空操作。 */

@@ -196,6 +196,9 @@
 #define LX_SYS_statx         332
 #define LX_SYS_copy_file_range 326
 #define LX_SYS_fallocate     285
+#define LX_SYS_pwrite64      18
+#define LX_SYS_preadv        327
+#define LX_SYS_pwritev       328
 #define LX_FALLOC_FL_KEEP_SIZE   0x01u
 #define LX_FALLOC_FL_PUNCH_HOLE  0x02u
 #define LX_SYS_unlinkat      263
@@ -367,6 +370,9 @@ u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);
 u64  lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off);
+u64  lx_fs_pwrite(u64 fd, u64 ubuf, u64 len, u64 off);
+u64  lx_fs_preadv(u64 fd, u64 uiov, u64 cnt, u64 off);
+u64  lx_fs_pwritev(u64 fd, u64 uiov, u64 cnt, u64 off);
 u64  lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off);
 /* 内核侧路径查询（不做用户态权限检查）：给 ELF 加载器找解释器用。 */
 u64  lx_fs_size_of(const char *path);

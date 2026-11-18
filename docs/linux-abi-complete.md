@@ -1261,3 +1261,24 @@ ancillary 类型。
 非法 flag EINVAL，全 PASS。验收 `make check-linuxabi-m43` → PASS；
 统一回归纳入（39 项）；关键回归 M9/M15/M39/M40 全 PASS。
 
+### M44 pwrite64 / preadv / pwritev + 统一 fd 游标语义
+
+补 nr18 `pwrite`、nr327 `preadv`、nr328 `pwritev`（此前 ENOSYS）：
+复用 `lx_fs_pread`/`lx_fs_write`，按 iovec 逐段在 `off + 已读写量` 上
+操作，**不改 fd 的 pos**。
+
+验收过程中暴露并修了三处真 bug（架构层统一游标语义）：
+
+1. `lx_fs_pread` / `lx_fs_write` 在 VFS 分支会移动底层 `OsFile.pos`：
+   位置 I/O 调用前后保存/恢复它。
+2. `lx_fs_lseek` 把底层 `OsFile.pos` 当 SEEK_CUR 基准，位置 I/O 后
+   它仍是旧值 → lseek 读回过期位置；改成以 Linux 层 `LxFile.pos`
+   为权威算目标（SEEK_SET/END 分别用 0 / fd_size），再 SEEK_SET 同步后端。
+3. `lx_fs_ftruncate` 曾把 `f->pos = 0`（POSIX 违规：ftruncate 不改偏移），
+   过去被 lseek 的旧基准掩盖；游标统一后暴露，已删除。
+
+`tests/linux/m44posio.c` 验 10 项：pwrite/pwritev/preadv 位置读写、
+多段 iovec 连续推进、lseek 游标保持、内容正确，全 PASS。验收
+`make check-linuxabi-m44` → PASS；统一回归纳入（40 项）；
+关键回归 M9/M15/M39/M40/M43 全 PASS。
+

@@ -982,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -995,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1035,7 +1035,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1481,6 +1481,13 @@ $(M42_ELF): $(M42_SRC)
 M43_SRC := tests/linux/m43fallocate.c
 M43_ELF := $(X86)/m43fallocate.elf
 $(M43_ELF): $(M43_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M44：pwrite/preadv/pwritev ----
+M44_SRC := tests/linux/m44posio.c
+M44_ELF := $(X86)/m44posio.elf
+$(M44_ELF): $(M44_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
 
@@ -2458,6 +2465,11 @@ DISK_DEPS  := $(M43_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(M43_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m44)
+DISK_DEPS  := $(M44_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M44_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),m27)
 DISK_DEPS  := $(M27_ELF) $(M27_FS)
 DISK_MB    := 16
@@ -2978,3 +2990,17 @@ check-linuxabi-m43: x86-m43
 		| grep -q "^PASS: m43fallocate" \
 	  && echo "PASS: linux-abi M43（fallocate）" \
 	  || { echo "FAIL: linux-abi M43"; tail -30 /tmp/check-m43.log; exit 1; }
+
+# ---- M44：pwrite/preadv/pwritev ----
+x86-m44: caps-check-x86
+	$(MAKE) X86S_NAME=m44 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m44-disk.img
+
+check-linuxabi-m44: x86-m44
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m44-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m44.log \
+		| grep -q "^PASS: m44posio" \
+	  && echo "PASS: linux-abi M44（pwrite/preadv/pwritev）" \
+	  || { echo "FAIL: linux-abi M44"; tail -30 /tmp/check-m44.log; exit 1; }

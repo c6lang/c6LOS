@@ -1284,15 +1284,18 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
     }
 #if C6OS_VFS
     if (f->kind == LX_FD_VFS) {
+        INT32 saved_pos = LOS_FsLseek((INT32)f->node, 0, (INT32)LOS_SEEK_CUR);
         int n;
 
         if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
             return (u64)0 - LX_EFAULT;
         }
-        if (LOS_FsLseek((INT32)f->node, (UINT32)off, (INT32)LOS_SEEK_SET) < 0) {
+        if (saved_pos < 0 ||
+            LOS_FsLseek((INT32)f->node, (UINT32)off, (INT32)LOS_SEEK_SET) < 0) {
             return (u64)0 - LX_EINVAL;
         }
         n = (int)LOS_FsRead((INT32)f->node, (VOID *)dst, (UINT32)len);
+        (void)LOS_FsLseek((INT32)f->node, saved_pos, (INT32)LOS_SEEK_SET);
         return vfs_err_(n);
     }
 #endif
@@ -1358,6 +1361,94 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
 u64 lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off)
 {
     return pread_(fd, ubuf, len, off, 1u);
+}
+
+/* pwrite(2)（nr 18）：在指定偏移写，绝不改动 fd 的 pos。
+ * 复用 lx_fs_write 的位置写入逻辑：临时把 pos 设为 off，写完恢复。 */
+u64 lx_fs_pwrite(u64 fd, u64 ubuf, u64 len, u64 off)
+{
+    LxFile *f = fd_get(fd);
+    u64 saved;
+    u64 n;
+#if C6OS_VFS
+    INT32 vpos = 0;
+    int have_vpos = 0;
+
+    if (f != 0 && f->kind == LX_FD_VFS && f->node < LX_VDIR_BASE) {
+        vpos = LOS_FsLseek((INT32)f->node, 0, (INT32)LOS_SEEK_CUR);
+        have_vpos = 1;
+    }
+#endif
+    if (f == 0) {
+        return (u64)0 - LX_EBADF;
+    }
+    saved = f->pos;
+    f->pos = off;
+    n = lx_fs_write(fd, ubuf, len);
+    f->pos = saved;
+#if C6OS_VFS
+    if (have_vpos != 0) {
+        (void)LOS_FsLseek((INT32)f->node, vpos, (INT32)LOS_SEEK_SET);
+    }
+#endif
+    return n;
+}
+
+/* 向量化位置 I/O：preadv(327)/pwritev(328)。
+ * iovec 是 16B 的 {base@0, len@8}，cnt 上限与 readv/writev 一致（1024）。
+ * 每段的位置由调用者传入的 off 累加推进，fd 的 pos 保持不变。 */
+u64 lx_fs_preadv(u64 fd, u64 uiov, u64 cnt, u64 off)
+{
+    u64 total = 0ull;
+    u64 i;
+
+    if (cnt > 1024ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if (cnt != 0ull && lx_user_ok(uiov, cnt * 16ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    for (i = 0ull; i < cnt; i++) {
+        u64 base = *(const u64 *)(uiov + i * 16ull);
+        u64 len = *(const u64 *)(uiov + i * 16ull + 8ull);
+        u64 r = lx_fs_pread(fd, base, len, off + total);
+
+        if ((i64)r < 0) {
+            return (total != 0ull) ? total : r;
+        }
+        total += r;
+        if (r < len) {
+            break;
+        }
+    }
+    return total;
+}
+
+u64 lx_fs_pwritev(u64 fd, u64 uiov, u64 cnt, u64 off)
+{
+    u64 total = 0ull;
+    u64 i;
+
+    if (cnt > 1024ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if (cnt != 0ull && lx_user_ok(uiov, cnt * 16ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    for (i = 0ull; i < cnt; i++) {
+        u64 base = *(const u64 *)(uiov + i * 16ull);
+        u64 len = *(const u64 *)(uiov + i * 16ull + 8ull);
+        u64 r = lx_fs_pwrite(fd, base, len, off + total);
+
+        if ((i64)r < 0) {
+            return (total != 0ull) ? total : r;
+        }
+        total += r;
+        if (r < len) {
+            break;
+        }
+    }
+    return total;
 }
 
 /* 内核目标（dmap 里的物理页）：不查用户权限。文件映射用它把内容先灌进页框，
@@ -1664,16 +1755,10 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
     }
 #if C6OS_VFS
     if (f->kind == LX_FD_VFS) {
-        INT32 wh = (INT32)LOS_SEEK_SET;
         INT32 np;
+        i64 base = 0;
+        i64 target;
 
-        if (whence == 1ull) {
-            wh = (INT32)LOS_SEEK_CUR;
-        } else if (whence == 2ull) {
-            wh = (INT32)LOS_SEEK_END;
-        } else if (whence != 0ull) {
-            return (u64)0 - LX_EINVAL;
-        }
         if (f->node >= LX_VDIR_BASE) {
             if (whence != 0ull) {
                 return (u64)0 - LX_EINVAL;
@@ -1681,11 +1766,27 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
             f->pos = off;
             return off;
         }
-        np = LOS_FsLseek((INT32)f->node, (INT32)off, wh);
+        /* LxFile.pos 是权威逻辑游标：pread/pwrite/copy_file_range 等位置
+         * I/O 刻意不动底层 OsFile.pos，若这里拿底层 pos 作 SEEK_CUR 基准
+         * 就会读回过期值。统一在 Linux 层算目标，再用 SEEK_SET 同步后端。 */
+        if (whence == 0ull) {
+            base = 0;
+        } else if (whence == 1ull) {
+            base = (i64)f->pos;
+        } else if (whence == 2ull) {
+            base = (i64)lx_fs_fd_size(fd);
+        } else {
+            return (u64)0 - LX_EINVAL;
+        }
+        target = base + (i64)off;
+        if (target < 0) {
+            return (u64)0 - LX_EINVAL;
+        }
+        np = LOS_FsLseek((INT32)f->node, (INT32)target, (INT32)LOS_SEEK_SET);
         if (np < 0) {
             return vfs_err_(np);
         }
-        f->pos = (u64)(u32)np;                   /* 游标是 fd 的，必须同步 */
+        f->pos = (u64)(u32)np;
         return (u64)(u32)np;
     }
 #endif
@@ -2002,7 +2103,8 @@ u64 lx_fs_ftruncate(u64 fd, u64 len)
         return (u64)0 - LX_EINVAL;         /* initramfs 只读 / 管道不可截断 */
     }
     (void)os_str_cpy(abspath, g_vpath[(u32)f->node], (u32)sizeof abspath);
-    f->pos = 0ull;
+    /* POSIX：ftruncate 不改文件偏移。LxFile.pos 是权威逻辑游标，这里绝不能
+     * 动它；truncate_refresh_ 会按需要夹住底层 OsFile.pos。 */
     return vfs_errno_(LOS_FsTruncate((const CHAR *)abspath, (UINT32)len));
 #else
     (void)f; (void)len; (void)abspath;
