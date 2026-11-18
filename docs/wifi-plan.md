@@ -17940,3 +17940,12 @@ goal 保持 active。
 
 参考 app 侧时间线（§542）显示 ca0 在 `ic_mac_init` 后由硬件变成
 0x00ff1000；c6LOS 缺这一步硬件解锁的上游条件。goal 保持 active。
+
+---
+
+## §544 直接写官方 WIFI_CLK_EN 值会卡 PHY
+
+把 `s3_win_phy_clock_enable()` 改成直接写 `0xff87d850`（官方 app 运行时值），
+真板卡在 `calling register_chipv7_phy(mode=0)`，没有后续日志。
+⇒ 官方值是 WiFi 完整启动后的**结果**，不是初始化输入；照抄无效。已回退。
+goal 保持 active。
