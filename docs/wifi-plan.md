@@ -17893,3 +17893,13 @@ JTAG 对照（halt 状态）：
 不能直接写官方值（会掉 USB），暂不再试。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §540 对齐 IDF 电源域序列末尾的 clock-disable 会卡死 PHY
+
+`esp_wifi_bt_power_domain_on()` 完整序列末尾有
+`wifi_bt_common_module_disable()`（清 WIFI_CLK_EN 的 0x78078F）。
+照搬后真板卡在 `register_chipv7_phy(mode=0)`，再无后续日志
+=> IDF 的 disable 依赖后续 `modem_clock_module_enable` 重新开时钟；
+单纯照搬这半段不行。改动已回退，goal 保持 active。
