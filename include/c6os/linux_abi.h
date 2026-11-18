@@ -263,6 +263,34 @@
 #define LX_SYS_prlimit64     302
 #define LX_SYS_getrandom     318
 #define LX_SYS_rseq          334
+/* M51：资源/调度类 syscall */
+#define LX_SYS_getrlimit     97
+#define LX_SYS_getrusage     98
+#define LX_SYS_getpriority   140
+#define LX_SYS_setpriority   141
+#define LX_SYS_mlock         149
+#define LX_SYS_munlock       150
+#define LX_SYS_setrlimit     160
+#define LX_SYS_sethostname   170
+/* RLIMIT_* 资源 id（Linux 通用） */
+#define LX_RLIMIT_CPU        0u
+#define LX_RLIMIT_FSIZE      1u
+#define LX_RLIMIT_DATA       2u
+#define LX_RLIMIT_STACK      3u
+#define LX_RLIMIT_CORE       4u
+#define LX_RLIMIT_RSS        5u
+#define LX_RLIMIT_NPROC      6u
+#define LX_RLIMIT_NOFILE     7u
+#define LX_RLIMIT_MEMLOCK    8u
+#define LX_RLIMIT_AS         9u
+#define LX_RLIMIT_LOCKS     10u
+#define LX_RLIMIT_SIGPENDING 11u
+#define LX_RLIMIT_MSGQUEUE  12u
+#define LX_RLIMIT_NICE      13u
+#define LX_RLIMIT_RTPRIO    14u
+#define LX_RLIMIT_RTTIME    15u
+#define LX_NLIMITS          16u
+#define LX_RLIM_INFINITY    (~0ull)
 
 /* arch_prctl 的 code */
 #define LX_ARCH_SET_FS    0x1002u

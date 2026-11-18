@@ -236,6 +236,15 @@ void lx_proc_attach(u64 as, u64 brk)
     }
     lx_fs_set_fdtab(p->fd);                /* fd 表从此跟着进程走 */
     lx_fs_set_cwd(p->cwd);
+    {
+        /* M51：资源上限默认无限（资源不受限策略）；nice 默认 0。 */
+        u32 ri;
+        for (ri = 0u; ri < LX_NLIMITS; ri++) {
+            p->rlim[ri] = LX_RLIM_INFINITY;
+            p->rlim_max[ri] = LX_RLIM_INFINITY;
+        }
+        p->nice = 0;
+    }
     p->state = LX_P_RUN;
     p->as = as;
     p->brk = brk;
@@ -1145,6 +1154,15 @@ u64 lx_proc_fork(LxRegs *r)
     ch->as = as;
     ch->brk = par->brk;
     ch->mmap_top = par->mmap_top;
+    {
+        /* M51：资源上限与 nice 随 fork 继承（Linux 语义）。 */
+        u32 ri;
+        for (ri = 0u; ri < LX_NLIMITS; ri++) {
+            ch->rlim[ri] = par->rlim[ri];
+            ch->rlim_max[ri] = par->rlim_max[ri];
+        }
+        ch->nice = par->nice;
+    }
     ch->f.r = *r;                         /* 继承父进程的用户寄存器 */
     ch->f.r.rax = 0ull;                   /* fork 在子进程里返回 0 */
     ch->f.user_rsp = pf->user_rsp;

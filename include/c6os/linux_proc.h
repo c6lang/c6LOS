@@ -195,6 +195,10 @@ typedef struct LxProc {
     u32 intr_sig;                 /* 那个信号号：用来查 SA_RESTART */
     u64 cont_seen;                /* 续行已发生、还没被 wait4(WCONTINUED) 取走 */
     u64 alarm_deadline;           /* alarm(2)：TSC 截止时刻，0=没设 */
+    u64 rlim[LX_NLIMITS];         /* M51：rlim_cur（fork 继承），~0=INFINITY */
+    u64 rlim_max[LX_NLIMITS];     /* M51：rlim_max（硬上限） */
+    i32 nice;                     /* getpriority/setpriority 的 nice 值 */
+    u32 proc_pad;
 } LxProc;
 
 /* 进程表与调度（linux/proc.c） */

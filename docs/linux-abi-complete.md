@@ -1408,3 +1408,25 @@ termios、winsize 独立设置/读取，全 PASS。验收 `make check-linuxabi-m
 遗留：musl libc-test 全量与 glibc NSS（目标 Alpine 用 musl，路径不同）
 属边际项，不影响 T0–T2 与 Alpine 主体。
 
+### M51 资源/调度类 syscall
+
+此前 `prlimit64`(302) 是固定 8MB 的桩，`getrlimit`/`setrlimit`/
+`getrusage`/`getpriority`/`setpriority`/`mlock`/`munlock`/`sethostname`
+全部落到默认 ENOSYS —— `ulimit`、`nice`、`time` 等 shell 内建/工具会
+踩到。M51：
+
+- `LxProc` 加 `rlim[16]`/`rlim_max[16]`/`nice`，默认全 INFINITY、nice=0，
+  fork 时继承（Linux 语义）。
+- `getrlimit`(97)/`setrlimit`(160)/`prlimit64`(302) 共享 cur/max 状态，
+  prlimit64 仅支持 pid=self（其它 pid 报 ESRCH）。
+- `getrusage`(98) 返回全零 144B（不引入计时统计）；`mlock`/`munlock`
+  因不换页天然成功；`sethostname` 静默接受（hostname 由 uname.nodename
+  体现，32/64 位 glibc 的 gethostname 走 uname nr63）。
+- `getpriority`(140)/`setpriority`(141)：内核 getpriority 返回
+  `20-nice`（glibc 包装层转成 nice），setpriority 第 3 参数直接是 nice。
+
+`tests/linux/m51rlimit.c` 验 21 项：默认 INFINITY、set/get 往返、
+prlimit64 往返、fork 继承、nice 往返、rusage/mlock/sethostname，全 PASS。
+验收 `make check-linuxabi-m51` → PASS；统一回归纳入（47 项）；
+关键回归 M38/M19/check-alpine-apps 全 PASS。
+

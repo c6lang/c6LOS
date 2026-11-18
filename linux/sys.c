@@ -714,15 +714,99 @@ void lx_syscall_do(LxRegs *r)
         r->rax = neg(LX_ENOSYS);
         return;
 
-    case LX_SYS_prlimit64:
+    case LX_SYS_getrlimit:
+    case LX_SYS_setrlimit: {
+        /* getrlimit(resource, rlim*) / setrlimit(resource, rlim*) */
+        LxProc *p = lx_cur_proc();
+        u32 res = (u32)a0;
+
+        if (p == (LxProc *)0 || res >= LX_NLIMITS || a1 == 0ull ||
+            lx_user_ok(a1, 16ull, (nr == LX_SYS_setrlimit) ? C6OS_PROT_R : C6OS_PROT_W) == 0) {
+            r->rax = neg((res >= LX_NLIMITS || a1 == 0ull) ? LX_EINVAL : LX_EFAULT);
+            return;
+        }
+        if (nr == LX_SYS_getrlimit) {
+            *(u64 *)a1 = p->rlim[res];
+            *(u64 *)(a1 + 8ull) = p->rlim_max[res];
+        } else {
+            u64 cur = *(const u64 *)a1;
+            u64 mx = *(const u64 *)(a1 + 8ull);
+            if (cur > mx && mx != LX_RLIM_INFINITY) { r->rax = neg(LX_EINVAL); return; }
+            p->rlim[res] = cur;
+            p->rlim_max[res] = mx;
+        }
+        r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_prlimit64: {
+        /* prlimit64(pid, resource, new_rlim*, old_rlim*)；仅支持 pid==self */
+        LxProc *p = lx_cur_proc();
+        u32 res = (u32)a1;
+
+        if (p == (LxProc *)0 || res >= LX_NLIMITS) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a0 != 0ull && a0 != (u64)p->pid) { r->rax = neg(LX_ESRCH); return; }
+        if (a2 != 0ull) {
+            u64 cur, mx;
+            if (lx_user_ok(a2, 16ull, C6OS_PROT_R) == 0) { r->rax = neg(LX_EFAULT); return; }
+            cur = *(const u64 *)a2;
+            mx = *(const u64 *)(a2 + 8ull);
+            if (cur > mx && mx != LX_RLIM_INFINITY) { r->rax = neg(LX_EINVAL); return; }
+            p->rlim[res] = cur;
+            p->rlim_max[res] = mx;
+        }
         if (a3 != 0ull) {
-            if (lx_user_ok(a3, 16ull, C6OS_PROT_W) == 0) {
-                r->rax = neg(LX_EFAULT);
+            if (lx_user_ok(a3, 16ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            *(u64 *)a3 = p->rlim[res];
+            *(u64 *)(a3 + 8ull) = p->rlim_max[res];
+        }
+        r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_getrusage:
+        /* getrusage(who, ru*)：返回全零 rusage（144B），不引入计时统计。 */
+        if (a0 > 2ull || a1 == 0ull || lx_user_ok(a1, 144ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        for (u64 i = 0ull; i < 144ull; i++) { ((u8 *)a1)[i] = 0u; }
+        r->rax = 0ull;
+        return;
+    case LX_SYS_getpriority:
+    case LX_SYS_setpriority: {
+        /* getpriority(which, who) / setpriority(which, who, prio)；
+         * Linux 语义：getpriority 返回 20-nice（值越大越友好），
+         * setpriority 的 prio 是 20-nice 的"向上"值 —— 用 -prio 得 nice。 */
+        LxProc *p = lx_cur_proc();
+
+        if (p == (LxProc *)0) { r->rax = neg(LX_EINVAL); return; }
+        if (nr == LX_SYS_getpriority) {
+            if (a0 > 2ull || (a0 == 1ull && (u32)a1 != p->pgid)) {
+                r->rax = neg(LX_ESRCH);
                 return;
             }
-            *(u64 *)(a3) = 8ull * 1024ull * 1024ull;
-            *(u64 *)(a3 + 8ull) = 8ull * 1024ull * 1024ull;
+            r->rax = (u64)(i64)(20 - p->nice);
+        } else {
+            i32 prio;
+            if (a0 > 2ull) { r->rax = neg(LX_EINVAL); return; }
+            prio = (i32)(i64)a2;
+            if (prio < -20) { prio = -20; }
+            if (prio > 19) { prio = 19; }
+            p->nice = prio;                /* setpriority 第 3 参数就是 nice */
+            r->rax = 0ull;
         }
+        return;
+    }
+    case LX_SYS_mlock:
+    case LX_SYS_munlock:
+        /* 我们不换出页，锁住内存是天然成立的；接受并成功返回。 */
+        r->rax = 0ull;
+        return;
+    case LX_SYS_sethostname:
+        /* hostname 只在 uname.nodename 里体现（c6los）；sethostname 静默接受。 */
+        if (a1 > 64ull) { r->rax = neg(LX_EINVAL); return; }
         r->rax = 0ull;
         return;
 
