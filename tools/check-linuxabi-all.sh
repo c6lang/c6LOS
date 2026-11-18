@@ -56,6 +56,16 @@ for t in $TESTS; do
     out=$(make "$t" 2>&1)
     rc=$?
     line=$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL):' | tail -1)
+    # 单项失败重试一次：批量跑时内部 timeout 偶尔被外层竞态打断，残留 qemu
+    # 占住镜像锁（"Failed to get write lock"）会造成假 FAIL；清掉后重试即恢复。
+    if { [ "$rc" -ne 0 ] || ! printf '%s' "$line" | grep -q '^PASS:'; }; then
+        printf '  （失败，清理残留 qemu 后重试一次）\n'
+        pkill -9 qemu-system-x86_64 2>/dev/null || true
+        sleep 2
+        out=$(make "$t" 2>&1)
+        rc=$?
+        line=$(printf '%s\n' "$out" | grep -E '^(PASS|FAIL):' | tail -1)
+    fi
     if [ "$rc" -eq 0 ] && printf '%s' "$line" | grep -q '^PASS:'; then
         printf '  %s\n' "$line"
         pass=$((pass + 1))
