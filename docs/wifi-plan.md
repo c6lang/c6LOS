@@ -18428,3 +18428,14 @@ goal 保持 active。
 经 windowed 桥 `s3_win_call1` 在 start 之后重调 `hal_init`，
 前后 d14/ca0 都是 0，扫描仍 0 AP。说明不是"调用时机太早"。
 改动已回退。goal 保持 active。
+
+---
+
+## §585 给 modem power_on 加"只做一次"guard 无效
+
+IDF 的 `esp_wifi_bt_power_domain_on()` 是引用计数的，我们每次 `_phy_enable`
+都重做 0x2A1F 全 modem 复位脉冲，怀疑会清掉 hal_init 写进 d14 的握手位。
+加 static guard 只做一次后：PHY 首次校准仍是 rc=1/retry rc=0（与基线相同），
+扫描仍 0 AP、关联超时。说明重复 modem 复位不是 d14=0 的原因。改动已回退。
+另注：首次 `register_chipv7_phy` 返回 1、重试返回 0 在基线里也存在，
+不是本次实验引入的。goal 保持 active。
