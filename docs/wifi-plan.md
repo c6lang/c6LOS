@@ -18320,3 +18320,12 @@ c6LOS 在 `esp_wifi_start()` 前读：
 `PWC=0 ISO=0x80 CLK=0xfffce7bf RST=0 ca0=0 d14=0`——
 电源域已开（与参考 app 的 after-wifi-init 一致），但 MAC 寄存器仍为 0。
 诊断打印已回退。goal 保持 active。
+
+---
+
+## §576 补齐官方 esp_wifi_init 里的 power_domain_on 步骤仍无效
+
+公开 `esp_wifi_init()` 在内部 API 前会调 `esp_wifi_power_domain_on()`；
+c6LOS 此前缺这一步。在 `esp_wifi_init_internal()` 前显式调用等价的
+`s3_win_phy_power_on()` 后：PWC=0（电源域本来就开），ca0 仍 0，扫描 0 AP、
+关联超时。改动已回退。goal 保持 active。
