@@ -18281,3 +18281,15 @@ SYSTEM_BTBB_RST(3) | SYSTEM_BTMAC_RST(4) | SYSTEM_RW_BTMAC_RST(9) |
 SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
 与 `s3_win_phy_power_on()` 里用的掩码完全一致。
 ⇒ 复位脉冲位宽不是差异来源。goal 保持 active。
+
+---
+
+## §572 对比公开 esp_wifi_init 与 esp_wifi_init_internal 的额外步骤
+
+`esp_wifi_init()`（wifi_init.c:348）在 `esp_wifi_init_internal(config)` 之外
+还会做睡眠参数配置、`esp_phy_modem_init()`、以及仅 `CONFIG_MAC_BB_PD=y` 时的
+`esp_mac_bb_pd_mem_init()` / `esp_wifi_mac_pd_mem_init()`。
+参考 app 的 sdkconfig 没有 `CONFIG_MAC_BB_PD`（只有 CONFIG_ESP_PHY_ENABLED=y），
+所以最后两项也不会跑；剩余是 sleep/PM 参数，与 MAC 寄存器访问无关。
+`esp_wifi_internal_set_mac_sleep` 在 c6LOS 里也存在（0x4204006c）。
+⇒ 这条路径也不解释 ca0 恒 0。goal 保持 active。
