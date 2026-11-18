@@ -275,6 +275,13 @@
 #define LX_SYS_munlock       150
 #define LX_SYS_setrlimit     160
 #define LX_SYS_sethostname   170
+/* M54：目录 fd/访问/socket 标志类 syscall */
+#define LX_SYS_fchdir       81
+#define LX_SYS_readlink     89
+#define LX_SYS_faccessat    269
+#define LX_SYS_accept4      288
+#define LX_SOCK_CLOEXEC     0x80000u
+#define LX_SOCK_NONBLOCK    0x800u
 /* M53：间隔定时器 */
 #define LX_SYS_getitimer    36
 #define LX_SYS_setitimer    38
@@ -417,6 +424,8 @@ u64  lx_fs_copy_file_range(u64 fd_in, u64 uoff_in, u64 fd_out,
                            u64 uoff_out, u64 len, u64 flags);
 u64  lx_fs_fallocate(u64 fd, u64 mode, u64 off, u64 len);
 u64  lx_fs_access(u64 upath, u64 mode);
+u64  lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags);
+u64  lx_fs_fchdir(u64 fd);
 u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);

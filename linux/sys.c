@@ -489,6 +489,14 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_access:
         r->rax = lx_fs_access(a0, a1);
         return;
+    case LX_SYS_faccessat:
+        /* faccessat(dirfd, path, mode, flags) */
+        r->rax = lx_fs_faccessat(a0, a1, a2, a3);
+        return;
+    case LX_SYS_fchdir:
+        /* fchdir(fd)：切到已打开目录 fd */
+        r->rax = lx_fs_fchdir(a0);
+        return;
 
     case LX_SYS_getcwd:
     {
@@ -848,6 +856,21 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_syncfs:
         /* sync()/syncfs(fd)：全局/单 fs 刷盘，写通无脏页，恒成功。 */
         r->rax = 0ull;
+        return;
+
+    case LX_SYS_readlink:
+        /* readlink(path, buf, bufsiz) == readlinkat(AT_FDCWD, ...) */
+        if (user_streq(a0, "/proc/self/exe") != 0) {
+            static const char p[] = "/hello";
+            u64 i;
+
+            if (a2 < 6ull) { r->rax = neg(LX_EINVAL); return; }
+            if (lx_user_ok(a1, 6ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            for (i = 0; i < 6ull; i++) { *(u8 *)(a1 + i) = (u8)p[i]; }
+            r->rax = 6ull;
+            return;
+        }
+        r->rax = neg(LX_ENOENT);
         return;
 
     case LX_SYS_readlinkat:
@@ -1426,6 +1449,29 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_accept:
         r->rax = lx_sock_accept(a0, a1, a2);
         return;
+    case LX_SYS_accept4:
+        /* accept4(fd, addr, addrlen, flags) = accept + 给新 fd 设 CLOEXEC/NONBLOCK */
+        {
+            u64 cfd = lx_sock_accept(a0, a1, a2);
+            LxProc *p = lx_cur_proc();
+
+            if ((i64)cfd >= 0 && p != (LxProc *)0) {
+                LxFdTab *tab = p->fd;
+                u32 idx = (u32)cfd;
+
+                if (tab != (LxFdTab *)0 && idx < tab->cap &&
+                    tab->ent[idx].node != LX_FD_NONE) {
+                    if ((a3 & LX_SOCK_CLOEXEC) != 0ull) {
+                        tab->ent[idx].flags |= (u32)LX_FD_CLOEXEC;
+                    }
+                    if ((a3 & LX_SOCK_NONBLOCK) != 0ull) {
+                        tab->ent[idx].oflags |= (u32)LX_O_NONBLOCK;
+                    }
+                }
+            }
+            r->rax = cfd;
+            return;
+        }
     case LX_SYS_sendto:
         r->rax = lx_sock_sendto(a0, a1, a2, a3, a4, a5);
         return;

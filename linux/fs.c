@@ -2036,6 +2036,50 @@ u64 lx_fs_access(u64 upath, u64 mode)
     return (u64)0 - LX_ENOENT;
 }
 
+/* M54：faccessat(dirfd, path, mode, flags) —— 与 access 同语义但支持 dirfd。
+ * flags 只认 AT_EACCESS(=0x200)/AT_SYMLINK_NOFOLLOW(=0x100)，我们无有效
+ * uid/gid 与符号链接概念，接受并忽略；路径解析复用 at_abspath_。 */
+u64 lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags)
+{
+    char ab[LOS_FS_PATH_MAX] = {0};
+    char ap[FS_NAME] = {0};
+    LosFsStat st = {0};
+    int rc;
+
+    (void)mode;
+    (void)flags;
+    rc = at_path_(dirfd, upath, ap, (u64)sizeof ap);
+    if (rc != 0) { return (u64)0 - (u64)(-rc); }
+    if (ap[0] == '\0') { return 0ull; }
+#if C6OS_VFS
+    ab[0] = '/';
+    (void)os_str_cpy(ab + 1, ap, (u32)(LOS_FS_PATH_MAX - 1));
+    if (vfs_owns_(ap) != 0) {
+        return (LOS_FsStat((const CHAR *)ab, &st) == 0) ? 0ull
+                                                        : (u64)0 - LX_ENOENT;
+    }
+#endif
+    return (fs_find(ap) >= 0) ? 0ull : (u64)0 - LX_ENOENT;
+}
+
+/* M54：fchdir(fd) —— 把 cwd 改到已打开目录 fd。用 dirfd_base_ 取该 fd 的
+ * 路径后写回 cwd；非目录 fd 报 ENOTDIR。 */
+u64 lx_fs_fchdir(u64 fd)
+{
+    char base[FS_NAME] = {0};
+    int rc;
+
+    rc = dirfd_base_(fd, base, (u64)sizeof base);
+    if (rc != 0) { return (u64)0 - (u64)(-rc); }
+    {
+        u64 n = slen_(base);
+        if (n >= (u64)FS_NAME) { return (u64)0 - LX_ENAMETOOLONG; }
+        for (u64 i = 0u; i <= n; i++) { g_cwd[i] = base[i]; }
+    }
+    lx_fs_set_cwd(g_cwd);
+    return 0ull;
+}
+
 /* ---- M15-1b：写类 syscall ------------------------------------------------
  * 一律转成绝对路径后交给内核 VFS（LOS_Fs*）。内核 errno 与 Linux errno 数值
  * 一致（都是 POSIX），直接透传即可。initramfs 只读：相关操作返回 EROFS。

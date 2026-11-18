@@ -1476,6 +1476,26 @@ PROF 状态往返、非法 which，全 PASS。验收 `make check-linuxabi-m53` �
 PASS；统一回归纳入（49 项）；关键回归 M21/M22/M14 全 PASS。
 
 **剩余待办**（供后续）：`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、
-`mknod` 族、`readlink`(89)、`fchdir`(81)、`faccessat`(269)、
-`accept4`(288)、`rt_sigtimedwait`(128)；`send`/`recv` 号冲突。
+`mknod` 族、`rt_sigtimedwait`(128)；`send`/`recv` 号冲突。
+
+### M54 readlink / faccessat / fchdir / accept4
+
+上一批待办里四项在 syscall 层可实现的收窄（不需 VFS 后端原语）：
+
+- `readlink`(89)：等价于 `readlinkat(AT_FDCWD, ...)`，`/proc/self/exe`
+  返回 "/hello"（与 readlinkat 共用逻辑）。
+- `faccessat`(269)：新增 `lx_fs_faccessat`，复用 `at_path_` 按 dirfd 解析
+  路径；AT_EACCESS/AT_SYMLINK_NOFOLLOW 标志接受并忽略（无有效 uid/gid）。
+- `fchdir`(81)：新增 `lx_fs_fchdir`，`dirfd_base_` 取已打开目录 fd 的路径
+  后写回 cwd；非目录 fd 报 ENOTDIR。
+- `accept4`(288)：`accept` + 给新 fd 设 SOCK_CLOEXEC/SOCK_NONBLOCK。
+
+`tests/linux/m54dirfd.c` 验 15 项：readlink 往返、faccessat 成功/ENOENT、
+fchdir 后 getcwd、accept4+CLOEXEC，全 PASS。验收 `make check-linuxabi-m54`
+→ PASS；统一回归纳入（50 项）；关键回归 M15/M42/alpine-apps 正常
+（M42 日志 PASS 15/15，仅 qemu 退出后 hang 属环境 quirk）。
+
+**最终剩余待办**（均需 VFS 后端扩展或 SysV 信号量，属较大工程）：
+`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、`mknod` 族、
+`rt_sigtimedwait`(128)、`send`/`recv` 号冲突（应让出 64/65 给 semget/semop）。
 
