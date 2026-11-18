@@ -18155,3 +18155,16 @@ JTAG 在 `esp_wifi_start`(0x4203e0dc) 断点处，把 0x60026014=0xff87d850、
 全部改成官方运行值并读回确认，恢复执行 4 秒后 `ca0`/`d14` 仍为 0。
 ⇒ 写寄存器时机不是问题；缺的是让 MAC 硬件模块本身上电的另一条件。
 goal 保持 active。
+
+---
+
+## §560 参考 app 出现新增的环境性关联失败（与本任务根因分开）
+
+重新烧写未改动的参考 app 后，`after-wifi-start` 仍是
+`d14=1 ca0=00ff1000`（MAC ready 正常），但随后连续
+`retry to connect to the AP` / `connect to the AP fail`，最终
+`getaddrinfo() returns 202`。而此前同一工程在同一真板上曾成功
+连上 `weforpay.com`（ch6, BSSID dc:d8:7c:5a:7a:46）并取到 qq.com。
+说明当前 AP 侧或射频环境发生了变化；这**不影响** c6LOS 侧
+`ca0/d14` 恒 0 的根因判断，但会让后续真板验收更难。
+goal 保持 active。
