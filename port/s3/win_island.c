@@ -413,9 +413,13 @@ int s3_win_phy_enable(void)
 
     /* §292 实验：参照工程运行时 SYSCON_WIFI_RST_EN(0x60026018) = 0x3e08，
      * 我们一直是 0。按参照值写一次，看 MAC 块（0x6001c000 段）会不会活过来。 */
-    s3_ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x\n",
+    s3_ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x PWC=%08x ISO=%08x CLK=%08x RST=%08x\n",
                (unsigned)*(volatile u32 *)0x6001c08cu,
-               (unsigned)*(volatile u32 *)0x60008000u);
+               (unsigned)*(volatile u32 *)0x60008000u,
+               (unsigned)*(volatile u32 *)0x60008090u,
+               (unsigned)*(volatile u32 *)0x60008094u,
+               (unsigned)*(volatile u32 *)0x60026014u,
+               (unsigned)*(volatile u32 *)0x60026018u);
     s3_ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
     /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
      *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，

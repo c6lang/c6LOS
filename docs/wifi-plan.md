@@ -18205,3 +18205,23 @@ goal 保持 active。
 `nvs_enable=1` 时库调用 `osi_nvs_open`（我们的桩返回 0 但给无效句柄），
 `esp_wifi_init_internal -> 4353(0x1101)`，bringup 直接失败。已回退。
 goal 保持 active。
+
+---
+
+## §565 同一阶段完整电源/时钟寄存器对照（新增 PWC/ISO/RST/OPTIONS0）
+
+```
+阶段                 PWC       ISO       CLK         RST       OPTIONS0
+IDF app_main-start   00020000  10000080  ffffdfdf    00000000  1c008000
+IDF before-wifi-init 00020000  10000080  ffffdfdf    00000000  1c008000
+IDF after-wifi-init  00000000  00000080  ff87d850    00000000  1c008000
+IDF after-wifi-start 00000000  00000080  ffffdfdf    00003e08  1c008080
+c6 PHY 回调中        00000000  00000080  fffce7bf    00000000  1c008080
+```
+- PWC / ISO 在 `after-wifi-init` 后两边完全一致（WIFI_FORCE_PD/ISO 都已清）；
+- CLK 差 0x31840（IDF-only）/0x7827af（c6-only），§530/§544 已试过对齐无效；
+- OPTIONS0 差 bit7（BB_I2C_FORCE_PU），c6 提前置 1，IDF 到 wifi-start 才置 1；
+- 唯一在 IDF 里随 wifi-start 出现、c6 里始终为 0 的是 RST=0x3e08
+  和 MAC 寄存器块本身。
+
+保留诊断打印，goal 保持 active。
