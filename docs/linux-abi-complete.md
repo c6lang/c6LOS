@@ -1310,3 +1310,25 @@ termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unloc
 的锁语义（TIOCSPTLCK）。控制终端绑定 TIOCSCTTY 仍是"接受即成功"
 的全局近似。这些是边际项，不影响 pty 双向字节流的核心 ABI。
 
+### M46 AF_UNIX SOCK_STREAM 真字节流语义
+
+权威遗留清单第 4 项收窄。此前 STREAM 按消息成槽，`recvfrom` 有
+**真数据丢失 bug**：短读只取一条消息的前 `len` 字节，其余直接丢弃；
+且多次小写不能合并成一次读。M46：
+
+- `UnixMsg` 加 `off`（已读走字节数）；`unix_enq_` 入队时初始化 0。
+- 新增 `unix_stream_take_`：跨消息合并读，部分读用 `off` 保留剩余；
+  遇到带 SCM_RIGHTS 的消息收下字节与 fd 后停下（cmsg 与数据对齐）。
+- `recvfrom`：STREAM 走字节流合并；DGRAM 保持"一条消息一读、短读丢弃
+  剩余"的数据报语义。
+- `recvmsg`：STREAM 用同一 helper 取到内核缓冲再散射到 iovec；DGRAM
+  保持原路径。SCM_RIGHTS 从 `pass[]` 安装，不再依赖固定 head 消息。
+
+`tests/linux/m46stream.c` 验 14 项：三次小写合并成 "abcdef"、一次
+10 字节写拆成 4+6 两次部分读不丢字节、回程信号，全 PASS。验收
+`make check-linuxabi-m46` → PASS；统一回归纳入（42 项）；
+关键回归 M23/M25/M41/M42（含 SCM_RIGHTS）全 PASS。
+
+遗留：AF_UNIX 抽象名字空间（sun_path[0]=='\0'）、非 SCM_RIGHTS 的
+其它 cmsg、epoll ET/ONESHOT、epoll_pwait 信号掩码仍属边际项。
+
