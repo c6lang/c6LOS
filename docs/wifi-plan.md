@@ -18117,3 +18117,14 @@ c6LOS 的 0x420510a4 只是个转发 wrapper（把 a2 截成 8 位后 callx8 ROM
 （`s_mac_bb_pd_mem`），冷启动时没有可恢复的内容，
 因此不能直接解释 ca0 的初值差异。该假设搁置。
 goal 保持 active。
+
+---
+
+## §557 库来源确认：两边同为 IDF v6.0.1 esp32s3 闭源库
+
+Makefile 的 `IDF_ROOT` 就是 `/media/winger/inst_26/esp/esp-idf`，
+`WIFI_LIBDIR = components/esp_wifi/lib/esp32s3`，与参考 app 完全同一份库；
+地址差异只是链接布局不同。⇒ 库版本差异也排除。
+剩余可能性收窄到：c6LOS 的 PHY/RF 硬件上电次序（尤其是
+`register_chipv7_phy` 与 `esp_wifi_start` 之间的状态）仍与 IDF app 不同。
+goal 保持 active。
