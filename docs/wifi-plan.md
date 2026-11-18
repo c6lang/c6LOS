@@ -18293,3 +18293,12 @@ SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
 所以最后两项也不会跑；剩余是 sleep/PM 参数，与 MAC 寄存器访问无关。
 `esp_wifi_internal_set_mac_sleep` 在 c6LOS 里也存在（0x4204006c）。
 ⇒ 这条路径也不解释 ca0 恒 0。goal 保持 active。
+
+---
+
+## §573 擦除 NVS + phy_init 分区后参考 app 仍完整工作
+
+把 0x9000 起 0x8000 字节（NVS + phy_init）全部擦掉后重跑参考 app：
+`after-wifi-start d14=1 ca0=00ff1000`、连上 AP、DHCP 拿到
+192.168.68.120、`HTTP status=200 content_length=131853`。
+⇒ 持久化分区数据不是 MAC 上电的前提，排除这条路径。goal 保持 active。
