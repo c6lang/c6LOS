@@ -905,7 +905,31 @@ static u64 dev_node_(const char *s)
     if (seq_(s, "dev/random") == 1 || seq_(s, "dev/urandom") == 1) {
         return LX_DEV_URANDOM;
     }
+    if (seq_(s, "dev/ptmx") == 1) {
+        return LX_DEV_PTMX;
+    }
     return 0ull;
+}
+
+/* /dev/pts/N：返回 pty 对象 id（N），不是 dev 哨兵。返回 ~0 表示不匹配。 */
+static u64 pts_node_(const char *s)
+{
+    u32 i;
+
+    /* 前缀比较（seq_ 要求完全相等，这里后面还有 N） */
+    {
+        const char *pfx = "dev/pts/";
+
+        for (u32 k = 0u; pfx[k] != '\0'; k++) {
+            if (s[k] != pfx[k]) { return ~0ull; }
+        }
+    }
+    i = 0u;
+    for (u32 k = 8u; s[k] != '\0'; k++) {
+        if (s[k] < '0' || s[k] > '9') { return ~0ull; }
+        i = i * 10u + (u32)(s[k] - '0');
+    }
+    return (u64)i;
 }
 
 /* ---- M17-1：procfs 最小集 -------------------------------------------------
@@ -1171,8 +1195,32 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         return (u64)0 - LX_ENOENT;
     }
     {
+        u64 ptyn = pts_node_(s);
+
+        if (ptyn != ~0ull) {
+            u64 node = lx_pty_open_slave(ptyn);
+
+            if ((i64)node < 0) { return node; }
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) { return (u64)0 - LX_EMFILE; }
+            fd_set(fd, node, 0u, LX_FD_PTY, flags);
+            g_fd[fd].pos = 1ull;                   /* pos=1 → slave（fd_set 会清零 pos） */
+            return fd;
+        }
         u64 dev = dev_node_(s);
 
+        if (dev == LX_DEV_PTMX) {
+            u64 node = lx_pty_open_master();
+
+            if ((i64)node < 0) { return node; }
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                lx_pty_close(node, 1u);
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, node, 0u, LX_FD_PTY, flags); /* pos=0 → master */
+            return fd;
+        }
         if (dev != 0ull) {
             fd = fd_alloc();
             if (fd == LX_FD_NONE) {

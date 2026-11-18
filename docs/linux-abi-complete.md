@@ -1282,3 +1282,31 @@ ancillary 类型。
 `make check-linuxabi-m44` → PASS；统一回归纳入（40 项）；
 关键回归 M9/M15/M39/M40/M43 全 PASS。
 
+### M45 pty：/dev/ptmx + /dev/pts/N（多实例伪终端）
+
+权威遗留清单第 1 项（真 pty）收窄：新增自包含的 pty 子系统
+`linux/pty.c`（固定 8 个对象，每个对象一对 4KB 环形缓冲）：
+
+- `/dev/ptmx` → `LX_DEV_PTMX` 哨兵 → 新建 master（LxFile.node=对象 id,
+  pos=0）；master 的 `TIOCGPTN`(0x80045430) 返回从设备编号 N。
+- `/dev/pts/N` → `pts_node_`（前缀比较，非 `seq_` 全等）→ 打开
+  从设备（node=同一对象 id, pos=1）。注意 `fd_set` 会清零 pos，
+  必须在之后显式设回 1 —— M45 踩过的坑。
+- 双向桥：master 写→slave 读、slave 写→master 读；阻塞读复用
+  `lx_proc_set_wait`/`lx_proc_block`，入队调 `lx_unix_wake()` 唤醒。
+- termios 自答：TCGETS/TCSETS*/TIOCGWINSZ 在 pty.c 内直接实现，
+  不依赖全局串口 tty 的 `g_on`（pty 可在无控制台行规程时独立使用）。
+- close：master 关闭即销毁整个 pty 对象；从设备关闭不释放对象。
+- 新 fd 种类 `LX_FD_PTY`，接入 proc.c 的 read/write/close 与 sys.c
+  的 ioctl 分派；pty.o 加入两条编译分支的链接表。
+
+`tests/linux/m45pty.c` 验 14 项：ptmx 打开、TIOCGPTN 编号、
+slave 是 tty（TCGETS/TIOCGWINSZ）、双向读写内容正确、多实例编号
+不同，全 PASS。验收 `make check-linuxabi-m45` → PASS；
+统一回归纳入（41 项）；关键回归 M25/M41/M42/M15 全 PASS。
+
+遗留：pty 目前不做 per-instance 行规程（ICANON/ECHO 独立 termios），
+termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unlockpt
+的锁语义（TIOCSPTLCK）。控制终端绑定 TIOCSCTTY 仍是"接受即成功"
+的全局近似。这些是边际项，不影响 pty 双向字节流的核心 ABI。
+

@@ -952,6 +952,13 @@ void lx_syscall_do(LxRegs *r)
                 r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
                 return;
             }
+            if (iofe != (LxFile *)0 && iofe->kind == LX_FD_PTY) {
+                i64 pr = lx_pty_ioctl(iofe->node, a1, a2,
+                                      iofe->pos == 0ull ? 1u : 0u);
+
+                r->rax = (pr < 0) ? neg((u64)(-pr)) : (u64)pr;
+                return;
+            }
         }
         r->rax = neg(LX_ENOTTY);
         return;

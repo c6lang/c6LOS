@@ -72,6 +72,8 @@
 #define LX_FD_TIMERFD 9u   /* timerfd（M21）：node = 对象 id */
 #define LX_FD_SIGNALFD 10u /* signalfd（M22）：node = 对象 id */
 #define LX_FD_UNIX    11u /* AF_UNIX socket（M25）：node = 对象 id */
+#define LX_FD_PTY     12u /* pty 主/从（M45）：node = 对象 id，pos=0 主/1 从 */
+#define LX_DEV_PTMX     0xfffffff3ull  /* /dev/ptmx 的 dev 哨兵 */
 
 /* procfs 虚拟文件的 id（fs.c 内部生成内容） */
 #define LX_PROC_meminfo   1u
@@ -356,5 +358,14 @@ u32  lx_tty_ready(void);                          /* 有整行可读 / 有 EOF �
 u64  lx_tty_read(u64 ubuf, u64 len, void (*yield_fn)(void));
 u64  lx_tty_write(u64 ubuf, u64 len);             /* 输出侧：应答 ESC[6n 等 DSR */
 i64  lx_tty_ioctl(u64 fd, u64 req, u64 arg);
+
+/* ---- pty（linux/pty.c，M45）：/dev/ptmx + /dev/pts/N ------------------- */
+u64  lx_pty_open_master(void);              /* 返回 LxFile.node（对象 id）或负 errno */
+u64  lx_pty_open_slave(u64 id);             /* 打开从设备，返回 node 或负 errno */
+u64  lx_pty_read(u64 node, u64 ubuf, u64 len, u32 is_master);
+u64  lx_pty_write(u64 node, u64 ubuf, u64 len, u32 is_master);
+void lx_pty_close(u64 node, u32 is_master);
+i64  lx_pty_ioctl(u64 node, u64 req, u64 arg, u32 is_master);
+u32  lx_pty_is_tty(u64 node);
 
 #endif
