@@ -17845,3 +17845,23 @@ hal_mac_init:
 返回值及 `0x60033ca0` 内容。
 
 目标未达成，goal 保持 active。
+
+---
+
+## §537 MAC 寄存器块整片只读且为 0 ⇒ MAC 电源/时钟域未开
+
+JTAG 对照（都 halt 在 CPU）：
+```
+                 官方 IDF app       c6LOS
+0x60033ca0       0x00ff1000        0x00000000
+0x60033d14       0x00000001        0x00000000
+0x60033084       0x80000000        0x80000000
+0x60026014       0xff87d850        0xfffce7bf
+```
+在 c6LOS 里 CPU 写 `0x60033ca0 = 0x00ff1000` 后立即读回仍是 `0`。
+⇒ 不只是单个 bit，`0x60033c00..0x60033d14` 这一片 MAC 寄存器在 c6LOS
+状态下整体不可访问（读 0、写忽略），说明 **WiFi MAC 电源域或 APB 时钟
+没有真正打开**。虽然我们清了 `RTC_CNTL_DIG_PWC.WIFI_FORCE_PD(bit17)`、
+`DIG_ISO.WIFI_FORCE_ISO(bit28)` 并 OR 了 `WIFI_CLK_EN`，仍缺 IDF
+`modem_clock_module_enable(PERIPH_WIFI_MODULE)` 里的关键步骤。
+改动已回退，目标未达成，goal 保持 active。
