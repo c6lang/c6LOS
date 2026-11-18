@@ -1969,6 +1969,16 @@ u64 lx_proc_close(u64 fd)
         wake_all_();
         return 0ull;
     }
+    /* VFS 文件（/data FAT、/tmp ramfs等）必须走 lx_fs_close 释放内核侧
+     * 文件句柄（FAT_MAX_FILES 池）。以前落进下面的通用 pipe_drop_ 分支，
+     * 句柄永不归还，几个 open/close 之后就 "Out of memory"。 */
+    if (fe->kind == LX_FD_VFS) {
+        (void)lx_fs_close(fd);
+        fe->node = LX_FD_NONE;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
     if (fe->kind != LX_FD_FILE) {
         pipe_drop_(fe);
         fe->node = LX_FD_NONE;
@@ -2020,6 +2030,10 @@ u64 lx_proc_dup2(u64 oldfd, u64 newfd)
     }
     *nf = *of;
     pipe_ref_(nf);
+    /* Linux：dup2 的目标 fd 必须清除 FD_CLOEXEC（只有 dup3 可以再设）。
+     * ash 用 pipe2(O_CLOEXEC) 建管道再 dup2 到 0/1；不清这一点的话，
+     * execve 时会把 dup 出的 stdin/stdout 关掉，外部命令管道全失效。 */
+    nf->flags &= ~(u32)LX_FD_CLOEXEC;
     return newfd;
 }
 

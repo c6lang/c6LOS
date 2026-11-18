@@ -1926,6 +1926,30 @@ run-x86-alpine-shell:
 
 # 验收：`sh -c '...'` 那段脚本的四件事都要在串口上看得到，而且 /data 里写下的
 # 文件在宿主侧（数据盘镜像）能查出来 —— 证明真的落盘了。
+# M28：真实 Alpine 程序冒烟（awk/sed/grep/sort/tar/gzip + 管道重定向）。
+# 用独立的 ISO 名，避免覆盖 check-alpine 的常规镜像。
+x86-alpine-apps: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6_DEFS=-DC6OS_ALPINE_APPS \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/apps.iso
+
+check-alpine-apps: x86-alpine-apps
+	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine-apps.log >/dev/null
+	@grep -q "apps-cat-ok" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（cat 读 FAT 文件失败）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@grep -q "apps-tar-ok" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（tar 写 /data 失败）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@grep -q "apps-done" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（脚本没跑完）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@echo "PASS: alpine apps（cat/tar + /data FAT 读写 + 句柄回收）"
+
 check-alpine:
 	@rm -f $(ALPINE_DATA)
 	@$(MAKE) x86-alpine

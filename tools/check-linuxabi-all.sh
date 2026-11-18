@@ -40,6 +40,7 @@ check-ping
 check-udp
 check-tcp
 check-alpine
+check-alpine-apps
 "
 
 pass=0

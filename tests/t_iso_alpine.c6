@@ -39,6 +39,18 @@ static OsFsPart g_part = {0};
  * 本身就是那次修复的端到端检验（kernel 里没有 C 运行时）。
  * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
 #ifndef C6OS_ALPINE_INTERACTIVE
+#ifdef C6OS_ALPINE_APPS
+/* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
+ * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。
+ * 备注：外部命令管道（如 `xx | cat`）与 gzip/sort/grep 在本内核上仍有
+ * 兼容限制，作为已知缺口单独记录，不纳入本冒烟脚本。 */
+static const char kScript[] =
+    "echo alpine-apps-alive; "
+    "echo hello > /data/a.txt; "
+    "cat /data/a.txt && echo apps-cat-ok; "
+    "tar -cf /data/a.tar /data/a.txt && echo apps-tar-ok; "
+    "echo apps-done";
+#else
 /* 交给 Alpine /bin/sh 的脚本，作为 `sh -c` 的第三个 argv。
  *
  * 用固定脚本而不是裸 `sh`：自动化验收里没法复现"等人输入"，失败时只能看到
@@ -52,6 +64,7 @@ static const char kScript[] =
     "echo m12ok > /data/m12.txt; "
     "cat /data/m12.txt; "
     "echo alpine-M12-done";
+#endif
 
 /* argv 表：静态指针数组，加载即有效，不依赖任何构造函数 */
 static const char *const kAv[] = { "/bin/sh", "-c", kScript };

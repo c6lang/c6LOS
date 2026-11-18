@@ -742,6 +742,11 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_pipe:
+        /* pipe(2) 只有 1 个参数：rsi 是残留值，绝不能当 pipe2 的 flags。
+         * glibc busybox 恰好 rsi=0 蒙混过关，musl ash 的 rsi 是栈地址，
+         * 传下去会被当成非法 flags → EINVAL → "can't create pipe"。 */
+        r->rax = lx_proc_pipe2(a0, 0ull);
+        return;
     case LX_SYS_pipe2:
         r->rax = lx_proc_pipe2(a0, a1);
         return;

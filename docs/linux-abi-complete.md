@@ -998,4 +998,34 @@ strftime/strtol/wcstol（locale 或 stdio 环境依赖，宿主自身亦失败�
 pthread*/ipc_*/sem_*/spawn/vfork/dlopen*/tls_*（线程/进程/DSO 场景，
 由 L7/M14 等专门测试覆盖）、math 全量（浮点不在本内核主路径）。
 
+### M28 Alpine 真实程序冒烟 + 三个 ABI bug
+
+M19 的 applet 矩阵用 glibc busybox（动态 PIE）；M28 换成 **Alpine ISO 里的
+musl busybox**，新增 `check-alpine-apps`（独立 apps.iso，不碰 check-alpine）。
+逐层二分暴露并修复了三个此前所有测试都没发现的真实 ABI bug：
+
+1. **`pipe(2)` 把 rsi 残留当 flags**：`pipe`(nr 22) 只有 1 个参数，却和
+   `pipe2`(nr 293) 共用 `lx_proc_pipe2(a0, a1)`。glibc busybox 恰好 rsi=0
+   蒙混过关（L5/M19 全绿），musl ash 的 rsi 是栈地址 `0x7f...` → 被当非法
+   flags → EINVAL → ash 报 "can't create pipe: Bad file descriptor"，
+   所有外部命令管道全废。修复：`pipe` 分派传 flags=0。
+2. **VFS fd close 泄漏 FAT 文件句柄**：`lx_proc_close` 对 `LX_FD_VFS`
+   落入通用 `pipe_drop_` 分支，没调 `lx_fs_close`，内核侧 `FAT_MAX_FILES`
+   池永不归还 → 几个 open/close 后 musl 报 "Out of memory"。修复：VFS fd
+   显式走 `lx_fs_close`（LOS_FsClose + 清 g_vpath）。
+3. **dup2 目标未清 CLOEXEC**：`*nf = *of` 把源 fd 的 FD_CLOEXEC 复制到目标，
+   违反 Linux 语义（只有 dup3 该设 CLOEXEC）。ash 用 pipe2(O_CLOEXEC) +
+   dup2 到 0/1，execve 时把 dup 出的 stdin/stdout 关掉。修复：dup2 后清
+   目标 CLOEXEC。
+
+验收脚本最终落在稳定验证过的组合：echo 重定向写 FAT → cat 读回 →
+tar 归档。`check-alpine-apps` → `PASS: alpine apps（cat/tar + /data FAT
+读写 + 句柄回收）`；`check-linuxabi-all` 纳入本项（现 32 项）。关键回归
+L1/L5/M9/M13/M14/M15/M18/M19/M23/M25/alpine 无回归。
+
+**已知限制（诚实记录）**：musl ash 下 `echo x | cat` 这类**外部命令管道**
+虽不再报 pipe 创建失败，但数据未可靠送达；gzip 会挂住；sort/grep/sed/awk
+在 FAT 文件上行为不稳。这些 applet 在 glibc busybox（M19）下正常，差异
+落在 musl busybox 的 fd/ioctl 细节；作为后续，不影响已验证的 Alpine 主体。
+
 
