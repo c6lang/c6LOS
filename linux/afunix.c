@@ -43,6 +43,8 @@ typedef struct {
 typedef struct {
     char path[UNIX_PATH_MAX];
     u32  bound;
+    u32  abstract;                   /* sun_path[0]=='\0'：抽象名字空间 */
+    u32  len;                        /* 绑定名字长度（抽象名可含 NUL，不能靠 strlen） */
     u32  type;                       /* LX_SOCK_DGRAM / LX_SOCK_STREAM */
     u32  listening;                  /* STREAM：已 listen */
     u64  peer;                       /* 对端对象 id，~0=未连接 */
@@ -107,17 +109,17 @@ static int unix_grow_(void)
     return 0;
 }
 
-static UnixSock *unix_by_path_(const char *path, u32 len)
+static UnixSock *unix_by_path_(const char *path, u32 len, u32 abstract)
 {
     u32 i;
 
     if (g_unix == (UnixSock *)0) { return (UnixSock *)0; }
     for (i = 0u; i < g_unix_cap; i++) {
         UnixSock *s = &g_unix[i];
+        u32 slen = (s->abstract != 0u) ? s->len : lx_str_len_(s->path, UNIX_PATH_MAX);
 
-        if (s->used != 0u && s->bound != 0u &&
-            lx_str_len_(s->path, UNIX_PATH_MAX) == len &&
-            lx_str_eq_(s->path, path, len)) {
+        if (s->used != 0u && s->bound != 0u && s->abstract == abstract &&
+            slen == len && lx_str_eq_(s->path, path, len)) {
             return s;
         }
     }
@@ -136,18 +138,34 @@ static UnixSock *unix_fd_(u64 fd)
     return unix_at_(f->node);
 }
 
-/* 读 sockaddr_un：family(u16)@0 + path@2，最多 106 字节。 */
-static int unix_addr_(u64 uaddr, u64 ulen, char *path, u32 *outlen)
+/* 读 sockaddr_un：family(u16)@0 + path@2，最多 106 字节。
+ * 普通路径：以 NUL 结尾，长度靠 strlen。
+ * 抽象名字空间：sun_path[0]=='\0'，名字是后面 ulen-2 个字节（可含 NUL、
+ * 不以 NUL 结尾），长度由 addrlen 给出 —— 这是 dbus/systemd 用的形式。
+ * out_abs 输出是否抽象；抽象时 path[0] 存名字首字节，长度用 outlen。 */
+static int unix_addr_(u64 uaddr, u64 ulen, char *path, u32 *outlen, u32 *out_abs)
 {
     u8 *p;
     u32 len;
 
+    *out_abs = 0u;
     if (lx_user_ok(uaddr, 2ull, C6OS_PROT_R) == 0) { return -1; }
     p = (u8 *)uaddr;
     if (((u16)p[0] | ((u16)p[1] << 8)) != 1u) { return -1; }  /* AF_UNIX=1 */
+    if (ulen > 110ull) { ulen = 110ull; }
+    if (ulen <= 2ull) { return -1; }
+    if (p[2] == 0u) {                       /* 抽象名字空间 */
+        len = (u32)ulen - 2u;
+        if (len == 0u || len > UNIX_PATH_MAX - 2u) { return -1; }
+        if (lx_user_ok(uaddr + 2ull, len, C6OS_PROT_R) == 0) { return -1; }
+        for (*outlen = 0u; *outlen < len; (*outlen)++) {
+            path[*outlen] = (char)p[2u + *outlen];
+        }
+        *out_abs = 1u;
+        return 0;
+    }
     len = lx_str_len_((const char *)(p + 2u), UNIX_PATH_MAX - 2u);
     if (len == 0u || len > UNIX_PATH_MAX - 2u) { return -1; }
-    if (ulen > 110ull) { ulen = 110ull; }
     for (*outlen = 0u; *outlen < len; (*outlen)++) {
         path[*outlen] = (char)p[2u + *outlen];
     }
@@ -204,16 +222,20 @@ u64 lx_unix_bind(u64 fd, u64 uaddr, u64 ulen)
     UnixSock *s = unix_fd_(fd);
     char path[UNIX_PATH_MAX];
     u32 len = 0u;
+    u32 abstract = 0u;
+    u32 i;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
-    if (unix_addr_(uaddr, ulen, path, &len) != 0) { return (u64)0 - LX_EINVAL; }
-    if (unix_by_path_(path, len) != (UnixSock *)0) {
+    if (unix_addr_(uaddr, ulen, path, &len, &abstract) != 0) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if (unix_by_path_(path, len, abstract) != (UnixSock *)0) {
         return (u64)0 - LX_EADDRINUSE;
     }
-    for (len = 0u; len < UNIX_PATH_MAX - 1u && path[len] != '\0'; len++) {
-        s->path[len] = path[len];
-    }
+    for (i = 0u; i < len; i++) { s->path[i] = path[i]; }
     s->path[len] = '\0';
+    s->len = len;
+    s->abstract = abstract;
     s->bound = 1u;
     return 0ull;
 }
@@ -346,10 +368,13 @@ u64 lx_unix_connect(u64 fd, u64 uaddr, u64 ulen)
     UnixSock *t;
     char path[UNIX_PATH_MAX];
     u32 len = 0u;
+    u32 abstract = 0u;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
-    if (unix_addr_(uaddr, ulen, path, &len) != 0) { return (u64)0 - LX_EINVAL; }
-    t = unix_by_path_(path, len);
+    if (unix_addr_(uaddr, ulen, path, &len, &abstract) != 0) {
+        return (u64)0 - LX_EINVAL;
+    }
+    t = unix_by_path_(path, len, abstract);
     if (t == (UnixSock *)0) { return (u64)0 - LX_ECONNREFUSED; }
     if (s->type != t->type) { return (u64)0 - LX_EINVAL; }
     if (s->type == 1u) {

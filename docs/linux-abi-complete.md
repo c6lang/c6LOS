@@ -1351,3 +1351,24 @@ termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unloc
 
 遗留：`epoll_pwait` 信号掩码参数仍忽略（边际项）。
 
+### M48 AF_UNIX 抽象名字空间
+
+上一条遗留里的抽象名字空间收窄。`unix_addr_` 此前用 `strlen` 取名字，
+`sun_path[0]=='\0'` 时长度为 0 → bind/connect 一律 EINVAL。M48：
+
+- `unix_addr_` 多输出 `abstract` 标志；抽象时名字是 `sun_path[1..]`，
+  长度由 `addrlen-2` 给出（可含 NUL、不以 NUL 结尾），按 addrlen 逐字节取。
+- `UnixSock` 加 `abstract` 与 `len` 字段（抽象名不能靠 strlen 判长）。
+- `unix_by_path_` 加 `abstract` 参数，抽象名与文件系统路径隔离匹配 ——
+  同名 "@ abstract" 与 "/tmp/path" 是两个独立端点（dbus/systemd 用法）。
+- bind/connect 两处调用同步更新；文件系统路径路径的旧语义完全不变。
+
+`tests/linux/m48abstract.c` 验 8 项：抽象 DGRAM bind/connect/send/recv
+往返、抽象名与文件系统路径同名不冲突，全 PASS。验收
+`make check-linuxabi-m48` → PASS；统一回归纳入（44 项）；
+关键回归 M25/M41/M42/M46 全 PASS。
+
+遗留：`epoll_pwait` 信号掩码、pty per-instance termios、musl libc-test
+全量与 glibc NSS（目标 Alpine 用 musl，路径不同）属边际项，不影响
+T0–T2 与 Alpine 主体。
+
