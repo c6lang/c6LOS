@@ -18400,3 +18400,23 @@ offset   IDF(after start)   c6(after start)
 把 SYSTEM_WIFIMAC_RST 的脉宽从 400 次空转拉长到 20000 次（~100us，对齐
 IDF 的 esp_rom_delay_us(50) 量级）后：ca0/d14 仍 0、扫描 0 AP、关联超时。
 改动已回退。goal 保持 active。
+
+---
+
+## §583 hal_init 反汇编揭示 d14 的触发方式（关键线索）
+
+`hal_init @0x420245d4` 的完整开头：
+```
+420245d4  entry a1,48
+420245d7  l32r a2, 0x60033d14
+420245da  movi.n a8, 2
+420245e1  or a3, a3, a8          ; a3 |= 0x2
+420245e7  s32i.n a3, a2, 0        ; ★ 软件写 d14 bit1 触发 MAC
+420245ec  l32i.n a3, a2, 0
+420245ee  bbci a3, 0, 420245ec    ; 等硬件回 bit0（被 patch_halinit 跳过）
+```
+⇒ d14 bit0 不是"自动变成 1"，而是软件先写 bit1 触发、硬件再置 bit0 应答。
+c6LOS 里这条 `s32i` 执行后 d14 仍读到 0（§578 直接写 bit0 也读回 0），
+所以问题是 **d14 这个寄存器在 c6LOS 里写不进去**，而不是简单的"硬件没准备好"。
+这比之前的"电源/时钟未开"假设更精确地指向 MAC 寄存器接口的访问条件。
+goal 保持 active。
