@@ -18081,3 +18081,13 @@ JTAG 在 c6LOS `hal_mac_init`(0x40386554) 断点处读到：
 
 ⇒ 在 hal_mac_init 这一时刻补寄存器已太晚，或者缺的是别的电源域。
 goal 保持 active。
+
+---
+
+## §554 更正 §553 写的时钟寄存器地址并重试
+
+`SYSCON_WIFI_CLK_EN_REG = SYSCON_BASE + 0x14 = 0x60026014`
+（§553 误写了 0x6002600c，那不是 WiFi 时钟使能寄存器）。
+在 `hal_mac_init` 断点处把 0x60026014 从 0xfffce7bf 改成官方运行值
+0xff87d850 后恢复执行，`ca0`/`d14` 仍全 0。
+⇒ 即使时钟寄存器值正确，MAC 硬件仍未被激活。goal 保持 active。
