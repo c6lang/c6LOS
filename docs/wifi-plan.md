@@ -18106,3 +18106,14 @@ IDF 里 `esp_mac_bb_power_up()`（phy_init.c:569）会调用
 c6LOS 目前只做了前者的等价物，后者（寄存器备份恢复）完全缺失；
 这可能是 MAC 寄存器块始终为 0 的原因，下一步检查 ROM 是否导出该接口。
 goal 保持 active。
+
+---
+
+## §556 phy_freq_mem_backup 在 c6LOS 里可用但未用于启动路径
+
+两边都存在 `rom_phy_freq_mem_backup`（指针 0x400063d8）；
+c6LOS 的 0x420510a4 只是个转发 wrapper（把 a2 截成 8 位后 callx8 ROM）。
+它属于 PHY 省电省电上下文保存接口，需要预先有备份区
+（`s_mac_bb_pd_mem`），冷启动时没有可恢复的内容，
+因此不能直接解释 ca0 的初值差异。该假设搁置。
+goal 保持 active。
