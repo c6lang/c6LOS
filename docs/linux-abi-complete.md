@@ -1028,4 +1028,28 @@ L1/L5/M9/M13/M14/M15/M18/M19/M23/M25/alpine 无回归。
 在 FAT 文件上行为不稳。这些 applet 在 glibc busybox（M19）下正常，差异
 落在 musl busybox 的 fd/ioctl 细节；作为后续，不影响已验证的 Alpine 主体。
 
+### M35 管道 fd 的 fstat/isatty ABI 语义
+
+继续追查上面的外部命令管道问题，用受控实验分层定位：静态 exec + stdin
+管道正常（M33）、不 exec 时 dup2+read 正常（M32）、只有**动态 exec** 的
+stdin 管道丢数据。过程中发现并修复两个独立的真 ABI bug：
+
+1. **`fstat` 把管道 fd 当 initramfs 节点**：`lx_fs_fstat` 里管道 fd 的
+   `node`（小整数管道 id）被当作 `g_node[]` 下标，返回普通文件 size=0；
+   busybox/musl `cat` fstat(0) 据此判定"stdin 是空普通文件"直接不读。
+   修复：按 `LX_FD_PIPE_R/W` 上报 `S_IFIFO`(0010600)、size=0。
+2. **`ioctl(TCGETS)` 只按 fd<=2 判终端**：dup2 到 fd 0/1/2 的管道被误认为
+   串口终端，`isatty()` 返回真 → 程序走终端路径。修复：按 fd 实际
+   `node == LX_FD_CONSOLE` 判定，其他 fd 一律 ENOTTY。
+
+`tests/linux/m35fifo.c` 验：管道两端 fstat=S_IFIFO、dup2 到 fd0 后仍是
+FIFO、ioctl(TCGETS) 返 ENOTTY、同进程 dup2+read 数据正确。
+验收 `make check-linuxabi-m35` → `PASS: m35fifo`；统一回归纳入（现 33 项）。
+关键回归 L1/L5/M9/M14/M15/M18/M19/M23/M25/alpine-apps 无回归。
+
+**剩余限制**：动态 exec（PT_INTERP）后 stdin 管道仍会在子进程侧提前掉读者
+而触发 SIGPIPE —— 位置已收敛到动态链接器装载路径，但根因未在内核
+fd 语义层复现（静态 exec 同路径完全正常）。记为后续，不阻塞已验证的
+Alpine/busybox 主体功能。
+
 

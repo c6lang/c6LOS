@@ -903,12 +903,18 @@ void lx_syscall_do(LxRegs *r)
             r->rax = 0ull;
             return;
         }
-        /* M12：init 调过 lx_tty_init() 之后，0/1/2 是一个真串口终端
-         * （TCGETS 给出 38400 8N1 + ICANON/ECHO，isatty() 才会认账）；
-         * 没开就还是老行为——一律 ENOTTY，ls 退回单列输出。 */
-        if (a0 <= 2ull && lx_tty_enabled() != 0u) {
-            r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
-            return;
+        /* M35：必须按 fd 的**实际种类**判终端，不能只看 fd<=2 —— dup2 之后
+         * fd 0/1/2 可能是管道/socket，此时 isatty() 必须返回 ENOTTY，否则
+         * busybox cat 会当成终端走另一条路径，导致外部命令管道静默丢数据。 */
+        {
+            LxFile *iofe = lx_fdtab_get(lx_cur_proc() != (LxProc *)0
+                                        ? lx_cur_proc()->fd : (LxFdTab *)0, a0);
+
+            if (iofe != (LxFile *)0 && iofe->node == LX_FD_CONSOLE &&
+                lx_tty_enabled() != 0u) {
+                r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
+                return;
+            }
         }
         r->rax = neg(LX_ENOTTY);
         return;

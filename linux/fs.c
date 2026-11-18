@@ -1604,6 +1604,15 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
         }
         return 0ull;
     }
+    /* 管道 fd 的 node 是小整数 id，不是 initramfs 节点号。必须当作 FIFO
+     * 上报，否则 busybox/musl 的 cat 会 fstat(0) 看到普通文件 size=0 而
+     * 直接不读 —— 外部命令管道（如 `echo x | cat`）静默丢数据。 */
+    if (f->kind == LX_FD_PIPE_R || f->kind == LX_FD_PIPE_W) {
+        if (fill_stat(ustat, 0u, 0ull, 0010600u) != 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        return 0ull;
+    }
     idx = (u32)f->node;
     if (fill_stat(ustat, idx, g_node[idx].size, g_node[idx].mode) != 0) {
         return (u64)0 - LX_EFAULT;

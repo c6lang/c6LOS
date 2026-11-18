@@ -982,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -995,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1035,7 +1035,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1436,6 +1436,11 @@ M27ROOT  := $(X86)/m27root
 $(M27_ELF): $(M27_SRC)
 	@mkdir -p $(dir $@)
 	gcc -Os -s -o $@ $<
+
+M35_ELF := tests/linux/m35fifo.elf
+$(X86)/m35-disk.img: $(M35_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(M35_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
 $(M27_FS): tools/build-libctest.sh $(M27_ELF) /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /usr/lib/x86_64-linux-gnu/libc.so.6 tools/mk-initramfs.py
 	@rm -rf $(M27ROOT)
@@ -2807,3 +2812,13 @@ wififlash: wifi
 # ---- 头文件依赖（见 X86CDEPFLAGS） ------------------------------------------
 # 放在最后：此时所有 obj 目录规则都已定义，-include 只是把 .d 读进来当普通规则。
 -include $(wildcard $(X86)/*/obj/*.d)
+
+
+check-linuxabi-m35: $(X86)/m35-disk.img
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m35-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m35.log \
+		| grep -q "PASS: m35fifo" \
+	  && echo "PASS: linux-abi M35（管道 fstat=S_IFIFO + isatty=ENOTTY）" \
+	  || { echo "FAIL: linux-abi M35"; tail -20 /tmp/check-m35.log; exit 1; }

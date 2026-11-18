@@ -41,6 +41,7 @@ check-udp
 check-tcp
 check-alpine
 check-alpine-apps
+check-linuxabi-m35
 "
 
 pass=0
