@@ -17967,3 +17967,15 @@ DIG_ISO 对齐、时钟位对齐、电源域序列照搬（§533–§544 全部�
 `g_osi_funcs_p` 表），而不是继续猜寄存器位。
 
 goal 保持 active。
+
+---
+
+## §546 `pm_get_tx_blocks_retention_mask` 两侧完全一致
+
+反汇编对比（c6LOS 0x4201bc0c / IDF 0x420593a8）逐指令相同：
+都返回 `-1` 或 `0xfff1ffff`，且依赖 `g_pm+14/+15/+0x200+30` 三个标志。
+⇒ 该函数不是造成 `hal_mac_init` 行为差异的原因。
+`g_ic` 地址不同（c6LOS 0x3fcd6754 / IDF 0x3fc9ea68）但作为参数传入，
+理论上无关；若后续仍无进展可检查 `g_ic` 内容是否被正确初始化。
+
+goal 保持 active。
