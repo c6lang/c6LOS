@@ -18439,3 +18439,12 @@ IDF 的 `esp_wifi_bt_power_domain_on()` 是引用计数的，我们每次 `_phy_
 扫描仍 0 AP、关联超时。说明重复 modem 复位不是 d14=0 的原因。改动已回退。
 另注：首次 `register_chipv7_phy` 返回 1、重试返回 0 在基线里也存在，
 不是本次实验引入的。goal 保持 active。
+
+---
+
+## §586 强制对齐 RTC_CNTL_DIG_PWC/DIG_ISO 到 IDF 值无效
+
+c6LOS 从 ROM 直跳，PWC/ISO 读回 0x00545010 / 0xaa805080（ROM 残余），
+而 IDF 经二级 bootloader 后是 0 / 0x80。强制写成 IDF 值后诊断打印确实
+变成 PWC=0 ISO=0x80，但 ca0/d14 仍 0、扫描 0 AP、关联超时。
+⇒ 这两个寄存器的残余值不是原因。改动已回退。goal 保持 active。
