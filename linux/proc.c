@@ -648,13 +648,22 @@ void lx_proc_alarm_check(void)
     lx_timerfd_check();       /* M21：timerfd 到期与 alarm 共用检查点 */
     for (i = 0u; i < g_proc_cap; i++) {
         LxProc *q = g_proc[i].p;
+        u32 w;
 
-        if (q == (LxProc *)0 || q->state == LX_P_FREE || q->alarm_deadline == 0ull) {
+        if (q == (LxProc *)0 || q->state == LX_P_FREE) {
             continue;
         }
-        if (now >= q->alarm_deadline) {
-            q->alarm_deadline = 0ull;
+        /* M53：三个 itimer 共用一个检查点。REAL 复用 alarm_deadline
+         * （与 alarm(2) 同一定时器），VIRTUAL/PROF 用 itimer_deadline[1/2]。
+         * 到期后若有 interval 则重 armed 到下一个周期，否则清零。
+         * VIRTUAL/PROF 按墙钟近似（协作内核无 CPU 时间统计），发同一 SIGALRM。 */
+        for (w = 0u; w < 3u; w++) {
+            u64 *dl = (w == 0u) ? &q->alarm_deadline : &q->itimer_deadline[w];
+            u64 iv = q->itimer_interval[w];
+
+            if (*dl == 0ull || now < *dl) { continue; }
             lx_sig_send_one(q, (u32)LX_SIGALRM, 0);
+            *dl = (iv != 0ull) ? (now + iv) : 0ull;
         }
     }
 }

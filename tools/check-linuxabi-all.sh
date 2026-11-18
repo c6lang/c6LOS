@@ -57,6 +57,7 @@ check-linuxabi-m49
 check-linuxabi-m50
 check-linuxabi-m51
 check-linuxabi-m52
+check-linuxabi-m53
 "
 
 pass=0

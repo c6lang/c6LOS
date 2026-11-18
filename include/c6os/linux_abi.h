@@ -161,6 +161,9 @@
 #define LX_SIGUSR2  12
 #define LX_SIGPIPE  13
 #define LX_SIGALRM  14
+/* M53：ITIMER_VIRTUAL/PROF 到期信号 */
+#define LX_SIGVTALRM 26
+#define LX_SIGPROF  27
 #define LX_SIGTERM  15
 #define LX_SIGCHLD  17
 #define LX_SIGCONT  18
@@ -272,6 +275,12 @@
 #define LX_SYS_munlock       150
 #define LX_SYS_setrlimit     160
 #define LX_SYS_sethostname   170
+/* M53：间隔定时器 */
+#define LX_SYS_getitimer    36
+#define LX_SYS_setitimer    38
+#define LX_ITIMER_REAL      0u
+#define LX_ITIMER_VIRTUAL   1u
+#define LX_ITIMER_PROF      2u
 /* M52：文件同步与咨询锁 */
 #define LX_SYS_flock         73
 #define LX_SYS_fsync         74

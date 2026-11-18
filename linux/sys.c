@@ -1188,6 +1188,59 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_proc_alarm(a0);
         return;
 
+    case LX_SYS_getitimer:
+    case LX_SYS_setitimer: {
+        /* getitimer(which, cur*) / setitimer(which, new*, old*)
+         * itimerval = {it_interval:{sec,usec}, it_value:{sec,usec}} 32B。
+         * REAL 复用 alarm_deadline（alarm() 与 ITIMER_REAL 是同一个定时器），
+         * VIRTUAL/PROF 用 itimer_deadline[1/2]，周期存 itimer_interval[3]。
+         * 到期投递复用 lx_proc_alarm_check 检查点。 */
+        LxProc *p = lx_cur_proc();
+        u32 which = (u32)a0;
+
+        if (p == (LxProc *)0 || which > LX_ITIMER_PROF) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        /* 回写旧值（getitimer 的 cur / setitimer 的 old） */
+        {
+            u64 dst = (nr == LX_SYS_getitimer) ? a1 : a2;
+            u64 dl = (which == LX_ITIMER_REAL) ? p->alarm_deadline : p->itimer_deadline[which];
+            u64 now = port_cycles();
+            u64 remain = (dl != 0ull && now < dl) ? (dl - now) : 0ull;
+            u64 iv = p->itimer_interval[which];
+
+            if (dst != 0ull) {
+                if (lx_user_ok(dst, 32ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+                *(u64 *)dst = iv / 1000000000ull;                    /* interval.sec */
+                *(u64 *)(dst + 8ull) = (iv % 1000000000ull) / 1000ull; /* interval.usec */
+                *(u64 *)(dst + 16ull) = remain / 1000000000ull;      /* value.sec */
+                *(u64 *)(dst + 24ull) = (remain % 1000000000ull) / 1000ull; /* value.usec */
+            }
+        }
+        if (nr == LX_SYS_setitimer) {
+            u64 newp = a1;
+            u64 sec, usec, val;
+
+            if (newp == 0ull || lx_user_ok(newp, 32ull, C6OS_PROT_R) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            sec = *(u64 *)(newp + 16ull);       /* it_value.sec */
+            usec = *(u64 *)(newp + 24ull);      /* it_value.usec */
+            p->itimer_interval[which] = (*(u64 *)newp * 1000000000ull) +
+                                        (*(u64 *)(newp + 8ull) * 1000ull);
+            val = (sec * 1000000000ull) + (usec * 1000ull);
+            if (which == LX_ITIMER_REAL) {
+                p->alarm_deadline = (val == 0ull) ? 0ull : port_cycles() + val;
+            } else {
+                p->itimer_deadline[which] = (val == 0ull) ? 0ull : port_cycles() + val;
+            }
+        }
+        r->rax = 0ull;
+        return;
+    }
+
     case LX_SYS_clock_nanosleep:
         /* glibc 的 sleep() 走这个而不是 nanosleep(2)。参数和 nanosleep 一样在
          * a2（req）/a3（rem），a0=clockid、a1=flags（TIMER_ABSTIME 时 a2 是绝对

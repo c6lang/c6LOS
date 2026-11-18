@@ -1456,3 +1456,26 @@ x86-64 的 `semget`(64)/`semop`(65) 号 —— 真实程序走 sendto/recvfrom�
 不影响 Alpine，但 SysV 信号量号被劫持。VFS 后端无 symlink/link/chown/
 mknod 原语（FAT 限定），这些需后端扩展，属较大工程。
 
+### M53 getitimer / setitimer
+
+上一条待办首项收窄。`getitimer`(36)/`setitimer`(38) 此前 ENOSYS ——
+musl `alarm()`/`ualarm()`、`busybox timeout`、apk 锁等待会踩到。M53：
+
+- `LxProc` 加 `itimer_interval[3]`/`itimer_deadline[3]`；`itimerval` 是
+  32B（`{it_interval,it_value}` 各 `timeval{sec,usec}` 16B），按 cycles
+  （port_cycles 纳秒口径）存取。
+- `ITIMER_REAL`(0) 复用 `alarm_deadline`（与 `alarm`(37) 是同一定时器），
+  VIRTUAL/PROF 用独立 deadline，三者共用 `lx_proc_alarm_check` 检查点；
+  到期若有 interval 则重 armed 到下一周期，发 SIGALRM。VIRTUAL/PROF
+  按墙钟近似（协作内核无 CPU 时间统计，文档标注）。
+- `setitimer` 带 old 参数时回写旧值；`getitimer` 读当前剩余值；非法
+  which 报 EINVAL。
+
+`tests/linux/m53itimer.c` 验 20 项：REAL 一次性/周期/取消往返、VIRTUAL/
+PROF 状态往返、非法 which，全 PASS。验收 `make check-linuxabi-m53` →
+PASS；统一回归纳入（49 项）；关键回归 M21/M22/M14 全 PASS。
+
+**剩余待办**（供后续）：`symlink`/`symlinkat`、`link`/`linkat`、`chown` 族、
+`mknod` 族、`readlink`(89)、`fchdir`(81)、`faccessat`(269)、
+`accept4`(288)、`rt_sigtimedwait`(128)；`send`/`recv` 号冲突。
+
