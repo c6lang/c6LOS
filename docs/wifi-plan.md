@@ -18181,3 +18181,11 @@ c6LOS 真板日志（PHY 回调进入时）：
 
 另外确认 Makefile 的 `--wrap` 只是计数器包装（`__wrap_*` 直接转发
 `__real_*`），没有改变 WiFi 库行为。goal 保持 active。
+
+---
+
+## §562 start 前重复 PHY 上电无效
+
+在 `esp_wifi_start()` 前再调一次 `s3_win_phy_enable_hook()`，
+返回 0，但 `ca0/d14` 仍为 0，扫描仍 0 AP、关联超时。改动已回退。
+goal 保持 active。
