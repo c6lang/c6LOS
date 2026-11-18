@@ -18270,3 +18270,14 @@ goal 保持 active。
 `missing data from bitq interface` / `Debug controller was reset`，
 目标被 RTC WDT 复位（PC=0x4037B002）。这是已知的板载 USB-JTAG 不稳定，
 不是固件问题。该实验需后续在 JTAG 稳定时重试。goal 保持 active。
+
+---
+
+## §571 确认 MODEM_RESET_FIELD_WHEN_PU 掩码正确
+
+从 IDF S3 `syscon_reg.h` 逐项展开：
+`SYSTEM_WIFIBB_RST(0) | SYSTEM_FE_RST(1) | SYSTEM_WIFIMAC_RST(2) |
+SYSTEM_BTBB_RST(3) | SYSTEM_BTMAC_RST(4) | SYSTEM_RW_BTMAC_RST(9) |
+SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
+与 `s3_win_phy_power_on()` 里用的掩码完全一致。
+⇒ 复位脉冲位宽不是差异来源。goal 保持 active。
