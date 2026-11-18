@@ -342,22 +342,54 @@ INT32 LOS_FsRename(const CHAR *from, const CHAR *to)
     return 0 - OS_E_ROFS;
 }
 
+/* 截断后刷新所有指向同一文件的已打开 fd 的缓存 size。
+ * OsFile.size 在 open 时快照，供 fstat/SEEK_END 与 LOS_FsRead 夹紧使用；
+ * 不刷新的话 truncate 后旧 fd 仍读到旧大小（M43 暴露的真 bug）。 */
+static void truncate_refresh_(OsMount *m, const char *rel, UINT32 size, int skip_fd)
+{
+    void *fh = (void *)0;
+    u32 mnt = (u32)(m - &g_os_mounts[0]);
+    int i = 0;
+
+    /* 用和 open 相同的后端句柄作为"同一文件"的标识。ramfs/fatfs 的 fh
+     * 都能从路径重新取到（open_ 不写盘，仅查节点/簇号）。 */
+    if (open_(m, rel, (u32)LOS_O_RDONLY, &fh) != 0) {
+        return;
+    }
+    for (i = 0; i < OS_MAX_FILES; i++) {
+        OsFile *f = &g_os_files[i];
+
+        if (f->used != 0u && i != skip_fd && f->mnt == mnt && f->fh == fh) {
+            f->size = size;
+            if (f->pos > size) {
+                f->pos = size;
+            }
+        }
+    }
+    (void)close_(m, fh);
+}
+
 INT32 LOS_FsTruncate(const CHAR *path, UINT32 size)
 {
     OsMount *m = (OsMount *)0;
     char rel[LOS_FS_PATH_MAX] = {0};
     int rc = mount_of_(path, &m, rel, (u32)sizeof(rel));
+    int trc = 0;
 
     if (rc != 0) {
         return (INT32)rc;
     }
     if (os_str_eq(m->type, "ramfs") == 1) {
-        return (INT32)ramfs_truncate(m, rel, (u32)size);
+        trc = ramfs_truncate(m, rel, (u32)size);
+    } else if (os_str_eq(m->type, "fatfs") == 1) {
+        trc = fatfs_truncate(m, rel, (u32)size);
+    } else {
+        return 0 - OS_E_ROFS;
     }
-    if (os_str_eq(m->type, "fatfs") == 1) {
-        return (INT32)fatfs_truncate(m, rel, (u32)size);
+    if (trc == 0) {
+        truncate_refresh_(m, rel, size, -1);
     }
-    return 0 - OS_E_ROFS;
+    return (INT32)trc;
 }
 
 INT32 LOS_FsSync(INT32 fd)

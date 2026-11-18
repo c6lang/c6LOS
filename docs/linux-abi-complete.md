@@ -1241,3 +1241,23 @@ ancillary 类型。
 **T4（namespace/cgroup/overlayfs/seccomp）在 §8 明确不做**，另由 OCI 微虚机
 主线承接，不计入本目标缺口。
 
+### M43 fallocate(2) + 修 VFS 截断后 fd 缓存
+
+`fallocate`(nr 285) 此前 ENOSYS；cp/grep 等工具会用它预分配。M43：
+
+- `lx_fs_fallocate`：mode=0 用 `lx_fs_ftruncate(fd, off+len)` 扩展文件大小；
+  `FALLOC_FL_KEEP_SIZE`(0x01) 因 VFS 无块预分配概念做 no-op 成功；
+  `FALLOC_FL_PUNCH_HOLE`(0x02) → EOPNOTSUPP；其它 flags → EINVAL；
+  len=0 → EINVAL；溢出 → EINVAL；成功不改 fd pos。
+- **暴露并修复一个真 VFS bug**：truncate 后 path-based stat 显示新大小，
+  但已打开 fd 的 `fstat`/`pread` 仍是旧大小 —— 根因是 `OsFile.size`
+  在 open 时快照、供 `LOS_FsRead` 夹紧与 `SEEK_END` 用，truncate 后没刷新。
+  在 `LOS_FsTruncate` 成功后用同 mount + 后端句柄匹配所有打开 fd，
+  刷新其 `size`（并把 pos 夹到新大小），新增 `truncate_refresh_`。
+  这同时让 ftruncate 的扩展语义真正对所有已打开 fd 生效。
+
+`tests/linux/m43fallocate.c` 验 12 项：扩展后 fstat/pread=32、内容前
+2 字节保留其余清零、pos 不变、KEEP_SIZE no-op、PUNCH_HOLE EOPNOTSUPP、
+非法 flag EINVAL，全 PASS。验收 `make check-linuxabi-m43` → PASS；
+统一回归纳入（39 项）；关键回归 M9/M15/M39/M40 全 PASS。
+

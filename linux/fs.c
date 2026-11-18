@@ -2010,6 +2010,41 @@ u64 lx_fs_ftruncate(u64 fd, u64 len)
 #endif
 }
 
+/* fallocate(2)（nr 285）：本内核 VFS（FAT）不支持真正的块预分配，
+ * 语义按"文件大小"近似：
+ *   - mode=0                 → 把文件扩展到 off+len（等价 ftruncate 到更大）
+ *   - FALLOC_FL_KEEP_SIZE    → 预分配但不改大小：本文件系统无预分配概念，
+ *                              若 off+len 已不超过当前大小则直接成功；否则
+ *                              仍视为成功（后续写入自然扩展），不改 pos。
+ *   - FALLOC_FL_PUNCH_HOLE   → EOPNOTSUPP（FAT 无稀疏）
+ * 其余 flag 组合 → EINVAL。返回的"成功"与 POSIX 对齐：成功不改变 fd pos。 */
+u64 lx_fs_fallocate(u64 fd, u64 mode, u64 off, u64 len)
+{
+    LxFile *f = fd_get(fd);
+    u64 end;
+
+    if (f == (LxFile *)0) {
+        return (u64)0 - LX_EBADF;
+    }
+    if (len == 0ull) {
+        return (u64)0 - LX_EINVAL;
+    }
+    end = off + len;
+    if (end < off) {                       /* 64 位溢出 */
+        return (u64)0 - LX_EINVAL;
+    }
+    if ((mode & LX_FALLOC_FL_PUNCH_HOLE) != 0u) {
+        return (u64)0 - LX_EOPNOTSUPP;
+    }
+    if ((mode & ~(u64)LX_FALLOC_FL_KEEP_SIZE) != 0u) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if ((mode & LX_FALLOC_FL_KEEP_SIZE) != 0u) {
+        return 0ull;                       /* 无预分配：语义等价 no-op */
+    }
+    return lx_fs_ftruncate(fd, end);       /* mode=0：扩展文件大小 */
+}
+
 static u64 chmod_path_(u64 dirfd, u64 upath, u64 mode)
 {
     char abspath[LOS_FS_PATH_MAX] = {0};
