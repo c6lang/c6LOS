@@ -17912,3 +17912,20 @@ JTAG 对照（halt 状态）：
 `register_chipv7_phy()` 前重新打开，PHY 校准成功（rc=1→0），
 但真板仍 `scan_get_ap_num=0`、关联失败。改动已回退。
 goal 保持 active。
+
+---
+
+## §542 参考 app 中 `0x60033ca0` 的完整时间线
+
+```
+(app_main-start)   d14=00000000 ca0=00000000
+(before-wifi-init) d14=00000000 ca0=00000000
+(after-wifi-init)  d14=00000000 ca0=00000000
+(after-wifi-start) d14=00000001 ca0=00ff1000   <-- ic_mac_init 后才出现
+(after-connect)    d14=00000001 ca0=00002000
+```
+⇒ MAC 寄存器块在 app 启动初期本来也是 0；是 `esp_wifi_start()` 内
+`ic_mac_init` 让硬件把 ca0 变成 0x00ff1000 并置起 d14 bit0。
+c6LOS 走到同一 ROM 函数却没有这个效果，说明 `hal_mac_init` 的
+前置硬件状态仍不满足（不是启动早期的寄存器值差异）。
+goal 保持 active。
