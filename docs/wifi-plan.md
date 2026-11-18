@@ -18168,3 +18168,16 @@ goal 保持 active。
 说明当前 AP 侧或射频环境发生了变化；这**不影响** c6LOS 侧
 `ca0/d14` 恒 0 的根因判断，但会让后续真板验收更难。
 goal 保持 active。
+
+---
+
+## §561 再次核对启动期 RTC/寄存器状态，排除若干旧差异
+
+c6LOS 真板日志（PHY 回调进入时）：
+`RTC_CNTL_OPTIONS0(0x60008000)=0x1c008080`，与官方 app 完全一致；
+`0x6001c08c=0x03fffa00`（该 MAC 寄存器块可读）。
+⇒ § 早期记录里 `OPTIONS0=0x1c00a080` 是 bootloader 之前/不同阶段的瞬态值，
+不是根因。真正恒 0 的只有 `0x60033ca0/d14` 这一组 WIFIMAC 寄存器。
+
+另外确认 Makefile 的 `--wrap` 只是计数器包装（`__wrap_*` 直接转发
+`__real_*`），没有改变 WiFi 库行为。goal 保持 active。
