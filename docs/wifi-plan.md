@@ -18128,3 +18128,20 @@ Makefile 的 `IDF_ROOT` 就是 `/media/winger/inst_26/esp/esp-idf`，
 剩余可能性收窄到：c6LOS 的 PHY/RF 硬件上电次序（尤其是
 `register_chipv7_phy` 与 `esp_wifi_start` 之间的状态）仍与 IDF app 不同。
 goal 保持 active。
+
+---
+
+## §558 核对 IDF esp_phy_enable 全流程，无遗漏的软件步骤
+
+逐项对照 `esp_phy_enable()`（phy_init.c:326）与
+`esp_phy_load_cal_and_init()`（:930）：
+- common clock → `phy_module_enable()` → `phy_bbpll_en_usb(true)` →
+  `register_chipv7_phy(init,cal,mode)`，c6LOS 的 `s3_win_phy_enable()` 全部覆盖；
+- `phy_digital_regs_load()`（:368）只在**第二次及以后** enable 时调用，
+  且 c6LOS 镜像里没有这个符号；首次校准路径没有它；
+- `esp_mac_bb_power_up()` → `esp_wifi_bt_power_domain_on()` 的等价物
+  `s3_win_phy_power_on()` 已在 PHY 初始化里调用。
+
+⇒ 软件步骤没有明显遗漏。剩余差异可能在 IDF 二级 bootloader 的
+早期 analog/RTC 配置中（我们只用了它的镜像，没调用它的初始化函数）。
+goal 保持 active。
