@@ -1,19 +1,14 @@
-/* M44 验收：pwrite64(18) / preadv(327) / pwritev(328)
- * 验：位置读写不改 fd pos、多段 iovec 按 off 连续推进、内容正确。 */
+/* M44 验收：pwrite64(18) / preadv(295) / pwritev(296) / v2(327/328)
+ * 验：位置读写不改 fd pos、多段 iovec 按 off 连续推进、内容正确。
+ * 注意：x86-64 上 preadv=295 / pwritev=296；327/328 是 preadv2/pwritev2。 */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
-
-#ifndef SYS_pwritev
-#define SYS_pwritev 328
-#endif
-#ifndef SYS_preadv
-#define SYS_preadv 327
-#endif
 
 static int failures;
 static int total;
@@ -50,6 +45,17 @@ int main(void)
     CHECK(syscall(SYS_preadv, fd, rv, 2, 0ull) == 6);
     CHECK(memcmp(buf, "abcdef", 6) == 0);
     CHECK(lseek(fd, 0, SEEK_CUR) == 0);
+
+    /* preadv2/pwritev2(327/328) flags=0 等价基础版 */
+    wv[0].iov_base = "XY"; wv[0].iov_len = 2;
+    CHECK(syscall(SYS_pwritev2, fd, wv, 1, 8ull, 0ul) == 2);
+    memset(buf, 0, sizeof(buf));
+    rv[0].iov_base = buf; rv[0].iov_len = 2;
+    CHECK(syscall(SYS_preadv2, fd, rv, 1, 8ull, 0ul) == 2);
+    CHECK(memcmp(buf, "XY", 2) == 0);
+    /* 非零 flags（如 RWF_NOWAIT）当前不支持 */
+    CHECK(syscall(SYS_preadv2, fd, rv, 1, 8ull, 1ul) == -1);
+    CHECK(errno == EOPNOTSUPP);
 
     close(fd);
     if (failures == 0) {

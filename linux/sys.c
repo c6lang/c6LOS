@@ -557,6 +557,18 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_pwritev(a0, a1, a2, a3);
         return;
 
+    case LX_SYS_preadv2:
+        /* preadv2(fd, iov, iovcnt, offset, flags)：flags 是第 5 参数=a4，仅支持 0 */
+        if (a4 != 0ull) { r->rax = neg(LX_EOPNOTSUPP); return; }
+        r->rax = lx_fs_preadv(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_pwritev2:
+        /* pwritev2(fd, iov, iovcnt, offset, flags)：flags 是第 5 参数=a4，仅支持 0 */
+        if (a4 != 0ull) { r->rax = neg(LX_EOPNOTSUPP); return; }
+        r->rax = lx_fs_pwritev(a0, a1, a2, a3);
+        return;
+
     case LX_SYS_munmap:
         /* 先作废记账再还页：反过来会让缺页在"页已还、VMA 还在"的窗口里
          * 重新分配页，把 munmap 变成空操作。 */
@@ -1181,6 +1193,31 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_epoll_wait:
         r->rax = lx_epoll_wait(a0, a1, a2, (i64)a3);
         return;
+    case LX_SYS_epoll_pwait: {
+        /* epoll_pwait(fd, events, maxevents, timeout, sigmask)：
+         * 等待期间把 sigmask 设为调用者给定值，返回后恢复旧掩码。
+         * a4=sigmask 指针（NULL 时等价 epoll_wait）。 */
+        u64 old = 0ull;
+        u64 set = 0ull;
+        u64 rc;
+
+        if (a4 != 0ull) {
+            if (lx_user_ok(a4, 8ull, C6OS_PROT_R) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            set = *(const u64 *)a4;
+            old = (lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->sig_mask : 0ull;
+            lx_cur_proc()->sig_mask = set &
+                ~((1ull << ((u32)LX_SIGKILL - 1u)) | (1ull << ((u32)LX_SIGSTOP - 1u)));
+        }
+        rc = lx_epoll_wait(a0, a1, a2, (i64)a3);
+        if (a4 != 0ull) {
+            lx_cur_proc()->sig_mask = old;
+        }
+        r->rax = rc;
+        return;
+    }
     /* M21：timerfd */
     case LX_SYS_timerfd_create:
         r->rax = lx_timerfd_create(a0, a1);

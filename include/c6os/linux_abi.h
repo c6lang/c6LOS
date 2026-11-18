@@ -197,8 +197,10 @@
 #define LX_SYS_copy_file_range 326
 #define LX_SYS_fallocate     285
 #define LX_SYS_pwrite64      18
-#define LX_SYS_preadv        327
-#define LX_SYS_pwritev       328
+#define LX_SYS_preadv        295
+#define LX_SYS_pwritev       296
+#define LX_SYS_preadv2       327
+#define LX_SYS_pwritev2      328
 #define LX_FALLOC_FL_KEEP_SIZE   0x01u
 #define LX_FALLOC_FL_PUNCH_HOLE  0x02u
 #define LX_SYS_unlinkat      263
@@ -227,6 +229,7 @@
 #define LX_SYS_epoll_create1 291
 /* M20：epoll 事件接口 */
 #define LX_SYS_epoll_wait    232
+#define LX_SYS_epoll_pwait   281
 #define LX_SYS_epoll_ctl     233
 /* M21：timerfd */
 #define LX_SYS_timerfd_create 283

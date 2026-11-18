@@ -1368,7 +1368,25 @@ termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unloc
 `make check-linuxabi-m48` → PASS；统一回归纳入（44 项）；
 关键回归 M25/M41/M42/M46 全 PASS。
 
-遗留：`epoll_pwait` 信号掩码、pty per-instance termios、musl libc-test
-全量与 glibc NSS（目标 Alpine 用 musl，路径不同）属边际项，不影响
-T0–T2 与 Alpine 主体。
+遗留：pty per-instance termios、musl libc-test 全量与 glibc NSS
+（目标 Alpine 用 musl，路径不同）属边际项，不影响 T0–T2 与 Alpine 主体。
+
+### M49 epoll_pwait + 修正 preadv/pwritev 系统调用号
+
+两处 ABI 收窄：
+
+1. `epoll_pwait`（x86-64 nr **281**，不是 255 —— glibc 实际发 281）：
+   等待期间把进程 sigmask 换成调用者给定值（KILL/STOP 不可屏蔽，
+   复用 `LX_SIG_SETMASK` 语义），返回后恢复旧掩码；sigmask==NULL 等价
+   `epoll_wait`。此前是 ENOSYS，`tests/linux/m49epollpwait.c` 验 10 项
+   （基本收发 + 掩码恢复），全 PASS。
+
+2. **修正 M44 的系统调用号错误**：x86-64 上 `preadv`=**295** /
+   `pwritev`=**296**，而 327/328 实为 `preadv2`/`pwritev2`。此前 M44
+   把 327/328 当基础版，真实 glibc 程序调用 `preadv()`（295）会 ENOSYS。
+   M49 改正常量并新增 `preadv2`/`pwritev2`（flags 第 5 参数 a4，仅支持 0，
+   非零 EOPNOTSUPP）。`tests/linux/m44posio.c` 扩到 15 项全 PASS。
+
+验收 `make check-linuxabi-m49` → PASS；统一回归纳入（45 项）。
+关键回归 M20/M44/M47 全 PASS。
 
