@@ -18091,3 +18091,18 @@ goal 保持 active。
 在 `hal_mac_init` 断点处把 0x60026014 从 0xfffce7bf 改成官方运行值
 0xff87d850 后恢复执行，`ca0`/`d14` 仍全 0。
 ⇒ 即使时钟寄存器值正确，MAC 硬件仍未被激活。goal 保持 active。
+
+---
+
+## §555 MAC 寄存器块不可写的范围确认
+
+在 `hal_mac_init` 断点处 JTAG 写其它外设寄存器（0x60026014 等）
+都能正确读回；唯独 `0x60033ca0`/`0x60033d14` 写完仍为 0。
+说明不是 JTAG 写流程问题，而是这块 MAC 寄存器本身处于未上电/隔离状态。
+
+IDF 里 `esp_mac_bb_power_up()`（phy_init.c:569）会调用
+`esp_wifi_bt_power_domain_on()`，并在 `SOC_PM_MODEM_RETENTION_BY_BACKUPDMA=1`
+时额外做 `phy_freq_mem_backup(false, ...)` 恢复 MAC/BB 寄存器影子。
+c6LOS 目前只做了前者的等价物，后者（寄存器备份恢复）完全缺失；
+这可能是 MAC 寄存器块始终为 0 的原因，下一步检查 ROM 是否导出该接口。
+goal 保持 active。
