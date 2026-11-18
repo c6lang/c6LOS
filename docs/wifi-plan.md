@@ -17903,3 +17903,12 @@ JTAG 对照（halt 状态）：
 照搬后真板卡在 `register_chipv7_phy(mode=0)`，再无后续日志
 => IDF 的 disable 依赖后续 `modem_clock_module_enable` 重新开时钟；
 单纯照搬这半段不行。改动已回退，goal 保持 active。
+
+---
+
+## §541 完整照搬 IDF 电源域 enable→disable→再 enable 仍无效
+
+在 `s3_win_phy_power_on()` 末尾清掉 0x78078F、在
+`register_chipv7_phy()` 前重新打开，PHY 校准成功（rc=1→0），
+但真板仍 `scan_get_ap_num=0`、关联失败。改动已回退。
+goal 保持 active。
