@@ -2094,9 +2094,7 @@ u64 lx_fs_access(u64 upath, u64 mode)
  * uid/gid 与符号链接概念，接受并忽略；路径解析复用 at_abspath_。 */
 u64 lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags)
 {
-    char ab[LOS_FS_PATH_MAX] = {0};
     char ap[FS_NAME] = {0};
-    LosFsStat st = {0};
     int rc;
 
     (void)mode;
@@ -2105,11 +2103,16 @@ u64 lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags)
     if (rc != 0) { return (u64)0 - (u64)(-rc); }
     if (ap[0] == '\0') { return 0ull; }
 #if C6OS_VFS
+    {
+    char ab[LOS_FS_PATH_MAX] = {0};
+    LosFsStat st = {0};
+
     ab[0] = '/';
     (void)os_str_cpy(ab + 1, ap, (u32)(LOS_FS_PATH_MAX - 1));
     if (vfs_owns_(ap) != 0) {
         return (LOS_FsStat((const CHAR *)ab, &st) == 0) ? 0ull
                                                         : (u64)0 - LX_ENOENT;
+    }
     }
 #endif
     return (fs_find(ap) >= 0) ? 0ull : (u64)0 - LX_ENOENT;
