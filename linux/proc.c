@@ -26,6 +26,7 @@ typedef struct LxPipe {
     u64 tail;
     u64 cap;
     u8 *buf;
+    u64 gen;                           /* 单调递增：每次写 +1，供 epoll ET 判边沿 */
 } LxPipe;
 
 /* 进程表（M13-3b）：槽位数组在内核堆里按需倍增，每个槽位有独立的 LxProc 与
@@ -2037,6 +2038,16 @@ u64 lx_proc_sendfile(u64 outfd, u64 infd, u64 uoff, u64 count)
 
 static void ep_release_(u64 id);   /* M20：定义在 epoll 块，close 里释放注册表 */
 static u16 poll_events_(LxProc *p, i32 fd);  /* M20：epoll_wait 复用，定义在下方 */
+/* ET 用：取 fd 对应管道的写代数（新数据到达会 +1）；非管道返回 0。 */
+static u64 fd_gen_(LxProc *p, i32 fd)
+{
+    const LxFile *f = lx_fdtab_get(p->fd, (u64)fd);
+    const LxPipe *pp;
+
+    if (f == (const LxFile *)0 || f->kind != LX_FD_PIPE_R) { return 0ull; }
+    pp = pipe_at_(f->node);
+    return (pp != (const LxPipe *)0) ? pp->gen : 0ull;
+}
 static void tfd_release_(u64 id);  /* M21：定义在 timerfd 块，close 里释放对象 */
 static void sfd_release_(u64 id);  /* M22：定义在 signalfd 块，close 里释放对象 */
 
@@ -2449,6 +2460,7 @@ static u64 pipe_write_(LxProc *p, LxFile *fe, u64 ubuf, u64 len)
             done++;
         }
         if (done == len) {
+            pp->gen++;                     /* 新数据到达 = 一个新边沿（epoll ET） */
             wake_all_();                   /* 有数据了，读者可能正等着 */
             return done;
         }
@@ -2620,9 +2632,18 @@ u64 lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len)
  * poll 替代路径足够；ET 语义可在后续扩展。 */
 #define LX_EPOLL_SENTINEL 0xfffffff6ull
 
+/* EPOLLET(1<<31) / EPOLLONESHOT(1<<30)：边沿触发与一次性通知。
+ * prev_ready 记录上次上报时的就绪位，ET 只在"新出现"的位上再报；
+ * fired 表示 ONESHOT 已报过一次，须 MOD/ADD 重新武装。 */
+#define LX_EPOLLET      0x80000000u
+#define LX_EPOLLONESHOT 0x40000000u
+
 typedef struct {
     i32 fd;
-    u32 events;                        /* 用户注册的 EPOLL* 位 */
+    u32 events;                        /* 用户注册的 EPOLL* 位（含 ET/ONESHOT） */
+    u32 prev_ready;                    /* ET：上次上报的就绪位 */
+    u32 fired;                         /* ONESHOT：已上报过 */
+    u64 last_gen;                      /* ET：上次上报时管道的写代数 */
     u64 data;                          /* 原样回传 */
 } LxEpItem;
 
@@ -2769,6 +2790,9 @@ u64 lx_epoll_ctl(u64 efd, u64 op, u64 fd, u64 uev)
         ep->items[ep->n].fd = (i32)fd;
         ep->items[ep->n].events = *(const u32 *)uev;
         ep->items[ep->n].data = *(const u64 *)(uev + 4ull);
+        ep->items[ep->n].prev_ready = 0u;
+        ep->items[ep->n].fired = 0u;
+        ep->items[ep->n].last_gen = 0u;
         ep->n++;
         return 0ull;
     }
@@ -2786,6 +2810,10 @@ u64 lx_epoll_ctl(u64 efd, u64 op, u64 fd, u64 uev)
                 }
                 ep->items[k].events = *(const u32 *)uev;
                 ep->items[k].data = *(const u64 *)(uev + 4ull);
+                /* MOD 重新武装 ONESHOT，并重置 ET 基线 */
+                ep->items[k].prev_ready = 0u;
+                ep->items[k].fired = 0u;
+                ep->items[k].last_gen = 0u;
             }
             return 0ull;
         }
@@ -2830,12 +2858,34 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
                 lx_tty_enabled() != 0u) {
                 tty = 1u;
             }
+            /* ONESHOT：已报过且未 MOD 重武装的项直接跳过 */
+            if ((it->events & LX_EPOLLONESHOT) != 0u && it->fired != 0u) {
+                continue;
+            }
+            /* ET：只在"新出现"的就绪位上报；与上次完全一样则不报。
+             * 管道的写代数变了（读空后又写）也算新边沿 —— 单靠 prev_ready
+             * 采样不到两次 wait 之间的"空→有"瞬态。 */
+            if ((it->events & LX_EPOLLET) != 0u) {
+                u64 gen = fd_gen_(p, it->fd);
+                u32 cur = (u32)rev & (it->events | 0x18u);
+
+                if (gen != it->last_gen) {
+                    got = cur;                 /* 新数据到达：当前就绪位都算新边沿 */
+                } else {
+                    got &= ~it->prev_ready;    /* 否则只报新出现的位 */
+                }
+                it->prev_ready = cur;
+                it->last_gen = gen;
+            }
             if (got != 0u) {
                 u8 *dst = (u8 *)(uevents + out * 12ull);
 
                 *(u32 *)dst = got;
                 *(u64 *)(dst + 4ull) = it->data;
                 out++;
+                if ((it->events & LX_EPOLLONESHOT) != 0u) {
+                    it->fired = 1u;
+                }
             }
         }
         if (out > 0ull || timeout == 0) {

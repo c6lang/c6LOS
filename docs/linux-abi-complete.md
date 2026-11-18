@@ -1330,5 +1330,24 @@ termios 应答用固定默认值；不做 /dev/pts 目录列举与 grantpt/unloc
 关键回归 M23/M25/M41/M42（含 SCM_RIGHTS）全 PASS。
 
 遗留：AF_UNIX 抽象名字空间（sun_path[0]=='\0'）、非 SCM_RIGHTS 的
-其它 cmsg、epoll ET/ONESHOT、epoll_pwait 信号掩码仍属边际项。
+其它 cmsg、epoll_pwait 信号掩码仍属边际项。
+
+### M47 epoll EPOLLET / EPOLLONESHOT
+
+上一条遗留里的 ET/ONESHOT 收窄。此前 epoll 纯水平触发，忽略
+`EPOLLET`(1<<31) 与 `EPOLLONESHOT`(1<<30)。M47：
+
+- `LxEpItem` 加 `prev_ready`（上次上报就绪位）、`fired`（ONESHOT 已报）、
+  `last_gen`（上次上报的管道写代数）；ADD/MOD 初始化与重装备。
+- `LxPipe` 加单调 `gen`，每次成功写 +1 —— 解决"两次 wait 之间读空又
+  写入"的瞬态（只靠 `prev_ready` 采样看不到空→有边沿）。
+- `epoll_wait`：ONESHOT 报过即跳过（MOD 重武装）；ET 用 `gen` 变化
+  或就绪位新出现判边沿，ERR/HUP 总报。水平触发路径完全不变。
+
+`tests/linux/m47epollflags.c` 验 20 项：ET 写数据报 1 次、无新数据
+不重复、读空再写又报 1 次；ONESHOT 报 1 次后静默、MOD 重武装再报。
+全 PASS。验收 `make check-linuxabi-m47` → PASS；统一回归纳入（43 项）；
+关键回归 M20/M21/M22/M46 全 PASS。
+
+遗留：`epoll_pwait` 信号掩码参数仍忽略（边际项）。
 
