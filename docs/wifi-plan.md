@@ -18376,3 +18376,11 @@ offset   IDF(after start)   c6(after start)
 在 start 后把 0x60026014 从 0xfffce7bf 清成 0xff84c010（去掉 c6-only 的
 0x7827af 位），读回确认生效，但 ca0 仍 0、扫描仍 0 AP、关联超时。
 改动已回退。goal 保持 active。
+
+---
+
+## §580 打开低 8 位全部外设中断源导致启动失败，已回退
+
+把 `intenable` 从 bit1-only 改成 0xff 后板子卡在 ROM bootloader 反复重启，
+串口无任何 c6os 输出。说明其它挂起源（1/4..7）必须保持屏蔽。
+改动已回退。goal 保持 active。
