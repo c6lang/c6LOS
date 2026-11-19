@@ -1130,12 +1130,14 @@ static u32 proc_mounts_(char *b)
 
 static u32 proc_pidstat_(char *b, u32 pid)
 {
-    /* /proc/PID/stat: busybox ps 读第 2 字段(comm)和第 4 字段(ppid)、
-     * 第 14/15 字段(utime/stime)算 CPU。给个最简合法行。 */
+    /* /proc/PID/stat：busybox top 用"跳 N 个空格"的方式定位 utime/stime，
+     * 短行会让它的扫描指针越过用户缓冲一路走到栈顶而 #PF。这里给足字段
+     * （56 个，覆盖 proc(5) 全部 52 字段），编号与 proc(5) 严格对齐。 */
     u32 o = pnum_(b, 0u, pid);
 
     o = pcat_(b, o, " (busybox) S 0 0 0 0 -1 0 0 0 0 0 0 0 "
-                    "10 5 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
+                    "10 5 0 0 1 0 20 0 1 1000 1 0 0 0 0 0 0 0 0 0 0 "
+                    "0 0 0 0 0 0 0 0 15 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
     return o;
 }
 
@@ -1200,6 +1202,58 @@ static u32 proc_id_(const char *s, u32 *pid)
     return 0u;
 }
 
+/* M58：/proc/<pid> 与 /proc/self 目录本身。node 编码成
+ * LX_PROC_PIDDIR_BASE + pid，和 proc 文件 id（1..LX_PROC_mounts）区分开。
+ * 没有它，busybox ps/top 列目录后 stat/open 子目录一律 ENOENT。 */
+#define LX_PROC_PIDDIR_BASE 0x10000u
+
+static u32 proc_piddir_(const char *s, u32 *pid)
+{
+    const char *q;
+    u32 p = 0u;
+    LxProc *cur;
+
+    if (seq_(s, "proc/self") == 1) {
+        cur = lx_cur_proc();
+        *pid = (cur != (LxProc *)0) ? cur->pid : 1u;
+        return 1u;
+    }
+    if (s[0] != 'p' || s[1] != 'r' || s[2] != 'o' || s[3] != 'c' || s[4] != '/') {
+        return 0u;
+    }
+    q = s + 5u;
+    while (*q >= '0' && *q <= '9') {
+        p = p * 10u + (u32)(*q - '0');
+        q++;
+    }
+    if (q == s + 5u || *q != '\0') {
+        return 0u;
+    }
+    *pid = p;
+    return 1u;
+}
+
+static void proc_u32_(u32 v, char *out)
+{
+    char tmp[12];
+    u32 n = 0u;
+    u32 i;
+
+    if (v == 0u) {
+        out[0] = '0';
+        out[1] = '\0';
+        return;
+    }
+    while (v != 0u) {
+        tmp[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+    for (i = 0u; i < n; i++) {
+        out[i] = tmp[n - 1u - i];
+    }
+    out[n] = '\0';
+}
+
 static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
 {
     char ap[FS_NAME] = {0};
@@ -1244,6 +1298,16 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
                 return (u64)0 - LX_EMFILE;
             }
             fd_set(fd, LX_FD_ROOT, 1u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        /* M58：/proc/<pid> 与 /proc/self 作为目录打开（ps/top 会 stat 它们） */
+        if (proc_piddir_(s, &pid) != 0u) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, LX_PROC_PIDDIR_BASE + (u64)pid, 1u, LX_FD_PROC, flags);
             g_fd[fd].pos = 0ull;
             return fd;
         }
@@ -1613,7 +1677,7 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
 
 /* 内核缓冲写（copy_file_range 的中转页在内核堆，不能过用户范围检查）。
  * 支持 VFS 文件与 /dev/*，与 lx_fs_write 的分支保持一致。 */
-static u64 fs_write_k_(u64 fd, const u8 *src, u64 len)
+u64 lx_fs_write_k(u64 fd, const u8 *src, u64 len)
 {
     LxFile *f = fd_get(fd);
 
@@ -1685,7 +1749,7 @@ u64 lx_fs_copy_file_range(u64 fd_in, u64 uoff_in, u64 fd_out,
         if ((i64)nr <= 0) { break; }
         /* fs_write_k_ 按 fd 当前 pos 写：显式 out_off 时先把 pos 对齐到它 */
         fo->pos = out_off;
-        nw = fs_write_k_(fd_out, tmp, nr);
+        nw = lx_fs_write_k(fd_out, tmp, nr);
         if ((i64)nw <= 0) {
             if (done == 0ull) { done = nw; }
             break;
@@ -2015,7 +2079,7 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
         u32 id = proc_id_(s, &pid);
         char *b;
 
-        if (s[4] == '\0') {
+        if (s[4] == '\0' || proc_piddir_(s, &pid) != 0u) {
             return (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) ?
                    (u64)0 - LX_EFAULT : 0ull;
         }
@@ -2501,50 +2565,98 @@ static u64 getdents_vfs_(LxFile *f, u64 ubuf, u64 len)
 #endif
 
 /* /proc 目录的 getdents64：列出最小集条目（busybox ps/free 只需能列目录）。 */
+/* M58：按 pos 算出 /proc 目录的第 pos 个条目名与 d_type。
+ * 根 /proc：固定虚拟文件 + self + 活进程 pid（全是 DIR 的 pid 项）。
+ * /proc/<pid>：status/stat/cmdline 三个 REG 文件。
+ * dtype=0 表示列表结束。 */
+static void proc_dent_(const LxFile *f, u64 pos, char *nm, u32 *dtype)
+{
+    static const char *const root_names[] = {
+        "meminfo", "uptime", "cpuinfo", "stat", "mounts", "self"
+    };
+    static const char *const pid_names[] = { "status", "stat", "cmdline" };
+    u32 pids[64];
+    u32 n;
+    u32 i;
+
+    if (pos == 0ull) {
+        nm[0] = '.'; nm[1] = '\0'; *dtype = 4u; return;
+    }
+    if (pos == 1ull) {
+        nm[0] = '.'; nm[1] = '.'; nm[2] = '\0'; *dtype = 4u; return;
+    }
+    pos -= 2ull;
+
+    if (f->node == LX_FD_ROOT) {
+        n = (u32)(sizeof root_names / sizeof root_names[0]);
+        if (pos < (u64)n) {
+            const char *src = root_names[pos];
+
+            for (i = 0u; src[i] != '\0'; i++) { nm[i] = src[i]; }
+            nm[i] = '\0';
+            *dtype = (seq_(src, "self") == 1) ? 4u : 8u;
+            return;
+        }
+        pos -= (u64)n;
+        n = lx_proc_list(pids, 64u);
+        if (pos < (u64)n) {
+            proc_u32_(pids[pos], nm);
+            *dtype = 4u;                    /* pid 项是目录 */
+            return;
+        }
+        *dtype = 0u;
+        return;
+    }
+
+    n = (u32)(sizeof pid_names / sizeof pid_names[0]);
+    if (pos < (u64)n) {
+        const char *src = pid_names[pos];
+
+        for (i = 0u; src[i] != '\0'; i++) { nm[i] = src[i]; }
+        nm[i] = '\0';
+        *dtype = 8u;
+        return;
+    }
+    *dtype = 0u;
+}
+
 static u64 getdents_proc_(LxFile *f, u64 ubuf, u64 len)
 {
-    static const char *const names[] = {
-        "meminfo", "uptime", "cpuinfo", "stat", "mounts",
-        "self", "1", "2", "3", "4"
-    };
     u64 used = 0ull;
 
-    while (f->pos < 2ull + (u64)(sizeof names / sizeof names[0])) {
-        const char *nm;
+    while (f->pos < 4096ull) {
+        char nm[32];
+        u32 dtype = 0u;
         u64 nl;
         u64 rl;
-        u8 rec[512];
+        u8 rec[64];
+        u64 i;
 
-        if (f->pos == 0ull) {
-            nm = ".";
-        } else if (f->pos == 1ull) {
-            nm = "..";
-        } else {
-            nm = names[f->pos - 2ull];
+        proc_dent_(f, f->pos, nm, &dtype);
+        if (dtype == 0u) {
+            break;                          /* 条目到头 */
         }
         nl = 0ull;
         while (nm[nl] != '\0') { nl++; }
-        /* 与 initramfs 版一致：19 字节头 + 名字 + NUL，再 8 字节对齐。 */
         rl = (19ull + nl + 1ull + 7ull) & ~7ull;
         if (used + rl > len) {
             break;
         }
-        for (u64 i = 0ull; i < 512ull; i++) {
+        for (i = 0ull; i < 64ull; i++) {
             rec[i] = 0u;
         }
         *(u64 *)(rec + 0ull) = 1ull;        /* d_ino */
         *(u64 *)(rec + 8ull) = f->pos + 1ull;  /* d_off */
         rec[16] = (u8)(rl & 0xffull);       /* d_reclen */
         rec[17] = (u8)((rl >> 8) & 0xffull);
-        rec[18] = (u8)((f->pos <= 1ull || seq_(nm, "self") == 1)
-                       ? 4u : 8u);         /* d_type: DIR/REG */
-        for (u64 i = 0ull; i < nl; i++) {
+        rec[18] = (u8)dtype;                /* d_type: DIR(4)/REG(8) */
+        for (i = 0ull; i < nl; i++) {
             rec[19ull + i] = (u8)nm[i];
         }
         if (lx_user_ok(ubuf + used, rl, C6OS_PROT_W) == 0) {
             return (u64)0 - LX_EFAULT;
         }
-        for (u64 i = 0ull; i < rl; i++) {
+        for (i = 0ull; i < rl; i++) {
             *(u8 *)(ubuf + used + i) = rec[i];
         }
         used += rl;

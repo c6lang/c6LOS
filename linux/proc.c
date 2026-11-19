@@ -100,6 +100,41 @@ LxProc *lx_cur_proc(void)
     return cur_();
 }
 
+/* M58：/proc 目录列举活进程用。只收 RUN/READY/STOP，排除 FREE 与 ZOMBIE
+ * （ZOMBIE 在 Linux 里仍可见，但它们的 stat 由 wait 前的残留信息给出，
+ * 这里统一不列举，避免 top/ps 看到读不出内容的幽灵项）。 */
+u32 lx_proc_list(u32 *out, u32 cap)
+{
+    u32 n = 0u;
+    u32 i;
+
+    if (g_proc == (LxSlot *)0) {
+        return 0u;
+    }
+    for (i = 0u; i < g_proc_cap && n < cap; i++) {
+        LxProc *p = g_proc[i].p;
+        u32 tgid;
+        u32 j;
+        int dup = 0;
+
+        if (p == (LxProc *)0 || p->state == LX_P_FREE || p->state == LX_P_ZOMBIE) {
+            continue;
+        }
+        tgid = (p->tgid != 0u) ? p->tgid : p->pid;
+        if (tgid == 0u) {
+            continue;
+        }
+        /* 线程组只列组长一次（Linux /proc 顶层只放 tgid） */
+        for (j = 0u; j < n; j++) {
+            if (out[j] == tgid) { dup = 1; break; }
+        }
+        if (dup == 0) {
+            out[n++] = tgid;
+        }
+    }
+    return n;
+}
+
 static void pipe_drop_(LxFile *fe);
 static void pipe_ref_(const LxFile *fe);
 static u64  n_(u64 v);             /* 负 errno（定义在本文件后部） */
@@ -3399,7 +3434,9 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     if (len == 0ull) {
         return 0ull;
     }
-    if (port_as_user_range_ok(p->as, ubuf, len, C6OS_PROT_W) == 0) {
+    /* 不能用裸 port_as_user_range_ok：musl 的大缓冲（cat 用 64KB）里未触碰的
+     * 页只有 VMA 承诺、尚无 PTE，必须先补页再查，否则误报 EFAULT。 */
+    if (lx_user_ok(ubuf, len, C6OS_PROT_W) == 0) {
         return n_((u64)LX_EFAULT);
     }
     if (fe->kind == LX_FD_PIPE_R) {
@@ -3725,10 +3762,13 @@ static u64 write_kbuf_(u64 fd, const u8 *src, u64 len)
     if (fe->kind == LX_FD_PIPE_W) {
         return pipe_write_(p, fe, (u64)src, len);
     }
-    if (fe->node == LX_FD_CONSOLE) {
-        return lx_console_put((u64)src, len);
+    if (fe->kind == LX_FD_PTY) {
+        return lx_pty_write_k(fe->node, (u64)src, len, fe->pos == 0ull ? 1u : 0u);
     }
-    return lx_console_write(fd, (u64)src, len);
+    if (fe->node == LX_FD_CONSOLE) {
+        return lx_console_put_k((u64)src, len);
+    }
+    return lx_fs_write_k(fd, src, len);
 }
 
 u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)

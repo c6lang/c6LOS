@@ -1560,3 +1560,38 @@ mknod EOPNOTSUPP，全 PASS。验收 `make check-linuxabi-m57` → PASS；
 **T4 范畴**：overlayfs、glibc NSS（musl/Alpine 不适用）、musl locale 全量
 libc-test（环境依赖），不在 Linux ABI 本体范围。
 
+
+### M58 /proc 端到端：sendfile 内核缓冲写 + 活进程目录
+
+M28–M57 补齐了 ABI 面，但交互式 Alpine 里 `cat /proc/cpuinfo` 仍报
+`read error: Bad address`，`top` 报 `no process info in /proc`，`ps` 只有表头。
+根因有两层，均不在 syscall 号码表本身：
+
+1. **sendfile 的内核中转缓冲被当成用户缓冲**。busybox `cat` 把 procfs 文件送到
+   stdout 走 `sendfile(2)`：`lx_proc_sendfile()` 先把数据读进 4KB 内核堆中转页，
+   再交给 `write_kbuf_()` 写出。原实现最终落到普通 `write` 路径，对这块内核地址
+   做 `lx_user_ok()` 用户范围校验 → EFAULT（管道路径恰好不做该检查，所以
+   `cat /proc/cpuinfo | wc -c` 一直正常，掩盖了问题）。新增三条**内核缓冲写**
+   入口，跳过用户校验、只做内核侧权限判断：
+   `lx_console_put_k`（sys.c）、`lx_fs_write_k`（fs.c，VFS/`/dev/*`）、
+   `lx_pty_write_k`（pty.c）。`write_kbuf_()` 按 fd 类型分派到这三条。
+2. **`/proc/<pid>` 没有目录语义**。procfs 只有固定的几个虚拟文件，没有活进程
+   目录；`getdents_proc_()` 把 pid 项标成 `d_type=8`(REG) 而非 `4`(DIR)。
+   新增 `lx_proc_list()` 枚举活进程（跳过 FREE/ZOMBIE、按 tgid 去重），
+   `proc_piddir_()` 解析 `/proc/<pid>` 与 `/proc/self`，open/stat 都返回目录
+   `0040755`，getdents 用 `proc_dent_()` 列出 `status`/`stat`/`cmdline`，
+   pid 项 `d_type=DIR`。
+
+另一个隐蔽点：busybox `top` 用"跳过 N 个空格"的方式解析 `/proc/PID/stat`，
+原先的最简行只有 35 个字段，扫描指针越过用户缓冲一路走到栈顶触发 #PF。
+`proc_pidstat_()` 现在输出 56 个字段（覆盖 proc(5) 的全部 52 字段，
+末尾另有若干保留位），编号与 proc(5) 严格对齐。
+此外 `lx_proc_read()` 的入口校验从裸 `port_as_user_range_ok()` 改为
+`lx_user_ok()`：`cat` 的 64KB 缓冲里未触碰的页只有 VMA 承诺、尚无 PTE，
+必须先补页再查，否则误报 EFAULT（写文件重定向场景）。
+
+验收 `tests/t_iso_alpine.c6` 的 `C6OS_ALPINE_PROC` 分支跑真实 Alpine busybox：
+`cat /proc/cpuinfo`、`cat /proc/meminfo > /data/...`、`stat /proc/1`、
+`ps`、`top -b -n 1`。`make check-linuxabi-m58` → PASS；统一回归纳入（54 项）。
+关键回归 M17/M19/M27/alpine-apps 全 PASS。已知遗留：`head -c N /proc/cpuinfo`
+的 "standard output: I/O error" 在本修复之前即存在，属 T4 范畴。

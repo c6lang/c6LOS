@@ -140,26 +140,40 @@ u64 lx_pty_read(u64 node, u64 ubuf, u64 len, u32 is_master)
     return n;
 }
 
-u64 lx_pty_write(u64 node, u64 ubuf, u64 len, u32 is_master)
+/* M58：user=1 走用户范围校验（普通 write），user=0 直收内核缓冲
+ * （sendfile 的中转页在内核堆，不能过用户页表检查）。 */
+static u64 pty_write_(u64 node, u64 buf, u64 len, u32 is_master, u32 user)
 {
     Pty *pt = pty_at_(node);
     PtyRing *r;
 
     if (pt == (Pty *)0) { return (u64)0 - LX_EBADF; }
     if (len == 0ull) { return 0ull; }
-    if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
+    if (user != 0u && lx_user_ok(buf, len, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
     r = ring_for_(pt, is_master, 1);
     {
         u8 *tmp = (u8 *)port_kcalloc(1ull, len);
         u64 i;
 
         if (tmp == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
-        for (i = 0ull; i < len; i++) { tmp[i] = *(u8 *)(ubuf + i); }
+        for (i = 0ull; i < len; i++) { tmp[i] = *(u8 *)(buf + i); }
         ring_put_(r, tmp, (u32)len);
         port_kfree((void *)tmp);
     }
     lx_unix_wake();                    /* 唤醒对端阻塞的 reader */
     return len;
+}
+
+u64 lx_pty_write(u64 node, u64 ubuf, u64 len, u32 is_master)
+{
+    return pty_write_(node, ubuf, len, is_master, 1u);
+}
+
+u64 lx_pty_write_k(u64 node, u64 kbuf, u64 len, u32 is_master)
+{
+    return pty_write_(node, kbuf, len, is_master, 0u);
 }
 
 void lx_pty_close(u64 node, u32 is_master)

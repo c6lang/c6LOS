@@ -208,6 +208,7 @@ typedef struct LxProc {
 /* 进程表与调度（linux/proc.c） */
 void     lx_proc_attach(u64 as, u64 brk);      /* 把当前上下文登记成 0 号进程 */
 LxProc  *lx_cur_proc(void);
+u32      lx_proc_list(u32 *out, u32 cap);        /* M58：活进程 pid 列表，给 /proc 目录用 */
 void     lx_proc_yield(void);                  /* 系统调用末尾让出一次 */
 void     lx_proc_block(void);                  /* 标 BLOCK 并立刻切走 */
 u64      lx_proc_alarm(u64 secs);              /* alarm(2)：返回旧闹钟剩余秒数 */
@@ -366,6 +367,7 @@ u32  lx_tty_pump(void);                           /* 泵一次串口，返回吃
 u32  lx_tty_ready(void);                          /* 有整行可读 / 有 EOF 挂起 */
 u64  lx_tty_read(u64 ubuf, u64 len, void (*yield_fn)(void));
 u64  lx_tty_write(u64 ubuf, u64 len);             /* 输出侧：应答 ESC[6n 等 DSR */
+u64  lx_console_put_k(u64 kbuf, u64 len);         /* M58：内核缓冲写控制台，不查用户权限 */
 i64  lx_tty_ioctl(u64 fd, u64 req, u64 arg);
 
 /* ---- pty（linux/pty.c，M45）：/dev/ptmx + /dev/pts/N ------------------- */
@@ -373,6 +375,7 @@ u64  lx_pty_open_master(void);              /* 返回 LxFile.node（对象 id）
 u64  lx_pty_open_slave(u64 id);             /* 打开从设备，返回 node 或负 errno */
 u64  lx_pty_read(u64 node, u64 ubuf, u64 len, u32 is_master);
 u64  lx_pty_write(u64 node, u64 ubuf, u64 len, u32 is_master);
+u64  lx_pty_write_k(u64 node, u64 kbuf, u64 len, u32 is_master);   /* M58：内核缓冲 */
 void lx_pty_close(u64 node, u32 is_master);
 i64  lx_pty_ioctl(u64 node, u64 req, u64 arg, u32 is_master);
 u32  lx_pty_is_tty(u64 node);

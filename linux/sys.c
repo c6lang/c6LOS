@@ -100,16 +100,23 @@ u64 lx_console_write(u64 fd, u64 ubuf, u64 len)
  * （ash/lineedit 真的会那么用），只看 fd==1/2 会把它们判成 EBADF。 */
 u64 lx_console_put(u64 ubuf, u64 len)
 {
-    u64 i;
-
     if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
         return (u64)0 - LX_EFAULT;
     }
+    return lx_console_put_k(ubuf, len);
+}
+
+/* M58：内核缓冲版 —— sendfile/copy_file_range 用内核中转缓冲写控制台。
+ * 内核缓冲不是用户 VA，绝不能走 lx_user_ok 的用户页表校验（否则 EFAULT）。 */
+u64 lx_console_put_k(u64 kbuf, u64 len)
+{
+    u64 i;
+
     if (lx_tty_enabled() != 0u) {
-        return lx_tty_write(ubuf, len);
+        return lx_tty_write(kbuf, len);
     }
     for (i = 0ull; i < len; i++) {
-        port_putc((int)(*(const u8 *)(ubuf + i)));
+        port_putc((int)(*(const u8 *)(kbuf + i)));
     }
     return len;
 }

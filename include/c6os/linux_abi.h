@@ -453,6 +453,8 @@ u64  lx_fs_pwrite(u64 fd, u64 ubuf, u64 len, u64 off);
 u64  lx_fs_preadv(u64 fd, u64 uiov, u64 cnt, u64 off);
 u64  lx_fs_pwritev(u64 fd, u64 uiov, u64 cnt, u64 off);
 u64  lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off);
+/* M58：内核缓冲写（sendfile/copy_file_range 的中转页在内核堆，不过用户校验） */
+u64  lx_fs_write_k(u64 fd, const u8 *ksrc, u64 len);
 /* 内核侧路径查询（不做用户态权限检查）：给 ELF 加载器找解释器用。 */
 u64  lx_fs_size_of(const char *path);
 u64  lx_fs_pa_of(const char *path);
