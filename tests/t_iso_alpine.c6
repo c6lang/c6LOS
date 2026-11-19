@@ -63,7 +63,9 @@ static const char kScript[] =
     "ifconfig; echo net-iface-ok; "
     "ifconfig eth0; echo net-ifaddr-ok; "
     "ping -c 1 -W 2 127.0.0.1; echo net-ping-loop-ok; "
-    "ping -c 1 -W 2 10.0.2.2; echo net-ping-gw-ok; "
+    "ping -c 1 -W 5 10.0.2.2 && echo net-ping-gw-ok; "
+    "nslookup google.com 10.0.2.3 && echo net-dns-ok; "
+    "ping -c 1 -W 5 8.8.8.8 && echo net-ping-ext-ok; "
     "echo net-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
@@ -163,6 +165,16 @@ static void net_init(void)
         (void)NetIfPollX86(nif);
         if (port_net_link_up() == 1) { break; }
         i++;
+    }
+    /* QEMU -nic user 的网关 MAC 固定为 52:55:0a:00:02:02。纯轮询网卡下
+     * 同步 send 拿不到 ARP 应答，先给网关填一条静态表项。 */
+    {
+        static const UINT8 gw_mac[LOS_ETH_ALEN] = {
+            0x52u, 0x55u, 0x0au, 0x00u, 0x02u, 0x02u
+        };
+        (void)ArpAdd(NET_IP_GW, &gw_mac[0]);
+        /* slirp 的 DNS（10.0.2.3）与网关共用同一虚拟 MAC。 */
+        (void)ArpAdd(0x0A000203u, &gw_mac[0]);
     }
     (void)SalUdpInit();
     (void)SalTcpInit();

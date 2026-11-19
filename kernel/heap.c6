@@ -19,19 +19,19 @@ static void heap_align_up(u32 *x) {
 
 static int heap_block_ok(OsHeap *h, HeapBlk *b) {
     u8 *p = (u8 *)b;
-    u32 end = 0;
+    u8 *end = (u8 *)0;
 
     if (h == 0 || b == 0) {
         return 0;
     }
-    end = (u32)(h->base + h->size);
-    if ((u32)p < (u32)h->base || (u32)p + HDR_SIZE > end) {
+    end = h->base + h->size;
+    if (p < h->base || p + HDR_SIZE > end) {
         return 0;
     }
     if (b->magic != (u32)HEAP_BLK_MAGIC) {
         return 0;
     }
-    if (b->size > (u32)(end - ((u32)p + HDR_SIZE))) {
+    if (b->size > (u32)(end - (p + HDR_SIZE))) {
         return 0;
     }
     return 1;

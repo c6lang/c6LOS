@@ -735,7 +735,7 @@ static int fill_stat(u64 ustat, u32 ino, u64 size, u32 mode)
 }
 
 /* statx(2)（nr 332）：真实程序（如 glibc 的 ls）用它取目录/文件元数据。
- * 复用 lx_fs_statat 的完整路径解析（initramfs/proc/VFS 挂载点/*at），
+ * 复用 lx_fs_statat 的完整路径解析（initramfs/proc/VFS 挂载点 at），
  * 做法是先把 legacy stat(144B) 暂存到用户给的 256B statx 缓冲前部，
  * 读出 ino/mode/size 后原地改写成 statx 布局，省掉重复一套路径解析。
  * x86-64 struct statx 256B：mask@0 blksize@4 attributes@8 nlink@16
@@ -1468,7 +1468,7 @@ u64 lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode)
 }
 
 /* 从文件读，不动 fd 位置（pread64、以及 mmap 的文件内容拷贝都用它）。 */
-/* M15-2：/dev/* 设备的读。node 是 LX_DEV_* 特殊值。
+/* M15-2：/dev 下设备的读。node 是 LX_DEV_* 特殊值。
  * user!=0 时目标在用户空间要先校验可写；user==0 是内核缓冲（pread_k）。 */
 static u32 g_dev_seed = 0x13579bdfu;
 
@@ -1739,7 +1739,7 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
 }
 
 /* 内核缓冲写（copy_file_range 的中转页在内核堆，不能过用户范围检查）。
- * 支持 VFS 文件与 /dev/*，与 lx_fs_write 的分支保持一致。 */
+ * 支持 VFS 文件与 /dev，与 lx_fs_write 的分支保持一致。 */
 u64 lx_fs_write_k(u64 fd, const u8 *src, u64 len)
 {
     LxFile *f = fd_get(fd);

@@ -1148,11 +1148,17 @@ $(X86)/disk.img: $(X86)/boot16.bin $(X86)/flat.bin
 	dd if=$(X86)/flat.bin of=$@ bs=512 seek=1 conv=notrunc status=none
 
 # sched 载荷：内核 + 上下文切换
+# c6 产出的 IR 里 triple 是 x86_64-pc-linux-gnu，而 clang 的目标是
+# x86_64-unknown-linux-gnu —— 不改写就每条都报一次 -Woverride-module。
+# 生成阶段统一 sed 成 clang 的目标（和 rv32 的两步做法一致）。
 $(X86S_DIR)/ir/stamp: $(X86S_C6)
 	@mkdir -p $(X86S_DIR)/ir
 	for f in $^; do \
 		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -DC6OS_NET=$(C6OS_NET) $(C6_DEFS) --emit-llvm \
-			-o $(X86S_DIR)/ir/$$(basename $$f .c6).ll $$f || exit 1; \
+			-o $(X86S_DIR)/ir/$$(basename $$f .c6).raw.ll $$f || exit 1; \
+		sed -e 's|^target triple = .*|target triple = "x86_64-unknown-linux-gnu"|' \
+			$(X86S_DIR)/ir/$$(basename $$f .c6).raw.ll \
+			> $(X86S_DIR)/ir/$$(basename $$f .c6).ll || exit 1; \
 	done
 	@touch $@
 
@@ -2106,11 +2112,11 @@ check-alpine-net: x86-alpine-net
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
 		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
 		| tr -d '\r' | tee /tmp/check-alpine-net.log >/dev/null
-	@for tag in net-iface-ok net-ifaddr-ok net-ping-loop-ok net-ping-gw-ok net-done; do \
+	@for tag in net-iface-ok net-ifaddr-ok net-ping-loop-ok net-ping-gw-ok net-dns-ok net-ping-ext-ok net-done; do \
 		grep -q "$$tag" /tmp/check-alpine-net.log \
 		  || { echo "FAIL: alpine net（缺 $$tag）"; tail -60 /tmp/check-alpine-net.log; exit 1; }; \
 	done
-	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2）"
+	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2/8.8.8.8 + DNS）"
 
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \

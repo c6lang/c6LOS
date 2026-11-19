@@ -69,29 +69,32 @@ void lx_sock_drop(u64 sd)
 }
 
 /* M24：泵轮询式网卡（x86 e1000）。NetIfPollX86 把 RX 环里的帧喂进协议栈，
- * ARP 应答与 DNS 响应才会被处理；没有中断，等待路径必须主动调。 */
+ * ARP 应答与 DNS 响应才会被处理；没有中断，等待路径必须主动调。
+ *
+ * 每次泵末尾必须让一下 CPU：e1000 的收包是 QEMU 主循环里 slirp+设备模型
+ * 完成的，vCPU 一直占着主循环就排不上队，应答永远填不进 RX 环。outb 到
+ * 0x80 会触发一次 PIO VM exit，QEMU 在这期间放锁让主循环跑一轮 —— 这是
+ * 这个端口上唯一安全的手段（hlt 不行：int 0x80 进内核时 IF 已被清掉，
+ * 且 PIT 回调可能把 syscall 当成任务切换掉）。 */
 void lx_net_pump(void)
 {
     LosNetIf *nif = NetIfGet(0u);
+    u8 zero = 0u;
+    u16 port = 0x80u;
 
     if (nif != (LosNetIf *)0) {
         (void)NetIfPollX86(nif);
     }
+    __asm__ __volatile__("outb %0, %1" : : "a"(zero), "Nd"(port));
 }
 
 /* M24：单个 socket 的就绪位。UDP 看接收队列计数，TCP 看 SalPoll。 */
 u16 lx_sock_poll_one(u64 sd)
 {
-    LxFile *f = lxs_get_(sd);
     int revents;
 
-    if (f == (LxFile *)0) {
-        return LX_POLLNVAL;
-    }
-    if (f->kind == LX_FD_UNIX) {
-        return lx_unix_poll(f->node);
-    }
-    revents = SalPoll((int)f->node, 0x1u | 0x4u);   /* POLLIN | POLLOUT */
+    /* sd 是 SAL socket id（LxFile.node），不是 fd。 */
+    revents = SalPoll((int)sd, 0x1u | 0x4u);   /* POLLIN | POLLOUT */
     if (revents < 0) {
         return 0u;
     }
@@ -130,10 +133,10 @@ static void lxs_addr_out_(const LosSockAddr *in, u64 uaddr)
     p[1] = (u8)((in->family >> 8) & 0xffu);
     p[2] = (u8)(port_be & 0xffu);
     p[3] = (u8)((port_be >> 8) & 0xffu);
-    p[4] = (u8)(in->addr & 0xffu);
-    p[5] = (u8)((in->addr >> 8) & 0xffu);
-    p[6] = (u8)((in->addr >> 16) & 0xffu);
-    p[7] = (u8)((in->addr >> 24) & 0xffu);
+    p[4] = (u8)((in->addr >> 24) & 0xffu);   /* sin_addr 是网络序 */
+    p[5] = (u8)((in->addr >> 16) & 0xffu);
+    p[6] = (u8)((in->addr >> 8) & 0xffu);
+    p[7] = (u8)(in->addr & 0xffu);
     for (i = 8ull; i < 16ull; i++) {
         p[i] = 0u;
     }
@@ -354,31 +357,56 @@ u64 lx_sock_sendto(u64 fd, u64 ubuf, u64 len, u64 flags,
     return lxs_send_ret_(rc, len);
 }
 
-/* M24：UDP 空队列返回 -113? 不，返回 -11(EAGAIN)。等待响应时泵网卡收包，
- * 再试一次——让不经过 poll 的同步 recv（如 SO_RCVTIMEO 循环）也能收到
- * ARP 应答/DNS 响应。 */
-static int sal_recv_retry_(int sd, void *buf, u32 len)
-{
-    int rc = SalRecv(sd, buf, len);
-    int i;
+/* M24：UDP 空队列返回 -11(EAGAIN)。等待响应时泵网卡收包再重试——让不经过
+ * poll 的同步 recv 也能收到 ARP 应答/DNS 响应。
+ *
+ * 这里本质上是"自旋等网卡"：e1000 没有中断，收包完全靠 vCPU 主动轮询，
+ * 而真正收包的是 QEMU 主循环里的 slirp —— 每次泵末尾的 outb 才让主循环
+ * 跑一轮。所以"能收到几个包"直接正比于轮询次数：次数给少了 DNS 应答还在
+ * 路上就放弃了（nslookup 报超时），给多了纯浪费。500000 次 ≈ slirp 往返
+ * 十几次的余量，实测足够覆盖 ARP + DNS + ping 三种往返。
+ *
+ * 另加一个墙钟兜底，防止 TSC 异常时永远转下去。
+ *
+ * 非阻塞 socket 必须**立刻**返回 EAGAIN（select/poll 驱动的程序靠它判就绪），
+ * 所以 nonblock 时只泵一次网卡、不做重试。 */
+#define LX_NET_SPIN_MAX   500000ull
+#define LX_NET_SPIN_GUARD 30000000000ull   /* ≈10s @3GHz，仅作兜底 */
 
-    for (i = 0; i < 2000 && rc == -11; i++) {
-        lx_net_pump();
+static int lx_net_spin_(int sd, void *buf, u32 len, LosSockAddr *a,
+                        int want_addr, int nonblock)
+{
+    u64 guard = port_cycles() + LX_NET_SPIN_GUARD;
+    u64 limit = (nonblock != 0) ? 1ull : LX_NET_SPIN_MAX;
+    u64 i = 0ull;
+    int rc;
+
+    if (want_addr != 0) {
+        rc = SalRecvFrom(sd, buf, len, a);
+    } else {
         rc = SalRecv(sd, buf, len);
+    }
+    while (rc == -11 && i < limit && port_cycles() < guard) {
+        lx_net_pump();
+        if (want_addr != 0) {
+            rc = SalRecvFrom(sd, buf, len, a);
+        } else {
+            rc = SalRecv(sd, buf, len);
+        }
+        i++;
     }
     return rc;
 }
 
-static int sal_recvfrom_retry_(int sd, void *buf, u32 len, LosSockAddr *a)
+static int sal_recv_retry_(int sd, void *buf, u32 len, int nonblock)
 {
-    int rc = SalRecvFrom(sd, buf, len, a);
-    int i;
+    return lx_net_spin_(sd, buf, len, (LosSockAddr *)0, 0, nonblock);
+}
 
-    for (i = 0; i < 2000 && rc == -11; i++) {
-        lx_net_pump();
-        rc = SalRecvFrom(sd, buf, len, a);
-    }
-    return rc;
+static int sal_recvfrom_retry_(int sd, void *buf, u32 len, LosSockAddr *a,
+                               int nonblock)
+{
+    return lx_net_spin_(sd, buf, len, a, 1, nonblock);
 }
 
 u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
@@ -386,18 +414,21 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
 {
     LxFile *f = lxs_get_(fd);
     int rc;
+    int nb;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
     if (f->kind == LX_FD_UNIX) {
         return lx_unix_recvfrom(fd, ubuf, len, uaddr, uaddrlen);
     }
     if (lx_user_ok(ubuf, len, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
-    (void)flags;
+    /* MSG_DONTWAIT(0x40) 或 O_NONBLOCK：不许在内核里等。 */
+    nb = (((flags & 0x40ull) != 0ull) || ((f->oflags & LX_O_NONBLOCK) != 0u)) ? 1 : 0;
     if (uaddr != 0ull) {
         LosSockAddr a;
 
         if (lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
-        rc = sal_recvfrom_retry_((int)f->node, (void *)ubuf, (u32)len, &a);
+        rc = sal_recvfrom_retry_((int)f->node, (void *)ubuf, (u32)len, &a,
+                                 nb);
         if (rc >= 0) {
             lxs_addr_out_(&a, uaddr);
             if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) != 0) {
@@ -405,7 +436,7 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
             }
         }
     } else {
-        rc = sal_recv_retry_((int)f->node, (void *)ubuf, (u32)len);
+        rc = sal_recv_retry_((int)f->node, (void *)ubuf, (u32)len, nb);
     }
     return lxs_err_(rc);
 }
@@ -567,6 +598,7 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
     u8 *buf;
     u32 i;
     int rc;
+    int nb;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
     if (f->kind == LX_FD_UNIX) { return lx_unix_recvmsg(fd, umsg, flags); }
@@ -581,6 +613,7 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
     }
     buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
     if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
+    nb = (((flags & 0x40ull) != 0ull) || ((f->oflags & LX_O_NONBLOCK) != 0u)) ? 1 : 0;
     if (*(const u64 *)(umsg + 8ull) != 0ull) {
         LosSockAddr a;
         u64 name = *(const u64 *)(umsg + 0ull);
@@ -589,10 +622,11 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
             port_kfree((void *)buf);
             return (u64)0 - LX_EFAULT;
         }
-        rc = sal_recvfrom_retry_((int)f->node, (void *)buf, (u32)total, &a);
+        rc = sal_recvfrom_retry_((int)f->node, (void *)buf, (u32)total, &a,
+                                 nb);
         if (rc >= 0) { lxs_addr_out_(&a, name); }
     } else {
-        rc = sal_recv_retry_((int)f->node, (void *)buf, (u32)total);
+        rc = sal_recv_retry_((int)f->node, (void *)buf, (u32)total, nb);
     }
     if (rc < 0) {
         port_kfree((void *)buf);
@@ -712,9 +746,9 @@ u64 lx_sock_ioctl(u64 fd, u64 req, u64 arg)
     if (req == LX_SIOCGIFMTU)    { *(i32 *)(p + 16ull) = 1500;  return 0ull; }
     if (req == LX_SIOCGIFINDEX)  { *(i32 *)(p + 16ull) = 1;      return 0ull; }
     if (req == LX_SIOCGIFHWADDR) {
+        /* ifreq.ifr_hwaddr 是 sockaddr：family@16，sa_data@18，MAC 从 18 开始。 */
         p[16] = 1u; p[17] = 0u;              /* ARPHRD_ETHER */
-        p[18] = 0u; p[19] = 0u;
-        for (i = 0u; i < 6u; i++) { p[20u + i] = nif->mac[i]; }
+        for (i = 0u; i < 6u; i++) { p[18u + i] = nif->mac[i]; }
         return 0ull;
     }
     return (u64)0 - LX_ENOTTY;

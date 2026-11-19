@@ -110,6 +110,7 @@ LosNetIf *NetIfGet(UINT32 i);
 INT32  ArpInput(LosNetIf *nif, LosNetBuf *p);
 INT32  ArpResolve(LosNetIf *nif, UINT32 ip, UINT8 *mac_out);   /* 1 命中 / 0 未命中 */
 INT32  ArpRequest(LosNetIf *nif, UINT32 ip);
+INT32  ArpAdd(UINT32 ip, const UINT8 *mac);      /* 静态 ARP 表项 */
 UINT32 ArpCacheCount(VOID);
 
 /* ---- IPv4 ---- */
