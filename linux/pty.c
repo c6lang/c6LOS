@@ -18,7 +18,14 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 
+/* C6OS_NET=1 的 Linux ABI 镜像同时带协议栈，stage2 的 .bss 必须留在
+ * 0xA0000 以下；8 个 pty × 2 × 4KB = 64KB，压到 2 个（一个 shell + 一个备用）。
+ * 不编网络的构建保持 8 个，pty 回归不受影响。 */
+#if C6OS_NET
+#define PTY_MAX      2u
+#else
 #define PTY_MAX      8u
+#endif
 #define PTY_RBUF     4096u
 
 typedef struct {

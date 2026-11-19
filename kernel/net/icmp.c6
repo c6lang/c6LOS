@@ -106,6 +106,8 @@ INT32 IcmpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
         e->seq = seq;
         e->len = p->len;
         e->first = b[8];
+        /* M59：raw socket（ping）也要拿到整份应答，别只记进 IcmpPing 的表 */
+        (void)IcmpRawReply((const UINT8 *)b, p->len, src);
         NetBufFree(p);
         return 0;
     }

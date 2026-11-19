@@ -86,6 +86,8 @@
 #define LX_PROC_pidstatus 8u
 #define LX_PROC_pidcmdline 9u
 #define LX_PROC_mounts    10u
+#define LX_PROC_netdev    11u
+#define LX_PROC_MAX       LX_PROC_netdev
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，
@@ -267,6 +269,12 @@ u64      lx_sock_getsockopt(u64 sd, u64 level, u64 optname,
 u64      lx_sock_shutdown(u64 sd, u64 how);
 u64      lx_sock_getpeername(u64 sd, u64 uaddr, u64 uaddrlen);
 u64      lx_sock_getsockname(u64 sd, u64 uaddr, u64 uaddrlen);
+/* SAL socket 的 fd 引用计数：dup2/fork/close 别名共用一份底层 socket。
+ * 计数由 socket.c 维护；C6OS_NET=0 下是空操作。 */
+void     lx_sock_ref(u64 sd);
+void     lx_sock_drop(u64 sd);
+/* M59：socket fd 上的网络 ioctl（SIOCGIF*），给 ifconfig 用 */
+u64      lx_sock_ioctl(u64 sd, u64 req, u64 arg);
 /* M23：sendmsg/recvmsg（iovec 展开，控制消息暂忽略） */
 u64      lx_sock_sendmsg(u64 sd, u64 umsg, u64 flags);
 u64      lx_sock_recvmsg(u64 sd, u64 umsg, u64 flags);

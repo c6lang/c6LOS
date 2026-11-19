@@ -23,6 +23,10 @@
 #include "los/los_typedef.h"
 #include "los/los_fs.h"
 #include "los/los_block.h"
+#if C6OS_NET
+#include "los/net.h"
+#include "los/sal.h"
+#endif
 
 #define BOOTINFO_PA    0x7000u
 #define BOOTINFO_MAGIC 0x53493643u
@@ -51,6 +55,16 @@ static const char kScript[] =
     "ps; echo m58-ps-ok; "
     "top -b -n 1; echo m58-top-ok; "
     "echo m58-done";
+#elif defined(C6OS_ALPINE_NET)
+/* 网络端到端：未修改的 Alpine busybox ifconfig + ping。ifconfig 走 /proc/net/dev
+ * 与 SIOCGIF*；ping 走 AF_INET/SOCK_RAW/IPPROTO_ICMP（sal_raw.c6）。 */
+static const char kScript[] =
+    "echo alpine-net-alive; "
+    "ifconfig; echo net-iface-ok; "
+    "ifconfig eth0; echo net-ifaddr-ok; "
+    "ping -c 1 -W 2 127.0.0.1; echo net-ping-loop-ok; "
+    "ping -c 1 -W 2 10.0.2.2; echo net-ping-gw-ok; "
+    "echo net-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
  * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。
@@ -122,6 +136,40 @@ static INT32 blk_wr_cb(UINT32 d, UINT32 blk, UINT32 cnt, const VOID *buf)
     (void)d;
     return (INT32)port_ata_write(blk, cnt, (u64)buf);
 }
+
+#if C6OS_NET
+/* qemu -nic user 的默认网络：客户机 10.0.2.15/24，网关 10.0.2.2。
+ * 没有网卡时只警告不 abort —— 不带 -nic 跑 check-alpine 仍要能过。 */
+#define NET_IP_ME    0x0A00020Fu
+#define NET_IP_GW    0x0A000202u
+#define NET_IP_MASK  0xFFFFFF00u
+
+static void net_init(void)
+{
+    LosNetIf *nif = NetIfAttachX86();
+    UINT32 i = 0u;
+
+    if (nif == (LosNetIf *)0) {
+        port_puts("  net: 没有 e1000（qemu 要 -nic user,model=e1000）\n");
+        return;
+    }
+    if (NetIfSetIp(nif, NET_IP_ME, NET_IP_MASK, NET_IP_GW) != 0 ||
+        NetIfUp(nif) != 0) {
+        port_puts("  net: 配置 eth0 失败\n");
+        return;
+    }
+    /* 网卡纯轮询：先泵一会儿等链路起来；用户态等待路径另有 lx_net_pump。 */
+    while (i < 200000u) {
+        (void)NetIfPollX86(nif);
+        if (port_net_link_up() == 1) { break; }
+        i++;
+    }
+    (void)SalUdpInit();
+    (void)SalTcpInit();
+    (void)SalRawInit();
+    port_puts("  net: eth0 10.0.2.15/24 gw 10.0.2.2（UDP/TCP/ICMP-raw）\n");
+}
+#endif
 
 void os_main(void)
 {
@@ -230,6 +278,11 @@ void os_main(void)
     /* 4. 串口接上行规程：0 号 fd 变真终端，sh 才会认自己交互式 */
     lx_tty_init();
     port_puts("  tty: 串口行规程已开（0/1/2 是终端）\n");
+
+#if C6OS_NET
+    /* 4.5 网络和 SAL：ifconfig/socket/ping 的 syscall 都依赖这一步 */
+    net_init();
+#endif
 
     /* 5. 进用户态跑 /bin/sh（动态 PIE：先跑 ld-musl，再把控制权交给 busybox）
      *

@@ -64,8 +64,8 @@ INT32 IpOutput(LosNetIf *nif, UINT32 dst, UINT8 proto, LosNetBuf *p)
     NetPut32(&h[16], dst);
     csum = NetCsum(h, (UINT32)LOS_IP_HLEN);
     NetPut16(&h[10], csum);
-    /* 环回：目的就是本机 → 头造好了直接进自己的输入路径（不出网线）。 */
-    if (dst == nif->ip) {
+    /* 环回：本机地址或 127/8（busybox `ping 127.0.0.1`）直接进输入路径。 */
+    if (dst == nif->ip || (dst >> 24) == 127u) {
         return IpInput(nif, p);
     }
     hop = ip_next_hop_(nif, dst);
@@ -126,7 +126,7 @@ INT32 IpInput(LosNetIf *nif, LosNetBuf *p)
         return 0 - 22;
     }
     dst = NetGet32(&h[16]);
-    if (dst != nif->ip) {                    /* 不转发 */
+    if (dst != nif->ip && (dst >> 24) != 127u) { /* 不转发；127/8 是环回 */
         nif->rx_dropped = nif->rx_dropped + 1u;
         NetBufFree(p);
         return 0 - 22;

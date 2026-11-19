@@ -152,6 +152,10 @@ INT32  SalUdpInit(VOID);
 
 /* ---- ICMP ---- */
 
+/* M59：SOCK_RAW/IPPROTO_ICMP（busybox ping）；SalRawInit 注册到 SAL */
+INT32  SalRawInit(VOID);
+INT32  IcmpRawReply(const UINT8 *b, UINT32 len, UINT32 src);
+
 INT32  IcmpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
 INT32  IcmpPing(LosNetIf *nif, UINT32 dst, UINT16 id, UINT16 seq);   /* 发请求，1 = 立即拿到应答 */
 INT32  IcmpGotReply(UINT16 id, UINT16 seq);                          /* 该 (id,seq) 的应答到过没 */

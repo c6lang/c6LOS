@@ -1007,6 +1007,7 @@ X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
                   kernel/net/arp.c6 kernel/net/ip.c6 kernel/net/icmp.c6 \
                   kernel/net/udp.c6 kernel/net/sal_udp.c6 \
                   kernel/net/tcp.c6 kernel/net/sal_tcp.c6 \
+                  kernel/net/sal_raw.c6 \
                   kernel/net/netif_x86.c6
 endif
 
@@ -1150,7 +1151,7 @@ $(X86)/disk.img: $(X86)/boot16.bin $(X86)/flat.bin
 $(X86S_DIR)/ir/stamp: $(X86S_C6)
 	@mkdir -p $(X86S_DIR)/ir
 	for f in $^; do \
-		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude $(C6_DEFS) --emit-llvm \
+		$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -DC6OS_NET=$(C6OS_NET) $(C6_DEFS) --emit-llvm \
 			-o $(X86S_DIR)/ir/$$(basename $$f .c6).ll $$f || exit 1; \
 	done
 	@touch $@
@@ -2061,6 +2062,7 @@ x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 	@rm -rf $(ISO_DIR)
 	@mkdir -p $(ISO_DIR)
 	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 \
 		$(if $(filter 1,$(ALPINE_INTERACTIVE)),C6_DEFS=-DC6OS_ALPINE_INTERACTIVE) \
 		$(ISO_KER)
 	@mkdir -p $(ALPINE_DIR)
@@ -2070,7 +2072,7 @@ x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 run-x86-alpine: x86-alpine
 	qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
-		-nographic -serial stdio -monitor none -no-reboot
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
 
 # 自己敲命令：起来就是 Alpine 的 /bin/sh 提示符（/ #），exit 或 Ctrl-D 退出。
 run-x86-alpine-shell:
@@ -2089,10 +2091,31 @@ x86-alpine-apps: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/apps.iso
 
+# ---- 网络端到端：真实 Alpine busybox 的 ifconfig + ping ----
+x86-alpine-net: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 C6_DEFS=-DC6OS_ALPINE_NET \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/net.iso
+
+check-alpine-net: x86-alpine-net
+	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/net.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine-net.log >/dev/null
+	@for tag in net-iface-ok net-ifaddr-ok net-ping-loop-ok net-ping-gw-ok net-done; do \
+		grep -q "$$tag" /tmp/check-alpine-net.log \
+		  || { echo "FAIL: alpine net（缺 $$tag）"; tail -60 /tmp/check-alpine-net.log; exit 1; }; \
+	done
+	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2）"
+
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
-		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
 		| tr -d '\r' | tee /tmp/check-alpine-apps.log >/dev/null
 	@grep -q "apps-cat-ok" /tmp/check-alpine-apps.log \
 	  || { echo "FAIL: alpine apps（cat 读 FAT 文件失败）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
@@ -2107,7 +2130,7 @@ check-alpine:
 	@$(MAKE) x86-alpine
 	@timeout 180 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
-		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
 		| tr -d '\r' | tee /tmp/check-alpine.log >/dev/null
 	@grep -q "alpine-M12-alive" /tmp/check-alpine.log \
 	  || { echo "FAIL: alpine M12（脚本没跑起来）"; tail -40 /tmp/check-alpine.log; exit 1; }

@@ -2,6 +2,9 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
+#if C6OS_NET
+#include "los/net.h"
+#endif
 
 /* 只读 initramfs（标准 newc cpio，和 Linux 的 initramfs 同格式）+ fd 表 +
  * 文件类系统调用。
@@ -1001,7 +1004,7 @@ typedef struct {
     char *buf;
 } LxProcFile;
 
-static LxProcFile g_procf[LX_PROC_mounts + 1u];
+static LxProcFile g_procf[LX_PROC_MAX + 1u];
 
 static char *proc_buf_(u32 id)
 {
@@ -1128,6 +1131,52 @@ static u32 proc_mounts_(char *b)
     return o;
 }
 
+/* /proc/net/dev：busybox ifconfig 靠它列接口。前两行是 Linux 的固定表头，
+ * 数据行是 "<name>: <16 个收发计数>"，计数直接来自 NetIf 的驱动统计。 */
+static u32 proc_netdev_(char *b)
+{
+    static const char hdr[] =
+        "Inter-|   Receive                                                |  Transmit\n"
+        " face |bytes    packets errs drop fifo frame compressed multicast|"
+        "bytes    packets errs drop fifo colls carrier compressed\n";
+#if C6OS_NET
+    LosNetIf *nif = NetIfGet(0u);
+#endif
+    u32 o = pcat_(b, 0u, hdr);
+    u32 i;
+
+#if C6OS_NET
+    if (nif != (LosNetIf *)0) {
+        i = 0u;
+        while (nif->name[i] != '\0' && i < 7u) {
+            b[o++] = nif->name[i];
+            i++;
+        }
+        b[o++] = ':';
+        b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->rx_packets * 60ull); b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->rx_packets);         b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->rx_dropped);          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->tx_packets * 60ull);  b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->tx_packets);          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, (u64)nif->tx_dropped);          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = ' ';
+        o = pnum_(b, o, 0ull);                          b[o++] = '\n';
+    }
+#else
+    (void)i;
+#endif
+    return o;
+}
+
 static u32 proc_pidstat_(char *b, u32 pid)
 {
     /* /proc/PID/stat：busybox top 用"跳 N 个空格"的方式定位 utime/stime，
@@ -1145,7 +1194,7 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
 {
     char *b;
 
-    if (id == 0u || id > LX_PROC_mounts) {
+    if (id == 0u || id > LX_PROC_MAX) {
         return 0u;
     }
     b = proc_buf_(id);
@@ -1163,6 +1212,7 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
     case LX_PROC_pidstatus: g_procf[id].size = proc_status_(b, pid); break;
     case LX_PROC_pidcmdline:g_procf[id].size = proc_cmdline_(b); break;
     case LX_PROC_mounts:    g_procf[id].size = proc_mounts_(b); break;
+    case LX_PROC_netdev:    g_procf[id].size = proc_netdev_(b); break;
     default: return 0u;
     }
     *out = b;
@@ -1179,6 +1229,7 @@ static u32 proc_id_(const char *s, u32 *pid)
     if (seq_(s, "proc/cpuinfo") == 1)  return LX_PROC_cpuinfo;
     if (seq_(s, "proc/stat") == 1)     return LX_PROC_stat;
     if (seq_(s, "proc/mounts") == 1)   return LX_PROC_mounts;
+    if (seq_(s, "proc/net/dev") == 1)  return LX_PROC_netdev;
     if (seq_(s, "proc/self/status") == 1)   return LX_PROC_status;
     if (seq_(s, "proc/self/stat") == 1)     return LX_PROC_pidstat;
     if (seq_(s, "proc/self/cmdline") == 1)  return LX_PROC_cmdline;
@@ -1206,6 +1257,8 @@ static u32 proc_id_(const char *s, u32 *pid)
  * LX_PROC_PIDDIR_BASE + pid，和 proc 文件 id（1..LX_PROC_mounts）区分开。
  * 没有它，busybox ps/top 列目录后 stat/open 子目录一律 ENOENT。 */
 #define LX_PROC_PIDDIR_BASE 0x10000u
+/* /proc/net 目录（里面只有 dev），和 pid 目录用不同 node 区段。 */
+#define LX_PROC_NETDIR_BASE 0x20000u
 
 static u32 proc_piddir_(const char *s, u32 *pid)
 {
@@ -1308,6 +1361,16 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
                 return (u64)0 - LX_EMFILE;
             }
             fd_set(fd, LX_PROC_PIDDIR_BASE + (u64)pid, 1u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        /* /proc/net：ifconfig 会先列这个目录再打开 dev */
+        if (seq_(s, "proc/net") == 1) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, LX_PROC_NETDIR_BASE, 1u, LX_FD_PROC, flags);
             g_fd[fd].pos = 0ull;
             return fd;
         }
@@ -1470,7 +1533,7 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         char *b;
         u64 sz;
 
-        if (f->is_dir != 0u || id == 0u || id > LX_PROC_mounts) {
+        if (f->is_dir != 0u || id == 0u || id > LX_PROC_MAX) {
             return (u64)0 - LX_EISDIR;
         }
         b = proc_buf_(id);
@@ -1999,7 +2062,7 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
         u64 sz = 0ull;
 
         /* 目录 fd 的 node 是 LX_FD_ROOT 哨兵，不是 proc id —— 别拿它索引表。 */
-        if (f->is_dir == 0u && (u32)f->node <= LX_PROC_mounts) {
+        if (f->is_dir == 0u && (u32)f->node <= LX_PROC_MAX) {
             sz = (u64)g_procf[(u32)f->node].size;
         }
         if (fill_stat(ustat, 0u, sz, mode) != 0) {
@@ -2079,7 +2142,8 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
         u32 id = proc_id_(s, &pid);
         char *b;
 
-        if (s[4] == '\0' || proc_piddir_(s, &pid) != 0u) {
+        if (s[4] == '\0' || proc_piddir_(s, &pid) != 0u ||
+            seq_(s, "proc/net") == 1) {
             return (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) ?
                    (u64)0 - LX_EFAULT : 0ull;
         }
@@ -2572,7 +2636,7 @@ static u64 getdents_vfs_(LxFile *f, u64 ubuf, u64 len)
 static void proc_dent_(const LxFile *f, u64 pos, char *nm, u32 *dtype)
 {
     static const char *const root_names[] = {
-        "meminfo", "uptime", "cpuinfo", "stat", "mounts", "self"
+        "meminfo", "uptime", "cpuinfo", "stat", "mounts", "net", "self"
     };
     static const char *const pid_names[] = { "status", "stat", "cmdline" };
     u32 pids[64];
@@ -2594,7 +2658,7 @@ static void proc_dent_(const LxFile *f, u64 pos, char *nm, u32 *dtype)
 
             for (i = 0u; src[i] != '\0'; i++) { nm[i] = src[i]; }
             nm[i] = '\0';
-            *dtype = (seq_(src, "self") == 1) ? 4u : 8u;
+            *dtype = (seq_(src, "self") == 1 || seq_(src, "net") == 1) ? 4u : 8u;
             return;
         }
         pos -= (u64)n;
@@ -2605,6 +2669,17 @@ static void proc_dent_(const LxFile *f, u64 pos, char *nm, u32 *dtype)
             return;
         }
         *dtype = 0u;
+        return;
+    }
+
+    /* /proc/net 目录：只有 dev 一个虚拟文件 */
+    if (f->node == LX_PROC_NETDIR_BASE) {
+        if (pos == 0ull) {
+            nm[0] = 'd'; nm[1] = 'e'; nm[2] = 'v'; nm[3] = '\0';
+            *dtype = 8u;
+        } else {
+            *dtype = 0u;
+        }
         return;
     }
 
