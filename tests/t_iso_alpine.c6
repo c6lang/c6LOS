@@ -39,7 +39,19 @@ static OsFsPart g_part = {0};
  * 本身就是那次修复的端到端检验（kernel 里没有 C 运行时）。
  * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
 #ifndef C6OS_ALPINE_INTERACTIVE
-#ifdef C6OS_ALPINE_APPS
+#ifdef C6OS_ALPINE_PROC
+/* M58：真实 Alpine busybox 的 /proc 端到端验收。
+ * cat 走 sendfile→内核中转缓冲→控制台/文件；ps/top 走 /proc/<pid> 目录与
+ * 完整 52 字段 stat 行。任何一环退化都会让这里缺标记。 */
+static const char kScript[] =
+    "echo alpine-proc-alive; "
+    "cat /proc/cpuinfo && echo m58-cpuinfo-ok; "
+    "cat /proc/meminfo > /data/m58mem.txt && echo m58-meminfo-ok; "
+    "stat /proc/1 > /dev/null && echo m58-procdir-ok; "
+    "ps; echo m58-ps-ok; "
+    "top -b -n 1; echo m58-top-ok; "
+    "echo m58-done";
+#elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
  * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。
  * 备注：外部命令管道（如 `xx | cat`）与 gzip/sort/grep 在本内核上仍有

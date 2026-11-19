@@ -3349,3 +3349,28 @@ check-linuxabi-m57: x86-m57
 		| grep -q "^PASS: m57meta" \
 	  && echo "PASS: linux-abi M57（chown/symlink/link/mknod 族）" \
 	  || { echo "FAIL: linux-abi M57"; tail -30 /tmp/check-m57.log; exit 1; }
+
+# ---- M58：/proc 端到端（busybox cat/ps/top via sendfile 内核缓冲） ----
+x86-alpine-proc: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6_DEFS=-DC6OS_ALPINE_PROC \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/proc.iso
+
+check-linuxabi-m58: x86-alpine-proc
+	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/proc.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m58.log >/dev/null
+	@for tag in m58-cpuinfo-ok m58-meminfo-ok m58-procdir-ok m58-ps-ok m58-top-ok m58-done; do \
+		grep -q "$$tag" /tmp/check-m58.log \
+		  || { echo "FAIL: linux-abi M58（缺 $$tag）"; tail -40 /tmp/check-m58.log; exit 1; }; \
+	done
+	@grep -q "processor" /tmp/check-m58.log \
+	  || { echo "FAIL: linux-abi M58（cpuinfo 为空）"; tail -40 /tmp/check-m58.log; exit 1; }
+	@grep -q "PID.*COMMAND" /tmp/check-m58.log \
+	  || { echo "FAIL: linux-abi M58（ps 无表头）"; tail -40 /tmp/check-m58.log; exit 1; }
+	@echo "PASS: linux-abi M58（/proc 端到端：cat/stat/ps/top）"
