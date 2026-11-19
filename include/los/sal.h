@@ -19,7 +19,9 @@
 
 #define LOS_SAL_SOCK_STREAM      1
 #define LOS_SAL_SOCK_DGRAM       2
+#define LOS_SAL_SOCK_RAW         3
 
+#define LOS_SAL_IPPROTO_ICMP     1
 #define LOS_SAL_IPPROTO_TCP      6
 #define LOS_SAL_IPPROTO_UDP      17
 

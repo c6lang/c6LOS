@@ -1,0 +1,256 @@
+/* kernel/net/sal_raw.c6 —— M59：AF_INET / SOCK_RAW / IPPROTO_ICMP
+ *
+ * 未修改的 busybox ping 用 raw socket 收发 ICMP echo：socket(AF_INET,
+ * SOCK_RAW, IPPROTO_ICMP) + sendto/recvfrom，报文头部由它自己填。这里把它
+ * 包成一套 SAL 协议栈：发送时 payload 原样交给 IpOutput（校验和为 0 才补），
+ * 接收时 IcmpInput 在收到 echo reply 后调 IcmpRawReply() 把整包复制进队列。
+ *
+ * 网卡是纯轮询的：Linux ABI 的 send/recv 重试路径会泵网卡（lx_net_pump），
+ * 所以这里队列空就直接返回 -EAGAIN，不需要阻塞/唤醒。
+ */
+#include "c6os/types.h"
+#include "c6os/string.h"
+#include "los/los_typedef.h"
+#include "los/sal.h"
+#include "los/net.h"
+
+#define RAW_PKT_MAX   320u    /* ICMP 报文本身上限；IP 头由 IpOutput 加 */
+#define RAW_PKT_SLOTS 8u
+#define RAW_SEND_MAX  256u
+
+typedef struct RawPkt {
+    UINT32 used;
+    UINT32 len;
+    UINT32 src;                     /* 主机序 IPv4 */
+    UINT8  data[RAW_PKT_MAX];
+} RawPkt;
+
+typedef struct RawSock {
+    UINT32 used;
+    UINT32 dst;                     /* connect() 记下的目的地址（主机序） */
+} RawSock;
+
+static SalProto g_sal_raw = {0};
+static RawSock g_raws[LOS_SAL_MAX_SOCKETS] = {0};
+static RawPkt g_pkts[RAW_PKT_SLOTS] = {0};
+static UINT32 g_tail = 0u;
+
+/* IcmpInput 收到 echo reply 时调用：把 ICMP 包（含头）放进共享接收队列。 */
+INT32 IcmpRawReply(const UINT8 *b, UINT32 len, UINT32 src)
+{
+    RawPkt *p = &g_pkts[g_tail];
+
+    if (b == (const UINT8 *)0 || len == 0u) {
+        return 0;
+    }
+    if (len > RAW_PKT_MAX) {
+        len = RAW_PKT_MAX;
+    }
+    g_tail = g_tail + 1u;
+    if (g_tail >= RAW_PKT_SLOTS) {
+        g_tail = 0u;
+    }
+    p->used = 1u;
+    p->len = len;
+    p->src = src;
+    (void)memcpy((VOID *)&p->data[0], (const VOID *)b, len);
+    return 0;
+}
+
+static RawSock *raws_(VOID *priv)
+{
+    UINT32 i = (UINT32)(UINT64)priv;
+
+    if (i >= (UINT32)LOS_SAL_MAX_SOCKETS || g_raws[i].used == 0u) {
+        return (RawSock *)0;
+    }
+    return &g_raws[i];
+}
+
+static INT32 raw_socket(VOID)
+{
+    UINT32 i = 0u;
+
+    while (i < (UINT32)LOS_SAL_MAX_SOCKETS) {
+        if (g_raws[i].used == 0u) {
+            (void)memset((VOID *)&g_raws[i], 0, (UINT32)sizeof(RawSock));
+            g_raws[i].used = 1u;
+            return (INT32)i;
+        }
+        i++;
+    }
+    return 0 - LOS_SAL_E_MFILE;
+}
+
+static INT32 raw_close(VOID *priv)
+{
+    RawSock *s = raws_(priv);
+
+    if (s == (RawSock *)0) {
+        return 0 - LOS_SAL_E_BADF;
+    }
+    s->used = 0u;
+    return 0;
+}
+
+static INT32 raw_bind(VOID *priv, const LosSockAddr *a)
+{
+    (void)priv;
+    (void)a;
+    return 0;                            /* raw socket 不需要绑定端口 */
+}
+
+static INT32 raw_connect(VOID *priv, const LosSockAddr *a)
+{
+    RawSock *s = raws_(priv);
+
+    if (s == (RawSock *)0 || a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    s->dst = a->addr;
+    return 0;
+}
+
+static INT32 raw_listen(VOID *priv, INT32 backlog)
+{
+    (void)priv;
+    (void)backlog;
+    return 0 - LOS_SAL_E_OPNOTSUPP;
+}
+
+static INT32 raw_accept(VOID *priv, VOID **child, LosSockAddr *a)
+{
+    (void)priv;
+    (void)child;
+    (void)a;
+    return 0 - LOS_SAL_E_OPNOTSUPP;
+}
+
+static INT32 raw_xmit_(UINT32 dst, const VOID *buf, UINT32 len)
+{
+    LosNetIf *nif = NetIfGet(0u);
+    LosNetBuf *p = (LosNetBuf *)0;
+    UINT8 *b = (UINT8 *)0;
+
+    if (nif == (LosNetIf *)0 || dst == 0u || len < 8u || len > RAW_SEND_MAX) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    p = NetBufAlloc((UINT32)LOS_NET_HDR_ROOM, len);
+    if (p == (LosNetBuf *)0) {
+        return 0 - LOS_SAL_E_NOMEM;
+    }
+    b = &p->data[p->off];
+    (void)memcpy((VOID *)b, buf, len);
+    /* Linux 规则：调用方把校验和留 0 时由内核补算；busybox 自己算好就照发。 */
+    if (b[2] == 0u && b[3] == 0u) {
+        NetPut16(&b[2], NetCsum(b, len));
+    }
+    return IpOutput(nif, dst, (UINT8)LOS_IP_PROTO_ICMP, p);
+}
+
+static INT32 raw_send(VOID *priv, const VOID *buf, UINT32 len)
+{
+    RawSock *s = raws_(priv);
+
+    if (s == (RawSock *)0) {
+        return 0 - LOS_SAL_E_BADF;
+    }
+    if (s->dst == 0u) {
+        return 0 - LOS_SAL_E_NOTCONN;
+    }
+    return raw_xmit_(s->dst, buf, len);
+}
+
+static RawPkt *raw_next_(VOID)
+{
+    UINT32 i = 0u;
+
+    while (i < RAW_PKT_SLOTS) {
+        if (g_pkts[i].used != 0u) {
+            return &g_pkts[i];
+        }
+        i++;
+    }
+    return (RawPkt *)0;
+}
+
+static INT32 raw_recv_(VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    RawPkt *p = raw_next_();
+    UINT32 n = 0u;
+
+    if (p == (RawPkt *)0) {
+        return 0 - LOS_SAL_E_AGAIN;
+    }
+    n = (p->len < len) ? p->len : len;
+    (void)memcpy(buf, (const VOID *)&p->data[0], n);
+    if (a != (LosSockAddr *)0) {
+        a->family = (UINT16)LOS_SAL_AF_INET;
+        a->port = 0u;
+        a->addr = p->src;
+    }
+    p->used = 0u;
+    return (INT32)n;
+}
+
+static INT32 raw_recv(VOID *priv, VOID *buf, UINT32 len)
+{
+    if (raws_(priv) == (RawSock *)0) {
+        return 0 - LOS_SAL_E_BADF;
+    }
+    return raw_recv_(buf, len, (LosSockAddr *)0);
+}
+
+static INT32 raw_sendto(VOID *priv, const VOID *buf, UINT32 len,
+                        const LosSockAddr *a)
+{
+    if (raws_(priv) == (RawSock *)0 || a == (const LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return raw_xmit_(a->addr, buf, len);
+}
+
+static INT32 raw_recvfrom(VOID *priv, VOID *buf, UINT32 len, LosSockAddr *a)
+{
+    if (raws_(priv) == (RawSock *)0) {
+        return 0 - LOS_SAL_E_BADF;
+    }
+    return raw_recv_(buf, len, a);
+}
+
+static INT32 raw_setopt(VOID *priv, INT32 opt, const VOID *val, UINT32 len)
+{
+    (void)priv;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 0;
+}
+
+static INT32 raw_poll(VOID *priv, UINT32 events)
+{
+    (void)priv;
+    (void)events;
+    return (raw_next_() != (RawPkt *)0) ? 1 : 0;
+}
+
+INT32 SalRawInit(VOID)
+{
+    g_sal_raw.name = "icmp-raw";
+    g_sal_raw.domain = (INT32)LOS_SAL_AF_INET;
+    g_sal_raw.type = (INT32)LOS_SAL_SOCK_RAW;
+    g_sal_raw.proto = (INT32)LOS_SAL_IPPROTO_ICMP;
+    g_sal_raw.socket = raw_socket;
+    g_sal_raw.close = raw_close;
+    g_sal_raw.bind = raw_bind;
+    g_sal_raw.connect = raw_connect;
+    g_sal_raw.listen = raw_listen;
+    g_sal_raw.accept = raw_accept;
+    g_sal_raw.send = raw_send;
+    g_sal_raw.recv = raw_recv;
+    g_sal_raw.sendto = raw_sendto;
+    g_sal_raw.recvfrom = raw_recvfrom;
+    g_sal_raw.setopt = raw_setopt;
+    g_sal_raw.poll = raw_poll;
+    return SalRegister(&g_sal_raw);
+}

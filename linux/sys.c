@@ -1154,6 +1154,11 @@ void lx_syscall_do(LxRegs *r)
             LxFile *iofe = lx_fdtab_get(lx_cur_proc() != (LxProc *)0
                                         ? lx_cur_proc()->fd : (LxFdTab *)0, a0);
 
+            /* M59：socket fd 上的 SIOCGIF* 由网络层处理，别落回 ENOTTY */
+            if (iofe != (LxFile *)0 && iofe->kind == LX_FD_SOCK) {
+                r->rax = lx_sock_ioctl(a0, a1, a2);
+                return;
+            }
             if (iofe != (LxFile *)0 && iofe->node == LX_FD_CONSOLE &&
                 lx_tty_enabled() != 0u) {
                 r->rax = (u64)lx_tty_ioctl(a0, a1, a2);

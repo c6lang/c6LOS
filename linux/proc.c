@@ -1878,8 +1878,15 @@ static void pipe_free_(LxPipe *pp)
 
 static void pipe_drop_(LxFile *fe)
 {
-    LxPipe *pp = pipe_at_(fe->node);
+    LxPipe *pp;
 
+    /* socket fd 和管道端点一样按 fd 计数：dup2/fork/CLOEXEC/退出路径都走
+     * 这里，最后一份引用才让 SAL 真正关闭 sd。 */
+    if (fe->kind == LX_FD_SOCK) {
+        lx_sock_drop(fe->node);
+        return;
+    }
+    pp = pipe_at_(fe->node);
     if (pp == (LxPipe *)0) {
         return;
     }
@@ -1901,8 +1908,13 @@ static void pipe_drop_(LxFile *fe)
 /* 增加一个端点引用（dup2 / fork 复制 fd 表时用）。 */
 static void pipe_ref_(const LxFile *fe)
 {
-    LxPipe *pp = pipe_at_(fe->node);
+    LxPipe *pp;
 
+    if (fe->kind == LX_FD_SOCK) {
+        lx_sock_ref(fe->node);
+        return;
+    }
+    pp = pipe_at_(fe->node);
     if (pp == (LxPipe *)0) {
         return;
     }
