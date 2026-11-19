@@ -172,6 +172,8 @@ static INT32 udp_xmit_(LosNetIf *nif, UINT16 lport, UINT32 ip, UINT16 port,
     return IpOutput(nif, ip, (UINT8)LOS_IP_PROTO_UDP, p);
 }
 
+static void udp_autobind_(UdpSock *s);   /* M24：前置声明，send/sendto 都要用 */
+
 INT32 UdpSockSend(INT32 ud, const VOID *buf, UINT32 len)
 {
     UdpSock *s = (UdpSock *)0;
@@ -186,6 +188,7 @@ INT32 UdpSockSend(INT32 ud, const VOID *buf, UINT32 len)
     if (s->connected == 0u) {
         return udp_err_(107);       /* -ENOTCONN */
     }
+    udp_autobind_(s);              /* M24：未 bind 的 socket 首次 send 自动选端口 */
     nif = NetIfGet(0u);
     if (nif == (LosNetIf *)0) {
         return udp_err_(101);
@@ -215,6 +218,29 @@ INT32 UdpSockSend(INT32 ud, const VOID *buf, UINT32 len)
     return udp_xmit_(nif, s->lport, s->rip, s->rport, buf, len);
 }
 
+/* Linux 语义：未 bind 的 socket 在首次 send 时自动分配一个临时端口。
+ * glibc getaddrinfo 的 DNS 查询不显式 bind（依赖内核分配），没有这一步
+ * 源端口是 0，应答回不到 socket。端口从 49152 起找一个空闲槽。 */
+static void udp_autobind_(UdpSock *s)
+{
+    UINT16 base = 49152u;
+    UINT32 i = 0u;
+
+    if (s->bound != 0u) {
+        return;
+    }
+    while (i < 16384u) {
+        UINT16 p = (UINT16)(base + (UINT16)i);
+
+        if (udp_by_port_(p) == (UdpSock *)0) {
+            s->lport = p;
+            s->bound = 1u;
+            return;
+        }
+        i++;
+    }
+}
+
 INT32 UdpSockSendTo(INT32 ud, UINT32 ip, UINT16 port, const VOID *buf, UINT32 len)
 {
     UdpSock *s = (UdpSock *)0;
@@ -224,6 +250,7 @@ INT32 UdpSockSendTo(INT32 ud, UINT32 ip, UINT16 port, const VOID *buf, UINT32 le
     if (s == (UdpSock *)0) {
         return udp_err_(9);
     }
+    udp_autobind_(s);
     nif = NetIfGet(0u);
     if (nif == (LosNetIf *)0) {
         return udp_err_(101);

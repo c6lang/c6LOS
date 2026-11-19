@@ -63,6 +63,14 @@ e820_done:
     int $0x13
     jc 1f
 
+    /* dap5：stage2 增长后镜像越过 0x3FC00（前 4 个 DAP 的上限）。
+     * 继续从 LBA383 读到 0x3FC00，覆盖到 0x4FA00 —— 给 stage2 留出余量。 */
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap5, %si
+    int $0x13
+    jc 1f
+
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -102,6 +110,12 @@ dap4:
     .word 127
     .word 0x0000, 0x2FE0
     .quad 256
+
+dap5:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x3FC0
+    .quad 383
 
 .align 8
 gdt:

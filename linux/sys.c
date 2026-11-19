@@ -2,6 +2,7 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
+#include "c6os/linux_vma.h"
 
 
 /* Linux x86-64 系统调用实现（personality 的语义层）。
@@ -55,6 +56,7 @@ void lx_proc_init(u64 as, u64 brk_start)
     g_brk = brk_start;
     g_brk_init = brk_start;
     g_seed = 0x9e3779b9u;
+    lx_vma_init();                         /* VMA 表 + AS 释放回调 */
     lx_proc_attach(as, brk_start);         /* L5：登记成 0 号进程 */
 }
 
@@ -94,6 +96,24 @@ u64 lx_console_write(u64 fd, u64 ubuf, u64 len)
     return sys_write(fd, ubuf, len);
 }
 
+/* 按 **node** 而不是 fd 号判断目标是不是控制台：dup 出来的高位 fd 也是终端
+ * （ash/lineedit 真的会那么用），只看 fd==1/2 会把它们判成 EBADF。 */
+u64 lx_console_put(u64 ubuf, u64 len)
+{
+    u64 i;
+
+    if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (lx_tty_enabled() != 0u) {
+        return lx_tty_write(ubuf, len);
+    }
+    for (i = 0ull; i < len; i++) {
+        port_putc((int)(*(const u8 *)(ubuf + i)));
+    }
+    return len;
+}
+
 u64 lx_proc_brk(void)
 {
     return g_brk;
@@ -105,6 +125,15 @@ int lx_user_ok(u64 va, u64 len, u32 prot)
         return 1;
     }
     if (va + len < va) {
+        return 0;
+    }
+    if (port_as_user_range_ok(g_as, va, len, prot) != 0) {
+        return 1;
+    }
+    /* 惰性匿名页还没有 PTE：只要 VMA 承诺过这段地址，先把页补上再交给页表
+     * 检查。否则内核 copy_to/from_user 会对"还没被碰过的 malloc 缓冲"误判
+     * EFAULT（RSI 回归里 wait 写 status 就是这么坏的）。 */
+    if (lx_vma_fault_range(g_as, va, va + len, prot) != 0) {
         return 0;
     }
     return port_as_user_range_ok(g_as, va, len, prot);
@@ -156,6 +185,13 @@ static int brk_extend(u64 want)
         if (port_as_map(g_as, from, 0ull, to - from, C6OS_PROT_R | C6OS_PROT_W) != 0) {
             return -1;
         }
+        /* 堆也进 VMA：munmap/mprotect/栈增长都要看到它，否则堆上的 mprotect
+         * 会被当成"未映射区间"而返回 ENOMEM。 */
+        lx_vma_remove(g_as, from, to);
+        if (lx_vma_add(g_as, from, to, C6OS_PROT_R | C6OS_PROT_W, LX_VM_HEAP,
+                       0ull) != 0) {
+            return -1;
+        }
     }
     g_brk = want;
     return 0;
@@ -183,30 +219,6 @@ static u64 sys_write(u64 fd, u64 buf, u64 len)
     return len;
 }
 
-/* writev：ld.so 打印错误信息走的就是它（没有它连"为什么失败"都看不见）。 */
-static u64 sys_writev(u64 fd, u64 iov, u64 cnt)
-{
-    u64 i;
-    u64 total = 0ull;
-
-    if (fd != 1ull && fd != 2ull) {
-        return neg(LX_EBADF);
-    }
-    if (lx_user_ok(iov, cnt * 16ull, C6OS_PROT_R) == 0) {
-        return neg(LX_EFAULT);
-    }
-    for (i = 0; i < cnt; i++) {
-        u64 base = *(const u64 *)(iov + i * 16ull);
-        u64 len = *(const u64 *)(iov + i * 16ull + 8ull);
-        u64 r = sys_write(fd, base, len);
-
-        if ((i64)r < 0) {
-            return r;
-        }
-        total += r;
-    }
-    return total;
-}
 
 static u64 sys_getrandom(u64 buf, u64 len, u64 flags)
 {
@@ -230,6 +242,17 @@ static u64 sys_brk(u64 want)
     }
     if (want < g_brk_init) {
         return g_brk;                      /* 不允许降到映像内 */
+    }
+    if (want < g_brk) {                    /* 收缩：Linux 会真把页还回去 */
+        u64 from = (want + 4095ull) & ~4095ull;
+        u64 to = (g_brk + 4095ull) & ~4095ull;
+
+        if (to > from) {
+            lx_vma_remove(g_as, from, to);
+            (void)port_as_unmap(g_as, from, to - from);
+        }
+        g_brk = want;
+        return g_brk;
     }
     if (brk_extend(want) != 0) {
         return g_brk;
@@ -265,10 +288,13 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     } else {
         at &= ~4095ull;
     }
+    if ((flags & LX_MAP_FIXED) != 0ull && at != 0ull) {
+        lx_vma_remove(g_as, at, at + n);   /* 覆盖映射：旧记账先作废 */
+        (void)port_as_unmap(g_as, at, n);  /* 惰性映射下旧页不会自己消失 */
+    }
     if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
-        if (port_as_map(g_as, at, 0ull, n, perm) != 0) {
-            return neg(LX_ENOMEM);
-        }
+        /* 惰性：只记账，第一次访问由 #PF 补零页（M13-2b-3）。malloc 的 arena、
+         * 线程栈这类大 mmap 不再一上来就把物理页吃光。 */
     } else {
         /* 文件映射（MAP_PRIVATE）：逐页"分配页框 → 从 initramfs 拷内容 → 挂页表"。
          * 次序很重要：先挂页表再写用户地址，在 TLB 里还是旧页框的情况下会把
@@ -304,6 +330,20 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
             p += 4096ull;
         }
     }
+    /* 记账：munmap/mprotect/栈增长都靠这条链判断"这段地址是什么"。 */
+    {
+        u32 vf = ((flags & LX_MAP_ANONYMOUS) != 0ull) ? LX_VM_ANON : LX_VM_FILE;
+
+        if ((flags & LX_MAP_SHARED) != 0ull) {
+            vf |= LX_VM_SHARED;
+        }
+        if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
+            vf |= LX_VM_LAZY;              /* 页在第一次访问时才补 */
+        }
+        if (lx_vma_add(g_as, at, at + n, (u32)perm, vf, off) != 0) {
+            return neg(LX_ENOMEM);         /* 区间冲突/记账 OOM */
+        }
+    }
     return at;
 }
 
@@ -325,7 +365,10 @@ void lx_syscall_do(LxRegs *r)
 
     switch (nr) {
     case LX_SYS_writev:
-        r->rax = sys_writev(a0, a1, a2);
+        r->rax = lx_proc_writev(a0, a1, a2);
+        return;
+    case LX_SYS_readv:
+        r->rax = lx_proc_readv(a0, a1, a2);
         return;
 
     case LX_SYS_write:
@@ -346,6 +389,90 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_openat(a0, a1, a2, a3);
         return;
 
+    /* M15-1b：写类 syscall（*at 的 dirfd 按 int 符号/零扩展兼容，fs.c 里处理） */
+    case LX_SYS_mkdirat:
+        r->rax = lx_fs_mkdirat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_mkdir:
+        r->rax = lx_fs_mkdirat((u64)0 - 100ull, a0, a1);
+        return;
+    case LX_SYS_rmdir:
+        r->rax = lx_fs_rmdir(a0);
+        return;
+    case LX_SYS_unlinkat:
+        r->rax = lx_fs_unlinkat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_unlink:
+        r->rax = lx_fs_unlinkat((u64)0 - 100ull, a0, 0ull);
+        return;
+    case LX_SYS_renameat:
+        r->rax = lx_fs_renameat((i64)(i32)a0, a1, (i64)(i32)a2, a3);
+        return;
+    case LX_SYS_rename:
+        r->rax = lx_fs_renameat((u64)0 - 100ull, a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_truncate:
+        r->rax = lx_fs_truncate(a0, a1);
+        return;
+    case LX_SYS_ftruncate:
+        r->rax = lx_fs_ftruncate(a0, a1);
+        return;
+    case LX_SYS_chmod:
+        r->rax = lx_fs_chmod(a0, a1);
+        return;
+    case LX_SYS_fchmodat:
+        /* fchmodat(dirfd, path, mode, flags)：dirfd 按 int 解析 */
+        r->rax = lx_fs_chmod_pathat((i64)(i32)a0, a1, a2);
+        return;
+    case LX_SYS_fchmod:
+        /* fchmod(fd, mode)：fd 有效就成功（单用户无权限校验） */
+        r->rax = (lx_fdtab_get((lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->fd
+                               : (LxFdTab *)0, a0) != (LxFile *)0) ? 0ull
+                                                                   : neg(LX_EBADF);
+        return;
+    /* M57：chown 族（单用户：接受并忽略 uid/gid，只做存在性校验）。 */
+    case LX_SYS_chown:
+        r->rax = lx_fs_chownat((u64)0 - 100ull, a0, a1, a2, 0u);
+        return;
+    case LX_SYS_lchown:
+        r->rax = lx_fs_chownat((u64)0 - 100ull, a0, a1, a2, 1u);
+        return;
+    case LX_SYS_fchownat:
+        r->rax = lx_fs_chownat(a0, a1, a2, a3,
+                               (a4 & 0x100ull) != 0ull ? 1u : 0u); /* AT_SYMLINK_NOFOLLOW */
+        return;
+    case LX_SYS_fchown:
+        r->rax = (lx_fdtab_get((lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->fd
+                               : (LxFdTab *)0, a0) != (LxFile *)0) ? 0ull
+                                                                   : neg(LX_EBADF);
+        return;
+    /* M57：链接/设备节点族。 */
+    case LX_SYS_symlink:
+        r->rax = lx_fs_symlinkat(a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_symlinkat:
+        r->rax = lx_fs_symlinkat(a0, (i64)(i32)a2, a1);   /* old, newdirfd, new */
+        return;
+    case LX_SYS_link:
+        r->rax = lx_fs_linkat((u64)0 - 100ull, a0, (u64)0 - 100ull, a1);
+        return;
+    case LX_SYS_linkat:
+        r->rax = lx_fs_linkat((i64)(i32)a0, a1, (i64)(i32)a2, a3);
+        return;
+    case LX_SYS_mknod:
+        r->rax = lx_fs_mknodat((u64)0 - 100ull, a0, a1, a2);
+        return;
+    case LX_SYS_mknodat:
+        r->rax = lx_fs_mknodat((i64)(i32)a0, a1, a2, a3);
+        return;
+    case LX_SYS_statfs:
+    case LX_SYS_fstatfs:
+        r->rax = lx_fs_statfs(a0, a1);
+        return;
+    case LX_SYS_utimensat:
+        r->rax = lx_fs_utimensat((i64)(i32)a0, a1, a2);
+        return;
+
     case LX_SYS_close:
         r->rax = lx_proc_close(a0);
         return;
@@ -360,6 +487,22 @@ void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_newfstatat:
         r->rax = lx_fs_statat(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_statx:
+        /* statx(dirfd, path, flags, mask, statx_buf)：mask(a3) 只作提示，
+         * 本内核统一返回 BASIC_STATS，忽略具体请求位。 */
+        r->rax = lx_fs_statx(a0, a1, a2, a4);
+        return;
+
+    case LX_SYS_copy_file_range:
+        /* copy_file_range(fd_in, off_in*, fd_out, off_out*, len, flags) */
+        r->rax = lx_fs_copy_file_range(a0, a1, a2, a3, a4, a5);
+        return;
+
+    case LX_SYS_fallocate:
+        /* fallocate(fd, mode, offset, len) */
+        r->rax = lx_fs_fallocate(a0, a1, a2, a3);
         return;
 
     case LX_SYS_stat:
@@ -380,6 +523,14 @@ void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_access:
         r->rax = lx_fs_access(a0, a1);
+        return;
+    case LX_SYS_faccessat:
+        /* faccessat(dirfd, path, mode, flags) */
+        r->rax = lx_fs_faccessat(a0, a1, a2, a3);
+        return;
+    case LX_SYS_fchdir:
+        /* fchdir(fd)：切到已打开目录 fd */
+        r->rax = lx_fs_fchdir(a0);
         return;
 
     case LX_SYS_getcwd:
@@ -434,19 +585,65 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_pread(a0, a1, a2, a3);
         return;
 
+    case LX_SYS_pwrite64:
+        /* pwrite(fd, buf, count, offset)：a3=r10 是 offset 低 32 位 */
+        r->rax = lx_fs_pwrite(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_preadv:
+        /* preadv(fd, iov, iovcnt, offset) */
+        r->rax = lx_fs_preadv(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_pwritev:
+        /* pwritev(fd, iov, iovcnt, offset) */
+        r->rax = lx_fs_pwritev(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_preadv2:
+        /* preadv2(fd, iov, iovcnt, offset, flags)：flags 是第 5 参数=a4，仅支持 0 */
+        if (a4 != 0ull) { r->rax = neg(LX_EOPNOTSUPP); return; }
+        r->rax = lx_fs_preadv(a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_pwritev2:
+        /* pwritev2(fd, iov, iovcnt, offset, flags)：flags 是第 5 参数=a4，仅支持 0 */
+        if (a4 != 0ull) { r->rax = neg(LX_EOPNOTSUPP); return; }
+        r->rax = lx_fs_pwritev(a0, a1, a2, a3);
+        return;
+
     case LX_SYS_munmap:
+        /* 先作废记账再还页：反过来会让缺页在"页已还、VMA 还在"的窗口里
+         * 重新分配页，把 munmap 变成空操作。 */
+        lx_vma_remove(g_as, a0, a0 + ((a1 + 4095ull) & ~4095ull));
         (void)port_as_unmap(g_as, a0, (a1 + 4095ull) & ~4095ull);
         r->rax = 0ull;
         return;
 
     case LX_SYS_mprotect:
         {
-            int mrc = port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
-                                      (u32)a2);
+            u64 end = a0 + ((a1 + 4095ull) & ~4095ull);
 
-            /* 未映射/参数越界在 Linux 是 ENOMEM；权限位本身只取 R/W/X */
-            r->rax = (mrc == 0) ? 0ull : neg(LX_ENOMEM);
+            /* 先过 VMA：Linux 对"保护一段没映射的地址"返回 ENOMEM。只改页表
+             * 而不管记账，会让后续 munmap/栈增长按旧属性判断。 */
+            if (lx_vma_protect(g_as, a0, end, (u32)a2) != 0) {
+                r->rax = neg(LX_ENOMEM);
+                return;
+            }
+            /* 再改已存在的 PTE。惰性页没有 PTE 可改：VMA 记账成功就算成功，
+             * 页会在缺页时按新 prot 生成（Linux 对未触碰页同样不做事）。 */
+            (void)port_as_protect(g_as, a0, (a1 + 4095ull) & ~4095ull,
+                                  (u32)a2);
+            r->rax = 0ull;
         }
+        return;
+
+    case LX_SYS_msync:
+        /* 匿名页没有回写后端：整段在 VMA 内就算成功，否则 ENOMEM（Linux 语义）。
+         * 文件映射的脏页回写等 M15 的页缓存落地后再补。 */
+        r->rax = (lx_vma_covered(g_as, a0,
+                                 a0 + ((a1 + 4095ull) & ~4095ull)) != 0)
+                 ? 0ull : neg(LX_ENOMEM);
         return;
 
     case LX_SYS_poll:
@@ -476,6 +673,49 @@ void lx_syscall_do(LxRegs *r)
                 return;
             }
             r->rax = (u64)lx_proc_poll(a0, a1, to);
+        }
+        return;
+
+    /* M16-1a：select/pselect6。select 的 timeout 是 struct timeval{sec,usec}，
+     * pselect6 是 struct timespec{sec,nsec} + 第 5 参 sigmask（单线程下忽略）。
+     * 统一转成毫秒喂给 lx_proc_select；timeout=NULL → -1（无限等）。 */
+    case LX_SYS_select:
+        {
+            i64 to = -1;
+
+            if (a4 != 0ull) {
+                if (lx_user_ok(a4, 16ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                to = *(const i64 *)a4 * 1000ll + *(const i64 *)(a4 + 8ull) / 1000ll;
+                if (to < 0) {
+                    to = -1;
+                }
+            }
+            r->rax = (u64)lx_proc_select((i32)(i32)a0, a1, a2, a3, to);
+        }
+        return;
+
+    case LX_SYS_eventfd2:
+        r->rax = lx_proc_eventfd2(a0, a1);
+        return;
+
+    case LX_SYS_pselect6:
+        {
+            i64 to = -1;
+
+            if (a4 != 0ull) {
+                if (lx_user_ok(a4, 16ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                to = *(const i64 *)a4 * 1000ll + *(const i64 *)(a4 + 8ull) / 1000000ll;
+                if (to < 0) {
+                    to = -1;
+                }
+            }
+            r->rax = (u64)lx_proc_select((i32)(i32)a0, a1, a2, a3, to);
         }
         return;
 
@@ -517,16 +757,156 @@ void lx_syscall_do(LxRegs *r)
         r->rax = neg(LX_ENOSYS);
         return;
 
-    case LX_SYS_prlimit64:
-        if (a3 != 0ull) {
-            if (lx_user_ok(a3, 16ull, C6OS_PROT_W) == 0) {
-                r->rax = neg(LX_EFAULT);
-                return;
-            }
-            *(u64 *)(a3) = 8ull * 1024ull * 1024ull;
-            *(u64 *)(a3 + 8ull) = 8ull * 1024ull * 1024ull;
+    case LX_SYS_getrlimit:
+    case LX_SYS_setrlimit: {
+        /* getrlimit(resource, rlim*) / setrlimit(resource, rlim*) */
+        LxProc *p = lx_cur_proc();
+        u32 res = (u32)a0;
+
+        if (p == (LxProc *)0 || res >= LX_NLIMITS || a1 == 0ull ||
+            lx_user_ok(a1, 16ull, (nr == LX_SYS_setrlimit) ? C6OS_PROT_R : C6OS_PROT_W) == 0) {
+            r->rax = neg((res >= LX_NLIMITS || a1 == 0ull) ? LX_EINVAL : LX_EFAULT);
+            return;
+        }
+        if (nr == LX_SYS_getrlimit) {
+            *(u64 *)a1 = p->rlim[res];
+            *(u64 *)(a1 + 8ull) = p->rlim_max[res];
+        } else {
+            u64 cur = *(const u64 *)a1;
+            u64 mx = *(const u64 *)(a1 + 8ull);
+            if (cur > mx && mx != LX_RLIM_INFINITY) { r->rax = neg(LX_EINVAL); return; }
+            p->rlim[res] = cur;
+            p->rlim_max[res] = mx;
         }
         r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_prlimit64: {
+        /* prlimit64(pid, resource, new_rlim*, old_rlim*)；仅支持 pid==self */
+        LxProc *p = lx_cur_proc();
+        u32 res = (u32)a1;
+
+        if (p == (LxProc *)0 || res >= LX_NLIMITS) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a0 != 0ull && a0 != (u64)p->pid) { r->rax = neg(LX_ESRCH); return; }
+        if (a2 != 0ull) {
+            u64 cur, mx;
+            if (lx_user_ok(a2, 16ull, C6OS_PROT_R) == 0) { r->rax = neg(LX_EFAULT); return; }
+            cur = *(const u64 *)a2;
+            mx = *(const u64 *)(a2 + 8ull);
+            if (cur > mx && mx != LX_RLIM_INFINITY) { r->rax = neg(LX_EINVAL); return; }
+            p->rlim[res] = cur;
+            p->rlim_max[res] = mx;
+        }
+        if (a3 != 0ull) {
+            if (lx_user_ok(a3, 16ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            *(u64 *)a3 = p->rlim[res];
+            *(u64 *)(a3 + 8ull) = p->rlim_max[res];
+        }
+        r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_getrusage:
+        /* getrusage(who, ru*)：返回全零 rusage（144B），不引入计时统计。 */
+        if (a0 > 2ull || a1 == 0ull || lx_user_ok(a1, 144ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        for (u64 i = 0ull; i < 144ull; i++) { ((u8 *)a1)[i] = 0u; }
+        r->rax = 0ull;
+        return;
+    case LX_SYS_getpriority:
+    case LX_SYS_setpriority: {
+        /* getpriority(which, who) / setpriority(which, who, prio)；
+         * Linux 语义：getpriority 返回 20-nice（值越大越友好），
+         * setpriority 的 prio 是 20-nice 的"向上"值 —— 用 -prio 得 nice。 */
+        LxProc *p = lx_cur_proc();
+
+        if (p == (LxProc *)0) { r->rax = neg(LX_EINVAL); return; }
+        if (nr == LX_SYS_getpriority) {
+            if (a0 > 2ull || (a0 == 1ull && (u32)a1 != p->pgid)) {
+                r->rax = neg(LX_ESRCH);
+                return;
+            }
+            r->rax = (u64)(i64)(20 - p->nice);
+        } else {
+            i32 prio;
+            if (a0 > 2ull) { r->rax = neg(LX_EINVAL); return; }
+            prio = (i32)(i64)a2;
+            if (prio < -20) { prio = -20; }
+            if (prio > 19) { prio = 19; }
+            p->nice = prio;                /* setpriority 第 3 参数就是 nice */
+            r->rax = 0ull;
+        }
+        return;
+    }
+    case LX_SYS_mlock:
+    case LX_SYS_munlock:
+        /* 我们不换出页，锁住内存是天然成立的；接受并成功返回。 */
+        r->rax = 0ull;
+        return;
+    case LX_SYS_sethostname:
+        /* hostname 只在 uname.nodename 里体现（c6los）；sethostname 静默接受。 */
+        if (a1 > 64ull) { r->rax = neg(LX_EINVAL); return; }
+        r->rax = 0ull;
+        return;
+    case LX_SYS_fsync:
+    case LX_SYS_fdatasync: {
+        /* fsync/fdatasync(fd)：把 fd 的脏数据刷盘。VFS 后端 LOS_FsSync
+         * 当前是无缓冲写通（no-op 成功），故只校验 fd 存在并返 0。 */
+        LxProc *p = lx_cur_proc();
+        LxFile *f = lx_fdtab_get((p != (LxProc *)0) ? p->fd : (LxFdTab *)0, a0);
+
+        if (f == (LxFile *)0) { r->rax = neg(LX_EBADF); return; }
+        r->rax = 0ull;                 /* LOS_FsSync 成功（写通，无脏页） */
+        return;
+    }
+    case LX_SYS_flock: {
+        /* flock(fd, operation)：咨询锁。单进程协作内核 + 无共享写者，
+         * 锁状态记在 LxFile 上即可。LOCK_UN 解锁；LOCK_SH/EX 上锁；
+         * LOCK_NB  contention 才返回 EWOULDBLOCK（我们无争用，恒成功）。 */
+        LxProc *p = lx_cur_proc();
+        LxFile *f = lx_fdtab_get((p != (LxProc *)0) ? p->fd : (LxFdTab *)0, a0);
+
+        if (f == (LxFile *)0) { r->rax = neg(LX_EBADF); return; }
+        {
+            u32 op = (u32)a1;
+            u32 typ = op & 0x3u;        /* SH=1 EX=2 UN=3(UN&3)，NB=4 位在外 */
+
+            if ((op & LX_LOCK_UN) != 0u) {
+                f->lock = 0u;
+            } else if (typ == LX_LOCK_SH || typ == LX_LOCK_EX) {
+                f->lock = typ;         /* 无争用，直接记为已锁 */
+            } else {
+                r->rax = neg(LX_EINVAL);
+                return;
+            }
+        }
+        r->rax = 0ull;
+        return;
+    }
+    case LX_SYS_sync:
+    case LX_SYS_syncfs:
+        /* sync()/syncfs(fd)：全局/单 fs 刷盘，写通无脏页，恒成功。 */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_readlink:
+        /* readlink(path, buf, bufsiz) == readlinkat(AT_FDCWD, ...) */
+        if (user_streq(a0, "/proc/self/exe") != 0) {
+            static const char p[] = "/hello";
+            u64 i;
+
+            if (a2 < 6ull) { r->rax = neg(LX_EINVAL); return; }
+            if (lx_user_ok(a1, 6ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            for (i = 0; i < 6ull; i++) { *(u8 *)(a1 + i) = (u8)p[i]; }
+            r->rax = 6ull;
+            return;
+        }
+        /* M56：真实 initramfs 符号链接（/proc/self/exe 特例上面已处理）。 */
+        r->rax = lx_fs_readlinkat((u64)0 - 100ull, a0, a1, a2);
         return;
 
     case LX_SYS_readlinkat:
@@ -548,7 +928,8 @@ void lx_syscall_do(LxRegs *r)
             r->rax = 6ull;
             return;
         }
-        r->rax = neg(LX_ENOENT);
+        /* M56：真实 initramfs 符号链接（dirfd 版本）。 */
+        r->rax = lx_fs_readlinkat(a0, a1, a2, a3);
         return;
 
     case LX_SYS_getrandom:
@@ -581,10 +962,24 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_wait4:
-        r->rax = lx_proc_wait4((i64)a0, a1, a2, a3);
+        /* Linux 的 pid 参数是 int：glibc 传 -1 时上游高 32 位不可信（常是零
+         * 扩展），这里必须按 int 截断再符号扩展，否则 -1 会变成 +4294967295，
+         * 进程表里找不到任何子进程，wait() 直接 ECHILD。*/
+        r->rax = lx_proc_wait4((i64)(i32)a0, a1, a2, a3);
+        return;
+
+    case LX_SYS_waitid:
+        /* waitid(idtype, id, siginfo*, options, rusage*)
+         * idtype/id 都是 int 语义，按 32 位截断。 */
+        r->rax = lx_proc_waitid((u32)a0, (u32)a1, a2, a3, a4);
         return;
 
     case LX_SYS_pipe:
+        /* pipe(2) 只有 1 个参数：rsi 是残留值，绝不能当 pipe2 的 flags。
+         * glibc busybox 恰好 rsi=0 蒙混过关，musl ash 的 rsi 是栈地址，
+         * 传下去会被当成非法 flags → EINVAL → "can't create pipe"。 */
+        r->rax = lx_proc_pipe2(a0, 0ull);
+        return;
     case LX_SYS_pipe2:
         r->rax = lx_proc_pipe2(a0, a1);
         return;
@@ -613,6 +1008,10 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_sig_procmask((u32)a0, a1, a2);
         return;
 
+    case LX_SYS_rt_sigtimedwait:   /* M55 */
+        r->rax = lx_sig_timedwait(a0, a1, a2, a3);
+        return;
+
     case LX_SYS_rt_sigreturn:
         r->rax = lx_sig_return(r);
         return;
@@ -622,41 +1021,70 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_kill:
-        r->rax = lx_sig_kill((i64)(i32)a0, (u32)a1);
+        /* M14-2：pid<=0 的三种广播语义（0=本组，-1=全体，<-1=指定组）。
+         * shell 的 `kill -TERM -%d` 和 Ctrl-C 都靠它。 */
+        if (a1 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a1 != 0ull && lx_proc_send((i64)(i32)a0, (u32)a1) == 0) {
+            r->rax = 0ull;
+        } else if (a1 == 0ull && lx_proc_send((i64)(i32)a0, 0u) == 0) {
+            r->rax = 0ull;              /* 0 号信号：只探测存在性 */
+        } else {
+            r->rax = neg(LX_ESRCH);
+        }
         return;
 
     case LX_SYS_tgkill:                    /* tgkill(tgid, tid, sig) */
-        r->rax = lx_sig_kill((i64)(i32)a1, (u32)a2);
+        if (a2 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a2 != 0ull && lx_proc_find((i64)(i32)a1) == (LxProc *)0) {
+            r->rax = neg(LX_ESRCH);
+            return;
+        }
+        if (a2 != 0ull) {
+            lx_sig_send_one(lx_proc_find((i64)(i32)a1), (u32)a2, 0);
+        }
+        r->rax = 0ull;
         return;
 
+    /* B1：setpgid 以前和 chdir 共用一个 case，`setpgid(pid, pgid)` 实际执行的是
+     * `chdir(pid 的指针)`。拆成两条，各自按各自的语义走。 */
     case LX_SYS_setpgid:
+        r->rax = lx_proc_setpgid((i64)(i32)a0, (i64)(i32)a1);
+        return;
+
     case LX_SYS_chdir:
         r->rax = lx_fs_chdir(a0);           /* M12-4：真的换目录（含相对路径） */
         return;
 
     case LX_SYS_setsid:
+        r->rax = lx_proc_setsid();
+        return;
+
     case LX_SYS_umask:
+        r->rax = 022ull;                    /* 单用户 root：记录后恒返回旧值 */
+        return;
+
     case LX_SYS_fcntl:
-        /* L5 先把进程模型跑通；真正的信号投递是 L6 */
-        r->rax = 0ull;
+        r->rax = lx_proc_fcntl(a0, a1, a2);
+        return;
+
+    case LX_SYS_dup3:
+        r->rax = lx_proc_dup3(a0, a1, a2);
         return;
 
     case LX_SYS_getpgrp:
-    case LX_SYS_getpgid:
-        /* M12：进程组号恒为 1（和 TIOCGPGRP 回的一致）。
-         * 这两条必须同值 —— ash 启动时比 tcgetpgrp(0) 与 getpgrp()，
-         * 不相等就认定自己在后台，killpg(pgrp, SIGTTIN) 把自己停掉。
-         * 只实现 getpgrp(111) 而漏掉 getpgid(121) 的话，getpgid 走 ENOSYS
-         * 分支、getpgrp 回 1、TIOCGPGRP 回 0，三个值凑不齐，ash 立刻自杀。 */
-        if (nr == (u64)LX_SYS_getpgid && (i32)a0 > 0) {
-            LxProc *q = lx_proc_find((i64)(i32)a0);
+        /* getpgrp 和 getpgid 必须同值（ash 会拿它们和 TIOCGPGRP 比），
+         * 现在两者都读同一个 pgid 字段，天然一致。 */
+        r->rax = lx_proc_getpgrp();
+        return;
 
-            if (q == (LxProc *)0) {
-                r->rax = neg(LX_ESRCH);
-                return;
-            }
-        }
-        r->rax = 1ull;
+    case LX_SYS_getpgid:
+        r->rax = lx_proc_getpgid((i64)(i32)a0);
         return;
 
     case LX_SYS_getuid:
@@ -669,12 +1097,68 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_ioctl:
-        /* M12：init 调过 lx_tty_init() 之后，0/1/2 是一个真串口终端
-         * （TCGETS 给出 38400 8N1 + ICANON/ECHO，isatty() 才会认账）；
-         * 没开就还是老行为——一律 ENOTTY，ls 退回单列输出。 */
-        if (a0 <= 2ull && lx_tty_enabled() != 0u) {
-            r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
+        /* M14-2：TIOCSPGRP/TIOCGPGRP 是作业控制的核心 —— ash 启动时会
+         * `tcsetpgrp(0, getpid())` 把前台组设成自己，然后用 kill(-pgid) 给
+         * 整条作业发信号。以前一律 ENOTTY，ash 只能退回"没有作业控制"的模式。 */
+        /* TIOCSCTTY (0x540E)：把 fd 设为控制终端。本内核只有一个全局串口
+         * 终端（tty 已启用时 fd 0/1/2 就是它），没有 per-process ctty 表，
+         * 所以"接受"即可成功；未启用 tty 时 ENOTTY。busybox/ash 只在
+         * setsid 之后调它，返回 0 就能继续走作业控制流程。 */
+        if (a1 == 0x540eull) {
+            if (a0 <= 2ull && lx_tty_enabled() != 0u) {
+                r->rax = 0ull;
+            } else {
+                r->rax = neg(LX_ENOTTY);
+            }
             return;
+        }
+        if (a0 <= 2ull && (a1 == 0x5410ull || a1 == 0x540full)) {
+            if (a1 == 0x5410ull) {         /* TIOCSPGRP：arg 是 pid_t* */
+                i64 v;
+
+                if (lx_user_ok(a2, 4ull, C6OS_PROT_R) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                v = (i64)(*(const i32 *)a2);
+                r->rax = lx_proc_tcsetpgrp((i64)(i32)a0, v);
+                return;
+            }
+            if (lx_user_ok(a2, 4ull, C6OS_PROT_W) == 0) {   /* TIOCGPGRP */
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            {
+                u64 v = lx_proc_tcgetpgrp((i64)(i32)a0);
+
+                if ((i64)v < 0) {
+                    r->rax = v;
+                    return;
+                }
+                *(i32 *)a2 = (i32)v;
+            }
+            r->rax = 0ull;
+            return;
+        }
+        /* M35：必须按 fd 的**实际种类**判终端，不能只看 fd<=2 —— dup2 之后
+         * fd 0/1/2 可能是管道/socket，此时 isatty() 必须返回 ENOTTY，否则
+         * busybox cat 会当成终端走另一条路径，导致外部命令管道静默丢数据。 */
+        {
+            LxFile *iofe = lx_fdtab_get(lx_cur_proc() != (LxProc *)0
+                                        ? lx_cur_proc()->fd : (LxFdTab *)0, a0);
+
+            if (iofe != (LxFile *)0 && iofe->node == LX_FD_CONSOLE &&
+                lx_tty_enabled() != 0u) {
+                r->rax = (u64)lx_tty_ioctl(a0, a1, a2);
+                return;
+            }
+            if (iofe != (LxFile *)0 && iofe->kind == LX_FD_PTY) {
+                i64 pr = lx_pty_ioctl(iofe->node, a1, a2,
+                                      iofe->pos == 0ull ? 1u : 0u);
+
+                r->rax = (pr < 0) ? neg((u64)(-pr)) : (u64)pr;
+                return;
+            }
         }
         r->rax = neg(LX_ENOTTY);
         return;
@@ -684,6 +1168,54 @@ void lx_syscall_do(LxRegs *r)
             *(u64 *)a0 = 1700000000ull;
         }
         r->rax = 1700000000ull;            /* 没有 RTC：给个固定时刻 */
+        return;
+
+    /* M16-2：gettimeofday/clock_getres/clock_settime。统一用 TSC 推算的
+     * "假时钟"：起点 1700000000 秒 + 开机以来的毫秒，和 clock_gettime 同源，
+     * 保证 time()/gettimeofday()/clock_gettime() 不会互相矛盾。 */
+    case LX_SYS_gettimeofday:
+        {
+            u64 now = 1700000000ull + port_cycles() / 1000000000ull;
+            u64 usec = (port_cycles() / 1000ull) % 1000000ull;
+
+            if (a0 != 0ull) {
+                if (lx_user_ok(a0, 16ull, C6OS_PROT_W) == 0) {
+                    r->rax = neg(LX_EFAULT);
+                    return;
+                }
+                *(u64 *)a0 = (i64)now;
+                *(u64 *)(a0 + 8ull) = (i64)usec;
+            }
+            if (a1 != 0ull && lx_user_ok(a1, 8ull, C6OS_PROT_W) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            r->rax = 0ull;                 /* 没有时区：不写 tz 也成功 */
+        }
+        return;
+
+    case LX_SYS_clock_getres:
+        if (lx_user_ok(a1, 16ull, C6OS_PROT_W) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        if (a0 > 5ull) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        *(u64 *)a1 = 0ull;                 /* sec = 0 */
+        *(u64 *)(a1 + 8ull) = 1000000ull;  /* nsec = 1ms */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_clock_settime:
+        /* 没有 RTC 也没有可写的墙上时钟源：校验参数后明确返回 EPERM，
+         * 不假成功（busybox date -s 会据此判断能不能设时间）。 */
+        if (a0 > 5ull || lx_user_ok(a1, 16ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        r->rax = neg(LX_EPERM);
         return;
 
     case LX_SYS_nanosleep:
@@ -706,6 +1238,93 @@ void lx_syscall_do(LxRegs *r)
             ms = (u64)sec * 1000ull + (u64)nsec / 1000000ull;
             if (ms > 1000ull) {
                 ms = 1000ull;              /* 上限：这只是个超时兜底 */
+            }
+            if (ms > 0ull) {
+                port_delay_ms((u32)ms);
+            }
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_alarm:
+        /* alarm(2)：SIGALRM 闹钟。TSC 截止时刻存在 LxProc 上，由
+         * resched_/PIT tick 两处检查到点投递（见 proc.c 的 lx_proc_alarm_check）。 */
+        r->rax = lx_proc_alarm(a0);
+        return;
+
+    case LX_SYS_getitimer:
+    case LX_SYS_setitimer: {
+        /* getitimer(which, cur*) / setitimer(which, new*, old*)
+         * itimerval = {it_interval:{sec,usec}, it_value:{sec,usec}} 32B。
+         * REAL 复用 alarm_deadline（alarm() 与 ITIMER_REAL 是同一个定时器），
+         * VIRTUAL/PROF 用 itimer_deadline[1/2]，周期存 itimer_interval[3]。
+         * 到期投递复用 lx_proc_alarm_check 检查点。 */
+        LxProc *p = lx_cur_proc();
+        u32 which = (u32)a0;
+
+        if (p == (LxProc *)0 || which > LX_ITIMER_PROF) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        /* 回写旧值（getitimer 的 cur / setitimer 的 old） */
+        {
+            u64 dst = (nr == LX_SYS_getitimer) ? a1 : a2;
+            u64 dl = (which == LX_ITIMER_REAL) ? p->alarm_deadline : p->itimer_deadline[which];
+            u64 now = port_cycles();
+            u64 remain = (dl != 0ull && now < dl) ? (dl - now) : 0ull;
+            u64 iv = p->itimer_interval[which];
+
+            if (dst != 0ull) {
+                if (lx_user_ok(dst, 32ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+                *(u64 *)dst = iv / 1000000000ull;                    /* interval.sec */
+                *(u64 *)(dst + 8ull) = (iv % 1000000000ull) / 1000ull; /* interval.usec */
+                *(u64 *)(dst + 16ull) = remain / 1000000000ull;      /* value.sec */
+                *(u64 *)(dst + 24ull) = (remain % 1000000000ull) / 1000ull; /* value.usec */
+            }
+        }
+        if (nr == LX_SYS_setitimer) {
+            u64 newp = a1;
+            u64 sec, usec, val;
+
+            if (newp == 0ull || lx_user_ok(newp, 32ull, C6OS_PROT_R) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            sec = *(u64 *)(newp + 16ull);       /* it_value.sec */
+            usec = *(u64 *)(newp + 24ull);      /* it_value.usec */
+            p->itimer_interval[which] = (*(u64 *)newp * 1000000000ull) +
+                                        (*(u64 *)(newp + 8ull) * 1000ull);
+            val = (sec * 1000000000ull) + (usec * 1000ull);
+            if (which == LX_ITIMER_REAL) {
+                p->alarm_deadline = (val == 0ull) ? 0ull : port_cycles() + val;
+            } else {
+                p->itimer_deadline[which] = (val == 0ull) ? 0ull : port_cycles() + val;
+            }
+        }
+        r->rax = 0ull;
+        return;
+    }
+
+    case LX_SYS_clock_nanosleep:
+        /* glibc 的 sleep() 走这个而不是 nanosleep(2)。参数和 nanosleep 一样在
+         * a2（req）/a3（rem），a0=clockid、a1=flags（TIMER_ABSTIME 时 a2 是绝对
+         * 时刻，但我们没有真时钟基准，统一按相对时长处理）。 */
+        if (lx_user_ok(a2, 16ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EFAULT);
+            return;
+        }
+        {
+            i64 sec = *(const i64 *)a2;
+            i64 nsec = *(const i64 *)(a2 + 8ull);
+            u64 ms;
+
+            if (sec < 0 || nsec < 0 || nsec >= 1000000000ll) {
+                r->rax = neg(LX_EINVAL);
+                return;
+            }
+            ms = (u64)sec * 1000ull + (u64)nsec / 1000000ull;
+            if (ms > 10000ull) {
+                ms = 10000ull;             /* 上限：别让 test 把 QEMU 挂太久 */
             }
             if (ms > 0ull) {
                 port_delay_ms((u32)ms);
@@ -793,6 +1412,140 @@ void lx_syscall_do(LxRegs *r)
         }
         *(u64 *)a1 = 1ull;                 /* 单 CPU */
         r->rax = 8ull;
+        return;
+
+    /* ---- M19：busybox applet 矩阵暴露的 syscall 缺口 ---- */
+    case LX_SYS_sendfile:
+        r->rax = lx_proc_sendfile(a0, a1, a2, a3);
+        return;
+    case LX_SYS_sysinfo:
+        r->rax = lx_proc_sysinfo(a0);
+        return;
+    case LX_SYS_getgroups:
+        r->rax = lx_proc_getgroups(a0, a1);
+        return;
+    /* M20：epoll */
+    case LX_SYS_epoll_create1:
+        r->rax = lx_epoll_create1(a0);
+        return;
+    case LX_SYS_epoll_ctl:
+        r->rax = lx_epoll_ctl(a0, a1, a2, a3);
+        return;
+    case LX_SYS_epoll_wait:
+        r->rax = lx_epoll_wait(a0, a1, a2, (i64)a3);
+        return;
+    case LX_SYS_epoll_pwait: {
+        /* epoll_pwait(fd, events, maxevents, timeout, sigmask)：
+         * 等待期间把 sigmask 设为调用者给定值，返回后恢复旧掩码。
+         * a4=sigmask 指针（NULL 时等价 epoll_wait）。 */
+        u64 old = 0ull;
+        u64 set = 0ull;
+        u64 rc;
+
+        if (a4 != 0ull) {
+            if (lx_user_ok(a4, 8ull, C6OS_PROT_R) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            set = *(const u64 *)a4;
+            old = (lx_cur_proc() != (LxProc *)0) ? lx_cur_proc()->sig_mask : 0ull;
+            lx_cur_proc()->sig_mask = set &
+                ~((1ull << ((u32)LX_SIGKILL - 1u)) | (1ull << ((u32)LX_SIGSTOP - 1u)));
+        }
+        rc = lx_epoll_wait(a0, a1, a2, (i64)a3);
+        if (a4 != 0ull) {
+            lx_cur_proc()->sig_mask = old;
+        }
+        r->rax = rc;
+        return;
+    }
+    /* M21：timerfd */
+    case LX_SYS_timerfd_create:
+        r->rax = lx_timerfd_create(a0, a1);
+        return;
+    case LX_SYS_timerfd_settime:
+        r->rax = lx_timerfd_settime(a0, a1, a2, a3);
+        return;
+    case LX_SYS_timerfd_gettime:
+        r->rax = lx_timerfd_gettime(a0, a1);
+        return;
+    /* M22：signalfd */
+    case LX_SYS_signalfd4:
+        r->rax = lx_signalfd4(a0, a1, a2, a3);
+        return;
+
+    /* ---- M18：socket 族（linux/socket.c → LiteOS SAL）---- */
+    case LX_SYS_socket:
+        r->rax = lx_sock_socket(a0, a1, a2);
+        return;
+    case LX_SYS_bind:
+        r->rax = lx_sock_bind(a0, a1, a2);
+        return;
+    case LX_SYS_connect:
+        r->rax = lx_sock_connect(a0, a1, a2);
+        return;
+    case LX_SYS_listen:
+        r->rax = lx_sock_listen(a0, a1);
+        return;
+    case LX_SYS_accept:
+        r->rax = lx_sock_accept(a0, a1, a2);
+        return;
+    case LX_SYS_accept4:
+        /* accept4(fd, addr, addrlen, flags) = accept + 给新 fd 设 CLOEXEC/NONBLOCK */
+        {
+            u64 cfd = lx_sock_accept(a0, a1, a2);
+            LxProc *p = lx_cur_proc();
+
+            if ((i64)cfd >= 0 && p != (LxProc *)0) {
+                LxFdTab *tab = p->fd;
+                u32 idx = (u32)cfd;
+
+                if (tab != (LxFdTab *)0 && idx < tab->cap &&
+                    tab->ent[idx].node != LX_FD_NONE) {
+                    if ((a3 & LX_SOCK_CLOEXEC) != 0ull) {
+                        tab->ent[idx].flags |= (u32)LX_FD_CLOEXEC;
+                    }
+                    if ((a3 & LX_SOCK_NONBLOCK) != 0ull) {
+                        tab->ent[idx].oflags |= (u32)LX_O_NONBLOCK;
+                    }
+                }
+            }
+            r->rax = cfd;
+            return;
+        }
+    case LX_SYS_sendto:
+        r->rax = lx_sock_sendto(a0, a1, a2, a3, a4, a5);
+        return;
+    case LX_SYS_recvfrom:
+        r->rax = lx_sock_recvfrom(a0, a1, a2, a3, a4, a5);
+        return;
+    /* M55：x86-64 的 64/65 是 semget/semop，不是 send/recv。glibc 的
+     * send()/recv() 实际发 sendto(44)/recvfrom(45)，从不走这两个号；
+     * 移除误接的 case 后它们落入 default → ENOSYS（未实现 SysV 信号量）。
+     * lx_sock_send/recv 仍由 proc.c 的 read/write 内部路径直接调用。 */
+    case LX_SYS_sendmsg:
+        r->rax = lx_sock_sendmsg(a0, a1, a2);
+        return;
+    case LX_SYS_recvmsg:
+        r->rax = lx_sock_recvmsg(a0, a1, a2);
+        return;
+    case LX_SYS_shutdown:
+        r->rax = lx_sock_shutdown(a0, a1);
+        return;
+    case LX_SYS_setsockopt:
+        r->rax = lx_sock_setsockopt(a0, a1, a2, a3, a4);
+        return;
+    case LX_SYS_getsockopt:
+        r->rax = lx_sock_getsockopt(a0, a1, a2, a3, a4);
+        return;
+    case LX_SYS_getsockname:
+        r->rax = lx_sock_getsockname(a0, a1, a2);
+        return;
+    case LX_SYS_getpeername:
+        r->rax = lx_sock_getpeername(a0, a1, a2);
+        return;
+    case LX_SYS_socketpair:
+        r->rax = neg(LX_EOPNOTSUPP);
         return;
 
     default:

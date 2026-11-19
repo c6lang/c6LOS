@@ -959,8 +959,17 @@ toolchain-info:
 
 # ---- x86-64 参考目标（c6 -> LLVM IR，qemu 裸机） ----
 X86        := build/x86
+# -MMD -MP：让每个 .o 旁边落一份 .d，记录它包含了哪些头文件。
+# 没有这个的话，改一个结构体（比如 LxProc 加字段）只会重编直接依赖它的 .c，
+# 用过旧布局的 .o 会继续留在 obj 里，最后表现成"代码看着对、跑起来随机崩"。
+# 这类幽灵 bug 排查成本极高，两行 make 就能杜绝。
+# 注意不能在这里写 -MF：-MMD 的默认 .d 名字是按**目标文件**取的
+# （obj/proc.o → obj/proc.d），换成 $(@:.o=.d) 在这里展开时 $@ 还是空的。
+X86CDEPFLAGS := -MMD -MP
 X86CFLAGS  := --target=x86_64-elf -ffreestanding -fno-pic -mno-red-zone -O1 \
-              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS)
+              -DC6OS_PORT_CAPS=$(CAPS_X86) -DC6OS_LINUX_ABI=$(LINUX_ABI) -DC6OS_VFS=$(C6OS_VFS) \
+              -DC6OS_NET=$(C6OS_NET) \
+              $(X86CDEPFLAGS)
 # c6 产出的 IR 基本是 -O0 形态（locals 全在栈上），IR → .o 这一步不开优化的话
 # 一份几百行的内核文件就能吃掉 10KB+ 代码段 —— x86 stage2 只有 255 扇区
 # （≈127.5KB），M9 的 VFS 一加就爆。这里统一开 -O1。
@@ -973,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -986,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1002,6 +1011,9 @@ X86S_C6        += kernel/sal.c6 kernel/net/netbuf.c6 kernel/net/netif.c6 \
 endif
 
 X86S_LL    := $(addprefix $(X86S_DIR)/ir/,$(notdir $(X86S_C6:.c6=.ll)))
+# MMU 与内核堆必须同时在场：kmem 的页来自 PMM、指针在直接映射窗口里。集中成一处，
+# 免得以后再加"跟着 mmu 走"的文件时又要改三个 X86S_NAME 分支。
+X86S_MMU_OBJ := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/kmem.o
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/ctx.o \
               $(X86S_DIR)/obj/ctx_asm.o $(X86S_DIR)/obj/irq.o \
@@ -1013,23 +1025,28 @@ ifeq ($(X86S_NAME),user)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/userblob.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/fs.o \
               $(X86S_DIR)/obj/elf64.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/fdt.o \
+              $(X86S_DIR)/obj/vma.o \
+              $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/afunix.o \
+              $(X86S_DIR)/obj/pty.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/linux.o \
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/linux.o \
               $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
-              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o
+              $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o \
+              $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/afunix.o $(X86S_DIR)/obj/fdt.o \
+              $(X86S_DIR)/obj/pty.o
 endif
 
 # M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
@@ -1037,7 +1054,7 @@ ifeq ($(X86S_NAME),mem)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
-              $(X86S_DIR)/obj/mmu.o
+              $(X86S_MMU_OBJ) $(X86S_DIR)/obj/vma.o
 endif
 
 ifeq ($(C6OS_NET),1)
@@ -1178,6 +1195,10 @@ $(X86S_DIR)/obj/mmu.o: port/x86_64/mmu.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/kmem.o: port/x86_64/kmem.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 $(X86S_DIR)/obj/linux.o: port/x86_64/linux.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
@@ -1214,11 +1235,31 @@ $(X86S_DIR)/obj/proc.o: linux/proc.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/fdt.o: linux/fdt.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 $(X86S_DIR)/obj/tty.o: linux/tty.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
 $(X86S_DIR)/obj/sig.o: linux/sig.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/vma.o: linux/vma.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/socket.o: linux/socket.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/afunix.o: linux/afunix.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/pty.o: linux/pty.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
@@ -1229,6 +1270,12 @@ x86-user: caps-check-x86
 run-x86-user: x86-user
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/user-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
+
+# M26：统一回归入口——跑完所有 Linux ABI 里程碑 + 网络 + alpine，
+# 逐项汇总、单项失败不中断（实现见 tools/check-linuxabi-all.sh）。
+.PHONY: check-linuxabi-all
+check-linuxabi-all:
+	@bash tools/check-linuxabi-all.sh
 
 # L1 验收：真跑一遍"进 ring3 → int 0x80 → 退出"通路，按输出判定。
 check-linuxabi: x86-user
@@ -1279,6 +1326,7 @@ $(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
 	printf 'c6os 1.0\n' > $(FSROOT)/etc/version
 	printf 'hello from the c6LOS initramfs\n' > $(FSROOT)/hello.txt
 	cp $(LS_ELF) $(FSROOT)/bin/ls
+	ln -sfn /hello.txt $(FSROOT)/hello-link
 	python3 tools/mk-initramfs.py $@ $(FSROOT)
 
 # ---- M9-4：/tmp 挂 ramfs，用户态 write/read/getdents64 ----
@@ -1288,6 +1336,283 @@ M9_ELF := $(X86)/tmpfs.elf
 $(M9_ELF): $(M9_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+# ---- M15：VFS/设备 syscall 语义矩阵 ----
+M15_SRC := tests/linux/m15fs.c
+M15_ELF := $(X86)/m15fs.elf
+
+$(M15_ELF): $(M15_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M16：事件与时间 syscall 语义 ----
+M16_SRC := tests/linux/m16ev.c
+M16_ELF := $(X86)/m16ev.elf
+
+$(M16_ELF): $(M16_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M17：procfs 虚拟文件 + 控制终端 ----
+M17_SRC := tests/linux/m17proc.c
+M17_ELF := $(X86)/m17proc.elf
+
+$(M17_ELF): $(M17_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M18：Linux socket syscall → SAL ----
+M18_SRC := tests/linux/m18sock.c
+M18_ELF := $(X86)/m18sock.elf
+
+$(M18_ELF): $(M18_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M19：busybox applet 矩阵 ----
+M19_SRC := tests/linux/m19applet.c
+M19_ELF := $(X86)/m19applet.elf
+
+$(M19_ELF): $(M19_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(X86)/m19-disk.img: $(M19_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(M19_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+# ---- M20：epoll_create1/ctl/wait ----
+M20_SRC := tests/linux/m20epoll.c
+M20_ELF := $(X86)/m20epoll.elf
+
+$(M20_ELF): $(M20_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M21：timerfd_create/settime/gettime ----
+M21_SRC := tests/linux/m21timerfd.c
+M21_ELF := $(X86)/m21timerfd.elf
+
+$(M21_ELF): $(M21_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M22：signalfd4 ----
+M22_SRC := tests/linux/m22signalfd.c
+M22_ELF := $(X86)/m22signalfd.elf
+
+$(M22_ELF): $(M22_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M23：sendmsg/recvmsg iovec ----
+M23_SRC := tests/linux/m23msg.c
+M23_ELF := $(X86)/m23msg.elf
+
+$(M23_ELF): $(M23_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M24：getaddrinfo / DNS（动态 ELF + 带 /etc 的 initramfs）----
+M24_SRC  := tests/linux/m24dns.c
+M24_ELF  := $(X86)/m24dns.elf
+M24_FS   := $(X86)/m24fs.img
+M24ROOT  := $(X86)/m24root
+LIBNSSD  := /lib/x86_64-linux-gnu/libnss_dns.so.2
+LIBNSSF  := /lib/x86_64-linux-gnu/libnss_files.so.2
+
+# 动态 ELF：解释器/libc 从 initramfs 加载（与 DYNROOT 一致）
+$(M24_ELF): $(M24_SRC)
+	@mkdir -p $(dir $@)
+	gcc -Os -s -o $@ $<
+
+# ---- M25：AF_UNIX socket ----
+M25_SRC := tests/linux/m25unix.c
+M25_ELF := $(X86)/m25unix.elf
+
+$(M25_ELF): $(M25_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M27：musl libc-test functional 子集 ----
+M27_SRC  := tests/linux/m27libctest.c
+M27_ELF  := $(X86)/m27libctest.elf
+M27_FS   := $(X86)/m27fs.img
+M27ROOT  := $(X86)/m27root
+
+$(M27_ELF): $(M27_SRC)
+	@mkdir -p $(dir $@)
+	gcc -Os -s -o $@ $<
+
+M35_ELF := tests/linux/m35fifo.elf
+$(X86)/m35-disk.img: $(M35_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(M35_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+# ---- M38：waitid(2) ----
+M38_SRC := tests/linux/m38waitid.c
+M38_ELF := $(X86)/m38waitid.elf
+$(M38_ELF): $(M38_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M39：statx ----
+M39_SRC := tests/linux/m39statx.c
+M39_ELF := $(X86)/m39statx.elf
+$(M39_ELF): $(M39_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M40：copy_file_range ----
+M40_SRC := tests/linux/m40cfr.c
+M40_ELF := $(X86)/m40cfr.elf
+$(M40_ELF): $(M40_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M41：AF_UNIX SOCK_STREAM ----
+M41_SRC := tests/linux/m41unixstream.c
+M41_ELF := $(X86)/m41unixstream.elf
+$(M41_ELF): $(M41_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M42：AF_UNIX SCM_RIGHTS ----
+M42_SRC := tests/linux/m42scmright.c
+M42_ELF := $(X86)/m42scmright.elf
+$(M42_ELF): $(M42_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M43：fallocate ----
+M43_SRC := tests/linux/m43fallocate.c
+M43_ELF := $(X86)/m43fallocate.elf
+$(M43_ELF): $(M43_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M44：pwrite/preadv/pwritev ----
+M44_SRC := tests/linux/m44posio.c
+M44_ELF := $(X86)/m44posio.elf
+$(M44_ELF): $(M44_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M45：pty ----
+M45_SRC := tests/linux/m45pty.c
+M45_ELF := $(X86)/m45pty.elf
+$(M45_ELF): $(M45_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M46：AF_UNIX STREAM 字节流 ----
+M46_SRC := tests/linux/m46stream.c
+M46_ELF := $(X86)/m46stream.elf
+$(M46_ELF): $(M46_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M47：epoll ET/ONESHOT ----
+M47_SRC := tests/linux/m47epollflags.c
+M47_ELF := $(X86)/m47epollflags.elf
+$(M47_ELF): $(M47_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M48：AF_UNIX abstract namespace ----
+M48_SRC := tests/linux/m48abstract.c
+M48_ELF := $(X86)/m48abstract.elf
+$(M48_ELF): $(M48_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M49：epoll_pwait ----
+M49_SRC := tests/linux/m49epollpwait.c
+M49_ELF := $(X86)/m49epollpwait.elf
+$(M49_ELF): $(M49_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M50：pty per-instance termios ----
+M50_SRC := tests/linux/m50ptytermios.c
+M50_ELF := $(X86)/m50ptytermios.elf
+$(M50_ELF): $(M50_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M51：资源/调度类 syscall ----
+M51_SRC := tests/linux/m51rlimit.c
+M51_ELF := $(X86)/m51rlimit.elf
+$(M51_ELF): $(M51_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M52：文件同步与咨询锁 ----
+M52_SRC := tests/linux/m52sync.c
+M52_ELF := $(X86)/m52sync.elf
+$(M52_ELF): $(M52_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M53：getitimer/setitimer ----
+M53_SRC := tests/linux/m53itimer.c
+M53_ELF := $(X86)/m53itimer.elf
+$(M53_ELF): $(M53_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M54：readlink/faccessat/fchdir/accept4 ----
+M54_SRC := tests/linux/m54dirfd.c
+M54_ELF := $(X86)/m54dirfd.elf
+$(M54_ELF): $(M54_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M55：rt_sigtimedwait + send/recv 号冲突修复 ----
+M55_SRC := tests/linux/m55sigtimedwait.c
+M55_ELF := $(X86)/m55sigtimedwait.elf
+$(M55_ELF): $(M55_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M56：readlink 真实符号链接 ----
+M56_SRC := tests/linux/m56readlink.c
+M56_ELF := $(X86)/m56readlink.elf
+$(M56_ELF): $(M56_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M57：chown/symlink/link/mknod 族 ----
+M57_SRC := tests/linux/m57meta.c
+M57_ELF := $(X86)/m57meta.elf
+$(M57_ELF): $(M57_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(M27_FS): tools/build-libctest.sh $(M27_ELF) /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /usr/lib/x86_64-linux-gnu/libc.so.6 tools/mk-initramfs.py
+	@rm -rf $(M27ROOT)
+	@mkdir -p $(M27ROOT)/lt $(M27ROOT)/lib64 $(M27ROOT)/lib/x86_64-linux-gnu
+	bash tools/build-libctest.sh $(M27ROOT)
+	cp $(M27_ELF) $(M27ROOT)/lt/runner
+	cp /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 $(M27ROOT)/lib64/ld-linux-x86-64.so.2
+	cp /usr/lib/x86_64-linux-gnu/libc.so.6 $(M27ROOT)/lib/x86_64-linux-gnu/libc.so.6
+	python3 tools/mk-initramfs.py $@ $(M27ROOT)
+
+# 复制 dynroot（ld.so/libc/libresolv/busybox）+ /etc 解析配置，打成 initramfs
+$(M24_FS): $(DYN_ELF) $(LD_SO) $(LIBC6) $(LIBRES) $(LIBNSSD) $(LIBNSSF) tools/mk-initramfs.py
+	@rm -rf $(M24ROOT)
+	@mkdir -p $(M24ROOT)/bin $(M24ROOT)/lib64 $(M24ROOT)/lib/x86_64-linux-gnu $(M24ROOT)/etc
+	cp $(LD_SO)  $(M24ROOT)/lib64/ld-linux-x86-64.so.2
+	cp $(LIBC6)  $(M24ROOT)/lib/x86_64-linux-gnu/libc.so.6
+	cp $(LIBRES) $(M24ROOT)/lib/x86_64-linux-gnu/libresolv.so.2
+	cp $(LIBNSSD) $(M24ROOT)/lib/x86_64-linux-gnu/libnss_dns.so.2
+	cp $(LIBNSSF) $(M24ROOT)/lib/x86_64-linux-gnu/libnss_files.so.2
+	cp $(DYN_ELF) $(M24ROOT)/bin/busybox
+	printf 'nameserver 10.0.2.3\n' > $(M24ROOT)/etc/resolv.conf
+	printf '127.0.0.1 localhost\n10.0.2.15 c6os\n' > $(M24ROOT)/etc/hosts
+	printf 'hosts: files dns\n' > $(M24ROOT)/etc/nsswitch.conf
+	python3 tools/mk-initramfs.py $@ $(M24ROOT)
+
 
 # ---- L4：动态链接（ld.so + libc.so 从 initramfs 里由 ld.so 自己 mmap 进来）----
 DYN_ELF := $(X86)/busybox
@@ -1349,7 +1674,7 @@ $(SH_ELF): tests/linux/shpipe.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(SH_IMG): $(SH_ELF) $(X86)/dyn-disk.img
+$(SH_IMG): $(SH_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(SH_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
@@ -1357,9 +1682,56 @@ $(SIG_ELF): tests/linux/sig.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(SIG_IMG): $(SIG_ELF) $(X86)/dyn-disk.img
+$(SIG_IMG): $(SIG_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(SIG_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+# ---- M13-2a：COW fork ------------------------------------------------------
+# 48MB 匿名映射 + 6 次 fork（受 LX_MAX_PROC=8 限制）：全量复制会 OOM，COW 只多
+# 页表页；父子写必须隔离。
+COW_ELF := $(X86)/cow.elf
+COW_IMG := $(X86)/cow-disk.img
+
+$(COW_ELF): tests/linux/cow.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+# 依赖 x86-dyn（而不是 dyn-disk.img 这个文件）：保证镜像一定在内核重建之后才
+# 拷贝；同时避免 check 目标和文件规则各触发一次递归 make（并发时两边会打架，
+# 曾出现镜像里是旧内核、调试打印对不上的怪现象）。
+$(COW_IMG): $(COW_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(COW_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m13b: $(COW_IMG)
+	@timeout 90 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(COW_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13b.log \
+		| grep -q "^PASS: cow" \
+	  && echo "PASS: linux-abi M13-2a（COW fork：48MB×6 次 fork + 写隔离）" \
+	  || { echo "FAIL: linux-abi M13-2a"; tail -20 /tmp/check-m13b.log; exit 1; }
+
+# ---- M13-2b：惰性 mmap / 栈向下增长 / munmap 真回收 -------------------------
+VMA_ELF := $(X86)/vma.elf
+VMA_IMG := $(X86)/vma-disk.img
+
+$(VMA_ELF): tests/linux/vma.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(VMA_IMG): $(VMA_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(VMA_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m13c: $(VMA_IMG)
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(VMA_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13c.log \
+		| grep -q "^PASS: vma" \
+	  && echo "PASS: linux-abi M13-2b（惰性 mmap/栈增长/munmap 回收）" \
+	  || { echo "FAIL: linux-abi M13-2b"; tail -20 /tmp/check-m13c.log; exit 1; }
 
 check-linuxabi-l5: $(SH_IMG)
 	@timeout 60 qemu-system-x86_64 -m 256M \
@@ -1369,6 +1741,48 @@ check-linuxabi-l5: $(SH_IMG)
 	  && echo "PASS: linux-abi L5（fork/execve/pipe/wait4：busybox sh 管道）" \
 	  || { echo "FAIL: linux-abi L5"; exit 1; }
 
+# ---- M13-3：人为上限清零（1000 fd / 32 线程 / 64KB 管道）--------------------
+SCAL_ELF := $(X86)/scal.elf
+SCAL_IMG := $(X86)/scal-disk.img
+
+$(SCAL_ELF): tests/linux/scal.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $< -lpthread
+
+$(SCAL_IMG): $(SCAL_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(SCAL_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+# ---- M14：进程语义完整（进程组 / 作业控制 / wait4 选项 / SIGPIPE / EINTR）-----
+PROCGRP_ELF := $(X86)/procgrp.elf
+PROCGRP_IMG := $(X86)/procgrp-disk.img
+
+$(PROCGRP_ELF): tests/linux/procgrp.c
+	@mkdir -p $(dir $@)
+	gcc -Os -o $@ $<
+
+$(PROCGRP_IMG): $(PROCGRP_ELF) x86-dyn
+	cp $(X86)/dyn-disk.img $@
+	dd if=$(PROCGRP_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+
+check-linuxabi-m14: $(PROCGRP_IMG)
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(PROCGRP_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m14.log \
+		| grep -q "^PASS: procgrp" \
+	  && echo "PASS: linux-abi M14（进程组/作业控制/wait4 选项/SIGPIPE/EINTR）" \
+	  || { echo "FAIL: linux-abi M14"; tail -30 /tmp/check-m14.log; exit 1; }
+
+check-linuxabi-m13d: $(SCAL_IMG)
+	@timeout 180 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(SCAL_IMG),if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m13d.log \
+		| grep -q "^PASS: scal" \
+	  && echo "PASS: linux-abi M13-3（1000 fd / 32 线程 / 64KB 管道）" \
+	  || { echo "FAIL: linux-abi M13-3"; tail -30 /tmp/check-m13d.log; exit 1; }
+
 THR_ELF := $(X86)/thread.elf
 THR_IMG := $(X86)/thread-disk.img
 
@@ -1376,7 +1790,7 @@ $(THR_ELF): tests/linux/thread.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $< -lpthread
 
-$(THR_IMG): $(THR_ELF) $(X86)/dyn-disk.img
+$(THR_IMG): $(THR_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(THR_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
@@ -1387,7 +1801,7 @@ $(PRE_ELF): tests/linux/preempt.c
 	@mkdir -p $(dir $@)
 	gcc -Os -o $@ $<
 
-$(PRE_IMG): $(PRE_ELF) $(X86)/dyn-disk.img
+$(PRE_IMG): $(PRE_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(PRE_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 
@@ -1664,6 +2078,30 @@ run-x86-alpine-shell:
 
 # 验收：`sh -c '...'` 那段脚本的四件事都要在串口上看得到，而且 /data 里写下的
 # 文件在宿主侧（数据盘镜像）能查出来 —— 证明真的落盘了。
+# M28：真实 Alpine 程序冒烟（awk/sed/grep/sort/tar/gzip + 管道重定向）。
+# 用独立的 ISO 名，避免覆盖 check-alpine 的常规镜像。
+x86-alpine-apps: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6_DEFS=-DC6OS_ALPINE_APPS \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/apps.iso
+
+check-alpine-apps: x86-alpine-apps
+	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine-apps.log >/dev/null
+	@grep -q "apps-cat-ok" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（cat 读 FAT 文件失败）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@grep -q "apps-tar-ok" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（tar 写 /data 失败）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@grep -q "apps-done" /tmp/check-alpine-apps.log \
+	  || { echo "FAIL: alpine apps（脚本没跑完）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
+	@echo "PASS: alpine apps（cat/tar + /data FAT 读写 + 句柄回收）"
+
 check-alpine:
 	@rm -f $(ALPINE_DATA)
 	@$(MAKE) x86-alpine
@@ -1797,6 +2235,172 @@ check-linuxabi-m9: x86-m9
 	  && echo "PASS: linux-abi M9-4（/tmp = ramfs：open/write/lseek/read/getdents64）" \
 	  || { echo "FAIL: linux-abi M9-4"; exit 1; }
 
+# ---- M15：VFS/设备 syscall 完整语义 ----
+x86-m15: caps-check-x86
+	$(MAKE) X86S_NAME=m15 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m15-disk.img
+
+check-linuxabi-m15: x86-m15
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m15-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m15.log \
+		| grep -q "^PASS: m15fs" \
+	  && echo "PASS: linux-abi M15（VFS 写类/*at/devfs/statfs 语义）" \
+	  || { echo "FAIL: linux-abi M15"; tail -30 /tmp/check-m15.log; exit 1; }
+
+# ---- M16：事件与时间 syscall ----
+x86-m16: caps-check-x86
+	$(MAKE) X86S_NAME=m16 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m16-disk.img
+
+check-linuxabi-m16: x86-m16
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m16-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m16.log \
+		| grep -q "^PASS: m16ev" \
+	  && echo "PASS: linux-abi M16（select/eventfd/gettimeofday/clock_getres）" \
+	  || { echo "FAIL: linux-abi M16"; tail -30 /tmp/check-m16.log; exit 1; }
+
+# ---- M17：procfs + 控制终端 ----
+x86-m17: caps-check-x86
+	$(MAKE) X86S_NAME=m17 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m17-disk.img
+
+check-linuxabi-m17: x86-m17
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m17-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m17.log \
+		| grep -q "^PASS: m17proc" \
+	  && echo "PASS: linux-abi M17（procfs 虚拟文件 + 控制终端 ioctl）" \
+	  || { echo "FAIL: linux-abi M17"; tail -30 /tmp/check-m17.log; exit 1; }
+
+# ---- M18：Linux socket syscall → SAL（UDP 环回）----
+x86-m18: caps-check-x86
+	$(MAKE) X86S_NAME=m18 X86S_MAIN=tests/t_x86_m18.c6 LINUX_ABI=1 C6OS_NET=1 \
+		$(X86)/m18-disk.img
+
+check-linuxabi-m18: x86-m18
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m18-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m18.log \
+		| grep -q "^PASS: m18sock" \
+	  && echo "PASS: linux-abi M18（Linux socket syscall → SAL：UDP 环回）" \
+	  || { echo "FAIL: linux-abi M18"; tail -30 /tmp/check-m18.log; exit 1; }
+
+# ---- M19：busybox applet 矩阵（未修改的动态 busybox）----
+check-linuxabi-m19: $(X86)/m19-disk.img
+	@timeout 180 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m19-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m19.log \
+		| grep -q "^PASS: m19applet" \
+	  && echo "PASS: linux-abi M19（busybox applet 矩阵）" \
+	  || { echo "FAIL: linux-abi M19"; tail -40 /tmp/check-m19.log; exit 1; }
+
+# ---- M20：epoll 事件接口 ----
+x86-m20: caps-check-x86
+	$(MAKE) X86S_NAME=m20 X86S_MAIN=tests/t_x86_m20.c6 LINUX_ABI=1 \
+		$(X86)/m20-disk.img
+
+check-linuxabi-m20: x86-m20
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m20-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m20.log \
+		| grep -q "^PASS: m20epoll" \
+	  && echo "PASS: linux-abi M20（epoll_create1/ctl/wait）" \
+	  || { echo "FAIL: linux-abi M20"; tail -30 /tmp/check-m20.log; exit 1; }
+
+# ---- M21：timerfd ----
+x86-m21: caps-check-x86
+	$(MAKE) X86S_NAME=m21 X86S_MAIN=tests/t_x86_m21.c6 LINUX_ABI=1 \
+		$(X86)/m21-disk.img
+
+check-linuxabi-m21: x86-m21
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m21-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m21.log \
+		| grep -q "^PASS: m21timerfd" \
+	  && echo "PASS: linux-abi M21（timerfd_create/settime/gettime）" \
+	  || { echo "FAIL: linux-abi M21"; tail -30 /tmp/check-m21.log; exit 1; }
+
+# ---- M22：signalfd ----
+x86-m22: caps-check-x86
+	$(MAKE) X86S_NAME=m22 X86S_MAIN=tests/t_x86_m22.c6 LINUX_ABI=1 \
+		$(X86)/m22-disk.img
+
+check-linuxabi-m22: x86-m22
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m22-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m22.log \
+		| grep -q "^PASS: m22signalfd" \
+	  && echo "PASS: linux-abi M22（signalfd4）" \
+	  || { echo "FAIL: linux-abi M22"; tail -30 /tmp/check-m22.log; exit 1; }
+
+# ---- M23：sendmsg/recvmsg iovec ----
+x86-m23: caps-check-x86
+	$(MAKE) X86S_NAME=m23 X86S_MAIN=tests/t_x86_m18.c6 LINUX_ABI=1 C6OS_NET=1 \
+		$(X86)/m23-disk.img
+
+check-linuxabi-m23: x86-m23
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m23-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m23.log \
+		| grep -q "^PASS: m23msg" \
+	  && echo "PASS: linux-abi M23（sendmsg/recvmsg iovec）" \
+	  || { echo "FAIL: linux-abi M23"; tail -30 /tmp/check-m23.log; exit 1; }
+
+# ---- M24：getaddrinfo / DNS ----
+# 复用通用 disk 规则：递归 make 构建内核 flat.bin，DISK_APP 塞动态 ELF +
+# 带 /etc/resolv.conf|hosts 的 initramfs（M24_FS）。
+x86-m24: caps-check-x86 $(M24_ELF) $(M24_FS)
+	$(MAKE) X86S_NAME=m24 X86S_MAIN=tests/t_x86_m24.c6 LINUX_ABI=1 C6OS_NET=1 \
+		$(X86)/m24-disk.img
+
+check-linuxabi-m24: x86-m24
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m24-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m24.log \
+		| grep -q "^PASS: m24dns" \
+	  && echo "PASS: linux-abi M24（getaddrinfo / DNS）" \
+	  || { echo "FAIL: linux-abi M24"; tail -30 /tmp/check-m24.log; exit 1; }
+
+# ---- M25：AF_UNIX socket ----
+x86-m25: caps-check-x86
+	$(MAKE) X86S_NAME=m25 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m25-disk.img
+
+check-linuxabi-m25: x86-m25
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m25-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m25.log \
+		| grep -q "^PASS: m25unix" \
+	  && echo "PASS: linux-abi M25（AF_UNIX socket）" \
+	  || { echo "FAIL: linux-abi M25"; tail -30 /tmp/check-m25.log; exit 1; }
+
+# ---- M27：libc-test functional 子集 ----
+x86-m27: caps-check-x86 $(M27_FS)
+	$(MAKE) X86S_NAME=m27 X86S_MAIN=tests/t_x86_m27.c6 LINUX_ABI=1 \
+		$(X86)/m27-disk.img
+
+check-linuxabi-m27: x86-m27
+	@timeout 120 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m27-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m27.log \
+		| grep -q "^PASS: libc-test functional" \
+	  && echo "PASS: linux-abi M27（musl libc-test functional 子集）" \
+	  || { echo "FAIL: linux-abi M27"; tail -40 /tmp/check-m27.log; exit 1; }
+
 x86-fs: caps-check-x86
 	$(MAKE) X86S_NAME=fs X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(X86)/fs-disk.img
@@ -1814,9 +2418,13 @@ check-linuxabi-l3: x86-fs
 	  && echo "PASS: linux-abi L3（initramfs + 文件语义）" \
 	  || { echo "FAIL: linux-abi L3"; exit 1; }
 
+# 固定参数（X86S_NAME/X86S_MAIN/LINUX_ABI）走 env：命令行传的变量会进
+# MAKEOVERRIDES 再经 MAKEFLAGS 传给子 make，等于"强制覆盖"——子 make 里这些
+# 变量就成了不可被 Makefile 修改的 override，任何依赖它们的条件分支都会错乱。
+# 走 env 则子 make 是普通默认值，Makefile 里的 := / += 全都照常生效。
 x86-elf: caps-check-x86
-	$(MAKE) X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
-		$(X86)/elf-disk.img
+	X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/elf-disk.img
 
 run-x86-elf: x86-elf
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
@@ -1875,6 +2483,161 @@ DISK_DEPS  := $(M9_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(M9_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m15)
+DISK_DEPS  := $(M15_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M15_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m16)
+DISK_DEPS  := $(M16_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M16_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m17)
+DISK_DEPS  := $(M17_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M17_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m18)
+DISK_DEPS  := $(M18_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M18_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m20)
+DISK_DEPS  := $(M20_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M20_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m21)
+DISK_DEPS  := $(M21_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M21_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m22)
+DISK_DEPS  := $(M22_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M22_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m23)
+DISK_DEPS  := $(M23_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M23_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m24)
+DISK_DEPS  := $(M24_ELF) $(M24_FS)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M24_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(M24_FS) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m25)
+DISK_DEPS  := $(M25_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M25_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m38)
+DISK_DEPS  := $(M38_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M38_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m39)
+DISK_DEPS  := $(M39_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M39_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m40)
+DISK_DEPS  := $(M40_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M40_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m41)
+DISK_DEPS  := $(M41_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M41_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m42)
+DISK_DEPS  := $(M42_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M42_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m43)
+DISK_DEPS  := $(M43_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M43_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m44)
+DISK_DEPS  := $(M44_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M44_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m45)
+DISK_DEPS  := $(M45_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M45_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m46)
+DISK_DEPS  := $(M46_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M46_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m47)
+DISK_DEPS  := $(M47_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M47_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m48)
+DISK_DEPS  := $(M48_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M48_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m49)
+DISK_DEPS  := $(M49_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M49_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m50)
+DISK_DEPS  := $(M50_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M50_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m51)
+DISK_DEPS  := $(M51_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M51_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m52)
+DISK_DEPS  := $(M52_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M52_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m53)
+DISK_DEPS  := $(M53_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M53_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m54)
+DISK_DEPS  := $(M54_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M54_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m55)
+DISK_DEPS  := $(M55_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M55_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m56)
+DISK_DEPS  := $(M56_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M56_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m57)
+DISK_DEPS  := $(M57_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M57_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m27)
+DISK_DEPS  := $(M27_ELF) $(M27_FS)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M27_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(M27_FS) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),net)
 DISK_DEPS  :=
 DISK_MB    := 1
@@ -2292,3 +3055,297 @@ wifi:
 		s3
 wififlash: wifi
 	./tools/flashmon.sh build/wifi/c6os.bin 15
+
+# ---- 头文件依赖（见 X86CDEPFLAGS） ------------------------------------------
+# 放在最后：此时所有 obj 目录规则都已定义，-include 只是把 .d 读进来当普通规则。
+-include $(wildcard $(X86)/*/obj/*.d)
+
+
+check-linuxabi-m35: $(X86)/m35-disk.img
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m35-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m35.log \
+		| grep -q "PASS: m35fifo" \
+	  && echo "PASS: linux-abi M35（管道 fstat=S_IFIFO + isatty=ENOTTY）" \
+	  || { echo "FAIL: linux-abi M35"; tail -20 /tmp/check-m35.log; exit 1; }
+
+# ---- M38：waitid ----
+x86-m38: caps-check-x86
+	$(MAKE) X86S_NAME=m38 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m38-disk.img
+
+check-linuxabi-m38: x86-m38
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m38-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m38.log \
+		| grep -q "^PASS: m38waitid" \
+	  && echo "PASS: linux-abi M38（waitid）" \
+	  || { echo "FAIL: linux-abi M38"; tail -30 /tmp/check-m38.log; exit 1; }
+
+# ---- M39：statx ----
+x86-m39: caps-check-x86
+	$(MAKE) X86S_NAME=m39 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m39-disk.img
+
+check-linuxabi-m39: x86-m39
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m39-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m39.log \
+		| grep -q "^PASS: m39statx" \
+	  && echo "PASS: linux-abi M39（statx）" \
+	  || { echo "FAIL: linux-abi M39"; tail -30 /tmp/check-m39.log; exit 1; }
+
+# ---- M40：copy_file_range ----
+x86-m40: caps-check-x86
+	$(MAKE) X86S_NAME=m40 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m40-disk.img
+
+check-linuxabi-m40: x86-m40
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m40-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m40.log \
+		| grep -q "^PASS: m40cfr" \
+	  && echo "PASS: linux-abi M40（copy_file_range）" \
+	  || { echo "FAIL: linux-abi M40"; tail -30 /tmp/check-m40.log; exit 1; }
+
+# ---- M41：AF_UNIX SOCK_STREAM ----
+x86-m41: caps-check-x86
+	$(MAKE) X86S_NAME=m41 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m41-disk.img
+
+check-linuxabi-m41: x86-m41
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m41-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m41.log \
+		| grep -q "^PASS: m41unixstream" \
+	  && echo "PASS: linux-abi M41（AF_UNIX SOCK_STREAM）" \
+	  || { echo "FAIL: linux-abi M41"; tail -30 /tmp/check-m41.log; exit 1; }
+
+# ---- M42：AF_UNIX SCM_RIGHTS ----
+x86-m42: caps-check-x86
+	$(MAKE) X86S_NAME=m42 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m42-disk.img
+
+check-linuxabi-m42: x86-m42
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m42-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m42.log \
+		| grep -q "^PASS: m42scmright" \
+	  && echo "PASS: linux-abi M42（AF_UNIX SCM_RIGHTS）" \
+	  || { echo "FAIL: linux-abi M42"; tail -30 /tmp/check-m42.log; exit 1; }
+
+# ---- M43：fallocate ----
+x86-m43: caps-check-x86
+	$(MAKE) X86S_NAME=m43 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m43-disk.img
+
+check-linuxabi-m43: x86-m43
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m43-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m43.log \
+		| grep -q "^PASS: m43fallocate" \
+	  && echo "PASS: linux-abi M43（fallocate）" \
+	  || { echo "FAIL: linux-abi M43"; tail -30 /tmp/check-m43.log; exit 1; }
+
+# ---- M44：pwrite/preadv/pwritev ----
+x86-m44: caps-check-x86
+	$(MAKE) X86S_NAME=m44 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m44-disk.img
+
+check-linuxabi-m44: x86-m44
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m44-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m44.log \
+		| grep -q "^PASS: m44posio" \
+	  && echo "PASS: linux-abi M44（pwrite/preadv/pwritev）" \
+	  || { echo "FAIL: linux-abi M44"; tail -30 /tmp/check-m44.log; exit 1; }
+
+# ---- M45：pty ----
+x86-m45: caps-check-x86
+	$(MAKE) X86S_NAME=m45 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(X86)/m45-disk.img
+
+check-linuxabi-m45: x86-m45
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m45-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m45.log \
+		| grep -q "^PASS: m45pty" \
+	  && echo "PASS: linux-abi M45（pty）" \
+	  || { echo "FAIL: linux-abi M45"; tail -30 /tmp/check-m45.log; exit 1; }
+
+# ---- M46：AF_UNIX STREAM 字节流 ----
+x86-m46: caps-check-x86
+	$(MAKE) X86S_NAME=m46 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m46-disk.img
+
+check-linuxabi-m46: x86-m46
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m46-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m46.log \
+		| grep -q "^PASS: m46stream" \
+	  && echo "PASS: linux-abi M46（AF_UNIX STREAM 字节流）" \
+	  || { echo "FAIL: linux-abi M46"; tail -30 /tmp/check-m46.log; exit 1; }
+
+# ---- M47：epoll ET/ONESHOT ----
+x86-m47: caps-check-x86
+	$(MAKE) X86S_NAME=m47 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m47-disk.img
+
+check-linuxabi-m47: x86-m47
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m47-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m47.log \
+		| grep -q "^PASS: m47epollflags" \
+	  && echo "PASS: linux-abi M47（epoll ET/ONESHOT）" \
+	  || { echo "FAIL: linux-abi M47"; tail -30 /tmp/check-m47.log; exit 1; }
+
+# ---- M48：AF_UNIX abstract namespace ----
+x86-m48: caps-check-x86
+	$(MAKE) X86S_NAME=m48 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m48-disk.img
+
+check-linuxabi-m48: x86-m48
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m48-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m48.log \
+		| grep -q "^PASS: m48abstract" \
+	  && echo "PASS: linux-abi M48（AF_UNIX abstract namespace）" \
+	  || { echo "FAIL: linux-abi M48"; tail -30 /tmp/check-m48.log; exit 1; }
+
+# ---- M49：epoll_pwait ----
+x86-m49: caps-check-x86
+	$(MAKE) X86S_NAME=m49 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m49-disk.img
+
+check-linuxabi-m49: x86-m49
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m49-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m49.log \
+		| grep -q "^PASS: m49epollpwait" \
+	  && echo "PASS: linux-abi M49（epoll_pwait）" \
+	  || { echo "FAIL: linux-abi M49"; tail -30 /tmp/check-m49.log; exit 1; }
+
+# ---- M50：pty per-instance termios ----
+x86-m50: caps-check-x86
+	$(MAKE) X86S_NAME=m50 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m50-disk.img
+
+check-linuxabi-m50: x86-m50
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m50-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m50.log \
+		| grep -q "^PASS: m50ptytermios" \
+	  && echo "PASS: linux-abi M50（pty per-instance termios）" \
+	  || { echo "FAIL: linux-abi M50"; tail -30 /tmp/check-m50.log; exit 1; }
+
+# ---- M51：资源/调度类 syscall ----
+x86-m51: caps-check-x86
+	$(MAKE) X86S_NAME=m51 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m51-disk.img
+
+check-linuxabi-m51: x86-m51
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m51-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m51.log \
+		| grep -q "^PASS: m51rlimit" \
+	  && echo "PASS: linux-abi M51（资源/调度类 syscall）" \
+	  || { echo "FAIL: linux-abi M51"; tail -30 /tmp/check-m51.log; exit 1; }
+
+# ---- M52：文件同步与咨询锁 ----
+x86-m52: caps-check-x86
+	$(MAKE) X86S_NAME=m52 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m52-disk.img
+
+check-linuxabi-m52: x86-m52
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m52-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m52.log \
+		| grep -q "^PASS: m52sync" \
+	  && echo "PASS: linux-abi M52（文件同步与咨询锁）" \
+	  || { echo "FAIL: linux-abi M52"; tail -30 /tmp/check-m52.log; exit 1; }
+
+# ---- M53：getitimer/setitimer ----
+x86-m53: caps-check-x86
+	$(MAKE) X86S_NAME=m53 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m53-disk.img
+
+check-linuxabi-m53: x86-m53
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m53-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m53.log \
+		| grep -q "^PASS: m53itimer" \
+	  && echo "PASS: linux-abi M53（getitimer/setitimer）" \
+	  || { echo "FAIL: linux-abi M53"; tail -30 /tmp/check-m53.log; exit 1; }
+
+# ---- M54：readlink/faccessat/fchdir/accept4 ----
+x86-m54: caps-check-x86
+	$(MAKE) X86S_NAME=m54 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m54-disk.img
+
+check-linuxabi-m54: x86-m54
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m54-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m54.log \
+		| grep -q "^PASS: m54dirfd" \
+	  && echo "PASS: linux-abi M54（readlink/faccessat/fchdir/accept4）" \
+	  || { echo "FAIL: linux-abi M54"; tail -30 /tmp/check-m54.log; exit 1; }
+
+# ---- M55：rt_sigtimedwait ----
+x86-m55: caps-check-x86
+	$(MAKE) X86S_NAME=m55 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m55-disk.img
+
+check-linuxabi-m55: x86-m55
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m55-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m55.log \
+		| grep -q "^PASS: m55sigtimedwait" \
+	  && echo "PASS: linux-abi M55（rt_sigtimedwait）" \
+	  || { echo "FAIL: linux-abi M55"; tail -30 /tmp/check-m55.log; exit 1; }
+
+# ---- M56：readlink 真实符号链接 ----
+x86-m56: caps-check-x86
+	$(MAKE) X86S_NAME=m56 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m56-disk.img
+
+check-linuxabi-m56: x86-m56
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m56-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m56.log \
+		| grep -q "^PASS: m56readlink" \
+	  && echo "PASS: linux-abi M56（readlink 真实符号链接）" \
+	  || { echo "FAIL: linux-abi M56"; tail -30 /tmp/check-m56.log; exit 1; }
+
+# ---- M57：chown/symlink/link/mknod 族 ----
+x86-m57: caps-check-x86
+	$(MAKE) X86S_NAME=m57 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m57-disk.img
+
+check-linuxabi-m57: x86-m57
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m57-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m57.log \
+		| grep -q "^PASS: m57meta" \
+	  && echo "PASS: linux-abi M57（chown/symlink/link/mknod 族）" \
+	  || { echo "FAIL: linux-abi M57"; tail -30 /tmp/check-m57.log; exit 1; }

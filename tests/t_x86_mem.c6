@@ -10,6 +10,7 @@
 
 #include "c6os/types.h"
 #include "c6os/port.h"
+#include "c6os/linux_vma.h"
 
 #define TEST_VA      0x00400000ull
 #define TEST_PAGES   64ull
@@ -127,6 +128,85 @@ void os_main(void)
                 fail = 12u;
             }
             port_as_unref(as);             /* ref 1 → 0，销毁 */
+        }
+    }
+
+    /* 内核堆（M13-2b-1）：小对象按类复用、地址不重叠；大对象走连续页、释放后
+     * 整块还回去（free_kb 必须回升）。slab 页不还页是有意的：那种抖动比漏页更
+     * 伤吞吐，长期上限由真实并发对象数决定。 */
+    if (fail == 0u) {
+        void *a = port_kmalloc(24ull);
+        void *b = port_kmalloc(24ull);
+        void *c = port_kmalloc(300ull);
+        void *d = port_kmalloc(70000ull);
+        u64 kb_big = 0ull;
+
+        if (a == (void *)0 || b == (void *)0 || c == (void *)0 ||
+            d == (void *)0) {
+            fail = 13u;
+        } else if (a == b) {
+            fail = 14u;
+        } else {
+            *(u64 *)a = 0x1122334455667788ull;
+            *(u64 *)c = *(const u64 *)a;
+            *(u64 *)d = *(const u64 *)a;
+            if (*(const u64 *)c != 0x1122334455667788ull ||
+                *(const u64 *)d != 0x1122334455667788ull) {
+                fail = 15u;
+            }
+            kb_big = port_phys_free_kb();
+            port_kfree(d);
+            if (port_phys_free_kb() <= kb_big) {
+                fail = 16u;                /* 大对象没还页 */
+            }
+            port_kfree(a);
+            port_kfree(b);
+            port_kfree(c);
+            a = port_kmalloc(24ull);
+            b = port_kmalloc(24ull);
+            if (a == (void *)0 || b == (void *)0 || a == b) {
+                fail = 17u;                /* 释放回链后必须能再拿到 */
+            }
+            port_kfree(a);
+            port_kfree(b);
+        }
+    }
+
+    /* M13-2b-3：惰性 VMA 只占触碰页；AS 销毁后页表/页/节点一起归还。 */
+    if (fail == 0u) {
+        u64 as = port_as_create();
+        u64 kb0 = 0ull;
+        u64 kb1 = 0ull;
+        u64 kb2 = 0ull;
+
+        if (as == 0ull) {
+            fail = 18u;
+        } else {
+            lx_vma_init();
+            kb0 = port_phys_free_kb();
+            if (lx_vma_add(as, TEST_VA, TEST_VA + 64ull * 1024ull * 1024ull,
+                           C6OS_PROT_R | C6OS_PROT_W,
+                           LX_VM_ANON | LX_VM_LAZY, 0ull) != 0) {
+                fail = 19u;
+            } else if (lx_vma_fault(as, TEST_VA) != 1) {
+                fail = 20u;
+            } else if (lx_vma_fault(as, TEST_VA + TEST_PAGE) != 1) {
+                fail = 21u;
+            } else if (lx_vma_covered(as, TEST_VA, TEST_VA + TEST_PAGE) == 0) {
+                fail = 22u;
+            } else {
+                kb1 = port_phys_free_kb();
+                /* 64MB 的 VMA 只补了 2 页：降幅必须远小于 64MB */
+                if (kb0 > kb1 && kb0 - kb1 > 64ull) {
+                    fail = 23u;
+                }
+            }
+            port_as_unref(as);             /* 销毁：VMA 链/页表/页一起还 */
+            kb2 = port_phys_free_kb();
+            /* slab 页不还（故意的），留 32KB 余量给节点/表页缓存 */
+            if (fail == 0u && kb2 + 32ull < kb0) {
+                fail = 24u;
+            }
         }
     }
 

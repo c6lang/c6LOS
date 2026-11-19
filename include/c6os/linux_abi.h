@@ -12,9 +12,17 @@
  * 描述 ILP32/LP64 混合的 ABI 表，正是 architecture.md §3 警告的那类风险。
  * 规则：linux/ 下的文件只有在 C6OS_LINUX_ABI=1 时才进入编译单元列表。 */
 
-/* mmap 的两个标志（只用到这两个） */
+/* execve 的参数区上限（Linux 的 ARG_MAX 语义：指针个数与总字节两个维度）。
+ * 这两个值同时被 linux/proc.c（读用户 argv/envp）和 linux/elf64.c（压栈）用，
+ * 放在这里避免两处各写一份而漂移。 */
+#define LX_ARG_MAX    4096u
+#define LX_ARG_BYTES  131072ull       /* 单个参数字符串上限 128KB（同 Linux） */
+
+/* mmap 的标志（只列用到的） */
 #define LX_AT_EMPTY_PATH  0x1000ull
 #define LX_AT_SYMLINK_NOFOLLOW 0x100ull
+#define LX_MAP_SHARED     0x01ull
+#define LX_MAP_PRIVATE    0x02ull
 #define LX_MAP_FIXED      0x10ull
 #define LX_MAP_ANONYMOUS  0x20ull
 
@@ -27,6 +35,8 @@
 #define LX_SYS_fstat           5
 #define LX_SYS_lstat           6
 #define LX_SYS_nanosleep      35
+#define LX_SYS_alarm          37
+#define LX_SYS_clock_nanosleep 230
 #define LX_SYS_clock_gettime 228
 #define LX_SYS_lseek           8
 #define LX_SYS_mmap            9
@@ -63,6 +73,7 @@
 #define LX_POLLNVAL 0x0020
 #define LX_SYS_pread64        17
 #define LX_SYS_readv          19
+#define LX_SYS_dup3          292
 #define LX_SYS_writev         20
 #define LX_SYS_access         21
 #define LX_SYS_exit           60
@@ -101,6 +112,7 @@
 #define LX_SYS_geteuid       107
 #define LX_SYS_getegid       108
 #define LX_SYS_getpid         39
+#define LX_SYS_waitid         247
 #define LX_SYS_clone          56
 #define LX_SYS_execve         59
 #define LX_SYS_wait4          61
@@ -125,6 +137,7 @@
 #define LX_CLONE_CHILD_SETTID    0x01000000ull
 
 #define LX_SYS_sched_yield   24
+#define LX_SYS_msync         26
 #define LX_SYS_madvise       28
 #define LX_SYS_prctl        157
 #define LX_SYS_sched_getaffinity 204
@@ -148,11 +161,18 @@
 #define LX_SIGUSR2  12
 #define LX_SIGPIPE  13
 #define LX_SIGALRM  14
+/* M53：ITIMER_VIRTUAL/PROF 到期信号 */
+#define LX_SIGVTALRM 26
+#define LX_SIGPROF  27
 #define LX_SIGTERM  15
 #define LX_SIGCHLD  17
 #define LX_SIGCONT  18
 #define LX_SIGSTOP  19
+#define LX_SIGTSTP  20
+#define LX_SIGTTIN  21
+#define LX_SIGTTOU  22
 #define LX_SIGURG   23
+#define LX_SIGXCPU  24
 #define LX_SIGWINCH 28
 
 /* handler 的两个特殊值 + sigaction 标志（与 Linux 同值） */
@@ -161,6 +181,7 @@
 #define LX_SA_SIGINFO    4ull
 #define LX_SA_RESTORER   0x04000000ull
 #define LX_SA_NODEFER    0x40000000ull
+#define LX_SA_RESTART    0x10000000ull
 
 /* rt_sigprocmask 的 how */
 #define LX_SIG_BLOCK     0ull
@@ -173,12 +194,143 @@
 #define LX_SYS_set_tid_address   218
 #define LX_SYS_exit_group    231
 #define LX_SYS_openat        257
+#define LX_SYS_mkdirat       258
 #define LX_SYS_newfstatat    262
+#define LX_SYS_statx         332
+#define LX_SYS_copy_file_range 326
+#define LX_SYS_fallocate     285
+#define LX_SYS_pwrite64      18
+#define LX_SYS_preadv        295
+#define LX_SYS_pwritev       296
+#define LX_SYS_preadv2       327
+#define LX_SYS_pwritev2      328
+#define LX_FALLOC_FL_KEEP_SIZE   0x01u
+#define LX_FALLOC_FL_PUNCH_HOLE  0x02u
+#define LX_SYS_unlinkat      263
+#define LX_SYS_renameat      264
 #define LX_SYS_readlinkat    267
+#define LX_SYS_fchmodat      268
+/* 写类/属性类（legacy 与 *at 对，M15） */
+#define LX_SYS_rename        82
+#define LX_SYS_mkdir         83
+#define LX_SYS_rmdir         84
+#define LX_SYS_unlink        87
+#define LX_SYS_chmod         90
+#define LX_SYS_fchmod        91
+#define LX_SYS_truncate      76
+#define LX_SYS_ftruncate     77
+#define LX_SYS_statfs        137
+#define LX_SYS_fstatfs       138
+#define LX_SYS_utimensat     280
+/* M57：所有权/链接/设备节点族 */
+#define LX_SYS_link          86
+#define LX_SYS_symlink       88
+#define LX_SYS_chown         92
+#define LX_SYS_fchown        93
+#define LX_SYS_lchown        94
+#define LX_SYS_mknod         133
+#define LX_SYS_mknodat       259
+#define LX_SYS_fchownat      260
+#define LX_SYS_linkat        265
+#define LX_SYS_symlinkat     266
+/* M16：事件与时间 */
+#define LX_SYS_select        23
+#define LX_SYS_gettimeofday  96
+#define LX_SYS_clock_settime 227
+#define LX_SYS_clock_getres  229
+#define LX_SYS_pselect6      270
+#define LX_SYS_eventfd2      290
+#define LX_SYS_epoll_create1 291
+/* M20：epoll 事件接口 */
+#define LX_SYS_epoll_wait    232
+#define LX_SYS_epoll_pwait   281
+#define LX_SYS_epoll_ctl     233
+/* M21：timerfd */
+#define LX_SYS_timerfd_create 283
+#define LX_SYS_timerfd_settime 286
+#define LX_SYS_timerfd_gettime 287
+/* M22：signalfd */
+#define LX_SYS_signalfd4      289
+/* M18：socket 族 */
+#define LX_SYS_socket        41
+/* M19：busybox applet 矩阵暴露的缺口 */
+#define LX_SYS_sendfile      40
+#define LX_SYS_sysinfo       99
+#define LX_SYS_getgroups     115
+#define LX_SYS_connect       42
+#define LX_SYS_accept        43
+#define LX_SYS_sendto        44
+#define LX_SYS_recvfrom      45
+#define LX_SYS_sendmsg       46
+#define LX_SYS_recvmsg       47
+#define LX_SYS_shutdown      48
+#define LX_SYS_bind          49
+#define LX_SYS_listen        50
+#define LX_SYS_getsockname   51
+#define LX_SYS_getpeername   52
+#define LX_SYS_socketpair    53
+#define LX_SYS_send          64
+#define LX_SYS_recv          65
+#define LX_SYS_setsockopt    54
+#define LX_SYS_getsockopt    55
 #define LX_SYS_set_robust_list   273
 #define LX_SYS_prlimit64     302
 #define LX_SYS_getrandom     318
 #define LX_SYS_rseq          334
+/* M51：资源/调度类 syscall */
+#define LX_SYS_getrlimit     97
+#define LX_SYS_getrusage     98
+#define LX_SYS_getpriority   140
+#define LX_SYS_setpriority   141
+#define LX_SYS_mlock         149
+#define LX_SYS_munlock       150
+#define LX_SYS_setrlimit     160
+#define LX_SYS_sethostname   170
+/* M55：信号定时等待 */
+#define LX_SYS_rt_sigtimedwait 128
+/* M54：目录 fd/访问/socket 标志类 syscall */
+#define LX_SYS_fchdir       81
+#define LX_SYS_readlink     89
+#define LX_SYS_faccessat    269
+#define LX_SYS_accept4      288
+#define LX_SOCK_CLOEXEC     0x80000u
+#define LX_SOCK_NONBLOCK    0x800u
+/* M53：间隔定时器 */
+#define LX_SYS_getitimer    36
+#define LX_SYS_setitimer    38
+#define LX_ITIMER_REAL      0u
+#define LX_ITIMER_VIRTUAL   1u
+#define LX_ITIMER_PROF      2u
+/* M52：文件同步与咨询锁 */
+#define LX_SYS_flock         73
+#define LX_SYS_fsync         74
+#define LX_SYS_fdatasync     75
+#define LX_SYS_sync         162
+#define LX_SYS_syncfs       306
+/* flock 操作位（Linux 同值） */
+#define LX_LOCK_SH           0x01u
+#define LX_LOCK_EX           0x02u
+#define LX_LOCK_NB           0x04u
+#define LX_LOCK_UN           0x08u
+/* RLIMIT_* 资源 id（Linux 通用） */
+#define LX_RLIMIT_CPU        0u
+#define LX_RLIMIT_FSIZE      1u
+#define LX_RLIMIT_DATA       2u
+#define LX_RLIMIT_STACK      3u
+#define LX_RLIMIT_CORE       4u
+#define LX_RLIMIT_RSS        5u
+#define LX_RLIMIT_NPROC      6u
+#define LX_RLIMIT_NOFILE     7u
+#define LX_RLIMIT_MEMLOCK    8u
+#define LX_RLIMIT_AS         9u
+#define LX_RLIMIT_LOCKS     10u
+#define LX_RLIMIT_SIGPENDING 11u
+#define LX_RLIMIT_MSGQUEUE  12u
+#define LX_RLIMIT_NICE      13u
+#define LX_RLIMIT_RTPRIO    14u
+#define LX_RLIMIT_RTTIME    15u
+#define LX_NLIMITS          16u
+#define LX_RLIM_INFINITY    (~0ull)
 
 /* arch_prctl 的 code */
 #define LX_ARCH_SET_FS    0x1002u
@@ -200,6 +352,21 @@
 #define LX_EBUSY   16
 #define LX_EMFILE  24
 #define LX_ESRCH   3
+#define LX_E2BIG   7
+#define LX_EINTR   4
+#define LX_ENOTDIR 20
+#define LX_ENAMETOOLONG 36
+#define LX_EISDIR  21
+#define LX_EEXIST  17
+#define LX_EACCES  13
+#define LX_EROFS   30
+#define LX_ENOSPC  28
+#define LX_EAFNOSUPPORT 97
+#define LX_EOPNOTSUPP 95
+#define LX_EIO     5
+#define LX_ESPIPE  29
+#define LX_ECONNREFUSED 111
+#define LX_EADDRINUSE 98
 
 /* 与 port/x86_64/user_entry.S 的压栈顺序严格对应（低地址在前）。 */
 typedef struct {
@@ -239,6 +406,7 @@ int lx_exec_preparev(u64 as, u64 img_pa, u64 img_size, const char *path,
 void lx_exec_arg1(const char *a);
 int lx_exec_build(u64 as, u64 img_pa, u64 img_size, const char *path,
                   const char *const *argv, u32 argc,
+                  const char *const *envp, u32 envc,
                   u64 *o_entry, u64 *o_rsp, u64 *o_brk);
 u64 lx_exec_entry(void);
 u64 lx_exec_rsp(void);
@@ -264,11 +432,26 @@ u64  lx_fs_close(u64 fd);
 u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
 u64  lx_fs_fstat(u64 fd, u64 ustat);
 u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags);
+u64  lx_fs_statx(u64 dirfd, u64 upath, u64 flags, u64 ustatx);
+u64  lx_fs_copy_file_range(u64 fd_in, u64 uoff_in, u64 fd_out,
+                           u64 uoff_out, u64 len, u64 flags);
+u64  lx_fs_fallocate(u64 fd, u64 mode, u64 off, u64 len);
 u64  lx_fs_access(u64 upath, u64 mode);
+u64  lx_fs_faccessat(u64 dirfd, u64 upath, u64 mode, u64 flags);
+u64  lx_fs_fchdir(u64 fd);
+u64  lx_fs_readlinkat(u64 dirfd, u64 upath, u64 ubuf, u64 bufsiz);  /* M56 */
+/* M57：所有权/链接/设备节点族 */
+u64  lx_fs_chownat(u64 dirfd, u64 upath, u64 uid, u64 gid, u32 nofollow);
+u64  lx_fs_symlinkat(u64 oldpath, u64 newdirfd, u64 newpath);
+u64  lx_fs_linkat(u64 olddirfd, u64 oldpath, u64 newdirfd, u64 newpath);
+u64  lx_fs_mknodat(u64 dirfd, u64 upath, u64 mode, u64 dev);
 u64  lx_fs_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_getdents64(u64 fd, u64 ubuf, u64 len);
 u64  lx_fs_fd_size(u64 fd);
 u64  lx_fs_pread(u64 fd, u64 ubuf, u64 len, u64 off);
+u64  lx_fs_pwrite(u64 fd, u64 ubuf, u64 len, u64 off);
+u64  lx_fs_preadv(u64 fd, u64 uiov, u64 cnt, u64 off);
+u64  lx_fs_pwritev(u64 fd, u64 uiov, u64 cnt, u64 off);
 u64  lx_fs_pread_k(u64 fd, u64 kdst, u64 len, u64 off);
 /* 内核侧路径查询（不做用户态权限检查）：给 ELF 加载器找解释器用。 */
 u64  lx_fs_size_of(const char *path);

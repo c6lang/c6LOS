@@ -229,31 +229,47 @@ u64 lx_sig_altstack(u64 uss, u64 uoss)
     return 0ull;
 }
 
-u64 lx_sig_kill(i64 pid, u32 sig)
+/* 给一个具体进程投递信号。停止/续行类信号是**作业控制**语义：不能只挂
+ * pending 等它自己被调度到——正停着的进程根本不会被调度，那样 SIGCONT 就
+ * 永远送不进去。所以这两类走状态机的直接入口（实现在 linux/proc.c）。 */
+void lx_sig_send_one(LxProc *t, u32 sig, int to_group)
 {
-    LxProc *t;
-
-    if (sig == 0u) {
-        return 0ull;                        /* 0 号信号只探测存在性 */
+    if (t == (LxProc *)0 || t->state == LX_P_FREE) {
+        return;
     }
-    if (sig >= (u32)LX_NSIG) {
-        return (u64)0 - LX_EINVAL;
+    if (sig == (u32)LX_SIGKILL) {
+        lx_proc_exit_sig(sig);
+        return;
     }
-    if (pid <= 0) {
-        t = lx_cur_proc();
-    } else {
-        t = lx_proc_find(pid);
+    if (sig == (u32)LX_SIGSTOP || sig == (u32)LX_SIGTSTP || sig == (u32)LX_SIGTTIN ||
+        sig == (u32)LX_SIGTTOU) {
+        lx_proc_job_stop(t->pid, sig);
+        return;
     }
-    if (t == (LxProc *)0) {
-        return (u64)0 - LX_ESRCH;
+    if (sig == (u32)LX_SIGCONT) {
+        /* 只续这一个目标；`kill(-pgid, SIGCONT)` 的组广播已在
+         * lx_proc_send 里逐个成员做过了。 */
+        lx_proc_job_cont(t->pid);
+        return;
+    }
+    /* M22：先问 signalfd 是否吞掉该信号（被监控则入队、不走 handler）。 */
+    if (lx_signalfd_queue(sig, (u64)LX_SI_USER, (u64)t->pid) != 0) {
+        return;
     }
     t->sig_pending |= 1ull << (sig - 1u);
     t->sig_code[sig] = (u32)LX_SI_USER;
+    if (t->state == LX_P_STOP) {
+        /* 停在 SIGSTOP 上的进程继续收其他信号（不影响它的停止状态）。 */
+        return;
+    }
     lx_proc_wake(t);                        /* 阻塞中的话叫醒它去处理 */
-    return 0ull;
 }
 
-/* 默认动作：多数致命，SIGCHLD/SIGCONT/SIGWINCH/SIGURG 默认忽略。 */
+/* 默认动作。被忽略的：SIGCHLD/SIGCONT/SIGWINCH/SIGURG。
+ * 作业控制类（STOP/TSTP/TTIN/TTOU）的默认动作是"停下"而不是"终止"，
+ * 以前一律当致命处理，shell 一 Ctrl-Z 就少一个进程。
+ * 注意：这几类在 lx_sig_send_one 里就已经直接走状态机了，到不了这里；这一支
+ * 只是兜底——比如有人先装了 handler、又把它改回 SIG_DFL。 */
 static int default_(LxProc *p, u32 sig)
 {
     (void)p;
@@ -312,7 +328,11 @@ static void build_(LxProc *p, SigView *v, u32 sig, u32 code)
     if ((p->sa[sig].flags & LX_SA_NODEFER) == 0ull) {
         newmask |= 1ull << (sig - 1u);
     }
-    *(u64 *)(uc + LX_UC_SIGMASK) = newmask;
+    /* uc_sigmask 必须保存**进 handler 之前**的屏蔽字：rt_sigreturn 拿它
+     * 恢复。以前这里存的是 newmask（handler 运行期间的 mask），于是任何
+     * handler 一返回，该信号就被永久屏蔽 —— 下一次同信号的 handler 再也不
+     * 会跑（M14 case 10 的 SIGALRM 把 case 11 的信号挡掉了）。 */
+    *(u64 *)(uc + LX_UC_SIGMASK) = p->sig_mask;
 
     *(u32 *)(base + LX_SF_INFO) = (u32)sig;
     *(u32 *)(base + LX_SF_INFO + 4ull) = 0u;
@@ -453,4 +473,72 @@ u64 lx_sig_return(LxRegs *r)
         *(const u64 *)(gi + (u64)LX_GREGS_RSP * 8ull);
     p->sig_mask = *(const u64 *)(uc + LX_UC_SIGMASK);
     return r->rax;
+}
+
+/* M55：rt_sigtimedwait(set, info, timeout, sigsetsize)
+ * 等待 set 中任一信号变为 pending，取出最低号、填 128B siginfo、返回信号号。
+ * timeout 是 timespec{sec,nsec}（NULL=无限），sigsetsize 必须为 8。
+ * 用与 epoll_wait 相同的 deadline + lx_proc_block 模式；信号到达时
+ * lx_sig_send_one 会 lx_proc_wake，醒来后重新检查。 */
+u64 lx_sig_timedwait(u64 uset, u64 uinfo, u64 utimeout, u64 sigsetsize)
+{
+    LxProc *p = lx_cur_proc();
+    u64 want, old_mask, ret;
+    u64 deadline = 0ull;
+    int have_deadline = 0;
+
+    if (p == (LxProc *)0) { return (u64)0 - LX_EINVAL; }
+    if (sigsetsize != 8ull || uset == 0ull ||
+        lx_user_ok(uset, 8ull, C6OS_PROT_R) == 0) {
+        return (u64)0 - LX_EINVAL;
+    }
+    want = *(const u64 *)uset;
+    if (uinfo != 0ull && lx_user_ok(uinfo, 128ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    if (utimeout != 0ull) {
+        i64 sec, nsec;
+        if (lx_user_ok(utimeout, 16ull, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        sec = *(const i64 *)utimeout;
+        nsec = *(const i64 *)(utimeout + 8ull);
+        if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+            return (u64)0 - LX_EINVAL;
+        }
+        have_deadline = 1;
+        /* port_cycles 口径是微秒（见 epoll_wait 的 ms*1000000 换算）。 */
+        deadline = port_cycles() + (u64)sec * 1000000ull + (u64)nsec / 1000ull;
+    }
+    /* 等待期间屏蔽 want：否则装了 handler 的信号会先被投递走、清掉 pending，
+     * lx_sig_timedwait 就再也看不到它。退出时恢复原 mask。 */
+    old_mask = p->sig_mask;
+    p->sig_mask |= want;
+    for (;;) {
+        u64 avail = p->sig_pending & want;
+
+        if (avail != 0ull) {
+            u32 sig = 1u;
+            while (sig < (u32)LX_NSIG && (avail & (1ull << (sig - 1u))) == 0ull) {
+                sig++;
+            }
+            p->sig_pending &= ~(1ull << (sig - 1u));
+            if (uinfo != 0ull) {
+                u8 *b = (u8 *)uinfo;
+                for (u32 i = 0u; i < 128u; i++) { b[i] = 0u; }
+                *(u32 *)(b + 0u) = sig;                        /* si_signo */
+                *(i32 *)(b + 8u) = (i32)p->sig_code[sig];      /* si_code */
+            }
+            ret = (u64)sig;
+            break;
+        }
+        if (have_deadline && port_cycles() >= deadline) {
+            ret = (u64)0 - LX_EAGAIN;
+            break;
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);   /* 信号到达经 lx_proc_wake 叫醒 */
+        lx_proc_block();
+    }
+    p->sig_mask = old_mask;
+    return ret;
 }

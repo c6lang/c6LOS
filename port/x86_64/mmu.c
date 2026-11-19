@@ -21,6 +21,9 @@
 #define PTE_PWT   0x008ull
 #define PTE_PCD   0x010ull
 #define PTE_NX    (1ull << 63)
+/* 软件位：COW 共享页。bit 9-11 硬件不用，正好用来标记"父子共享、写时复制"。
+ * 置 COW 时一定同时清 W：写触发 #PF，由 port_pf_resolve 复制出新页。 */
+#define PTE_COW   (1ull << 9)
 #define PTE_ADDR  0x000ffffffffff000ull
 
 #define DMAP_BASE 0xffff800000000000ull
@@ -173,6 +176,76 @@ void port_phys_put(u64 pa)
 void port_phys_free(u64 pa)
 {
     port_phys_put(pa);
+}
+
+/* 连续 n 页物理帧：页表页、内核堆的 slab 页都要求"页对齐起点 + 整页"，大对象
+ * 还要物理连续（直接映射窗口里才连续可读写）。失败返回 0。 */
+u64 port_phys_alloc_pages(u64 n)
+{
+    u64 f = g_rover;
+    u64 scanned = 0ull;
+    u64 run = 0ull;
+    u64 base = 0ull;
+
+    if (n == 0ull) {
+        return 0ull;
+    }
+    while (scanned < g_frames) {
+        if (f >= g_frames) {
+            f = 4ull;
+            run = 0ull;                   /* 绕回低端：连续性在这里断掉 */
+        }
+        if (!bmp_get(f)) {
+            if (run == 0ull) {
+                base = f;
+            }
+            run++;
+            if (run >= n) {
+                u64 k;
+
+                for (k = base; k < base + n; k++) {
+                    bmp_set(k);
+                    if (g_ref != (u8 *)0 && k < g_ref_bytes) {
+                        g_ref[k] = 1u;
+                    }
+                    g_free--;
+                }
+                g_rover = base + n;
+                return base << 12;
+            }
+        } else {
+            run = 0ull;
+        }
+        f++;
+        scanned++;
+    }
+    return 0ull;
+}
+
+void port_phys_free_pages(u64 pa, u64 n)
+{
+    u64 k;
+
+    for (k = 0ull; k < n; k++) {
+        port_phys_put(pa + (k << 12));
+    }
+}
+
+u64 port_dmap_base(void)
+{
+    return DMAP_BASE;
+}
+
+/* 当前引用数。COW 用：只剩一个引用时直接放开写，不必复制。
+ * 表还没建好时返回 1（退化为"独占"）。 */
+static u32 phys_refs_(u64 pa)
+{
+    u64 f = pa >> 12;
+
+    if (g_ref == (u8 *)0 || f >= g_ref_bytes) {
+        return 1u;
+    }
+    return (g_ref[f] == 0u) ? 1u : (u32)g_ref[f];
 }
 
 void port_phys_reserve(u64 pa, u64 bytes)
@@ -445,6 +518,7 @@ void port_mmu_init(void)
     port_as_activate(g_kernel_as);
     g_dmap_ready = 1;                     /* 之后所有页表内存走直接映射窗口 */
     ref_table_init();                     /* 引用计数表要等直接映射可用 */
+    port_kmem_init();                     /* 内核堆：内核对象（VMA/动态表）的地基 */
 }
 
 /* ---- 地址空间生命周期 ----------------------------------------------------
@@ -495,6 +569,15 @@ static int as_slot_alloc_(u64 as)
         }
     }
     return -1;
+}
+
+/* AS 释放钩子：上层（linux/vma.c 等）在地址空间真正拆掉前要把自己的元信息还掉。
+ * port 层不认识 VMA/进程，所以只发事件、不反向依赖 linux/。 */
+static void (*g_as_free_hook)(u64 as);
+
+void port_as_set_free_hook(void (*fn)(u64 as))
+{
+    g_as_free_hook = fn;
 }
 
 static void as_free_(u64 as)
@@ -550,6 +633,9 @@ static void as_free_(u64 as)
         port_phys_put(e4 & PTE_ADDR);               /* PDPT 页 */
     }
     port_phys_put(as);                              /* PML4 页 */
+    if (g_as_free_hook != (void (*)(u64))0) {
+        g_as_free_hook(as);                         /* 上层还自己的元信息 */
+    }
 }
 
 u64 port_as_create(void)
@@ -693,6 +779,34 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
     return 0;
 }
 
+/* 惰性匿名页：分配→清零→挂表。清零必须在这里做：port_as_map 的分配路径不清零
+ * （它也可能是 MAP_FIXED 换页），漏了就是"新进程读到别人数据"的信息泄漏。
+ * 只挂一页，失败时自己还帧（port_as_map 对给定 paddr 的失败不负责回收）。 */
+int port_as_map_zero(u64 as, u64 vaddr, u32 prot)
+{
+    u64 pa = port_phys_alloc();
+    u8 *p;
+    u64 i;
+
+    if (pa == 0ull) {
+        return -1;
+    }
+    p = (u8 *)port_phys_map(pa);
+    for (i = 0ull; i < PAGE_SZ; i++) {
+        p[i] = 0u;
+    }
+    if (port_as_map(as, vaddr, pa, PAGE_SZ, prot) != 0) {
+        port_phys_put(pa);
+        return -2;
+    }
+    return 0;
+}
+
+u64 port_as_current(void)
+{
+    return cur_as_();
+}
+
 int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
 {
     u64 off = 0;
@@ -747,6 +861,40 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
     return 0;
 }
 
+/* 把 slot 上的 COW 页私有化（ref>1 时复制，ref==1 时原地去 COW）。
+ * 返回 1 = 已处理（slot 里没有 COW 了）；0 = 本来就是私有页或没内存。
+ * mprotect 必须先走这一步：否则"改权限"与 COW 软件位会互相打架
+ * （例如 PROT_READ 之后又 PROT_WRITE，会把共享页直接变成可写）。 */
+static int cow_break_(u64 *slot)
+{
+    u64 e = *slot;
+    u64 pa = e & PTE_ADDR;
+    u64 npa;
+    u8 *src;
+    u8 *dst;
+    u32 k;
+
+    if ((e & PTE_COW) == 0ull) {
+        return 0;
+    }
+    if (phys_refs_(pa) <= 1u) {
+        *slot = e & ~PTE_COW;
+        return 1;
+    }
+    npa = port_phys_alloc();
+    if (npa == 0ull) {
+        return 0;
+    }
+    src = (u8 *)port_phys_map(pa);
+    dst = (u8 *)port_phys_map(npa);
+    for (k = 0u; k < 4096u; k++) {
+        dst[k] = src[k];
+    }
+    port_phys_put(pa);
+    *slot = (npa & PTE_ADDR) | (e & 0xfffull & ~PTE_COW) | (e & PTE_NX);
+    return 1;
+}
+
 int port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot)
 {
     u64 off;
@@ -778,6 +926,14 @@ int port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot)
         e = p1[IDX1(va)];
         if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U)) {
             return -2;
+        }
+        if ((e & PTE_COW) != 0ull) {
+            /* 共享页先私有化：mprotect 的"意图权限"要落在独占页上，否则
+             * COW 软件位与 W 位互相覆盖，父子隔离就破了。 */
+            if (cow_break_(&p1[IDX1(va)]) == 0) {
+                return -3;                 /* 没内存 */
+            }
+            e = p1[IDX1(va)];
         }
         e &= ~(PTE_W | PTE_NX);
         if ((prot & C6OS_PROT_W) != 0u) {
@@ -829,7 +985,11 @@ int port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot)
         if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U)) {
             return 0;
         }
-        if ((prot & C6OS_PROT_W) != 0u && (e & PTE_W) == 0ull) {
+        /* COW 页在 OS 看来是可写的：写会走 #PF 私有化。调用方（copy_to_user
+         * 的前置校验）不该因此判 EFAULT —— fork 之后 wait4 写状态失败、父进程
+         * 收不到尸，就是漏了这条。 */
+        if ((prot & C6OS_PROT_W) != 0u && (e & PTE_W) == 0ull &&
+            (e & PTE_COW) == 0ull) {
             return 0;
         }
         if ((prot & C6OS_PROT_X) != 0u && (e & PTE_NX) != 0ull) {
@@ -839,11 +999,17 @@ int port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot)
     return 1;
 }
 
-/* fork：把 src_as 里所有用户页（PTE_U）复制到 dst_as。
+/* fork：把 src_as 的用户页共享给 dst_as（写时复制）。
  *
- * 只复制 4KB 叶子且带用户位的页：内核低端 0..4MB 的 identity 与 DMAP 都是
- * 2MB 页 + supervisor，既不该也不能复制。子进程拿到的是独立的物理页，
- * 所以父子写同一份数据不会互相踩（代价是 fork 变慢，写时复制留到后面）。 */
+ * 只处理 4KB 叶子且带用户位的页：内核低端 0..4MB 的 identity 与 DMAP 都是
+ * 2MB 页 + supervisor，既不该也不能共享。
+ *
+ * 可写页：两边都清 W、置软件位 PTE_COW，页框引用 +1；任何一方写都会 #PF，
+ * 由 port_pf_resolve 复制出新页（引用只剩 1 时直接放开 W）。
+ * 只读页（代码/RELRO）：只加引用、原样映射，写它仍然是 SIGSEGV。
+ *
+ * src 的 PTE 被改成只读了，必须逐页 invlpg：否则父进程 TLB 里还是可写项，
+ * 会绕过 COW 直接改写共享页。 */
 int port_as_copy(u64 dst_as, u64 src_as)
 {
     u64 *p4;
@@ -879,33 +1045,73 @@ int port_as_copy(u64 dst_as, u64 src_as)
                 p1 = tbl(p2[i2]);
                 for (i1 = 0; i1 < 512ull; i1++) {
                     u64 e = p1[i1];
+                    u64 pa;
+                    u64 nf;
                     u64 va;
-                    u64 npa;
-                    u8 *src;
-                    u8 *dst;
-                    u32 k;
 
                     if ((e & PTE_P) == 0ull || (e & PTE_U) == 0ull) {
                         continue;
                     }
                     va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
-                    npa = port_phys_alloc();
-                    if (npa == 0ull) {
-                        return -2;
+                    pa = e & PTE_ADDR;
+                    nf = e;
+                    if ((e & PTE_W) != 0ull) {
+                        nf = (e & ~PTE_W) | PTE_COW;
+                        p1[i1] = nf;              /* 父进程也变成只读 */
+                        invlpg(va);
                     }
-                    src = (u8 *)port_phys_map(e & PTE_ADDR);
-                    dst = (u8 *)port_phys_map(npa);
-                    for (k = 0; k < 4096u; k++) {
-                        dst[k] = src[k];
-                    }
-                    if (map4k(dst_as, va, npa,
-                              (e & 0xfffull) | (e & PTE_NX)) != 0) {
-                        port_phys_put(npa);
+                    if (map4k(dst_as, va, pa,
+                              (nf & 0xfffull) | (nf & PTE_NX)) != 0) {
                         return -3;
                     }
+                    port_phys_ref(pa);
                 }
             }
         }
     }
     return 0;
+}
+
+/* #PF 兜底：写一个 COW 页时把页框私有化。
+ *
+ * 由异常出口（port/x86_64/linux.c 的 x86_exc_dump）调用：ring3 直接写会进来，
+ * 内核写用户缓冲（copy_to_user / wait4 的状态写回）也会进来 —— 后者如果只按
+ * CS==3 判断就会漏掉，所以这个函数不看 CPL，只看 PTE。
+ *
+ * 返回 1 = 已修好，原指令可以重试；0 = 不是 COW 缺页，交给上层投 SIGSEGV。
+ * err 位：bit0 = present（保护违例），bit1 = 写，bit2 = 用户页。 */
+int port_pf_resolve(u64 va, u32 err)
+{
+    u64 as = cur_as_();
+    u64 *p4 = tbl(as);
+    u64 *p3;
+    u64 *p2;
+    u64 *p1;
+    u64 e;
+
+    if ((err & 7u) != 7u) {               /* 必须是 present + write + user */
+        return 0;
+    }
+    if ((p4[IDX4(va)] & PTE_P) == 0ull) {
+        return 0;
+    }
+    p3 = tbl(p4[IDX4(va)]);
+    if ((p3[IDX3(va)] & PTE_P) == 0ull) {
+        return 0;
+    }
+    p2 = tbl(p3[IDX3(va)]);
+    if ((p2[IDX2(va)] & (PTE_P | PTE_PS)) != PTE_P) {
+        return 0;
+    }
+    p1 = tbl(p2[IDX2(va)]);
+    e = p1[IDX1(va)];
+    if ((e & (PTE_P | PTE_U | PTE_COW)) != (PTE_P | PTE_U | PTE_COW)) {
+        return 0;
+    }
+    if (cow_break_(&p1[IDX1(va)]) == 0) {
+        return 0;                          /* 没内存：交上层 */
+    }
+    p1[IDX1(va)] |= PTE_W;
+    invlpg(va);
+    return 1;
 }

@@ -73,14 +73,23 @@ void port_as_ref(u64 as);
 void port_as_unref(u64 as);
 void port_as_gc(void);
 void port_as_activate(u64 as);
+/* AS 真正拆掉时发事件（上层用它还 VMA 等元信息，避免 port → linux 反向依赖）。 */
+void port_as_set_free_hook(void (*fn)(u64 as));
 /* 建立/拆除映射。paddr==0 表示分配新物理页（匿名映射）；同一 VA 覆盖映射会
  * 先释放旧页框（MAP_FIXED 语义）。 */
 int  port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot);
+/* 惰性匿名页：分配 + 清零 + 挂一页。清零必须在挂表之前（PORT_AS_MAP 分配路径
+ * 不清零，用户态会看到上一个进程的数据）。 */
+int  port_as_map_zero(u64 as, u64 vaddr, u32 prot);
+/* 当前 CR3 的 AS 句柄（异常处理里定位缺页属于谁）。 */
+u64  port_as_current(void);
 int  port_as_unmap(u64 as, u64 vaddr, u64 bytes);
 /* 改已映射页的权限（mprotect）：W/NX 立刻写回 PTE，不重新分配页框。 */
 int  port_as_protect(u64 as, u64 vaddr, u64 bytes, u32 prot);
-/* fork 用：复制用户区间（写时复制可后续替换此实现）。返回 0 成功。 */
-int  port_as_copy(u64 dst_as, u64 src_as);   /* fork：复制全部用户页 */
+/* #PF 兜底：COW 页写故障时就地私有化。返回 1 = 已修复，原指令可直接重试。 */
+int  port_pf_resolve(u64 va, u32 err);
+/* fork 用：写时复制（共享页框 + PTE_COW，#PF 时私有化）。返回 0 成功。 */
+int  port_as_copy(u64 dst_as, u64 src_as);
 void port_user_set_kstack(u64 top);          /* L5：每进程内核栈 */
 /* 用户指针校验（copy_from_user 的第一道闸）。返回 1 可访问。 */
 int  port_as_user_range_ok(u64 as, u64 vaddr, u64 len, u32 prot);
@@ -94,6 +103,17 @@ void port_phys_put(u64 pa);
 void port_phys_free(u64 pa);
 u64  port_phys_total_kb(void);
 u64  port_phys_free_kb(void);
+/* 连续 n 页物理帧（页对齐起点，失败返回 0）与直接映射窗口基址。 */
+u64  port_phys_alloc_pages(u64 n);
+void port_phys_free_pages(u64 pa, u64 n);
+u64  port_dmap_base(void);
+
+/* 内核堆：小对象走页级 slab（元信息在页头，不占内核镜像），大对象取连续页、
+ * 整块归还。返回的指针在直接映射窗口里，内核可直接读写；port_mmu_init 里初始化。 */
+void  port_kmem_init(void);
+void *port_kmalloc(u64 bytes);
+void *port_kcalloc(u64 n, u64 bytes);
+void  port_kfree(void *p);
 
 /* MMU / 物理帧初始化：必须先于任何 port_as_* 调用。 */
 void port_mmu_init(void);
