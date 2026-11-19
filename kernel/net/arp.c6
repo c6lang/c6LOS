@@ -188,6 +188,15 @@ INT32 ArpResolve(LosNetIf *nif, UINT32 ip, UINT8 *mac_out)
     return 1;
 }
 
+INT32 ArpAdd(UINT32 ip, const UINT8 *mac)
+{
+    if (ip == 0u || mac == (const UINT8 *)0) {
+        return 0 - 22;
+    }
+    arp_learn_(ip, mac);
+    return 0;
+}
+
 UINT32 ArpCacheCount(VOID)
 {
     UINT32 n = 0u;

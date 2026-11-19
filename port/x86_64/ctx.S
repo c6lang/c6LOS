@@ -48,3 +48,6 @@ x86_tramp:
 1:
     hlt
     jmp 1b
+
+/* 没有可执行栈需求：显式声明，免得 ld 给整个镜像打上可执行栈。 */
+.section .note.GNU-stack, "", @progbits

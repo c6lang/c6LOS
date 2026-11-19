@@ -43,6 +43,8 @@
 
 #define CTRL_RST            (1u << 26)
 #define RCTL_EN             (1u << 1)
+#define RCTL_UPE            (1u << 3)   /* 单播混杂：slirp 合成 MAC 不过滤 */
+#define RCTL_MPE            (1u << 4)
 #define RCTL_BAM            (1u << 15)
 #define RCTL_SECRC          (1u << 26)
 #define TCTL_EN             (1u << 1)
@@ -264,7 +266,7 @@ int port_net_init(void)
     }
     for (i = 0; i < RING_NUM; i++) {
         g_rx_desc[i].addr = g_rx_buf_pa[i];
-        g_rx_desc[i].length = 0u;
+        g_rx_desc[i].length = (u16)BUF_SIZE;
         g_rx_desc[i].csum = 0u;
         g_rx_desc[i].status = 0u;
         g_rx_desc[i].errors = 0u;
@@ -293,7 +295,7 @@ int port_net_init(void)
     reg_wr(E1000_TDT, 0u);
     mem_barrier();
     /* 开收/发 */
-    reg_wr(E1000_RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC);
+    reg_wr(E1000_RCTL, RCTL_EN | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
     reg_wr(E1000_TCTL, TCTL_EN | TCTL_PSP | (0x10u << 4) | (0x40u << 12));
     reg_wr(E1000_TIPG, 10u | (8u << 10) | (6u << 20));
     mem_barrier();
@@ -417,7 +419,7 @@ int port_net_recv(void *frame, u32 max)
         g_rx_packets = g_rx_packets + 1u;
     }
     d->status = 0u;
-    d->length = 0u;
+    d->length = (u16)BUF_SIZE;          /* 归还槽位时恢复缓冲区长度 */
     mem_barrier();
     g_rx_tail = (slot + 1u) % RING_NUM;
     reg_wr(E1000_RDT, slot);                   /* 这个槽还给网卡 */

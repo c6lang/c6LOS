@@ -109,7 +109,22 @@ INT32 UdpSockBind(INT32 ud, UINT16 port)
         return udp_err_(9);
     }
     if (port == 0u) {
-        return udp_err_(22);
+        UINT16 base = 49152u;
+        UINT32 i = 0u;
+
+        while (i < 16384u) {
+            UINT16 p = (UINT16)(base + (UINT16)i);
+
+            if (udp_by_port_(p) == (UdpSock *)0) {
+                port = p;
+                i = 16384u;
+            } else {
+                i++;
+            }
+        }
+        if (port == 0u) {
+            return udp_err_(98);        /* -EADDRINUSE */
+        }
     }
     o = udp_by_port_(port);
     if (o != (UdpSock *)0 && o != s) {

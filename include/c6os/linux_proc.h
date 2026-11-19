@@ -52,7 +52,7 @@
 #define LX_FD_NONE    0xffffffffffffffffull
 #define LX_FD_CONSOLE 0xfffffffffffeull
 #define LX_FD_ROOT    0xfffffffffffdull
-/* /dev/* 设备节点号（M15-2），放在 node 字段，和特殊标记/普通节点不冲突 */
+/* /dev 下的设备节点号（M15-2），放在 node 字段，和特殊标记/普通节点不冲突 */
 #define LX_DEV_NULL     0xfffffff0ull
 #define LX_DEV_ZERO     0xfffffff1ull
 #define LX_DEV_FULL     0xfffffff2ull
@@ -64,7 +64,7 @@
 #define LX_FD_PIPE_R  1u
 #define LX_FD_PIPE_W  2u
 #define LX_FD_VFS     3u   /* /tmp 等走内核 VFS（M9-4） */
-#define LX_FD_DEV     4u   /* /dev/* 设备（M15-2）：null/zero/full/random… */
+#define LX_FD_DEV     4u   /* /dev 下设备（M15-2）：null/zero/full/random… */
 #define LX_FD_EVENTFD 5u   /* eventfd2（M16-1b）：pos = 对象 id */
 #define LX_FD_PROC    6u   /* procfs 虚拟文件（M17-1）：node = id, pos = 偏移 */
 #define LX_FD_SOCK    7u   /* socket（M18）：node = SAL socket id */

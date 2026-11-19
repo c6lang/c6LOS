@@ -2921,11 +2921,17 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
         u64 out = 0ull;
         u32 k;
         u32 tty = 0u;
+        u32 has_sock = 0u;
 
         for (k = 0u; k < ep->n && out < maxevents; k++) {
             LxEpItem *it = &ep->items[k];
             u16 rev = poll_events_(p, it->fd);
             u32 got = (u32)rev & (it->events | 0x18u);  /* ERR/HUP 总报 */
+
+            if (lx_fdtab_get(p->fd, (u64)it->fd) != (LxFile *)0 &&
+                lx_fdtab_get(p->fd, (u64)it->fd)->kind == LX_FD_SOCK) {
+                has_sock = 1u;
+            }
 
             if (rev != 0u && lx_fdtab_get(p->fd, (u64)it->fd) != (LxFile *)0 &&
                 lx_fdtab_get(p->fd, (u64)it->fd)->node == LX_FD_CONSOLE &&
@@ -2970,6 +2976,10 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
         }
         (void)lx_tty_pump();
         if (tty == 0u) {
+            /* 和 poll/select 同理：socket 只有本进程能泵网卡，不能 block。 */
+            if (has_sock) {
+                continue;
+            }
             if (!others_live_(g_cur)) { return 0ull; }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
@@ -3643,12 +3653,23 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
                     has_tfd = 1;
                 }
             }
-            if (!others_live_(g_cur) && !(has_tfd && have_deadline) &&
-                !has_sock) {
-                return cnt;
+            /* 有 socket 就自旋：网卡是轮询式的，**只有本进程能泵它**。
+             * 这里以前会掉进下面的 lx_proc_block()，而 block 之后没有任何
+             * 人再来调 lx_net_pump()——DNS 应答永远进不了 UDP 队列，
+             * nslookup 就死等（busybox 的 nslookup 会 fork 一个子进程发查询，
+             * 所以 others_live_ 为真，反而更容易掉进这个坑）。
+             * 无论单进程还是多进程，socket 一律 continue 回循环顶部泵网卡。 */
+            if (has_sock) {
+                continue;
             }
-            if (!others_live_(g_cur) && !(has_sock && have_deadline)) {
-                continue;                  /* 有 timerfd/socket：自旋等到点 */
+            /* 单进程：没有任何别的进程能来唤醒我们，所以不能 block。
+             * 有 timerfd 且带 deadline 就自旋到点（poll_events_ 每轮驱动），
+             * 都没有才立刻返回（L2–L6 依赖 stdin 立即 EOF）。 */
+            if (!others_live_(g_cur)) {
+                if (has_tfd && have_deadline) {
+                    continue;
+                }
+                return cnt;
             }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
@@ -3745,11 +3766,12 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
         }
         (void)lx_tty_pump();
         if (tty == 0u) {
-            if (!others_live_(g_cur) && !has_sock) {
-                return 0;
+            /* 和 poll 同理：socket 只有本进程能泵，绝不能 block。 */
+            if (has_sock) {
+                continue;
             }
-            if (!others_live_(g_cur) && !(has_sock && have_deadline)) {
-                continue;                  /* M24：有 socket：自旋等网卡应答 */
+            if (!others_live_(g_cur)) {
+                return 0;
             }
             lx_proc_set_wait(LX_WAIT_PIPE);
             lx_proc_block();
