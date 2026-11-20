@@ -53,6 +53,7 @@ typedef struct {
     u32  tail;
     u32  count;
     u32  used;
+    u32  refs;                       /* 持有对象的 fd 数（dup2/fork/exec 各算一份） */
     u64  pending[UNIX_BACKLOG];      /* STREAM listen：待 accept 的对端 id */
     u32  phead;
     u32  ptail;
@@ -107,6 +108,78 @@ static int unix_grow_(void)
     g_unix = ne;
     g_unix_cap = ncap;
     return 0;
+}
+
+/* 新建一个 AF_UNIX 对象，只返回对象 id（不分配 fd）。refs 从 0 起，
+ * unix_fd_of_obj_ 安装 fd 时才 ++，最后一份 fd 关闭后对象才释放。 */
+static u64 unix_obj_new_(u64 type, u64 peer)
+{
+    u32 i;
+
+    for (i = 0u; i < g_unix_cap; i++) {
+        if (g_unix[i].used == 0u) { break; }
+    }
+    if (i >= g_unix_cap) {
+        if (unix_grow_() != 0) { return (u64)0 - LX_ENOMEM; }
+        for (i = 0u; i < g_unix_cap; i++) {
+            if (g_unix[i].used == 0u) { break; }
+        }
+    }
+    if (i >= g_unix_cap) { return (u64)0 - LX_ENOMEM; }
+    {
+        UnixSock *s = &g_unix[i];
+
+        s->used = 1u;
+        s->bound = 0u;
+        s->abstract = 0u;
+        s->len = 0u;
+        s->type = (u32)type;
+        s->listening = 0u;
+        s->peer = peer;
+        s->head = 0u; s->tail = 0u; s->count = 0u;
+        s->refs = 0u;
+        s->phead = 0u; s->ptail = 0u; s->pcount = 0u;
+        s->listener = ~0ull;
+        for (u32 k = 0u; k < UNIX_PATH_MAX; k++) { s->path[k] = '\0'; }
+    }
+    return (u64)i;
+}
+
+/* 最后一份引用消失：断开对端（对端读得到 EOF、写得到 ECONNREFUSED）
+ * 并唤醒可能阻塞在 recv/accept 上的进程——busybox 的 SSL helper 退出时
+ * 靠这一步让父进程的读取结束。 */
+static void unix_release_(UnixSock *s)
+{
+    u64 id = (u64)(s - g_unix);
+
+    if (s->peer != ~0ull) {
+        UnixSock *t = unix_at_(s->peer);
+
+        if (t != (UnixSock *)0 && t->peer == id) { t->peer = ~0ull; }
+    }
+    s->used = 0u;
+    lx_unix_wake();
+}
+
+static void unix_drop_(u64 id)
+{
+    UnixSock *s = unix_at_(id);
+
+    if (s == (UnixSock *)0) { return; }
+    if (s->refs > 0u) { s->refs--; }
+    if (s->refs == 0u) { unix_release_(s); }
+}
+
+void lx_unix_ref(u64 id)
+{
+    UnixSock *s = unix_at_(id);
+
+    if (s != (UnixSock *)0) { s->refs++; }
+}
+
+void lx_unix_drop(u64 id)
+{
+    unix_drop_(id);
 }
 
 static UnixSock *unix_by_path_(const char *path, u32 len, u32 abstract)
@@ -178,36 +251,23 @@ u64 lx_unix_socket(u64 type)
     LxProc *p = lx_cur_proc();
     u64 base = type & ~(u64)(0x80000ull | 0x800ull);
     u64 fd;
-    u32 i;
+    u64 id;
 
     if (p == (LxProc *)0 || (base != 1u && base != 2u)) {
         return (u64)0 - LX_EINVAL;   /* 仅 STREAM(1)/DGRAM(2) */
     }
-    for (i = 0u; i < g_unix_cap; i++) {
-        if (g_unix[i].used == 0u) { break; }
-    }
-    if (i >= g_unix_cap) {
-        if (unix_grow_() != 0) { return (u64)0 - LX_ENOMEM; }
-        for (i = 0u; i < g_unix_cap; i++) {
-            if (g_unix[i].used == 0u) { break; }
-        }
-    }
-    if (i >= g_unix_cap) { return (u64)0 - LX_ENOMEM; }
+    id = unix_obj_new_(base, ~0ull);
+    if ((i64)id < 0) { return id; }
     fd = lx_fdtab_alloc(p->fd);
-    if (fd == LX_FD_NONE) { return (u64)0 - LX_EMFILE; }
+    if (fd == LX_FD_NONE) {
+        unix_drop_(id);
+        return (u64)0 - LX_EMFILE;
+    }
     {
-        UnixSock *s = &g_unix[i];
         LxFile *f = &p->fd->ent[fd];
 
-        s->used = 1u;
-        s->bound = 0u;
-        s->type = (u32)base;
-        s->peer = ~0ull;
-        s->head = 0u;
-        s->tail = 0u;
-        s->count = 0u;
-        s->listener = ~0ull;
-        f->node = (u64)i;
+        g_unix[id].refs = 1u;
+        f->node = id;
         f->pos = 0ull;
         f->is_dir = 0u;
         f->kind = LX_FD_UNIX;
@@ -251,40 +311,24 @@ u64 lx_unix_listen(u64 fd, u64 backlog)
     return 0ull;
 }
 
-/* 新建一个 AF_UNIX 对象，只返回对象 id（不分配 fd）。
- * connect 时用它造"服务端接受端"，accept 时再把该 id 挂到新 fd。 */
+/* connect 时用它造"服务端接受端"，accept 时再把该 id 挂到新 fd。 */
 static u64 unix_new_obj_(const UnixSock *tmpl, u64 peer)
 {
-    u32 i;
+    u64 id = unix_obj_new_(tmpl->type, peer);
 
-    for (i = 0u; i < g_unix_cap; i++) {
-        if (g_unix[i].used == 0u) { break; }
-    }
-    if (i >= g_unix_cap) {
-        if (unix_grow_() != 0) { return (u64)0 - LX_ENOMEM; }
-        for (i = 0u; i < g_unix_cap; i++) {
-            if (g_unix[i].used == 0u) { break; }
-        }
-    }
-    if (i >= g_unix_cap) { return (u64)0 - LX_ENOMEM; }
-    {
-        UnixSock *s = &g_unix[i];
+    if ((i64)id >= 0) {
+        UnixSock *s = &g_unix[id];
 
-        s->used = 1u;
         s->bound = tmpl->bound;
-        s->type = tmpl->type;
-        s->listening = 0u;
-        s->peer = peer;
-        s->head = 0u; s->tail = 0u; s->count = 0u;
-        s->phead = 0u; s->ptail = 0u; s->pcount = 0u;
-        s->listener = ~0ull;
+        s->abstract = tmpl->abstract;
+        s->len = tmpl->len;
         for (u32 k = 0u; k < UNIX_PATH_MAX; k++) { s->path[k] = tmpl->path[k]; }
     }
-    return (u64)i;
+    return id;
 }
 
-/* 把对象 id 挂到当前进程的一个新 fd 上。 */
-static u64 unix_fd_of_obj_(u64 id)
+/* 把对象 id 挂到当前进程的一个新 fd 上，并记一份 fd 引用。 */
+static u64 unix_fd_of_obj_(u64 id, u64 want_flags)
 {
     LxProc *p = lx_cur_proc();
     u64 fd;
@@ -300,9 +344,44 @@ static u64 unix_fd_of_obj_(u64 id)
     f->pos = 0ull;
     f->is_dir = 0u;
     f->kind = LX_FD_UNIX;
-    f->flags = 0u;
-    f->oflags = 0u;
+    f->flags = (want_flags & 0x80000ull) ? LX_FD_CLOEXEC : 0u;
+    f->oflags = (want_flags & 0x800ull) ? LX_O_NONBLOCK : 0u;
+    lx_unix_ref(id);
     return fd;
+}
+
+/* socketpair(AF_UNIX, type, 0, sv)：两个互相直连的对象，两端各挂一个 fd。
+ * busybox wget 的 SSL helper 靠这对 socket 在 fork/exec 后把 HTTPS 连接
+ * 交给 openssl s_client；dup2 + close 原 fd 的路径依赖上面的 fd 引用计数。 */
+u64 lx_unix_socketpair(u64 type, u64 uvec)
+{
+    LxProc *p = lx_cur_proc();
+    u64 base = type & ~(u64)(0x80000ull | 0x800ull);
+    u64 a, b, fa, fb;
+
+    if (p == (LxProc *)0 || (base != 1u && base != 2u)) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if (lx_user_ok(uvec, 8ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+    a = unix_obj_new_(base, ~0ull);
+    if ((i64)a < 0) { return a; }
+    b = unix_obj_new_(base, ~0ull);
+    if ((i64)b < 0) { unix_drop_(a); return b; }
+    fa = unix_fd_of_obj_(a, type);
+    if ((i64)fa < 0) { unix_drop_(b); unix_drop_(a); return fa; }
+    fb = unix_fd_of_obj_(b, type);
+    if ((i64)fb < 0) {
+        lx_unix_close(fa);
+        unix_drop_(b);
+        return fb;
+    }
+    g_unix[a].peer = b;
+    g_unix[b].peer = a;
+    *(u32 *)uvec = (u32)fa;
+    *(u32 *)(uvec + 4ull) = (u32)fb;
+    return 0ull;
 }
 
 /* connect 对 STREAM 监听 socket：造一个服务端接受端对象，把它的 id
@@ -348,7 +427,7 @@ u64 lx_unix_accept(u64 fd, u64 uaddr, u64 uaddrlen)
 
         s->phead = (s->phead + 1u) % UNIX_BACKLOG;
         s->pcount--;
-        cfd = unix_fd_of_obj_(server_end);
+        cfd = unix_fd_of_obj_(server_end, 0ull);
         if ((i64)cfd < 0) { return cfd; }
         /* 接受端与客户端对象互相绑定（都用对象 id） */
         if (se != (UnixSock *)0) {
@@ -473,6 +552,11 @@ u64 lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen)
 
         if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
             return (u64)0 - LX_EAGAIN;
+        }
+        /* 对端最后一份 fd 关闭后队列空了就是 EOF（busybox SSL helper
+         * 退出时父进程就靠这个结束读取），不能继续阻塞等永远不会来的数据。 */
+        if (s->peer == ~0ull || unix_at_(s->peer) == (UnixSock *)0) {
+            return 0ull;
         }
         lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
@@ -607,6 +691,9 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
         if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
             return (u64)0 - LX_EAGAIN;
         }
+        if (s->peer == ~0ull || unix_at_(s->peer) == (UnixSock *)0) {
+            return 0ull;                  /* 对端关闭 → EOF */
+        }
         lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
     }
@@ -678,11 +765,7 @@ u64 lx_unix_close(u64 fd)
     UnixSock *s = unix_fd_(fd);
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
-    if (s->peer != ~0ull) {
-        UnixSock *t = unix_at_(s->peer);
-        if (t != (UnixSock *)0) { t->peer = ~0ull; }
-    }
-    s->used = 0u;
+    unix_drop_((u64)(s - g_unix));
     return 0ull;
 }
 

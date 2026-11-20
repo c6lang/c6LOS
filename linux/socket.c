@@ -35,6 +35,16 @@ static LxFile *lxs_get_(u64 fd)
     return f;
 }
 
+/* socketpair 在 Linux 上只支持 AF_UNIX；两端走内核本地对象（afunix.c），
+ * 不进 SAL，所以 C6OS_NET=0 的 port 也能用。busybox wget 的 SSL helper
+ * 就是靠它把已连接的 HTTPS socket 在 fork/exec 后交给 openssl。 */
+u64 lx_sock_socketpair(u64 domain, u64 type, u64 proto, u64 usockvec)
+{
+    if (domain != 1u) { return (u64)0 - LX_EAFNOSUPPORT; }
+    if (proto != 0ull) { return (u64)0 - LX_EINVAL; }
+    return lx_unix_socketpair(type, usockvec);
+}
+
 #if C6OS_NET
 #include "los/los_typedef.h"
 #include "los/sal.h"

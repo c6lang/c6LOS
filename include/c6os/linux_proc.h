@@ -255,6 +255,7 @@ u64      lx_proc_eventfd_read(u64 fd, u64 ubuf, u64 len);
 u64      lx_proc_eventfd_write(u64 fd, u64 ubuf, u64 len);
 /* socket（linux/socket.c，M18）：C6OS_NET=0 时链接桩返回 -EAFNOSUPPORT */
 u64      lx_sock_socket(u64 domain, u64 type, u64 proto);
+u64      lx_sock_socketpair(u64 domain, u64 type, u64 proto, u64 usockvec);
 u64      lx_sock_close(u64 sd);
 u64      lx_sock_bind(u64 sd, u64 usockaddr, u64 ulen);
 u64      lx_sock_connect(u64 sd, u64 usockaddr, u64 ulen);
@@ -287,6 +288,7 @@ void     lx_net_pump(void);
 u16      lx_sock_poll_one(u64 sd);   /* 返回 LX_POLLIN/POLLOUT 等就绪位 */
 /* M25：AF_UNIX socket（linux/afunix.c），复用主 fd 表 */
 u64      lx_unix_socket(u64 type);
+u64      lx_unix_socketpair(u64 type, u64 usockvec);
 u64      lx_unix_bind(u64 fd, u64 uaddr, u64 ulen);
 u64      lx_unix_connect(u64 fd, u64 uaddr, u64 ulen);
 u64      lx_unix_listen(u64 fd, u64 backlog);
@@ -296,6 +298,10 @@ u64      lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags);
 u64      lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen);
 u64      lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen);
 u64      lx_unix_close(u64 fd);
+/* AF_UNIX 对象的 fd 引用计数：dup2/fork/exec/SCM_RIGHTS 各加一份，
+ * 最后一份 close 才断开对端并回收对象。 */
+void     lx_unix_ref(u64 id);
+void     lx_unix_drop(u64 id);
 u16      lx_unix_poll(u64 id);
 void     lx_unix_wake(void);
 /* SCM_RIGHTS：把 fd 状态副本安装到当前进程 fd 表，并按 kind 增引用。
