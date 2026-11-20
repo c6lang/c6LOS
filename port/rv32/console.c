@@ -84,6 +84,11 @@ void port_panic_halt(void)
     sys_exit(1);
 }
 
+void port_qemu_exit(void)
+{
+    port_panic_halt();
+}
+
 static volatile u32 g_isr_nest = 0;
 
 u32 port_in_isr(void)

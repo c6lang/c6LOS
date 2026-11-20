@@ -11,6 +11,8 @@ u32 port_core_id(void);
 void port_init(void);
 void port_idle(void);
 void port_panic_halt(void);
+/* 正常关机（所有进程已退出）：交互式 QEMU 上关掉整个虚拟机，否则等价于 panic_halt。 */
+void port_qemu_exit(void);
 void port_reboot(void);
 void port_mark(u32 v);
 

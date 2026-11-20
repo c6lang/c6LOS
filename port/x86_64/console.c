@@ -96,6 +96,16 @@ void port_panic_halt(void)
     }
 }
 
+/* shell 里 exit / 所有进程退出：通知 QEMU 关机（isa-debug-exit，iobase 0x501）。
+ * 批处理 QEMU 没挂这个设备，写端口是无害 no-op，随后照旧 hlt 等 timeout。 */
+void port_qemu_exit(void)
+{
+    /* isa-debug-exit 默认 iobase=0x501 / iosize=2，必须写 16 位宽度，
+     * QEMU 的 write handler 会在 width != iosize 时忽略（写 4 字节不退出）。 */
+    __asm__ __volatile__("outw %0, %w1" : : "a"((u16)0u), "Nd"((u16)0x501u));
+    port_panic_halt();
+}
+
 void port_mark(u32 v)
 {
     (void)v;

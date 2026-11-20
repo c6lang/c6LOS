@@ -80,6 +80,11 @@ void port_panic_halt(void)
     }
 }
 
+void port_qemu_exit(void)
+{
+    port_panic_halt();
+}
+
 void port_mark(u32 v)
 {
     (void)v;

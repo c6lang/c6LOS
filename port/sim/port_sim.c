@@ -150,3 +150,8 @@ void port_panic_halt(void)
 {
     /* host 测试：直接返回，让断言继续执行；目标机由 port 层死循环。 */
 }
+
+void port_qemu_exit(void)
+{
+    /* host 测试没有 QEMU，行为同 panic_halt（返回）。 */
+}
