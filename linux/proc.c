@@ -3674,6 +3674,12 @@ static u16 poll_events_(LxProc *p, i32 fd)
         return (u16)(rev & ((u16)LX_POLLIN | (u16)LX_POLLOUT |
                             (u16)LX_POLLERR | (u16)LX_POLLHUP));
     }
+    if (f->kind == LX_FD_UNIX) {
+        u16 rev = lx_unix_poll(f->node);
+
+        return (u16)(rev & ((u16)LX_POLLIN | (u16)LX_POLLOUT |
+                            (u16)LX_POLLERR | (u16)LX_POLLHUP));
+    }
     if (f->kind == LX_FD_PIPE_R) {
         const LxPipe *pp = pipe_at_(f->node);
         u16 ev = 0u;

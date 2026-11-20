@@ -298,6 +298,7 @@ u64      lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags);
 u64      lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen);
 u64      lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen);
 u64      lx_unix_close(u64 fd);
+u64      lx_unix_shutdown(u64 fd, u64 how);      /* SHUT_RD/WR/RDWR 半关闭 */
 /* AF_UNIX 对象的 fd 引用计数：dup2/fork/exec/SCM_RIGHTS 各加一份，
  * 最后一份 close 才断开对端并回收对象。 */
 void     lx_unix_ref(u64 id);

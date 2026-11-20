@@ -54,6 +54,8 @@ typedef struct {
     u32  count;
     u32  used;
     u32  refs;                       /* 持有对象的 fd 数（dup2/fork/exec 各算一份） */
+    u32  shut_rd;                    /* shutdown(SHUT_RD/SHUT_RDWR)：本端读关闭 */
+    u32  shut_wr;                    /* shutdown(SHUT_WR/SHUT_RDWR)：本端写关闭 */
     u64  pending[UNIX_BACKLOG];      /* STREAM listen：待 accept 的对端 id */
     u32  phead;
     u32  ptail;
@@ -138,6 +140,8 @@ static u64 unix_obj_new_(u64 type, u64 peer)
         s->peer = peer;
         s->head = 0u; s->tail = 0u; s->count = 0u;
         s->refs = 0u;
+        s->shut_rd = 0u;
+        s->shut_wr = 0u;
         s->phead = 0u; s->ptail = 0u; s->pcount = 0u;
         s->listener = ~0ull;
         for (u32 k = 0u; k < UNIX_PATH_MAX; k++) { s->path[k] = '\0'; }
@@ -494,6 +498,7 @@ u64 lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen)
     int rc;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->shut_wr != 0u) { return (u64)0 - LX_EPIPE; }
     if (len == 0ull || len > UNIX_MSG_MAX) { return (u64)0 - LX_EINVAL; }
     if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     t = s->peer != ~0ull ? unix_at_(s->peer) : (UnixSock *)0;
@@ -546,6 +551,7 @@ u64 lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen)
     u32 n;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->shut_rd != 0u) { return 0ull; }
     if (lx_user_ok(ubuf, len, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
     while (s->count == 0u) {
         LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
@@ -595,6 +601,7 @@ u64 lx_unix_sendmsg(u64 fd, u64 umsg, u64 flags)
     int rc;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->shut_wr != 0u) { return (u64)0 - LX_EPIPE; }
     (void)flags;
     if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     iov = *(const u64 *)(umsg + 16ull);
@@ -674,6 +681,7 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
     int n;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (s->shut_rd != 0u) { return 0ull; }
     (void)flags;
     if (lx_user_ok(umsg, 56ull, C6OS_PROT_R) == 0) { return (u64)0 - LX_EFAULT; }
     iov = *(const u64 *)(umsg + 16ull);
@@ -760,6 +768,20 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
     return (u64)n;
 }
 
+/* shutdown(fd, how)：半关闭，不动 fd 本身。busybox wget 在 HTTPS 下写完
+ * 请求就 shutdown(SHUT_WR)，靠对端看到 EOF 来结束响应读取；以前这一调用
+ * 在 SAL 路径上把 fd 整个销毁，直接导致 "error getting response: EBADF"。 */
+u64 lx_unix_shutdown(u64 fd, u64 how)
+{
+    UnixSock *s = unix_fd_(fd);
+
+    if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
+    if (how == 0ull || how == 2ull) { s->shut_rd = 1u; }
+    if (how == 1ull || how == 2ull) { s->shut_wr = 1u; }
+    lx_unix_wake();                    /* 让阻塞的 recv/poll 重新看到 EOF */
+    return 0ull;
+}
+
 u64 lx_unix_close(u64 fd)
 {
     UnixSock *s = unix_fd_(fd);
@@ -772,7 +794,14 @@ u64 lx_unix_close(u64 fd)
 u16 lx_unix_poll(u64 id)
 {
     UnixSock *s = unix_at_(id);
+    UnixSock *t;
+    u16 ev = 0u;
 
     if (s == (UnixSock *)0) { return LX_POLLNVAL; }
-    return (s->count != 0u) ? (u16)LX_POLLIN : 0u;
+    if (s->count != 0u || s->shut_rd != 0u) { ev = (u16)(ev | LX_POLLIN); }
+    t = (s->peer != ~0ull) ? unix_at_(s->peer) : (UnixSock *)0;
+    if (t == (UnixSock *)0 || t->shut_wr != 0u) { ev = (u16)(ev | LX_POLLHUP); }
+    /* 不报 POLLOUT：poll_events_ 不按调用方请求的事件过滤 revents，
+     * 常报 POLLOUT 会让只等 POLLIN 的 ssl_client copy loop 空转。 */
+    return ev;
 }

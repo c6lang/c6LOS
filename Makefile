@@ -2157,6 +2157,27 @@ check-alpine-net: x86-alpine-net
 	done
 	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2/8.8.8.8/qq.com + DNS）"
 
+# ---- M63：真实 Alpine busybox wget 的 HTTPS 端到端（socketpair + ssl_client） ----
+x86-alpine-wget: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 C6_DEFS=-DC6OS_ALPINE_WGET \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/wget.iso
+
+check-alpine-wget: x86-alpine-wget
+	@timeout 180 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/wget.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine-wget.log >/dev/null
+	@grep -q "wget-https-ok" /tmp/check-alpine-wget.log \
+	  || { echo "FAIL: alpine wget（HTTPS 下载失败）"; tail -60 /tmp/check-alpine-wget.log; exit 1; }
+	@grep -q "wget-done" /tmp/check-alpine-wget.log \
+	  || { echo "FAIL: alpine wget（脚本没跑完）"; tail -60 /tmp/check-alpine-wget.log; exit 1; }
+	@echo "PASS: alpine wget（busybox HTTPS：socketpair + ssl_client + shutdown）"
+
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \

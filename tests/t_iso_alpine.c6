@@ -68,6 +68,13 @@ static const char kScript[] =
     "ping -c 1 -W 5 qq.com && echo net-ping-host-ok; "
     "ping -c 1 -W 5 8.8.8.8 && echo net-ping-ext-ok; "
     "echo net-done";
+#elif defined(C6OS_ALPINE_WGET)
+/* M63：真实 Alpine busybox wget 的 HTTPS 端到端。socketpair + 外部
+ * ssl_client + shutdown(SHUT_WR) 三件事任何一件退化，这里都拿不到 OK。 */
+static const char kScript[] =
+    "echo alpine-wget-alive; "
+    "wget -T 20 -O /data/wget.html https://qq.com && echo wget-https-ok; "
+    "echo wget-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
  * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。
