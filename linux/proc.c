@@ -670,6 +670,35 @@ u64 lx_proc_alarm(u64 secs)
     return old;
 }
 
+/* 当前进程最早的那个闹钟/定时器还有多少 cycles 到期？
+ * return 0 = 没有设任何定时器（调用方按自己的预算等）。 */
+u64 lx_proc_alarm_remain(void)
+{
+    LxProc *c = cur_();
+    u64 now;
+    u64 best = 0ull;
+    u32 w;
+
+    if (c == (LxProc *)0) {
+        return 0ull;
+    }
+    now = port_cycles();
+    for (w = 0u; w < 3u; w++) {
+        u64 dl = (w == 0u) ? c->alarm_deadline : c->itimer_deadline[w];
+
+        if (dl == 0ull) {
+            continue;
+        }
+        if (dl <= now) {
+            return 1ull;               /* 已经到点：让调用方尽快再检查一次 */
+        }
+        if (best == 0ull || (dl - now) < best) {
+            best = dl - now;
+        }
+    }
+    return best;
+}
+
 /* 到点投递 SIGALRM。两个调用点：
  *   - resched_()：进程每次 lx_proc_block() 都会走这里。光靠 PIT tick 不够 ——
  *     被阻塞的进程不占 CPU，而内核态关着中断，tick 根本进不来，闹钟会永远
@@ -801,6 +830,95 @@ int lx_proc_intr(void)
     r = 1;
     c->intr = 0u;                      /* intr_sig 留着给 lx_proc_restart() 查 */
     return r;
+}
+
+/* ---- 自旋等待里的"定时器 + 串口"节拍 ------------------------------------
+ *
+ * 这个内核的等待分两种：真阻塞（lx_proc_block）和自旋（网卡必须由本进程
+ * 泵，串口也只能在系统调用里泵）。真阻塞那条路有 resched_ 兜底，会给到点
+ * 的 itimer 投 SIGALRM；**自旋那条路以前什么都没有**，于是两个后果：
+ *
+ *   1. busybox ping 的节奏是 setitimer(ITIMER_REAL)：到点发下一个包。它在
+ *      recv 里自旋等应答，闹钟永远不响 —— `ping 8.8.8.8` 只发出第一个包，
+ *      之后一直 recvfrom 拿 EAGAIN（屏幕上刷 "Resource temporarily
+ *      unavailable"），应答回来也收不住，-c N / -W N 全都失效。
+ *   2. 自旋期间串口也没人泵，Ctrl-C 根本进不了行规程。
+ *
+ * 所以凡是自旋等待的循环，每轮都调一次这里：走到点的闹钟/定时器 + 泵一次
+ * 串口。返回 1 表示"该进程有未屏蔽的信号要处理"，调用方按 Linux 语义收尾
+ * （见 lx_proc_wait_intr）。
+ *
+ * 这里**不能**调 lx_sig_deliver_frame：那需要 iret 帧，而自旋循环深处只有
+ * 普通内核栈。让系统调用先返回、在 lx_syscall 出口投递才对——这也正是
+ * "信号只在系统调用边界生效"的 Linux 语义。 */
+int lx_proc_wait_tick(void)
+{
+    LxProc *c = cur_();
+
+    lx_proc_alarm_check();             /* alarm/itimer/timerfd 到点投信号 */
+    if (lx_tty_enabled() != 0u) {
+        (void)lx_tty_pump();           /* 串口：^C/^D/排队的命令行 */
+    }
+    if (c == (LxProc *)0) {
+        return 0;
+    }
+    return ((c->sig_pending & ~c->sig_mask) != 0ull) ? 1 : 0;
+}
+
+/* 自旋等待收尾：有信号时按 Linux 语义返回 EINTR（带 SA_RESTART 的继续等）。
+ * return 1 表示调用方应该立刻返回 EINTR。 */
+int lx_proc_wait_intr(void)
+{
+    LxProc *c = cur_();
+    u32 s;
+
+    if (c == (LxProc *)0) {
+        return 0;
+    }
+    for (s = 1u; s < (u32)LX_NSIG; s++) {
+        u64 h;
+
+        if ((c->sig_pending & ~c->sig_mask & (1ull << (s - 1u))) == 0ull) {
+            continue;
+        }
+        h = c->sa[s].handler;
+        if (h == LX_SIG_IGN) {
+            c->sig_pending &= ~(1ull << (s - 1u));   /* 忽略：清掉，不打断 */
+            continue;
+        }
+        /* 默认动作就是"忽略"的几个（SIGCHLD/SIGWINCH/SIGURG/SIGCONT）也不该
+         * 打断系统调用 —— Linux 上它们连 pending 都不会留。和 sig.c 的
+         * default_() 保持一致。 */
+        if (h == LX_SIG_DFL &&
+            (s == (u32)LX_SIGCHLD || s == (u32)LX_SIGWINCH ||
+             s == (u32)LX_SIGURG || s == (u32)LX_SIGCONT)) {
+            c->sig_pending &= ~(1ull << (s - 1u));
+            continue;
+        }
+        if (h != LX_SIG_DFL && (c->sa[s].flags & LX_SA_RESTART) != 0ull) {
+            return 0;                  /* 自动重启：继续等（信号仍会投递） */
+        }
+        c->intr = 0u;
+        c->intr_sig = s;
+        return 1;
+    }
+    return 0;
+}
+
+/* 当前进程还有没有未屏蔽的待投递信号？
+ *
+ * 和 lx_proc_wait_intr 的区别：后者回答"这个信号该不该让系统调用返回
+ * EINTR"（带 SA_RESTART 的 handler 会说"不用"）。这里只回答"有没有东西要
+ * 投递"——自旋等待到了预算上限时用得上：哪怕 handler 带 SA_RESTART，
+ * 也必须先回用户态让它跑一次，不能在内核里把 EAGAIN 交给调用方。 */
+int lx_proc_sig_pending(void)
+{
+    LxProc *c = cur_();
+
+    if (c == (LxProc *)0) {
+        return 0;
+    }
+    return ((c->sig_pending & ~c->sig_mask) != 0ull) ? 1 : 0;
 }
 
 /* 打断它的那个信号是否带 SA_RESTART：带了就不该返回 EINTR，调用点继续等。 */
@@ -2974,7 +3092,10 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
         if (have_deadline && port_cycles() >= deadline) {
             return 0ull;
         }
-        (void)lx_tty_pump();
+        (void)lx_proc_wait_tick();     /* 串口 + 到点的闹钟/定时器（M60） */
+        if (lx_proc_wait_intr() != 0) {
+            return n_((u64)LX_EINTR);  /* 被信号打断：先回用户态投递信号 */
+        }
         if (tty == 0u) {
             /* 和 poll/select 同理：socket 只有本进程能泵网卡，不能 block。 */
             if (has_sock) {
@@ -3633,7 +3754,12 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
         if (have_deadline && port_cycles() >= deadline) {
             return cnt;
         }
-        (void)lx_tty_pump();           /* 轮询式串口：每一轮都是一次机会 */
+        /* 轮询式串口 + 到点的闹钟/定时器：每一轮都是一次机会（M60 合并成
+         * 一个节拍，自旋等待期间 SIGALRM 也能响、^C 也能进来）。 */
+        (void)lx_proc_wait_tick();
+        if (lx_proc_wait_intr() != 0) {
+            return n_((u64)LX_EINTR);  /* 被信号打断：先回用户态投递信号 */
+        }
         /* 终端：输入来自串口，没有哪个进程会来唤醒我们，就地继续泵。
          * 这里**不能**用 lx_proc_block()：它把进程标成 BLOCK 再 resched，
          * 没人可切时状态就悬在 BLOCK 上，而且再也等不到唤醒。
@@ -3764,7 +3890,24 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
             }
             return cnt;
         }
-        (void)lx_tty_pump();
+        (void)lx_proc_wait_tick();     /* 串口 + 到点的闹钟/定时器（M60） */
+        if (lx_proc_wait_intr() != 0) {
+            u64 k;
+
+            /* 被信号打断：不写就绪位，只把结果集清零（调用方会复用它们）。 */
+            for (k = 0ull; k < 16ull; k++) {
+                if (rset != 0ull && lx_user_ok(rset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(rset + k * 8ull) = 0ull;
+                }
+                if (wset != 0ull && lx_user_ok(wset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(wset + k * 8ull) = 0ull;
+                }
+                if (eset != 0ull && lx_user_ok(eset + k * 8ull, 8ull, C6OS_PROT_W) != 0) {
+                    *(u64 *)(eset + k * 8ull) = 0ull;
+                }
+            }
+            return n_((u64)LX_EINTR);
+        }
         if (tty == 0u) {
             /* 和 poll 同理：socket 只有本进程能泵，绝不能 block。 */
             if (has_sock) {

@@ -283,6 +283,8 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 | ✅ M12-0 Alpine minirootfs 上 ISO | `Makefile` 的 `x86-alpine`/`run-x86-alpine`/`check-alpine`（minirootfs 按需下到 `build/x86/alpine/`）；`tests/t_iso_alpine.c6`；`linux/tty.c` 串口行规程（轮询泵 + 阻塞 read + 应答 `ESC[6n`）；`fs.c` 节点数 64→1024、路径归一化与符号链接解析；`mk-initramfs.py` 支持悬空链接；`cd0.S` 大载荷走 unreal mode | `make check-alpine` → `PASS: alpine M12` |
 | ✅ M12-1 c6 静态指针初始化器 | 编译器 bug：数据段的指针槽留 0、靠 `@__llvm_init` 启动时补，裸内核不跑构造函数就永远是 0（`sh -c` 的 argv 表是野指针，busybox 拿不到 `-c`）。修在 c6 `07d73b8`：带重定位的段发射成 packed struct 的静态初始化，wasm 仍走构造函数 | c6 仓库 `regression.sh llvm-static-data` |
 | ✅ M12-2 自己敲命令（交互式 shell） | `make run-x86-alpine-shell`（`ALPINE_INTERACTIVE=1` → `-DC6OS_ALPINE_INTERACTIVE`，裸 `/bin/sh`）。**关键修复**：`lx_proc_poll` 以前空转 4096 轮就返回 0，而 busybox 的 `read` 内置命令是"先 poll 再 read"，拿到 0 就当 stdin EOF —— 提示符一出来 shell 就退出；改成超时为负真阻塞、为正按 `port_cycles()` 到点。`linux/tty.c` 让 `TCSETS` 的 `ICANON`/`ECHO` 生效（raw 模式字节直通，lineedit 自己回显，双回显消失） | `make run-x86-alpine-shell` → `/ #` 后敲 `ls /`、`uname -a`、`cat /etc/alpine-release` 都有输出 |
+| ✅ M60 交互式下的 `ping` / Ctrl-C | 三个叠在一起的坑，修完 `ping 8.8.8.8` 能一直发包、Ctrl-C 能停下它：<br>① `-serial stdio` 让 QEMU 自己接管宿主终端的 Ctrl-C（host tty 的 ISIG 被清掉），一按 ^C 变成 `qemu: terminating on signal 2`，客户机收不到 —— 改用 `-serial mon:stdio`（0x03 原样转给串口，Ctrl-A X 仍可退 QEMU，**不能**再加独立的 `-monitor none`）。<br>② 自旋等待里没人跑定时器：busybox ping 靠 `setitimer(ITIMER_REAL)` 发下一个包，它在 `recvfrom` 里自旋，闹钟永远不响 → 只发一个包、之后一直刷 `recvfrom: Resource temporarily unavailable`。新增 `lx_proc_wait_tick()`（走闹钟 + 泵串口）挂到 socket 自旋、`poll`/`select`/`epoll_wait`、`tty_read` 的等待循环上。<br>③ `Ctrl-C` 以前只回显 `^C` 不发信号。现在 `tty.c` 按 ISIG 语义给前台进程组发 SIGINT（`tcsetpgrp` 的 `g_fore`，没有就当前进程组），Ctrl-\\ 发 SIGQUIT；`tty_read` 也能被信号打断（返回 `-EINTR`）。<br>**顺带修的真 bug**：`linux/sig.c` 的 `rt_sigframe` 对齐错了 —— x86-64 的 handler 入口必须 `RSP%16==8`（相当于被 `call` 压过返回地址）、`ucontext%16==0`。原来 `base = (sp-128-1280) & ~15` 得到 `%16==0`，musl 函数序言一 `movaps` 就 `#GP` → SIGSEGV。表现为"ping 收到第一个应答后崩"，其实是信号帧没对齐，跟网络无关。 | `make run-x86-alpine-shell` → `ping 8.8.8.8` 连续多行应答；Ctrl-C 断掉 ping 并打印 `--- 8.8.8.8 ping statistics ---` 回到 `/ #`，QEMU 不退；Ctrl-A X 才退 |
+
 | ✅ M12-4 cd 真的换目录 | `LX_SYS_chdir` 原来跟 setsid/umask 一起是空操作（直接回 0），`getcwd` 恒回 `/`，相对路径在 `fs.c` 里直接当根路径查 —— 所以 `cd /bin; ls` 列的还是 `/`。现在 `fs.c` 有 `g_cwd` + `path_()`（相对路径先拼 cwd 再归一化，openat/statat/access 三处入口都走它），`lx_fs_chdir` 校验目录后更新 cwd，`getcwd` 回真实路径；cwd 跟进程走（`LxProc.cwd[]`，切进程换指针、fork 继承）—— 不然 `top` 的 `chdir("/proc")` 会漏给父 shell | 交互式下 `cd /bin` → 提示符 `/bin #`、`pwd` 回 `/bin`、`ls` 列 /bin；`cd ..` → `/` |
 | M12-3（延伸，未做） | 挂载点本身的 `stat`/`readdir`（`ls /data` 报 No such file，但 `echo x > /data/x`、`cat /data/x` 正常）；`sendfile`（`nr=40` 仍是 ENOSYS）；`ls /` 的 ANSI 颜色直接透传，没做终端能力判定 | — |
 
@@ -291,7 +293,8 @@ rootfs（`/bin/busybox` 是动态 PIE，解释器 `/lib/ld-musl-x86_64.so.1`）�
 - `make check-alpine` —— Alpine minirootfs 从 ISO 起机，`sh -c` 脚本跑完（`uname -a`、
   `ls /`、写 `/data` 再读回），且宿主侧在数据盘镜像里能看到 `m12.txt`。
 - `make run-x86-alpine-shell` —— 起来就是 Alpine 的 `/ #` 提示符，自己敲命令；
-  `exit` 或 Ctrl-D 退出，qemu 用 Ctrl-A X 关。
+  `exit` 或 Ctrl-D 退出，qemu 用 Ctrl-A X 关。**Ctrl-C 是给客户机的**（打断前台
+  程序，比如 `ping`），不是关 QEMU 的；两种"退出"分别对应 `Ctrl-A X` 和 `exit`。
 
 ## M13 Linux ABI 完整支持（Tier 3+）
 
