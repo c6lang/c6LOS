@@ -284,15 +284,42 @@ static int default_(LxProc *p, u32 sig)
     return 1;
 }
 
-/* 在用户栈上压 rt_sigframe，并把 iret 帧改成"进 handler"。 */
+/* 在用户栈上压 rt_sigframe，并把 iret 帧改成"进 handler"。
+ *
+ * 对齐是这条路径上最容易错、又最像"随机崩"的一处，按 x86-64 的 ABI 写死：
+ *
+ *   Linux 真实行为（实测，不是推测）：
+ *     handler 第一条指令处  RSP % 16 == 8      ← 相当于"被 call 压了一个返回地址"
+ *     &ucontext             % 16 == 0
+ *
+ *   为什么是 8：内核在 handler 之前压了 pretcode（restorer 地址），handler
+ *   返回时它被执行，等于一次函数调用。编译器因此认为函数体入口 RSP%16==8，
+ *   函数序言 sub $N,%rsp 之后 RSP%16==0，`movaps` 才对得上。
+ *
+ * 以前这里写成 `(sp - 128 - SIZE) & ~15`，得到的是 handler RSP%16==0 ——
+ * 函数序言一来就不对齐，musl 里第一条 movaps（ld-musl 的 alarm()，busybox
+ * ping 的 sendping_tail 会调它）直接 #GP → SIGSEGV。表现是"ping 收到第一个
+ * 应答后崩"，实际和网络无关，纯粹是信号帧没对齐。
+ *
+ * 同时 ucontext 必须 %16==0：musl 的 ucontext 结构里有 FPU 状态，用 movaps
+ * 存。SF_UC 保持 8 的倍数（8），所以 base 取 8 mod 16 正好让 uc 回到 16 对齐。 */
 static void build_(LxProc *p, SigView *v, u32 sig, u32 code)
 {
     u64 sp = *v->rsp;
-    u64 base = (sp - 128ull - LX_SF_SIZE) & ~15ull;   /* 留出 red zone */
-    u64 uc = base + LX_SF_UC;
-    u64 gi = uc + LX_UC_GREGS;
+    /* base 是 pretcode 的地址，也就是 handler 入口的 RSP。取 8 mod 16。 */
+    u64 base = (sp - 128ull - LX_SF_SIZE) & ~15ull;
+    u64 uc;
+    u64 gi;
     u64 newmask;
     u64 n;
+
+    /* 让 base%16==8（uc = base+8 因此 %16==0）。减 8 而不是加 8：只会让帧
+     * 更往下一点，仍然在 red zone 之外。 */
+    if ((base & 15ull) == 0ull) {
+        base -= 8ull;
+    }
+    uc = base + LX_SF_UC;
+    gi = uc + LX_UC_GREGS;
 
     zero_(base, LX_SF_SIZE);
 

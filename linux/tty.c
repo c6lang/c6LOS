@@ -12,7 +12,8 @@
  * 行规程（够 busybox sh 用）：
  *   - 回显：可打印字符原样回显，'\r'/'\n' 回显成 "\r\n"；
  *   - 退格：0x7F / 0x08 删掉一个字符并回显 "\b \b"，行首时不删；
- *   - Ctrl-C：丢掉当前行，回显 "^C\r\n"（不发信号，见 §9 的"已知限制"）；
+ *   - Ctrl-C：发 SIGINT 给前台进程组，丢掉当前行，回显 "^C\r\n"；
+ *   - Ctrl-\\：同理发 SIGQUIT（Linux 的 VQUIT），行为对齐；
  *   - Ctrl-D：行首时当 EOF（read 返回 0），行中则丢掉当前行；
  *   - 行结束：'\r' 或 '\n' 都当回车，写回 "\r\n"，并把整行交给读方。
  *
@@ -29,6 +30,7 @@
  *   ICANON 关：raw 模式，字节直接透传给读者 —— busybox 的 lineedit 就是这么
  *              干的，它要自己回显、自己处理方向键；我们再回一遍就成双回显了 */
 #define TTY_ICANON  0x00000002u
+#define TTY_ISIG    0x00000001u
 #define TTY_ECHO    0x00000008u
 static u32  g_lflag = 0x00008A3Bu;      /* 默认 ISIG|ICANON|ECHO|ECHOE|ECHOK|IEXTEN */
 
@@ -88,11 +90,48 @@ static void commit_(void)
     g_elen = 0u;
 }
 
+/* ---- 控制字符：ISIG 语义 ------------------------------------------------
+ *
+ * Linux 的行规程在 lflag 带 ISIG 时，收到 VINTR/VQUIT 不是"把字节交给读者"，
+ * 而是**给前台进程组发信号**并把当前行丢掉。这个内核以前只做了"丢掉当前行"，
+ * 于是 `ping 8.8.8.8` 一旦跑起来就再也停不下来（前台进程根本不知道有人
+ * 按了 ^C）。现在补上投递这一步。
+ *
+ * 目标：前台进程组（tcsetpgrp 设的 g_fore，没设过就退回 kill(0) 的语义 =
+ * 调用者所在进程组）。整组投递用 lx_proc_send(-pgid, sig)，和 kill(2) 复用
+ * 同一套选目标逻辑，避免在这个文件里重新实现一遍进程组遍历。
+ *
+ * 调用者上下文是**内核、系统调用里**（lx_tty_pump 由系统调用/等待节拍驱动），
+ * 所以只能挂 pending，实际投递等系统调用返回到 lx_syscall 出口的
+ * lx_sig_deliver_frame —— 这正是 Linux 的语义（信号在系统调用边界生效）。 */
+static void isig_(u32 sig)
+{
+    u64 fore = (u64)lx_proc_fore();
+
+    if (fore != 0ull) {
+        (void)lx_proc_send(0 - (i64)fore, sig);
+        return;
+    }
+    /* 还没设过前台组（交互 shell 启动早期）：按"当前进程组"投递。 */
+    (void)lx_proc_send(0, sig);
+}
+
 /* 吃一个输入字节，喂进行规程 */
 static void feed_(u8 c)
 {
     if ((g_lflag & TTY_ICANON) == 0u) {
-        /* raw：不攒行、不做行编辑，也不替读者回显（除非 ECHO 还开着） */
+        /* raw：不攒行、不做行编辑，也不替读者回显（除非 ECHO 还开着）。
+         *
+         * ISIG 在 raw 模式下同样有效（Linux 也是这样）：busybox 的 lineedit
+         * 会把终端设成 raw 来自己做行编辑，但 ^C 仍然该是信号，它自己也是
+         * 这么期待的（收到 SIGINT 就放弃当前行）。 */
+        if ((g_lflag & TTY_ISIG) != 0u && c == 0x03u) {
+            echo_('^');
+            echo_('C');
+            echo_('\n');
+            isig_((u32)LX_SIGINT);
+            return;
+        }
         if (c == '\r') {
             c = '\n';
         } else if (c == '\n' && (g_lflag & TTY_ECHO) == 0u) {
@@ -123,6 +162,19 @@ static void feed_(u8 c)
         echo_('^');
         echo_('C');
         echo_('\n');
+        if ((g_lflag & TTY_ISIG) != 0u) {
+            isig_((u32)LX_SIGINT);
+        }
+        return;
+    }
+    if (c == 0x1Cu) {                               /* Ctrl-\：SIGQUIT */
+        g_elen = 0u;
+        echo_('^');
+        echo_('\\');
+        echo_('\n');
+        if ((g_lflag & TTY_ISIG) != 0u) {
+            isig_((u32)LX_SIGQUIT);
+        }
         return;
     }
     if (c == 0x04u) {                               /* Ctrl-D */
@@ -256,15 +308,23 @@ u32 lx_tty_ready(void)
 }
 
 /* 把待读数据搬给用户（ubuf 已经过 lx_user_ok 校验）。
- * 没有数据就在内核里泵串口 + 让出 CPU，直到至少有一行。 */
+ * 没有数据就在内核里泵串口 + 让出 CPU，直到至少有一行。
+ *
+ * M60：等待循环里也要问一次"有信号了吗"。以前这里死等整行，连 SIGINT 都
+ * 打断不了 —— 交互 shell 上跑的前台程序（比如 ping）一旦开始读终端就再也
+ * 停不下来。按 Linux 语义：被信号打断时返回 -EINTR（带 SA_RESTART 的
+ * handler 则继续等）。 */
 u64 lx_tty_read(u64 ubuf, u64 len, void (*yield_fn)(void))
 {
     u64 i = 0ull;
 
     while (g_ppos >= g_plen && g_eof == 0u) {
-        (void)lx_tty_pump();
+        (void)lx_proc_wait_tick();       /* 串口 + 到点的闹钟/定时器 */
         if (g_ppos < g_plen || g_eof != 0u) {
             break;
+        }
+        if (lx_proc_wait_intr() != 0) {
+            return (u64)0 - (u64)LX_EINTR;
         }
         if (yield_fn != (void (*)(void))0) {
             yield_fn();                             /* 让别的进程跑一会儿 */

@@ -215,8 +215,12 @@ void     lx_proc_yield(void);                  /* 系统调用末尾让出一次
 void     lx_proc_block(void);                  /* 标 BLOCK 并立刻切走 */
 u64      lx_proc_alarm(u64 secs);              /* alarm(2)：返回旧闹钟剩余秒数 */
 void     lx_proc_alarm_check(void);            /* 到点投递 SIGALRM（resched_/tick 调用） */
+u64      lx_proc_alarm_remain(void);            /* 当前进程最早的定时器还剩多少 cycles（0=没设） */
 int      lx_proc_intr(void);                    /* 刚醒来是被信号叫醒的？ */
 int      lx_proc_restart(void);                /* 该信号带 SA_RESTART？ */
+int      lx_proc_wait_tick(void);              /* 自旋等待的节拍：闹钟 + 泵串口；1=有信号 */
+int      lx_proc_wait_intr(void);              /* 自旋等待收尾：1=该返回 EINTR 了 */
+int      lx_proc_sig_pending(void);            /* 有未屏蔽的待投递信号？ */
 void     lx_proc_exit(u64 code);               /* 不返回 */
 void     lx_sched_tick(void);
 u64      lx_proc_fork(LxRegs *r);

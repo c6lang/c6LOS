@@ -369,25 +369,64 @@ u64 lx_sock_sendto(u64 fd, u64 ubuf, u64 len, u64 flags,
  * 另加一个墙钟兜底，防止 TSC 异常时永远转下去。
  *
  * 非阻塞 socket 必须**立刻**返回 EAGAIN（select/poll 驱动的程序靠它判就绪），
- * 所以 nonblock 时只泵一次网卡、不做重试。 */
+ * 所以 nonblock 时只泵网卡、不做重试。
+ *
+ * M60：循环里每轮还要调一次 lx_proc_wait_tick()。自旋等待期间没有任何人
+ * 会来跑定时器，busybox ping 靠 setitimer(ITIMER_REAL) 发下一个包，不查闹钟
+ * 就永远只发第一个包（屏幕上一直刷 "recvfrom: Resource temporarily
+ * unavailable"）。顺带也让串口在这段时间里继续泵，Ctrl-C 能打断它。 */
 #define LX_NET_SPIN_MAX   500000ull
 #define LX_NET_SPIN_GUARD 30000000000ull   /* ≈10s @3GHz，仅作兜底 */
 
+/* 返回 SAL 的原始结果；*intr 置 1 表示被信号打断（调用方报 EINTR）。 */
 static int lx_net_spin_(int sd, void *buf, u32 len, LosSockAddr *a,
-                        int want_addr, int nonblock)
+                        int want_addr, int nonblock, int *intr)
 {
     u64 guard = port_cycles() + LX_NET_SPIN_GUARD;
     u64 limit = (nonblock != 0) ? 1ull : LX_NET_SPIN_MAX;
     u64 i = 0ull;
     int rc;
 
+    if (intr != (int *)0) {
+        *intr = 0;
+    }
     if (want_addr != 0) {
         rc = SalRecvFrom(sd, buf, len, a);
     } else {
         rc = SalRecv(sd, buf, len);
     }
-    while (rc == -11 && i < limit && port_cycles() < guard) {
+    while (rc == -11 && port_cycles() < guard) {
+        /* 轮询预算用完了，但进程还挂着闹钟/定时器：别急着报 EAGAIN，再等
+         * 一会儿让它到点。busybox ping 就是靠这个 —— 它 setitimer 之后在
+         * recvfrom 里等应答，如果预算先到期，回来的 EAGAIN 会被它打成一行
+         * "recvfrom: Resource temporarily unavailable"，而它想看到的是
+         * SIGALRM 引发的 EINTR（那个它直接忽略）。没有定时器的进程（比如
+         * m18 里对空队列做阻塞 recv 的用例）行为不变，仍然立刻 EAGAIN。 */
+        if (i >= limit && lx_proc_alarm_remain() == 0ull) {
+            /* 轮询预算用完了、也没有挂着的定时器。这时候还有两种收场：
+             *
+             *   - 有信号等着投递（典型是 SIGALRM 已经到点、但 busybox 用
+             *     signal() 装 handler 带 SA_RESTART，lx_proc_wait_intr 一直
+             *     说"继续等"）：必须回用户态让 handler 跑，否则 ping 的
+             *     "发下一个包"永远不执行。报 EINTR 是这里唯一正确的说法 ——
+             *     阻塞 socket 上 EAGAIN 本身就不是合法结果。
+             *   - 什么信号都没有：才按"真的没数据"报 EAGAIN（m18 依赖它）。 */
+            if (lx_proc_sig_pending() != 0) {
+                if (intr != (int *)0) {
+                    *intr = 1;
+                }
+                return rc;
+            }
+            break;
+        }
         lx_net_pump();
+        (void)lx_proc_wait_tick();
+        if (lx_proc_wait_intr() != 0) {
+            if (intr != (int *)0) {
+                *intr = 1;
+            }
+            return rc;
+        }
         if (want_addr != 0) {
             rc = SalRecvFrom(sd, buf, len, a);
         } else {
@@ -398,15 +437,15 @@ static int lx_net_spin_(int sd, void *buf, u32 len, LosSockAddr *a,
     return rc;
 }
 
-static int sal_recv_retry_(int sd, void *buf, u32 len, int nonblock)
+static int sal_recv_retry_(int sd, void *buf, u32 len, int nonblock, int *intr)
 {
-    return lx_net_spin_(sd, buf, len, (LosSockAddr *)0, 0, nonblock);
+    return lx_net_spin_(sd, buf, len, (LosSockAddr *)0, 0, nonblock, intr);
 }
 
 static int sal_recvfrom_retry_(int sd, void *buf, u32 len, LosSockAddr *a,
-                               int nonblock)
+                               int nonblock, int *intr)
 {
-    return lx_net_spin_(sd, buf, len, a, 1, nonblock);
+    return lx_net_spin_(sd, buf, len, a, 1, nonblock, intr);
 }
 
 u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
@@ -415,6 +454,7 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
     LxFile *f = lxs_get_(fd);
     int rc;
     int nb;
+    int intr = 0;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
     if (f->kind == LX_FD_UNIX) {
@@ -428,7 +468,7 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
 
         if (lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
         rc = sal_recvfrom_retry_((int)f->node, (void *)ubuf, (u32)len, &a,
-                                 nb);
+                                 nb, &intr);
         if (rc >= 0) {
             lxs_addr_out_(&a, uaddr);
             if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) != 0) {
@@ -436,8 +476,12 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
             }
         }
     } else {
-        rc = sal_recv_retry_((int)f->node, (void *)ubuf, (u32)len, nb);
+        rc = sal_recv_retry_((int)f->node, (void *)ubuf, (u32)len, nb, &intr);
     }
+    /* 被信号打断（Ctrl-C / SIGALRM）：先回用户态把信号送进去，别把 EAGAIN
+     * 当"真的没数据"报给调用方——busybox ping 会把 EAGAIN 打成一行错误，
+     * 而归规矩的阻塞 socket 在这种局面下报的是 EINTR。 */
+    if (intr != 0) { return (u64)0 - LX_EINTR; }
     return lxs_err_(rc);
 }
 
@@ -599,6 +643,7 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
     u32 i;
     int rc;
     int nb;
+    int intr;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
     if (f->kind == LX_FD_UNIX) { return lx_unix_recvmsg(fd, umsg, flags); }
@@ -614,6 +659,7 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
     buf = (u8 *)port_kcalloc(1ull, total ? total : 1ull);
     if (buf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
     nb = (((flags & 0x40ull) != 0ull) || ((f->oflags & LX_O_NONBLOCK) != 0u)) ? 1 : 0;
+    intr = 0;
     if (*(const u64 *)(umsg + 8ull) != 0ull) {
         LosSockAddr a;
         u64 name = *(const u64 *)(umsg + 0ull);
@@ -623,14 +669,14 @@ u64 lx_sock_recvmsg(u64 fd, u64 umsg, u64 flags)
             return (u64)0 - LX_EFAULT;
         }
         rc = sal_recvfrom_retry_((int)f->node, (void *)buf, (u32)total, &a,
-                                 nb);
+                                 nb, &intr);
         if (rc >= 0) { lxs_addr_out_(&a, name); }
     } else {
-        rc = sal_recv_retry_((int)f->node, (void *)buf, (u32)total, nb);
+        rc = sal_recv_retry_((int)f->node, (void *)buf, (u32)total, nb, &intr);
     }
     if (rc < 0) {
         port_kfree((void *)buf);
-        return lxs_err_(rc);
+        return (intr != 0) ? (u64)0 - LX_EINTR : lxs_err_(rc);
     }
     /* 按 iovec 分散回填，返回实际收到的字节数（可能小于 total） */
     {

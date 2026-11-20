@@ -2075,10 +2075,23 @@ x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
 		--rootfs $(ALPINE_CPIO) -o $(ALPINE_ISO)
 
+# 交互式会话的串口挂 `-serial mon:stdio`（mux），**不能**用 `-serial stdio`：
+# 后者让 QEMU 把宿主终端设成"自己接管 Ctrl-C"（host tty 的 ISIG 被清掉、^C
+# 不再产生 SIGINT），然后 QEMU 自己解释这个字节 —— 一按 Ctrl-C 就把整个虚拟机
+# SIGINT 掉（屏幕上 `qemu: terminating on signal 2`），客户机根本收不到 ^C。
+#
+# mon:stdio 保留 mux 的转义（Ctrl-A X 退出 QEMU），同时把 0x03 原样转给串口
+# → 客户机行规程 → 前台进程组的 SIGINT。两种"退出"因此各归各位：
+#   - 在 shell 里跑的程序：Ctrl-C 打断它，回到 / # 提示符；
+#   - 想关掉 QEMU：Ctrl-A X（或 exit 退掉 shell）。
+# 注意 mon:stdio 自己就带 mux，不能再加独立的 `-monitor none`。
+# 批处理验收（check-*）仍然用 -serial stdio：它们不需要 ^C。
+QEMU_SERIAL_INTERACTIVE := -serial mon:stdio
+
 run-x86-alpine: x86-alpine
 	qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
-		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC)
+		-nographic $(QEMU_SERIAL_INTERACTIVE) -no-reboot $(QEMU_NIC)
 
 # 自己敲命令：起来就是 Alpine 的 /bin/sh 提示符（/ #），exit 或 Ctrl-D 退出。
 run-x86-alpine-shell:
