@@ -155,3 +155,8 @@ void port_qemu_exit(void)
 {
     /* host 测试没有 QEMU，行为同 panic_halt（返回）。 */
 }
+
+u64 port_wallclock_sec(void)
+{
+    return 0ull;                       /* host/sim 没有 RTC：回退 TSC 假时钟 */
+}

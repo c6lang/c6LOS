@@ -23,8 +23,11 @@
 #include "los/los_typedef.h"
 
 #define LOS_NET_MAX_IF      4u
-#define LOS_NET_MAX_BUFS    16u
-#define LOS_NET_BUF_SIZE    512u
+/* 每个缓冲必须装得下一整帧以太网包（1500 MTU + 14 字节头），否则 e1000
+ * 收到 TLS ServerHello 这类 >448 字节的帧时会被 port_net_recv 丢弃，
+ * SSL_connect 永远等不到响应。静态池总数减半，避免撑破 stage2 的 0xA0000。 */
+#define LOS_NET_MAX_BUFS    8u
+#define LOS_NET_BUF_SIZE    1600u
 #define LOS_NET_HDR_ROOM    64u      /* 给链路层+IP 预留的头空间 */
 
 #define LOS_ETH_HLEN        14u

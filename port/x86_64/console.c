@@ -15,6 +15,65 @@ static u8 inb(u32 port)
     return v;
 }
 
+/* ---- PC/MC146818 CMOS RTC ------------------------------------------------
+ * QEMU 默认把宿主当前时间写进 CMOS（REG_B=0x02：BCD + 24 小时制）。墙钟不能
+ * 再用固定起点 1700000000：Alpine 的 ssl_client 会校验服务器证书，2023 年的
+ * 假时间会让新证书一律 "not yet valid"，wget HTTPS 必败。
+ * 寄存器见 QEMU 的 include/hw/rtc/mc146818rtc_regs.h。 */
+#define RTC_IO_INDEX   0x70u
+#define RTC_IO_DATA    0x71u
+#define RTC_SEC        0x00u
+#define RTC_MIN        0x02u
+#define RTC_HOUR       0x04u
+#define RTC_DAY        0x07u
+#define RTC_MON        0x08u
+#define RTC_YEAR       0x09u
+#define RTC_CENTURY    0x32u
+
+static u8 cmos_read_(u8 reg)
+{
+    outb(RTC_IO_INDEX, reg);
+    return inb(RTC_IO_DATA);
+}
+
+static u32 cmos_bcd_(u8 v)
+{
+    return ((u32)(v >> 4) * 10u) + (u32)(v & 0x0fu);
+}
+
+/* 1970-01-01 起的天数（Howard Hinnant 的 days_from_civil）。 */
+static u64 days_from_civil_(u32 y, u32 m, u32 d)
+{
+    u32 era;
+    u32 yoe;
+    u32 mp;
+    u32 doe;
+
+    y -= (m <= 2u) ? 1u : 0u;
+    era = y / 400u;
+    yoe = y - era * 400u;
+    mp = (m > 2u) ? (m - 3u) : (m + 9u);
+    doe = yoe * 365u + yoe / 4u - yoe / 100u +
+          (153u * mp + 2u) / 5u + d - 1u;
+    return (u64)era * 146097ull + (u64)doe - 719468ull;
+}
+
+u64 port_wallclock_sec(void)
+{
+    u32 sec = cmos_bcd_(cmos_read_(RTC_SEC));
+    u32 min = cmos_bcd_(cmos_read_(RTC_MIN));
+    u32 hour = cmos_bcd_(cmos_read_(RTC_HOUR));
+    u32 day = cmos_bcd_(cmos_read_(RTC_DAY));
+    u32 mon = cmos_bcd_(cmos_read_(RTC_MON));
+    u32 year = cmos_bcd_(cmos_read_(RTC_YEAR)) +
+               cmos_bcd_(cmos_read_(RTC_CENTURY)) * 100u;
+
+    /* CMOS 全 0xFF/0（没有 RTC）时年份会算出 16665，回退 TSC 假时钟。 */
+    if (year < 1970u || year > 2100u) { return 0ull; }
+    return days_from_civil_(year, mon, day) * 86400ull +
+           (u64)hour * 3600ull + (u64)min * 60ull + (u64)sec;
+}
+
 extern void x86_irq_init(void);
 
 u32 port_core_id(void)

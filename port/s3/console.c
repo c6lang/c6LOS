@@ -554,3 +554,8 @@ void port_diag_task(void *arg)
         ph = ph + 1u;
     }
 }
+
+u64 port_wallclock_sec(void)
+{
+    return 0ull;                       /* S3 没有墙钟 RTC：回退 TSC 假时钟 */
+}

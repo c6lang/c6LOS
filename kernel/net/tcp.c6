@@ -137,7 +137,10 @@ static INT32 tcp_xmit_(LosNetIf *nif, TcpSock *s, UINT8 flags, UINT32 seq,
     NetPut32(&h[8], ack);
     h[12] = 0x50u;                       /* data offset = 5 个 32 位字 */
     h[13] = flags;
-    NetPut16(&h[14], (UINT16)TCP_WIN);
+    /* 通告真实空闲窗口，不能固定 TCP_WIN：接收缓冲满时还喊 1024，对端会按
+     * 1024 猛发，我们只接得下一点点、其余丢弃，TLS 记录就永远拼不齐。
+     * rx_len 由 tcp_rx_append_/TcpSockRecv 保证不超过 TCP_RXBUF。 */
+    NetPut16(&h[14], (UINT16)((UINT32)TCP_RXBUF - s->rx_len));
     NetPut16(&h[16], 0u);
     NetPut16(&h[18], 0u);
     i = 0u;
@@ -186,6 +189,7 @@ INT32 TcpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
     UINT8 flags = 0u;
     UINT32 doff = 0u;
     UINT32 plen = 0u;
+    UINT32 kept = 0u;
     UINT32 i = 0u;
     TcpSock *s = (TcpSock *)0;
     TcpSock *l = (TcpSock *)0;
@@ -308,8 +312,10 @@ INT32 TcpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src)
         }
         if (plen != 0u) {
             if (seq == s->rcv_nxt) {
-                (void)tcp_rx_append_(s, &h[doff], plen);
-                s->rcv_nxt = s->rcv_nxt + plen;
+                /* 只确认真正放进接收缓冲的字节：窗口满了就回重复 ACK，
+                 * 让对端重传剩下的部分，不再把数据 ACK 掉又悄悄丢弃。 */
+                kept = tcp_rx_append_(s, &h[doff], plen);
+                s->rcv_nxt = s->rcv_nxt + kept;
             }
             tcp_send_ack_(nif, s);
         }
@@ -543,6 +549,7 @@ INT32 TcpSockSend(INT32 sd, const VOID *buf, UINT32 len)
 INT32 TcpSockRecv(INT32 sd, VOID *buf, UINT32 max)
 {
     TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
     UINT8 *dst = (UINT8 *)buf;
     UINT32 i = 0u;
     UINT32 n = 0u;
@@ -565,6 +572,14 @@ INT32 TcpSockRecv(INT32 sd, VOID *buf, UINT32 max)
     }
     s->rx_head = (s->rx_head + n) % (UINT32)TCP_RXBUF;
     s->rx_len = s->rx_len - n;
+    /* 窗口更新 ACK：应用把数据读走后立刻通告空闲窗口。否则对端只能等 RTO
+     * 退避（3s/6s/12s）才重传被窗口挡住的字节，TLS 握手会超过 wget 的超时。 */
+    if (n != 0u && s->state == (UINT32)TS_ESTAB) {
+        nif = NetIfGet(0u);
+        if (nif != (LosNetIf *)0) {
+            tcp_send_ack_(nif, s);
+        }
+    }
     return (INT32)n;
 }
 

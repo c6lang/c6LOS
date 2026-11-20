@@ -1314,3 +1314,30 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
   （试 `-Wl,-Map=...`、`-Wl,--orphan-handling=warn`）、
   再试常规镜像（去掉 `--ram-only-header`）、
   再试"只链 libphy 的单个 .o"逐步加。
+
+---
+
+## Alpine HTTPS（进行中，验收未通过）
+
+`make check-alpine-wget` 仍未通过，但已定位并修掉三个真实的协议/内核 bug：
+
+1. **`include/los/net.h`**：`LOS_NET_BUF_SIZE` 512→1600。原值扣掉 `LOS_NET_HDR_ROOM`
+   后只剩 448 字节，e1000 收到 TLS ServerHello 的 1024 字节帧时直接丢弃，
+   `SSL_connect` 永远等不到响应（pcap 实证）。缓冲池 16→8 以守住 stage2 的
+   `0xA0000` 上限。
+2. **`kernel/net/tcp.c6`**：`TcpInput` 以前把整段 `plen` 都 ACK 掉，即使
+   `tcp_rx_append_()` 因接收缓冲满只存下一部分——被 ACK 的数据永久丢失。
+   现在只 ACK 真正写入的字节；`TcpSockRecv` 读走数据后立刻发窗口更新 ACK；
+   `tcp_xmit_` 改为通告真实空闲窗口 `TCP_RXBUF - rx_len`（原固定 `TCP_WIN`
+   在缓冲满时仍喊 1024，对端猛发导致数据反复被丢，只能按 RTO 蠕动）。
+   修完后 TLS 握手已经能通过，不再报 `ssl_client: SSL_connect`。
+3. **墙钟与镜像布局**：x86 增加 CMOS RTC（`port_wallclock_sec`），
+   `time`/`gettimeofday`/`clock_gettime(REALTIME)` 统一走它
+   （固定 1700000000 会把当前证书判成 not-yet-valid）；
+   `stage2.ld` 丢弃 `.eh_frame` 给 BSS 腾出空间。
+
+**遗留（阻塞验收）**：握手成功后客户机 `ssl_client` 仍在 musl `free()` 附近
+SIGSEGV（`cr2=0x10`），wget 拿不到响应。已排除：COW fork 共享堆、`brk`/
+`mmap_top` 跨进程切换未保存、`fs_base` 未保存、动态库与 mmap 区重叠、
+`read()` 越界写用户缓冲。尚未定位真正的破坏来源；静态/堆 RX buffer 都会触发，
+只有握手失败时不会触发，怀疑与 OpenSSL 3 在清理路径上的堆元数据有关。

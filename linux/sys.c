@@ -21,6 +21,17 @@ static u64 neg(u64 e)
     return (u64)0 - e;
 }
 
+/* 墙钟：x86 用 CMOS RTC（QEMU 默认与宿主同步），其它 port 退回原来的
+ * TSC 假时钟。固定 1700000000 会让 Alpine ssl_client 把当前服务器证书
+ * 判成 "not yet valid"，HTTPS 握手必败。 */
+static u64 wall_sec_(void)
+{
+    u64 rtc = port_wallclock_sec();
+
+    return (rtc != 0ull) ? rtc :
+           (1700000000ull + port_cycles() / 1000000000ull);
+}
+
 static void put_hex(u64 v)
 {
     int i;
@@ -1176,18 +1187,22 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_time:
-        if (a0 != 0ull && lx_user_ok(a0, 8ull, C6OS_PROT_W) != 0) {
-            *(u64 *)a0 = 1700000000ull;
+        {
+            u64 now = wall_sec_();
+
+            if (a0 != 0ull && lx_user_ok(a0, 8ull, C6OS_PROT_W) != 0) {
+                *(u64 *)a0 = now;
+            }
+            r->rax = now;
         }
-        r->rax = 1700000000ull;            /* 没有 RTC：给个固定时刻 */
         return;
 
-    /* M16-2：gettimeofday/clock_getres/clock_settime。统一用 TSC 推算的
-     * "假时钟"：起点 1700000000 秒 + 开机以来的毫秒，和 clock_gettime 同源，
-     * 保证 time()/gettimeofday()/clock_gettime() 不会互相矛盾。 */
+    /* M16-2：gettimeofday/clock_getres/clock_settime。墙钟优先取 x86 CMOS
+     * RTC，没有 RTC 的 port 仍用 TSC 假时钟；time()/gettimeofday()/
+     * clock_gettime() 都走同一个 wall_sec_()，三者不会互相矛盾。 */
     case LX_SYS_gettimeofday:
         {
-            u64 now = 1700000000ull + port_cycles() / 1000000000ull;
+            u64 now = wall_sec_();
             u64 usec = (port_cycles() / 1000ull) % 1000000ull;
 
             if (a0 != 0ull) {
@@ -1347,7 +1362,7 @@ void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_clock_gettime:
         /* 同理：nanosleep 的超时逻辑和 busybox 的时间戳都要它。
-         * 返回"单调递增的假时钟"，精度到毫秒，起点固定在 1700000000。 */
+         * MONOTONIC 用 TSC 假时钟；REALTIME 走 wall_sec_()（x86 上是 RTC）。 */
         if (lx_user_ok(a1, 16ull, C6OS_PROT_W) == 0) {
             r->rax = neg(LX_EFAULT);
             return;
@@ -1359,7 +1374,7 @@ void lx_syscall_do(LxRegs *r)
                 *(u64 *)a1 = (i64)(now / 1000ull);
                 *(u64 *)(a1 + 8ull) = (i64)((now % 1000ull) * 1000000ull);
             } else {                                   /* CLOCK_REALTIME */
-                *(u64 *)a1 = (i64)(1700000000ull + now / 1000ull);
+                *(u64 *)a1 = (i64)wall_sec_();
                 *(u64 *)(a1 + 8ull) = (i64)((now % 1000ull) * 1000000ull);
             }
         }

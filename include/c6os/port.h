@@ -33,6 +33,9 @@ void port_isr_enter(void);
 void port_isr_exit(void);
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 new);
 u64 port_cycles(void);
+/* Unix 墙钟（秒）。x86 读 CMOS RTC；没有 RTC 的 port 返回 0，
+ * 调用方退回 TSC 假时钟（见 linux/sys.c 的 wall_sec_）。 */
+u64 port_wallclock_sec(void);
 u32 port_irq_save(void);
 void port_irq_restore(u32 state);
 void os_test_set_isr(u32 v);

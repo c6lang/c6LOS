@@ -149,3 +149,8 @@ void port_delay_ms(u32 ms)
         ms--;
     }
 }
+
+u64 port_wallclock_sec(void)
+{
+    return 0ull;                       /* 没有 RTC：回退 TSC 假时钟 */
+}
