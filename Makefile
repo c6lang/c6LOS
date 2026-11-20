@@ -2057,10 +2057,21 @@ $(ALPINE_ROOT)/bin/busybox: $(ALPINE_TGZ)
 # 514 个成员、334 个符号链接（/bin/sh → busybox、/lib/ld-musl-x86_64.so.1）
 # minirootfs 不带 /etc/resolv.conf，musl 的 getaddrinfo 没有可用 nameserver，
 # `ping qq.com` 就会报 bad address。打包前写进 slirp 的 DNS（10.0.2.3）。
-$(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox tools/mk-initramfs.py
-	@mkdir -p $(ALPINE_DIR)
-	@mkdir -p $(ALPINE_ROOT)/etc
-	printf 'nameserver 10.0.2.3\n' > $(ALPINE_ROOT)/etc/resolv.conf
+# resolv.conf 必须单独做成目标：只改打包配方并不会让旧的 full.cpio 过期（make
+# 只比依赖的时间戳），旧构建树拉到修复后仍带着没有 DNS 的 initramfs。这里每次
+# 都检查内容，仅当缺失/内容不同才写；mtime 变了才触发 cpio 与 ISO 重打包。
+ALPINE_RESOLV  := $(ALPINE_ROOT)/etc/resolv.conf
+.PHONY: alpine-dns-force
+alpine-dns-force:
+
+# 依赖 busybox：tarball 更新时 busybox 那步会 rm -rf 整个 rootfs，必须等它
+# 抽完再写 resolv.conf（并行 make 下也不能让两步抢同一个目录）。
+$(ALPINE_RESOLV): $(ALPINE_ROOT)/bin/busybox alpine-dns-force
+	@mkdir -p $(@D)
+	@printf 'nameserver 10.0.2.3\n' | cmp -s - $@ 2>/dev/null \
+	  || printf 'nameserver 10.0.2.3\n' > $@
+
+$(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox $(ALPINE_RESOLV) tools/mk-initramfs.py
 	python3 tools/mk-initramfs.py $@ $(ALPINE_ROOT)
 
 # 8MB FAT16，给客户机当 /data 写
