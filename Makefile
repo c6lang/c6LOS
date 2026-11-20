@@ -982,7 +982,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -995,7 +995,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1037,7 +1037,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1593,6 +1593,13 @@ $(M56_ELF): $(M56_SRC)
 M57_SRC := tests/linux/m57meta.c
 M57_ELF := $(X86)/m57meta.elf
 $(M57_ELF): $(M57_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- M59：socketpair(AF_UNIX)（busybox wget SSL helper 前置） ----
+M59_SRC := tests/linux/m59socketpair.c
+M59_ELF := $(X86)/m59socketpair.elf
+$(M59_ELF): $(M59_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
 
@@ -2694,6 +2701,11 @@ DISK_DEPS  := $(M57_ELF) $(FS_IMG)
 DISK_MB    := 16
 DISK_APP   = dd if=$(M57_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
              dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
+else ifeq ($(X86S_NAME),m59)
+DISK_DEPS  := $(M59_ELF) $(FS_IMG)
+DISK_MB    := 16
+DISK_APP   = dd if=$(M59_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(FS_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),m27)
 DISK_DEPS  := $(M27_ELF) $(M27_FS)
 DISK_MB    := 16
@@ -3435,3 +3447,17 @@ check-linuxabi-m58: x86-alpine-proc
 	@grep -q "PID.*COMMAND" /tmp/check-m58.log \
 	  || { echo "FAIL: linux-abi M58（ps 无表头）"; tail -40 /tmp/check-m58.log; exit 1; }
 	@echo "PASS: linux-abi M58（/proc 端到端：cat/stat/ps/top）"
+
+# ---- M59：socketpair(AF_UNIX)（busybox wget SSL helper 前置） ----
+x86-m59: caps-check-x86
+	$(MAKE) X86S_NAME=m59 X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		$(X86)/m59-disk.img
+
+check-linuxabi-m59: x86-m59
+	@timeout 60 qemu-system-x86_64 -m 256M \
+		-drive format=raw,file=$(X86)/m59-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' | tee /tmp/check-m59.log \
+		| grep -q "^PASS: m59socketpair" \
+	  && echo "PASS: linux-abi M59（socketpair）" \
+	  || { echo "FAIL: linux-abi M59"; tail -30 /tmp/check-m59.log; exit 1; }

@@ -2004,6 +2004,10 @@ static void pipe_drop_(LxFile *fe)
         lx_sock_drop(fe->node);
         return;
     }
+    if (fe->kind == LX_FD_UNIX) {
+        lx_unix_drop(fe->node);
+        return;
+    }
     pp = pipe_at_(fe->node);
     if (pp == (LxPipe *)0) {
         return;
@@ -2030,6 +2034,10 @@ static void pipe_ref_(const LxFile *fe)
 
     if (fe->kind == LX_FD_SOCK) {
         lx_sock_ref(fe->node);
+        return;
+    }
+    if (fe->kind == LX_FD_UNIX) {
+        lx_unix_ref(fe->node);
         return;
     }
     pp = pipe_at_(fe->node);
@@ -2249,13 +2257,17 @@ void lx_unix_wake(void)
     wake_all_();
 }
 
-/* SCM_RIGHTS：按 kind 增加 fd 携带对象的引用计数。 */
+/* SCM_RIGHTS / dup：按 kind 增加 fd 携带对象的引用计数。 */
 void lx_unix_fd_acquire(u32 node, u32 kind)
 {
     LxFile tmp;
 
     tmp.node = (u64)node;
     tmp.kind = kind;
+    if (kind == LX_FD_UNIX) {
+        lx_unix_ref((u64)node);
+        return;
+    }
     if (kind == LX_FD_PIPE_R || kind == LX_FD_PIPE_W) {
         pipe_ref_(&tmp);
     }

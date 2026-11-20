@@ -1557,7 +1557,7 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_sock_getpeername(a0, a1, a2);
         return;
     case LX_SYS_socketpair:
-        r->rax = neg(LX_EOPNOTSUPP);
+        r->rax = lx_sock_socketpair(a0, a1, a2, a3);
         return;
 
     default:
