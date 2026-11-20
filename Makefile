@@ -2055,8 +2055,12 @@ $(ALPINE_ROOT)/bin/busybox: $(ALPINE_TGZ)
 	tar -xzf $(ALPINE_TGZ) -C $(ALPINE_ROOT)
 
 # 514 个成员、334 个符号链接（/bin/sh → busybox、/lib/ld-musl-x86_64.so.1）
+# minirootfs 不带 /etc/resolv.conf，musl 的 getaddrinfo 没有可用 nameserver，
+# `ping qq.com` 就会报 bad address。打包前写进 slirp 的 DNS（10.0.2.3）。
 $(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox tools/mk-initramfs.py
 	@mkdir -p $(ALPINE_DIR)
+	@mkdir -p $(ALPINE_ROOT)/etc
+	printf 'nameserver 10.0.2.3\n' > $(ALPINE_ROOT)/etc/resolv.conf
 	python3 tools/mk-initramfs.py $@ $(ALPINE_ROOT)
 
 # 8MB FAT16，给客户机当 /data 写
@@ -2129,11 +2133,11 @@ check-alpine-net: x86-alpine-net
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
 		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
 		| tr -d '\r' | tee /tmp/check-alpine-net.log >/dev/null
-	@for tag in net-iface-ok net-ifaddr-ok net-ping-loop-ok net-ping-gw-ok net-dns-ok net-ping-ext-ok net-done; do \
+	@for tag in net-iface-ok net-ifaddr-ok net-ping-loop-ok net-ping-gw-ok net-dns-ok net-ping-host-ok net-ping-ext-ok net-done; do \
 		grep -q "$$tag" /tmp/check-alpine-net.log \
 		  || { echo "FAIL: alpine net（缺 $$tag）"; tail -60 /tmp/check-alpine-net.log; exit 1; }; \
 	done
-	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2/8.8.8.8 + DNS）"
+	@echo "PASS: alpine net（ifconfig eth0 + ping 127.0.0.1/10.0.2.2/8.8.8.8/qq.com + DNS）"
 
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \

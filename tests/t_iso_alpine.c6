@@ -65,6 +65,7 @@ static const char kScript[] =
     "ping -c 1 -W 2 127.0.0.1; echo net-ping-loop-ok; "
     "ping -c 1 -W 5 10.0.2.2 && echo net-ping-gw-ok; "
     "nslookup google.com 10.0.2.3 && echo net-dns-ok; "
+    "ping -c 1 -W 5 qq.com && echo net-ping-host-ok; "
     "ping -c 1 -W 5 8.8.8.8 && echo net-ping-ext-ok; "
     "echo net-done";
 #elif defined(C6OS_ALPINE_APPS)
