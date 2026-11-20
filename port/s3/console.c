@@ -427,6 +427,11 @@ void port_panic_halt(void)
     }
 }
 
+void port_qemu_exit(void)
+{
+    port_panic_halt();
+}
+
 u32 port_virtual_tick(void)
 {
     return 0u;

@@ -1211,7 +1211,7 @@ static void thread_exit_(LxProc *c)
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
-        port_panic_halt();
+        port_qemu_exit();
     }
     switch_to_(next);
     port_panic_halt();
@@ -1255,7 +1255,7 @@ void lx_proc_exit(u64 code)
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
-        port_panic_halt();
+        port_qemu_exit();
     }
     switch_to_(next);
     /* 僵尸不该被调度回来 */
@@ -4073,7 +4073,7 @@ void lx_proc_exit_group(u64 code)
         next = pick_next_(g_cur);
         if (next < 0) {
             port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
-            port_panic_halt();
+            port_qemu_exit();
         }
         switch_to_(next);
         port_panic_halt();

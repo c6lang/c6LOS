@@ -2086,12 +2086,16 @@ x86-alpine: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
 #   - 想关掉 QEMU：Ctrl-A X（或 exit 退掉 shell）。
 # 注意 mon:stdio 自己就带 mux，不能再加独立的 `-monitor none`。
 # 批处理验收（check-*）仍然用 -serial stdio：它们不需要 ^C。
+# 交互式额外挂 isa-debug-exit：guest 里 shell exit / 所有进程退出时内核写 0x501，
+# QEMU 随之真正关机回到宿主终端（否则只停在 hlt、QEMU 进程不退，像"exit 退不出"）。
+# 退出码是 (val<<1)|1 = 1，属预期；批处理 QEMU 没这个设备，写端口是无害 no-op。
 QEMU_SERIAL_INTERACTIVE := -serial mon:stdio
+QEMU_EXIT_DEVICE := -device isa-debug-exit,iobase=0x501,iosize=0x02
 
 run-x86-alpine: x86-alpine
-	qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
+	-qemu-system-x86_64 -m 256M -cdrom $(ALPINE_ISO) -boot d \
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
-		-nographic $(QEMU_SERIAL_INTERACTIVE) -no-reboot $(QEMU_NIC)
+		-nographic $(QEMU_SERIAL_INTERACTIVE) -no-reboot $(QEMU_NIC) $(QEMU_EXIT_DEVICE)
 
 # 自己敲命令：起来就是 Alpine 的 /bin/sh 提示符（/ #），exit 或 Ctrl-D 退出。
 run-x86-alpine-shell:
