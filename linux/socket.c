@@ -103,13 +103,14 @@ u16 lx_sock_poll_one(u64 sd)
 {
     int revents;
 
-    /* sd 是 SAL socket id（LxFile.node），不是 fd。 */
-    revents = SalPoll((int)sd, 0x1u | 0x4u);   /* POLLIN | POLLOUT */
+    /* sd 是 SAL socket id（LxFile.node），不是 fd。SAL 的 POLLOUT 是 2，
+     * Linux 的是 4：以前传 4 进去，TCP 的 Established 永远报不出可写。 */
+    revents = SalPoll((int)sd, 0x1u | 0x2u);   /* SAL: POLLIN | POLLOUT */
     if (revents < 0) {
         return 0u;
     }
     return (u16)((revents & 0x1u) ? LX_POLLIN : 0u) |
-           (u16)((revents & 0x4u) ? LX_POLLOUT : 0u);
+           (u16)((revents & 0x2u) ? LX_POLLOUT : 0u);
 }
 
 static u64 lxs_err_(int sal_rc)
@@ -304,15 +305,16 @@ u64 lx_sock_accept(u64 fd, u64 uaddr, u64 uaddrlen)
     return cfd;
 }
 
-/* M24：SalSend 在 ARP 未解析时返回 -113(EHOSTUNREACH)。轮询式网卡没有
- * 中断，用户态同步 send 没有机会泵网卡收 ARP 应答，第一个 DNS 包永远
- * 发不出去。这里在 -113 时泵网卡再重试，让 ARP 有时间完成。 */
+/* M24：SalSend 在 ARP 未解析时返回 -113(EHOSTUNREACH)；TCP 刚发完 SYN 时
+ * 返回 -107(ENOTCONN)。轮询式网卡没有中断，用户态同步 send 没有机会泵
+ * 网卡收 ARP 应答/SYN-ACK。这里在这两种错误时泵网卡再重试，让握手完成
+ * （否则 busybox wget 的 ssl_client 一 exec 就 send，握手必败）。 */
 static int sal_send_retry_(int sd, const void *buf, u32 len)
 {
     int rc = SalSend(sd, buf, len);
     int i;
 
-    for (i = 0; i < 4000 && rc == -113; i++) {
+    for (i = 0; i < 4000 && (rc == -113 || rc == -107); i++) {
         lx_net_pump();
         rc = SalSend(sd, buf, len);
     }
@@ -325,7 +327,7 @@ static int sal_sendto_retry_(int sd, const void *buf, u32 len,
     int rc = SalSendTo(sd, buf, len, a);
     int i;
 
-    for (i = 0; i < 4000 && rc == -113; i++) {
+    for (i = 0; i < 4000 && (rc == -113 || rc == -107); i++) {
         lx_net_pump();
         rc = SalSendTo(sd, buf, len, a);
     }
@@ -538,10 +540,11 @@ u64 lx_sock_shutdown(u64 fd, u64 how)
     LxFile *f = lxs_get_(fd);
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
-    (void)how;                                /* SAL 无 shutdown：释放这份 fd 引用 */
-    lx_sock_drop(f->node);
-    f->node = LX_FD_NONE;
-    f->kind = LX_FD_FILE;
+    if (f->kind == LX_FD_UNIX) { return lx_unix_shutdown(fd, how); }
+    /* SAL 没有真正的半关闭。以前这里把整个 fd 干掉，busybox wget 在
+     * HTTPS 下对 socketpair 调 shutdown(SHUT_WR) 之后读就变成 EBADF；
+     * 即使 fd 是 AF_INET，shutdown 也绝不能销毁 fd。这里成功返回即可。 */
+    (void)how;
     return 0ull;
 }
 
@@ -878,7 +881,7 @@ u64 lx_sock_send(u64 fd, u64 b, u64 l, u64 f) { return lx_sock_sendto(fd, b, l, 
 u64 lx_sock_recv(u64 fd, u64 b, u64 l, u64 f) { return lx_sock_recvfrom(fd, b, l, f, 0ull, 0ull); }
 u64 lx_sock_setsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_getsockopt(u64 fd, u64 l, u64 o, u64 v, u64 ol) { (void)fd; (void)l; (void)o; (void)v; (void)ol; return (u64)0 - LX_EOPNOTSUPP; }
-u64 lx_sock_shutdown(u64 fd, u64 h) { (void)fd; (void)h; return (u64)0 - LX_EOPNOTSUPP; }
+u64 lx_sock_shutdown(u64 fd, u64 h) { return lxs_is_unix_(fd) ? lx_unix_shutdown(fd, h) : (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_getpeername(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_getsockname(u64 fd, u64 a, u64 l) { (void)fd; (void)a; (void)l; return (u64)0 - LX_EOPNOTSUPP; }
 u64 lx_sock_ioctl(u64 fd, u64 req, u64 arg)
