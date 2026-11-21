@@ -1317,9 +1317,10 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
 
 ---
 
-## Alpine HTTPS（进行中，验收未通过）
+## Alpine HTTPS（已通过）
 
-`make check-alpine-wget` 仍未通过，但已定位并修掉三个真实的协议/内核 bug：
+`make check-alpine-wget` 已通过（Alpine busybox `wget https://qq.com` 下载
+119KB 并打印 `wget-https-ok` / `wget-done`）。一路修掉的真实 bug：
 
 1. **`include/los/net.h`**：`LOS_NET_BUF_SIZE` 512→1600。原值扣掉 `LOS_NET_HDR_ROOM`
    后只剩 448 字节，e1000 收到 TLS ServerHello 的 1024 字节帧时直接丢弃，
@@ -1330,14 +1331,25 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
    现在只 ACK 真正写入的字节；`TcpSockRecv` 读走数据后立刻发窗口更新 ACK；
    `tcp_xmit_` 改为通告真实空闲窗口 `TCP_RXBUF - rx_len`（原固定 `TCP_WIN`
    在缓冲满时仍喊 1024，对端猛发导致数据反复被丢，只能按 RTO 蠕动）。
-   修完后 TLS 握手已经能通过，不再报 `ssl_client: SSL_connect`。
 3. **墙钟与镜像布局**：x86 增加 CMOS RTC（`port_wallclock_sec`），
    `time`/`gettimeofday`/`clock_gettime(REALTIME)` 统一走它
    （固定 1700000000 会把当前证书判成 not-yet-valid）；
    `stage2.ld` 丢弃 `.eh_frame` 给 BSS 腾出空间。
-
-**遗留（阻塞验收）**：握手成功后客户机 `ssl_client` 仍在 musl `free()` 附近
-SIGSEGV（`cr2=0x10`），wget 拿不到响应。已排除：COW fork 共享堆、`brk`/
-`mmap_top` 跨进程切换未保存、`fs_base` 未保存、动态库与 mmap 区重叠、
-`read()` 越界写用户缓冲。尚未定位真正的破坏来源；静态/堆 RX buffer 都会触发，
-只有握手失败时不会触发，怀疑与 OpenSSL 3 在清理路径上的堆元数据有关。
+4. **`port/x86_64/mmu.c`（`free()` 附近 SIGSEGV 的真凶）**：惰性匿名页第一次
+   缺页后 LAZY 标记仍留在 VMA 里，之后每次 `copy_*_user` 走 `lx_user_ok` →
+   `lx_vma_fault_range` 都会再次 `port_as_map_zero`。该函数会先还掉旧页框再挂
+   新零页，把用户刚写进去的堆数据（malloc chunk header 等）整页抹掉。加
+   `mapped_leaf_`：叶子页已映射就直接返回，不再重复清零。
+5. **`linux/afunix.c`（socketpair 死锁）**：`wget` 写完请求会对 socketpair
+   `shutdown(SHUT_WR)`，但对端 `recv` 只认“对端对象消失”，不认
+   `peer->shut_wr`，于是 `ssl_client` 永远阻塞在 stdin；父进程又在等子进程
+   输出，两边都不泵网卡。现在对端半关闭按 EOF 返回 0。
+6. **`linux/afunix.c`（阻塞 send 的 EAGAIN）**：socketpair 队列只有 8 槽，
+   `ssl_client` 往 stdout 写解密数据时队列满，`send` 直接回 EAGAIN，busybox
+   把它当致命错误退出。现在阻塞 fd 的 `send/sendmsg` 等槽位（recv 腾出槽位
+   时 `lx_unix_wake`），非阻塞 fd 才回 EAGAIN；`lx_unix_poll` 只在真有槽位时
+   报 POLLOUT。
+7. **`linux/proc.c`**：`poll` 的 `revents` 只保留调用方请求的事件
+   （ERR/HUP/NVAL 永远报）。以前把 TCP socket 常置的 POLLOUT 也写回去，
+   只等 POLLIN 的 `ssl_client` 立刻返回、`read()` 拿 0 字节当网络 EOF；
+   `fork` 不再主动让子进程先跑，避免 SSL helper 抢在父进程写请求前行动。
