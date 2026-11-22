@@ -1,4 +1,4 @@
-/* 64 位载荷：链接在 0x20000，由 stage1 进入 long mode 后跳入。 */
+/* 64 位载荷：链接在 0x11000（stage1 只占 ~200B），由 stage1 进入 long mode 后跳入。 */
 .section .bss
 .align 16
 stack2_bottom:

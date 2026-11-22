@@ -49,6 +49,7 @@ int main(void)
     int dfd;
     int fd;
     char buf[64];
+    char mbuf[512];
     struct stat st;
     struct statfs sfs;
     ssize_t n;
@@ -89,11 +90,48 @@ int main(void)
     close(dfd);
     check(rmdir("/tmp/m15dir") == 0, "rmdir");
 
-    /* ---- 2. statfs ---- */
+    /* ---- 2. statfs：/tmp 是 ramfs 挂载点，报 arena 大小而不是 256MB 兜底值 ---- */
     memset(&sfs, 0, sizeof(sfs));
     check(statfs("/tmp", &sfs) == 0, "statfs");
     check(sfs.f_bsize > 0 && sfs.f_blocks > 0 && sfs.f_bavail > 0,
           "statfs fields nonzero");
+    check((unsigned long long)sfs.f_bsize * (unsigned long long)sfs.f_blocks
+              <= 1024ull * 1024ull,
+          "statfs /tmp uses ramfs arena size");
+
+    /* ---- 2.5 挂载点 chdir：/tmp 是 ramfs 挂载点，m15 的 initramfs 里没有
+     * 这个目录项。以前 chdir 只查 initramfs 扁平表，cd /tmp 直接 ENOENT。 ---- */
+    check(chdir("/tmp") == 0, "chdir mountpoint");
+    memset(mbuf, 0, sizeof(mbuf));
+    check(getcwd(mbuf, sizeof(mbuf)) != NULL && strcmp(mbuf, "/tmp") == 0,
+          "getcwd mountpoint");
+    fd = open("mntrel.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    check(fd >= 0, "open relative after chdir mountpoint");
+    if (fd >= 0) {
+        check(write(fd, "rel", 3) == 3, "write relative after chdir");
+        close(fd);
+    }
+    check(stat("mntrel.txt", &st) == 0 && st.st_size == 3,
+          "stat relative after chdir");
+    check(chdir("/") == 0, "chdir back to root");
+    check(stat("/tmp/mntrel.txt", &st) == 0 && st.st_size == 3,
+          "relative file landed in /tmp");
+    check(unlink("/tmp/mntrel.txt") == 0, "unlink relative file");
+
+    /* ---- 2.6 /proc/mounts 要列出真实挂载点（df -h 读它） ---- */
+    fd = open("/proc/mounts", O_RDONLY);
+    check(fd >= 0, "open /proc/mounts");
+    if (fd >= 0) {
+        memset(mbuf, 0, sizeof(mbuf));
+        n = read(fd, mbuf, sizeof(mbuf) - 1);
+        check(n > 0, "read /proc/mounts");
+        if (n > 0) {
+            mbuf[n] = '\0';
+            check(strstr(mbuf, "/tmp ramfs") != NULL,
+                  "/proc/mounts lists /tmp mount");
+        }
+        close(fd);
+    }
 
     /* ---- 3. devfs ---- */
     fd = open("/dev/null", O_WRONLY);

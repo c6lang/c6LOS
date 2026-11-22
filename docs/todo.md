@@ -1356,5 +1356,36 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
 
 > 交互式 shell 的 cwd `/` 是只读 initramfs：直接 `wget https://qq.com` 现在
 > 能完成握手并跟随跳转，但会停在 `can't open 'index.html': No such file or
-> directory`。要真正落盘请用 `wget -O /data/qq.html https://qq.com`，或先
-> `cd /data`。
+> directory`。要真正落盘请用 `wget -O /data/qq.html https://qq.com`，`/data`
+> 是挂载点，`cd /data` 已经能进去（见下一节）；别把下载落到 `/tmp`，那里只有
+> 8KB ramfs arena，大文件会报 `Out of memory`。
+
+---
+
+## 挂载点语义（cd / df，已通过）
+
+`/data` 是运行时挂上的 FAT16：stat/open/access 一直会查挂载表，但 `chdir`
+只查 initramfs 的扁平表，交互式 shell 里 `cd /data` 报
+`can't cd to /data: No such file or directory`；`/proc/mounts` 又是写死的
+rootfs+tmpfs，`df -h` 根本列不出 /data。三处一起修：
+
+1. **`linux/fs.c` `lx_fs_chdir`**：`fs_find` 失败后按 `vfs_owns_` 再查一次挂载
+   表，`LOS_FsStat` 确认是目录就把挂载路径写进 cwd（cwd 存的是不带前导 '/'
+   的相对路径，之后的相对 open/stat 自然落到挂载点下）。
+2. **`linux/fs.c` `proc_mounts_`**：按 `g_os_mounts` 逐项输出
+   （`/dev/<dev> <挂载点> <fs 类型> rw 0 0`）；rootfs 与 proc 两个虚拟项单独补。
+3. **statfs 按挂载点报数**：新增 `LosFsStatFs` + `LOS_FsStatFs`，ramfs 报
+   arena（8KB）、fatfs 按扇区扫 FAT1 数空闲簇；`statfs(2)` 解析路径，
+   `fstatfs(2)` 拆成单独实现（原来两者共用"忽略路径"的版本，fstatfs 能跑
+   纯属巧合，a0 其实是 fd 不是指针）。
+
+验收：`check-linuxabi-m15` 增加 `chdir("/tmp")`（m15 的 initramfs 里没有 /tmp
+目录项）+ chdir 后的相对路径读写 + `/proc/mounts` 含 `/tmp` + statfs 不再是
+256MB 兜底常量；`check-alpine` 的脚本增加 `cd /data && echo cdok > cdok.txt`
+和 `df -h`，断言日志里出现 `^/dev/ata0 .* /data$`。
+
+这三处改完，Alpine 内核镜像（flat.bin + `.bss`）正好越过 0xA0000，链接期 ASSERT
+直接拦住：`stage2` 基址原来在 0x20000，而 stage1 只占 ~200B，中间 60KB 是纯空洞。
+把 `stage2.ld`/`stage1.ld` 的基址下移到 0x11000、`stage1.S` 的远跳改成 `$0x11000`
+后，`.bss` 末尾从 0xA0CF8 回到 ~0x92000，flat.bin 从 ~252KB 降到 192KB（也顺手给
+boot16 的 0x4FB00 读入上限腾出余量）。

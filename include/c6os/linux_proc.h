@@ -375,6 +375,7 @@ u64  lx_fs_truncate(u64 upath, u64 len);
 u64  lx_fs_chmod(u64 upath, u64 mode);
 u64  lx_fs_chmod_pathat(u64 dirfd, u64 upath, u64 mode);
 u64  lx_fs_statfs(u64 upath, u64 ubuf);          /* x86-64 struct statfs, 120B */
+u64  lx_fs_fstatfs(u64 fd, u64 ubuf);            /* 同上，路径来自已打开的 fd */
 u64  lx_fs_utimensat(u64 dirfd, u64 upath, u64 times);
 
 /* ---- 串口控制台的行规程（linux/tty.c，M12）----------------------------

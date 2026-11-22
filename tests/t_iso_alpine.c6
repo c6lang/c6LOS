@@ -92,13 +92,16 @@ static const char kScript[] =
  * 用固定脚本而不是裸 `sh`：自动化验收里没法复现"等人输入"，失败时只能看到
  * "什么都没发生"。带 -c 的脚本走的是完全同一条装载 / 动态链接 / 系统调用路径，
  * 但输出确定。想自己敲命令：make run-x86-alpine-shell。
- * 脚本刻意覆盖四件事：往终端写、读内核信息、遍历目录、写 /data 再读回。 */
+ * 脚本刻意覆盖六件事：往终端写、读内核信息、遍历目录、写 /data 再读回、
+ * 挂载点 chdir（cd /data，cd 以前只认 initramfs 扁平表）、df -h 列出 /data。 */
 static const char kScript[] =
     "echo alpine-M12-alive; "
     "uname -a; "
     "ls /; "
     "echo m12ok > /data/m12.txt; "
     "cat /data/m12.txt; "
+    "cd /data && echo cdok > cdok.txt && cat cdok.txt && echo alpine-cd-ok; "
+    "df -h; echo alpine-df-done; "
     "echo alpine-M12-done";
 #endif
 
