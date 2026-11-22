@@ -1353,3 +1353,8 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
    （ERR/HUP/NVAL 永远报）。以前把 TCP socket 常置的 POLLOUT 也写回去，
    只等 POLLIN 的 `ssl_client` 立刻返回、`read()` 拿 0 字节当网络 EOF；
    `fork` 不再主动让子进程先跑，避免 SSL helper 抢在父进程写请求前行动。
+
+> 交互式 shell 的 cwd `/` 是只读 initramfs：直接 `wget https://qq.com` 现在
+> 能完成握手并跟随跳转，但会停在 `can't open 'index.html': No such file or
+> directory`。要真正落盘请用 `wget -O /data/qq.html https://qq.com`，或先
+> `cd /data`。
