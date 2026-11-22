@@ -66,6 +66,18 @@ static int stat_(OsMount *m, const char *rel, LosFsStat *st)
     return 0 - OS_E_INVAL;
 }
 
+/* statfs 只关心挂载点本身，不解析 rel：后端按整卷/整 arena 报数。 */
+static int statfs_(OsMount *m, LosFsStatFs *st)
+{
+    if (os_str_eq(m->type, "ramfs") == 1) {
+        return ramfs_statfs(m, st);
+    }
+    if (os_str_eq(m->type, "fatfs") == 1) {
+        return fatfs_statfs(m, st);
+    }
+    return 0 - OS_E_INVAL;
+}
+
 static int readdir_(OsMount *m, const char *rel, u32 idx, LosFsDirent *de)
 {
     if (os_str_eq(m->type, "romfs") == 1) {
@@ -227,6 +239,23 @@ INT32 LOS_FsStat(const CHAR *path, LosFsStat *st)
         return (INT32)rc;
     }
     return (INT32)stat_(&g_os_mounts[mnt], rel, st);
+}
+
+INT32 LOS_FsStatFs(const CHAR *path, LosFsStatFs *st)
+{
+    u32 mnt = 0u;
+    char rel[LOS_FS_PATH_MAX] = {0};
+    int rc = 0;
+
+    rel[0] = '\0';
+    if (st == (LosFsStatFs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    rc = os_vfs_lookup((const char *)path, &mnt, rel, (u32)sizeof(rel));
+    if (rc != 0) {
+        return (INT32)rc;
+    }
+    return (INT32)statfs_(&g_os_mounts[mnt], st);
 }
 
 INT32 LOS_FsReaddir(const CHAR *path, UINT32 idx, LosFsDirent *de)

@@ -39,6 +39,16 @@ typedef struct {
     UINT32 mtime;     /* 预留：romfs/ramfs 都返回 0 */
 } LosFsStat;
 
+/* statfs 的结果：df 读的就是 bsize/blocks/bfree/bavail。 */
+typedef struct {
+    UINT32 bsize;     /* 基本块大小（字节） */
+    UINT32 blocks;    /* 总块数 */
+    UINT32 bfree;     /* 空闲块数 */
+    UINT32 bavail;    /* 非特权用户可用块数 */
+    UINT32 files;     /* 总 inode 数（0 = 不适用） */
+    UINT32 ffree;     /* 空闲 inode 数 */
+} LosFsStatFs;
+
 typedef struct {
     CHAR name[LOS_FS_NAME_MAX];
     UINT32 type;
@@ -58,6 +68,7 @@ INT32 LOS_FsWrite(INT32 fd, const VOID *buf, UINT32 len);
 INT32 LOS_FsLseek(INT32 fd, INT32 off, UINT32 whence);
 
 INT32 LOS_FsStat(const CHAR *path, LosFsStat *st);
+INT32 LOS_FsStatFs(const CHAR *path, LosFsStatFs *st);
 INT32 LOS_FsReaddir(const CHAR *path, UINT32 idx, LosFsDirent *de);
 
 INT32 LOS_FsUnlink(const CHAR *path);

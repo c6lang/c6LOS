@@ -6,7 +6,10 @@ PHDRS
 }
 SECTIONS
 {
-    . = 0x20000;
+    /* 基址紧贴 stage1（0x10000，实际只占 ~200B）之后，别再留到 0x20000：
+     * 0x11000 起镜像有 0x8F000（572KB）直到 0xA0000 空洞，旧基址白白浪费
+     * 60KB —— Alpine 全量镜像 + 网络栈就是靠这 60KB 才重新塞得下。 */
+    . = 0x11000;
     .text : { *(.text.entry) *(.text*) } :text
     .rodata : { *(.rodata*) } :text
     . = ALIGN(4096);

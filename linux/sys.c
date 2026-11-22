@@ -484,8 +484,12 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_fs_mknodat((i64)(i32)a0, a1, a2, a3);
         return;
     case LX_SYS_statfs:
-    case LX_SYS_fstatfs:
         r->rax = lx_fs_statfs(a0, a1);
+        return;
+    case LX_SYS_fstatfs:
+        /* fstatfs 的 a0 是 fd 而不是用户路径：两个 syscall 分开走，
+         * 不能再共用 lx_fs_statfs（它现在会解析路径）。 */
+        r->rax = lx_fs_fstatfs(a0, a1);
         return;
     case LX_SYS_utimensat:
         r->rax = lx_fs_utimensat((i64)(i32)a0, a1, a2);

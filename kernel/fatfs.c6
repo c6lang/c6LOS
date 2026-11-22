@@ -1446,3 +1446,58 @@ int fatfs_rename(OsMount *m, const char *from, const char *to)
     (void)to;
     return 0 - OS_E_OPNOTSUPP;             /* 8.3 改名会牵扯目录项/簇链搬迁，不做 */
 }
+
+/* FAT 里空闲簇的个数。statfs 只看一次，卷很小（8MB 镜像的 FAT1 是 64 个
+ * 扇区），按扇区扫一遍比逐项 fat_next_（每项一次块读）快两个数量级。 */
+static u32 fat_free_clusters_(FatVol *v)
+{
+    u32 per_sec = FAT_SEC_SIZE / (v->bits / 8u);
+    u32 sec = 0u;
+    u32 freec = 0u;
+    u8 buf[FAT_SEC_SIZE] = {0};
+
+    while (sec < v->fat_secs) {
+        u32 ent = 0u;
+
+        if (fat_read_(v, v->reserved + sec, buf) != 0) {
+            break;
+        }
+        while (ent < per_sec) {
+            u32 idx = sec * per_sec + ent;
+
+            if (idx >= 2u && idx < v->max_clus) {
+                u32 e = (v->bits == 16u)
+                            ? fat_u16_(buf + ent * 2u)
+                            : (fat_u32_(buf + ent * 4u) & 0x0FFFFFFFu);
+
+                if (e == 0u) {
+                    freec++;
+                }
+            }
+            ent++;
+        }
+        sec++;
+    }
+    return freec;
+}
+
+/* statfs：以簇为块（df 的 blocks*bsize 就是数据区字节数）。 */
+int fatfs_statfs(OsMount *m, LosFsStatFs *st)
+{
+    FatVol *v = (FatVol *)0;
+
+    if (m == (OsMount *)0 || st == (LosFsStatFs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    v = (FatVol *)m->priv;
+    if (v == (FatVol *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    st->bsize = v->spc * FAT_SEC_SIZE;
+    st->blocks = v->max_clus - 2u;
+    st->bfree = fat_free_clusters_(v);
+    st->bavail = st->bfree;
+    st->files = 0u;                       /* FAT 没有 inode 概念 */
+    st->ffree = 0u;
+    return 0;
+}

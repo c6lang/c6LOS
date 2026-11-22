@@ -32,7 +32,7 @@ c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依�
 | 能力 | 现状 | 证据 |
 |---|---|---|
 | 硬碟引导（MBR） | `boot16.bin` 读 LBA 1..382（4 个 DAP，上限 195,584 B）→ `flat.bin` 装到 `0x10000` | `port/x86_64/boot16.S` + `Makefile` 的 `disk.img` 规则 |
-| 内核载荷 | `flat.bin` **自包含**（`stage1.S` 用 `.incbin` 把 `stage2.bin` 塞进 `.stage2`），stage1 建页表/长模式后跳 `0x20000` | `port/x86_64/stage1.S`、`stage2.S`（`_start64` 清 `.bss` 再 `call os_main`） |
+| 内核载荷 | `flat.bin` **自包含**（`stage1.S` 用 `.incbin` 把 `stage2.bin` 塞进 `.stage2`），stage1 建页表/长模式后跳 `0x11000` | `port/x86_64/stage1.S`、`stage2.S`（`_start64` 清 `.bss` 再 `call os_main`） |
 | 块设备层（LiteOS 面） | `LOS_DeviceRegister/Unregister/Get/Count`、`LOS_BlockRead/Write/Size/Count` | `include/los/los_block.h`、`kernel/blkdev.c6` |
 | ATA | PIO 读 + 写都在（`port_ata_read/write`），x86 参考目标挂在 `ata.o` | `port/x86_64/ata.c`、`include/c6os/port.h:104-105` |
 | VFS + 具体 FS | 挂载表/路径解析/file 表；`romfs`（newc cpio 只读）、`ramfs`（可读写，**32 节点 / 8KB arena**）、`fatfs`（FAT16/32 **只读**） | `kernel/vfs.c6`、`romfs.c6`、`ramfs.c6`、`fatfs.c6` |
@@ -74,7 +74,7 @@ c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依�
 │ tools/mkdockeriso.py     │              │                                      │
 │   扁平化（whiteout）      │  ────────►   │  ① El Torito 引导块 cd0               │
 │   newc cpio (rootfs)     │              │     ↓ 读 ISO 两块载荷（staging 中转）  │
-│   tools/mkiso.py         │              │  ② 内核 flat.bin → 0x10000 → 0x20000  │
+│   tools/mkiso.py         │              │  ② 内核 flat.bin → 0x10000 → 0x11000  │
 │     ├─ 引导块            │              │  ③ rootfs.cpio   → 0x00800000         │
 │     ├─ flat.bin (内核)   │              │  ④ 引导信息块 0x7000                   │
 │     ├─ rootfs.cpio       │              │  ⑤ 内核：romfs 挂 /（内存里的 cpio）   │

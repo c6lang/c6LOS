@@ -1,4 +1,4 @@
-/* 32 位入口：恒等映射 1GB、开 SSE、切 long mode，跳 0x20000 的 64 位载荷。 */
+/* 32 位入口：恒等映射 1GB、开 SSE、切 long mode，跳 0x11000 的 64 位载荷。 */
 .section .rodata
 .align 16
 gdt64:
@@ -62,4 +62,4 @@ _start:
     movl %eax, %cr0
 
     lgdt gdt64_ptr
-    ljmp $0x08, $0x20000
+    ljmp $0x08, $0x11000

@@ -85,6 +85,7 @@ int fatfs_mkdir(OsMount *m, const char *rel);
 int fatfs_rmdir(OsMount *m, const char *rel);
 int fatfs_rename(OsMount *m, const char *from, const char *to);
 int fatfs_truncate(OsMount *m, const char *rel, u32 size);
+int fatfs_statfs(OsMount *m, LosFsStatFs *st);
 
 /* ramfs.c6：可读写内存后端（M9-1） */
 int ramfs_mount(OsMount *m, void *data);
@@ -100,6 +101,7 @@ int ramfs_mkdir(OsMount *m, const char *rel);
 int ramfs_rmdir(OsMount *m, const char *rel);
 int ramfs_rename(OsMount *m, const char *from, const char *to);
 int ramfs_truncate(OsMount *m, const char *rel, u32 size);
+int ramfs_statfs(OsMount *m, LosFsStatFs *st);
 
 extern OsMount g_os_mounts[OS_MAX_MOUNTS];
 extern OsFile  g_os_files[OS_MAX_FILES];

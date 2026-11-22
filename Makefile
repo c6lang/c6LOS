@@ -2202,9 +2202,13 @@ check-alpine:
 	  || { echo "FAIL: alpine M12（脚本没跑起来）"; tail -40 /tmp/check-alpine.log; exit 1; }
 	@grep -q "m12ok" /tmp/check-alpine.log \
 	  || { echo "FAIL: alpine M12（写 /data 再读回失败）"; tail -40 /tmp/check-alpine.log; exit 1; }
+	@grep -q "alpine-cd-ok" /tmp/check-alpine.log \
+	  || { echo "FAIL: alpine M12（挂载点 chdir：cd /data 失败）"; tail -40 /tmp/check-alpine.log; exit 1; }
+	@grep -Eq "^/dev/ata0 .*/data$$" /tmp/check-alpine.log \
+	  || { echo "FAIL: alpine M12（df -h 看不到 /data）"; grep -E "Filesystem|ata0|/data" /tmp/check-alpine.log; exit 1; }
 	@grep -q "alpine-M12-done" /tmp/check-alpine.log \
 	  || { echo "FAIL: alpine M12（脚本没跑完）"; tail -40 /tmp/check-alpine.log; exit 1; }
-	@echo "PASS: alpine M12（Alpine minirootfs 从 ISO 起起来：sh -c 脚本跑完 + 写 /data）"
+	@echo "PASS: alpine M12（Alpine minirootfs 从 ISO 起起来：sh -c 脚本跑完 + 写 /data + cd /data + df 列出 /data）"
 	@7z l $(ALPINE_DATA) 2>/dev/null | grep -qi "M12.TXT" \
 	  && echo "PASS: alpine M12 宿主侧（数据盘里有 m12.txt）" \
 	  || { echo "FAIL: alpine M12 宿主侧"; 7z l $(ALPINE_DATA) | tail -12; exit 1; }

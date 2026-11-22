@@ -1119,15 +1119,39 @@ static u32 proc_stat_(char *b)
     return o;
 }
 
-/* /proc/mounts：busybox df -h 用它读已挂载文件系统。给一行根 romfs + tmpfs，
- * 字段对齐 mount(5) 的 6 列格式。 */
+/* /proc/mounts：busybox df -h 用它列已挂载文件系统。以前写死 rootfs+tmpfs，
+ * /data 这类运行时挂上的 FAT 卷根本看不到。现在按挂载表逐项枚举，6 列格式
+ * 与 mount(5) 一致；rootfs 和 proc 是虚拟的，单独补两行。 */
 static u32 proc_mounts_(char *b)
 {
-    u32 o = 0u;
+    u32 o = pcat_(b, 0u, "rootfs / romfs rw 0 0\n");
+#if C6OS_VFS
+    {
+        u32 i = 0u;
 
-    o = pcat_(b, o, "rootfs / romfs rw 0 0\n"
-                    "tmpfs /tmp tmpfs rw 0 0\n"
-                    "proc /proc proc rw 0 0\n");
+        while (i < (u32)OS_MAX_MOUNTS) {
+            OsMount *m = &g_os_mounts[i];
+
+            if (m->used != 0u) {
+                if (m->dev[0] != '\0') {
+                    o = pcat_(b, o, "/dev/");
+                    o = pcat_(b, o, m->dev);
+                } else if (os_str_eq(m->type, "ramfs") == 1) {
+                    o = pcat_(b, o, "tmpfs");   /* 和 Linux 的 tmpfs 行同形 */
+                } else {
+                    o = pcat_(b, o, m->type);
+                }
+                b[o++] = ' ';
+                o = pcat_(b, o, m->path);
+                b[o++] = ' ';
+                o = pcat_(b, o, m->type);
+                o = pcat_(b, o, " rw 0 0\n");
+            }
+            i++;
+        }
+    }
+#endif
+    o = pcat_(b, o, "proc /proc proc rw 0 0\n");
     return o;
 }
 
@@ -1910,6 +1934,38 @@ u64 lx_fs_chdir(u64 upath)
     }
     idx = fs_find(ap);
     if (idx < 0) {
+#if C6OS_VFS
+        /* 挂载点（/tmp 的 ramfs、/data 的 fatfs）不在 initramfs 的扁平表里。
+         * stat/open/access 早就先查挂载表了，只有 chdir 还死盯 fs_find，
+         * 于是 `cd /data` 报 "No such file or directory"。这里按同一张挂载表
+         * 解析一次，是目录就接受（cwd 存相对路径，相对 open 自然落到挂载点下）。 */
+        if (vfs_owns_(ap) != 0) {
+            char vpath[LOS_FS_PATH_MAX] = {0};
+            LosFsStat st = {0};
+            u64 k = 0ull;
+
+            vpath[0] = '/';
+            while (k + 2ull < (u64)sizeof(vpath) && ap[k] != '\0') {
+                vpath[k + 1ull] = ap[k];
+                k++;
+            }
+            vpath[k + 1ull] = '\0';
+            if (LOS_FsStat((const CHAR *)&vpath[0], &st) != 0) {
+                return (u64)0 - LX_ENOENT;
+            }
+            if (st.type != (UINT32)LOS_FS_TYPE_DIR) {
+                return (u64)0 - LX_ENOTDIR;
+            }
+            for (i = 0ull; i + 1ull < (u64)sizeof(g_cwd); i++) {
+                g_cwd[i] = ap[i];
+                if (ap[i] == '\0') {
+                    break;
+                }
+            }
+            g_cwd[sizeof(g_cwd) - 1u] = '\0';
+            return 0ull;
+        }
+#endif
         return (u64)0 - LX_ENOENT;
     }
     if ((g_node[(u32)idx].mode & 0xF000u) != 0x4000u) {
@@ -2498,9 +2554,8 @@ u64 lx_fs_chownat(u64 dirfd, u64 upath, u64 uid, u64 gid, u32 nofollow)
 /* statfs(2)：x86-64 struct statfs 共 120 字节（实测 offsets:
  * type 0/bsize 8/blocks 16/bfree 24/bavail 32/files 40/ffree 48/
  * fsid 56/namelen 64/frsize 72/flags 80/f_spare 88，末尾 32B 保留）。
- * busybox df 读 f_bsize/f_blocks/f_bfree/f_bavail，其余留 0 即可。
- * 报一组合理常量：4KB 块、65536 块（256MB）、空闲一半 —— df 有数显、不除零。 */
-u64 lx_fs_statfs(u64 upath, u64 ubuf)
+ * busybox df 读 f_bsize/f_blocks/f_bfree/f_bavail，其余留 0 即可。 */
+static u64 statfs_put_(u64 ubuf, u32 bsize, u32 blocks, u32 bfree)
 {
     u8 st[120];
     u64 i;
@@ -2512,17 +2567,139 @@ u64 lx_fs_statfs(u64 upath, u64 ubuf)
         st[i] = 0u;
     }
     put64(st + 0u, 0x858458f6ull);            /* f_type = RAMFS_MAGIC */
-    put64(st + 8u, 4096ull);                  /* f_bsize */
-    put64(st + 16u, 65536ull);                /* f_blocks */
-    put64(st + 24u, 32768ull);                /* f_bfree */
-    put64(st + 32u, 32768ull);                /* f_bavail */
+    put64(st + 8u, (u64)bsize);               /* f_bsize */
+    put64(st + 16u, (u64)blocks);             /* f_blocks */
+    put64(st + 24u, (u64)bfree);              /* f_bfree */
+    put64(st + 32u, (u64)bfree);              /* f_bavail */
     put64(st + 64u, 255ull);                  /* f_namelen */
-    put64(st + 72u, 4096ull);                 /* f_frsize */
-    (void)upath;
+    put64(st + 72u, (u64)bsize);              /* f_frsize */
     for (i = 0ull; i < 120ull; i++) {
         *(u8 *)(ubuf + i) = st[i];
     }
     return 0ull;
+}
+
+#if C6OS_VFS
+/* 绝对路径（带前导 '/'）→ 对应挂载点的后端统计。找不到挂载点返回 -1。 */
+static int statfs_mount_(const char *abspath, u32 *bsize, u32 *blocks,
+                         u32 *bfree)
+{
+    LosFsStatFs fs;
+    int rc;
+
+    fs.bsize = 0u;
+    fs.blocks = 0u;
+    fs.bfree = 0u;
+    fs.bavail = 0u;
+    fs.files = 0u;
+    fs.ffree = 0u;
+    rc = LOS_FsStatFs((const CHAR *)abspath, &fs);
+    if (rc != 0) {
+        return -1;
+    }
+    *bsize = fs.bsize;
+    *blocks = fs.blocks;
+    *bfree = fs.bfree;
+    return 0;
+}
+#endif
+
+/* statfs 以前对任何路径都报同一组常量（256MB），df 里 /data 是 8MB 的盘也
+ * 显示 256MB。现在挂载点走后端统计（ramfs 报 arena、fatfs 报簇数），/proc
+ * 报 0；initramfs 根仍用兜底常量。 */
+u64 lx_fs_statfs(u64 upath, u64 ubuf)
+{
+    u32 bsize = 4096u;
+    u32 blocks = 65536u;
+    u32 bfree = 32768u;
+
+    if (lx_user_ok(ubuf, 120ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+#if C6OS_VFS
+    {
+        char ap[FS_NAME] = {0};
+        int rc = at_path_(LX_AT_FDCWD, upath, ap, (u64)sizeof ap);
+
+        if (rc != 0) {
+            return (u64)0 - (u64)(-rc);
+        }
+        if (ap[0] != '\0') {
+            if (vfs_owns_(ap) != 0) {
+                char ab[LOS_FS_PATH_MAX] = {0};
+                u64 k = 0ull;
+
+                ab[0] = '/';
+                while (k + 2ull < (u64)sizeof(ab) && ap[k] != '\0') {
+                    ab[k + 1ull] = ap[k];
+                    k++;
+                }
+                ab[k + 1ull] = '\0';
+                if (statfs_mount_(ab, &bsize, &blocks, &bfree) != 0) {
+                    bsize = 4096u;
+                    blocks = 0u;
+                    bfree = 0u;
+                }
+            } else if (seq_(ap, "proc") == 1 ||
+                       os_str_prefix(ap, "proc/") == 1) {
+                bsize = 4096u;
+                blocks = 0u;
+                bfree = 0u;
+            }
+        }
+    }
+#else
+    (void)upath;
+#endif
+    return statfs_put_(ubuf, bsize, blocks, bfree);
+}
+
+/* fstatfs(fd)：第一个参数是 fd 而不是用户路径。以前和 statfs 共用同一个
+ * 忽略路径的实现，能跑纯属巧合；statfs 开始解析路径后必须拆开。 */
+u64 lx_fs_fstatfs(u64 fd, u64 ubuf)
+{
+    u32 bsize = 4096u;
+    u32 blocks = 65536u;
+    u32 bfree = 32768u;
+
+    if (lx_user_ok(ubuf, 120ull, C6OS_PROT_W) == 0) {
+        return (u64)0 - LX_EFAULT;
+    }
+#if C6OS_VFS
+    {
+        LxFile *f = fd_get(fd);
+
+        if (f == 0) {
+            return (u64)0 - LX_EBADF;
+        }
+        if (f->kind == LX_FD_VFS) {
+            const char *p = (const char *)0;
+
+            if (f->node >= LX_VDIR_BASE) {
+                u32 slot = (u32)(f->node - LX_VDIR_BASE);
+
+                if (slot < (u32)LX_MAX_VDIR) {
+                    p = (const char *)&g_dpath[slot][0];
+                }
+            } else if (f->node < (u64)OS_MAX_FILES) {
+                p = (const char *)&g_vpath[f->node][0];
+            }
+            if (p == (const char *)0 || p[0] != '/' ||
+                statfs_mount_(p, &bsize, &blocks, &bfree) != 0) {
+                bsize = 4096u;
+                blocks = 0u;
+                bfree = 0u;
+            }
+        } else if (f->kind == LX_FD_PROC) {
+            bsize = 4096u;
+            blocks = 0u;
+            bfree = 0u;
+        }
+    }
+#else
+    (void)fd;
+#endif
+    return statfs_put_(ubuf, bsize, blocks, bfree);
 }
 
 /* utimensat(2)：内核 VFS 的 mtime 是预留字段（ramfs/romfs 恒 0），

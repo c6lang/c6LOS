@@ -608,3 +608,29 @@ int ramfs_truncate(OsMount *m, const char *rel, u32 size)
     pv->n[idx].size = size;
     return 0;
 }
+
+/* statfs：数据区就是内核堆 arena（ramfs 每个挂载点一份），
+ * df 的 bsize/blocks/bfree 都从它算。 */
+int ramfs_statfs(OsMount *m, LosFsStatFs *st)
+{
+    Ramfs *pv = (Ramfs *)0;
+    u32 used = 0u;
+
+    if (m == (OsMount *)0 || st == (LosFsStatFs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    pv = (Ramfs *)m->priv;
+    if (pv == (Ramfs *)0) {
+        return 0 - OS_E_INVAL;
+    }
+    used = os_heap_used(&pv->heap);
+    st->bsize = 1024u;
+    st->blocks = (u32)RAMFS_ARENA_SIZE / st->bsize;
+    st->bfree = (used < (u32)RAMFS_ARENA_SIZE)
+                    ? (((u32)RAMFS_ARENA_SIZE - used) / st->bsize)
+                    : 0u;
+    st->bavail = st->bfree;
+    st->files = (u32)RAMFS_MAX_NODES;
+    st->ffree = 0u;                       /* 节点池不做 inode 记账 */
+    return 0;
+}

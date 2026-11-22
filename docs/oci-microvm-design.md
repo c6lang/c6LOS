@@ -154,7 +154,7 @@ Cloud Hypervisor 也都只认"Linux 内核镜像"。现有的 BIOS 路径**进�
 2. 把 `boot_params->hdr.cmd_line_ptr` 指向的 cmdline 拷进 bootinfo 块（`0x7000`）；
 3. 打一行心跳：`c6os bzkern: e820=N mem=...K cmdline=...`
    —— 三个后端的差异全靠这行定位（这是 M11 里最值钱的经验：都表现为"没有输出"）；
-4. 跳现有 `stage1`（建页表 → 长模式 → `0x20000` → `os_main`）。
+4. 跳现有 `stage1`（建页表 → 长模式 → `0x11000` → `os_main`）。
 
 **一份 manifest、两条引导路径**：cmdline 只放 4 个开关
 （`console=`、`root=`、`init_mode=container`、`poweroff=serial`），
