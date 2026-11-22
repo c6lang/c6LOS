@@ -494,8 +494,10 @@ u64 lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen)
 {
     UnixSock *s = unix_fd_(fd);
     UnixSock *t;
+    LxFile *f;
     u8 *kbuf;
     int rc;
+    int nb;
 
     if (s == (UnixSock *)0) { return (u64)0 - LX_EBADF; }
     if (s->shut_wr != 0u) { return (u64)0 - LX_EPIPE; }
@@ -506,9 +508,22 @@ u64 lx_unix_sendto(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 ulen)
     kbuf = (u8 *)port_kcalloc(1ull, len);
     if (kbuf == (u8 *)0) { return (u64)0 - LX_ENOMEM; }
     for (u64 i = 0ull; i < len; i++) { kbuf[i] = *(const u8 *)(ubuf + i); }
-    rc = unix_enq_(t, kbuf, (u32)len, (const LxFile *)0, 0u);
+    /* 阻塞 socket 的 send 在队列满时必须等，不能报 EAGAIN：busybox
+     * ssl_client 把写 stdout（socketpair）的 EAGAIN 当致命错误直接退出，
+     * wget 就永远收不到完整的 HTTPS 响应。 */
+    f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+    nb = (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) ? 1 : 0;
+    for (;;) {
+        rc = unix_enq_(t, kbuf, (u32)len, (const LxFile *)0, 0u);
+        if (rc == 0) { break; }
+        if (nb != 0 || t->shut_rd != 0u) {
+            port_kfree((void *)kbuf);
+            return (u64)0 - ((nb != 0) ? LX_EAGAIN : LX_EPIPE);
+        }
+        lx_proc_set_wait(LX_WAIT_PIPE);
+        lx_proc_block();
+    }
     port_kfree((void *)kbuf);
-    if (rc != 0) { return (u64)0 - LX_EAGAIN; }
     return len;
 }
 
@@ -541,6 +556,9 @@ static u32 unix_stream_take_(UnixSock *s, u8 *dst, u32 cap,
             break;                         /* 部分读：剩余留在槽里 */
         }
     }
+    if (total != 0u) {
+        lx_unix_wake();                /* 腾出槽位：唤醒等写空间的阻塞 send */
+    }
     return total;
 }
 
@@ -555,14 +573,18 @@ u64 lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen)
     if (lx_user_ok(ubuf, len, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
     while (s->count == 0u) {
         LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+        UnixSock *t = (s->peer != ~0ull) ? unix_at_(s->peer) : (UnixSock *)0;
 
+        /* 对端最后一份 fd 关闭后队列空了就是 EOF（busybox SSL helper
+         * 退出时父进程就靠这个结束读取），不能继续阻塞等永远不会来的数据。
+         * 对端 shutdown(SHUT_WR) 同样是 EOF：busybox wget 写完请求就半关闭
+         * socketpair，ssl_client 读到 EOF 才能转去等网络响应。EOF 要先于
+         * 非阻塞判断，否则 O_NONBLOCK 下会永远 EAGAIN。 */
+        if (t == (UnixSock *)0 || t->shut_wr != 0u) {
+            return 0ull;
+        }
         if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
             return (u64)0 - LX_EAGAIN;
-        }
-        /* 对端最后一份 fd 关闭后队列空了就是 EOF（busybox SSL helper
-         * 退出时父进程就靠这个结束读取），不能继续阻塞等永远不会来的数据。 */
-        if (s->peer == ~0ull || unix_at_(s->peer) == (UnixSock *)0) {
-            return 0ull;
         }
         lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
@@ -581,6 +603,7 @@ u64 lx_unix_recvfrom(u64 fd, u64 ubuf, u64 len, u64 uaddr, u64 uaddrlen)
     for (u32 i = 0u; i < n; i++) { *(u8 *)(ubuf + i) = m->data[i]; }
     s->head = (s->head + 1u) % UNIX_QDEPTH;
     s->count--;
+    lx_unix_wake();                        /* 腾出槽位：唤醒等写空间的阻塞 send */
     return (u64)n;
 }
 
@@ -667,8 +690,21 @@ u64 lx_unix_sendmsg(u64 fd, u64 umsg, u64 flags)
         }
     }
     rc = unix_enq_(t, buf, (u32)total, pass, nfd);
+    if (rc != 0) {
+        LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+        int nb = (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) ? 1 : 0;
+
+        while (rc != 0) {
+            if (nb != 0 || t->shut_rd != 0u) {
+                port_kfree((void *)buf);
+                return (u64)0 - ((nb != 0) ? LX_EAGAIN : LX_EPIPE);
+            }
+            lx_proc_set_wait(LX_WAIT_PIPE);
+            lx_proc_block();
+            rc = unix_enq_(t, buf, (u32)total, pass, nfd);
+        }
+    }
     port_kfree((void *)buf);
-    if (rc != 0) { return (u64)0 - LX_EAGAIN; }
     return total;
 }
 
@@ -695,12 +731,14 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
     }
     while (s->count == 0u) {
         LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
+        UnixSock *t = (s->peer != ~0ull) ? unix_at_(s->peer) : (UnixSock *)0;
 
+        /* 对端关闭（含 shutdown(SHUT_WR)）→ EOF，必须先于非阻塞判断。 */
+        if (t == (UnixSock *)0 || t->shut_wr != 0u) {
+            return 0ull;
+        }
         if (f != (LxFile *)0 && (f->oflags & LX_O_NONBLOCK) != 0u) {
             return (u64)0 - LX_EAGAIN;
-        }
-        if (s->peer == ~0ull || unix_at_(s->peer) == (UnixSock *)0) {
-            return 0ull;                  /* 对端关闭 → EOF */
         }
         lx_proc_set_wait(LX_WAIT_PIPE);
         lx_proc_block();
@@ -725,6 +763,7 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
             pass_nfd = m->nfd;
             s->head = (s->head + 1u) % UNIX_QDEPTH;
             s->count--;
+            lx_unix_wake();            /* 腾出槽位：唤醒等写空间的阻塞 send */
         }
         for (i = 0u; i < (u32)niov && pos < got; i++) {
             u64 base = *(const u64 *)(iov + (u64)i * 16ull);
@@ -801,7 +840,9 @@ u16 lx_unix_poll(u64 id)
     if (s->count != 0u || s->shut_rd != 0u) { ev = (u16)(ev | LX_POLLIN); }
     t = (s->peer != ~0ull) ? unix_at_(s->peer) : (UnixSock *)0;
     if (t == (UnixSock *)0 || t->shut_wr != 0u) { ev = (u16)(ev | LX_POLLHUP); }
-    /* 不报 POLLOUT：poll_events_ 不按调用方请求的事件过滤 revents，
-     * 常报 POLLOUT 会让只等 POLLIN 的 ssl_client copy loop 空转。 */
+    /* 写侧：队列还有槽位才算可写（send 现在会为阻塞 fd 等空间）。 */
+    if (s->shut_wr == 0u && s->count < UNIX_QDEPTH) {
+        ev = (u16)(ev | LX_POLLOUT);
+    }
     return ev;
 }

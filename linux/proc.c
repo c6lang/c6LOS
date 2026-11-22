@@ -1359,7 +1359,8 @@ u64 lx_proc_fork(LxRegs *r)
         }
     }
     setup_trampoline_(ch);
-    lx_proc_yield();                      /* 给子进程一次机会 */
+    /* 不主动让子进程先跑：busybox wget 的 SSL helper 是先 fork 后由父进程
+     * 写 HTTP 请求的。子进程抢先跑完握手就可能因网络先可读而退出。 */
     return (u64)ch->pid;
 }
 
@@ -3760,7 +3761,17 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
                     has_sock = 1u;
                 }
             }
-            rev = poll_events_(p, fd);
+            /* Linux poll 只报告调用方请求的事件（ERR/HUP/NVAL 永远报）。
+             * 以前直接把 poll_events_ 的全部位写进 revents：TCP socket 的
+             * POLLOUT 一直置位，ssl_client 只等 POLLIN 却立刻返回，随后
+             * read() 拿到 0 字节就当网络 EOF 退出，wget 报 "Connection refused"。 */
+            {
+                u16 want = *(const u16 *)(e + 4ull);
+
+                rev = (u16)(poll_events_(p, fd) &
+                            (want | (u16)LX_POLLERR | (u16)LX_POLLHUP |
+                             (u16)LX_POLLNVAL));
+            }
             *(u16 *)(e + 6ull) = rev;
             if (rev != 0u) {
                 cnt++;

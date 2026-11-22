@@ -707,6 +707,32 @@ void port_as_gc(void)
     }
 }
 
+/* 叶子页是否已经映射。惰性匿名页第一次缺页后就有页了；之后 copy_*_user
+ * 的 VMA 校验不能再把它换成新零页 —— port_as_map 会先还掉旧页框，用户刚
+ * 写进去的数据（malloc 的 chunk header 等）会被整个抹掉。 */
+static int mapped_leaf_(u64 as, u64 va)
+{
+    u64 *p4 = tbl(as);
+    u64 *p3;
+    u64 *p2;
+    u64 e;
+
+    if ((p4[IDX4(va)] & PTE_P) == 0ull) {
+        return 0;
+    }
+    p3 = tbl(p4[IDX4(va)]);
+    if ((p3[IDX3(va)] & (PTE_P | PTE_PS)) != PTE_P) {
+        return 0;
+    }
+    p2 = tbl(p3[IDX3(va)]);
+    e = p2[IDX2(va)];
+    if ((e & (PTE_P | PTE_PS)) != PTE_P) {
+        return 0;
+    }
+    e = tbl(e)[IDX1(va)];
+    return (e & (PTE_P | PTE_U)) == (PTE_P | PTE_U);
+}
+
 /* 覆盖映射：把 va 上已有的用户叶子页还掉。页表层级不存在 = 本来就没映射。 */
 static void unmap_leaf_(u64 as, u64 va)
 {
@@ -784,10 +810,16 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
  * 只挂一页，失败时自己还帧（port_as_map 对给定 paddr 的失败不负责回收）。 */
 int port_as_map_zero(u64 as, u64 vaddr, u32 prot)
 {
-    u64 pa = port_phys_alloc();
+    u64 pa;
     u8 *p;
     u64 i;
 
+    /* 已经映射过就直接返回：lx_user_ok 每次校验用户缓冲都会走
+     * lx_vma_fault_range，而 LAZY 标记在首次缺页后并没有清掉。 */
+    if (mapped_leaf_(as, vaddr) != 0) {
+        return 0;
+    }
+    pa = port_phys_alloc();
     if (pa == 0ull) {
         return -1;
     }
