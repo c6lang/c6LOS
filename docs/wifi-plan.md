@@ -30674,3 +30674,29 @@ bnez.n a10, 4201ca08      ; 非 0 才算成功
 - 最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`，真板稳定 **230 行**。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1265~§1266 想接管 `esf_buf_alloc_dynamic`（失败，已回退）
+
+既然它永远返回 0（§1261），试着用 `-Wl,--wrap=esf_buf_alloc_dynamic`
+给它一个自建缓冲（从 OSI 堆分配 2048 字节，避免 §1265 的静态池
+把 `.bss` 撞到栈界报 `S3 BSS/stack collision`）。
+
+**结果：`--wrap` 对它无效。**
+反汇编证据：`esf_buf_setup_static` 里的
+`4201ca3c: l32r a8, 0x4201ca1c (40383434 <esf_buf_alloc_dynamic>)`
+**仍指向原函数**，而 `__wrap_esf_buf_alloc_dynamic` 只在 `wdev_data_init`
+那个引用点被用上了。
+⇒ `--wrap` 只重写**跨对象**的未定义引用；
+`esf_buf_setup_static` 和 `esf_buf_alloc_dynamic` 在**同一个静态库**
+（libpp.a）里，属于归档内部引用，不会被 wrap。
+
+**⇒ 要接管它只能运行时改 IRAM 里的函数入口**，但
+`0x40383434`（IRAM）到 `0x420115a0`（flash）相距约 24MB，
+一条 `j` 跳不过去，需要 `l32r`+`jx` 且字面量要在近处 —— 风险和复杂度都太高。
+
+## §1267 交付终态（最终）
+
+- 仓库 `main`，工作树干净。
+- 最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`，真板稳定 **230 行**。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
