@@ -27828,3 +27828,57 @@ trampoline 入口 0x403799d6）恢复时，这个 union 是否把不该活的窗
 （`WS=0xbf54` 就是强烈信号）。
 
 （本轮镜像 `f7adc272`；若要回到能完整跑 130 行的稳定版，`git checkout 6dc85213 -- .`。）
+
+## §1083 去掉 `RESTORE_FRAME` 的 WS 并集（真 bug），崩溃点前移但未通过
+
+### 改动（构建 `c7aa8532`）
+
+`port/s3/ctx.S` 的 `RESTORE_FRAME` 里原来是：
+
+```asm
+rsr     a6, windowstart
+or      a3, a3, a6          /* 帧 WS ∨ 当前 WS */
+wsr     a3, windowstart
+```
+
+**改为直接 `wsr a3, windowstart`。**
+
+理由：§1050 加这个并集是为了保住"切走/切回之间仍活着的祖先窗口"。
+但 §1056 之后，所有会阻塞的 OSI 函数（sem/mutex/event/delay）都已经
+在**阻塞前**把祖先窗口 spill 掉了，那些位理应已经清掉。
+并集于是变成**只增不减的泄漏**：每次任务恢复都把上一批残留的窗口位再并回来。
+
+**真板证据**：§1082 崩溃那一瞬 `WS = 0xbf54`（16 个窗口里约 10 个被标活），
+环上根本没有那么多真活窗口。改掉之后，同样的崩溃点 `WS` 降到 `0x40`。
+
+### 结果：崩溃点前移，但仍崩
+
+```
+EXCCAUSE = 28 (LoadProhibited)     EXCVADDR = 0xfffffff4 (-12)
+EPC1 = 0x4037d872  ← osi_queue_recv_body+0x268 的 `retw.n`
+WB = 4, WS = 0x40   ← 当前基址 4 的位没置
+a0 = 0, a1 = 0
+```
+
+**⇒ 从"内核主循环 `callx8 port_cycles` 返回后 a1=0"前移到
+"`osi_queue_recv_body` 的 `retw.n`" —— 说明 WS 并集确实是真问题，
+但 `retw` 的 CALLINC/窗口账目还有别的不一致。**
+
+`w2c.S:319` 的注释里**早就记录过同一个现场**：
+"cause=0、pc 正好落在我们 osi_queue_recv_body 的 retw.n 上"，
+当时的处置是"把 PS 存下来、callx0 之后再写回"（见 `w2c.S:310`）。
+现在的现场说明那条处置在**任务切换**这条新路径上还不够 ——
+因为这次 `retw` 的调用者是**调度器上下文**，而不是正常调用链。
+
+### 当前进度小结
+
+```
+timer ISR ✓ → TICK_PEND ✓ → s3_tick_consume ✓ → os_sched_tick ✓
+→ 超时到期 ✓ → os_task_delay 真正阻塞 ✓ → 调度器选中 ppTask ✓
+→ port_task_switch ✓ → [★ 崩在 osi_queue_recv_body 的 retw.n]
+```
+
+**⇒ 距离 ppTask 真正跑起来只剩"任务切换后第一次返回"这一关。**
+
+镜像 `c7aa8532`。若需稳定版（完整跑 130 行但从不切换任务）：
+`git checkout 6dc85213 -- .`
