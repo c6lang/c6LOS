@@ -136,6 +136,7 @@ u32 lx_proc_list(u32 *out, u32 cap)
 }
 
 static void pipe_drop_(LxFile *fe);
+static void fd_free_hook_(LxFile *fe);
 static void pipe_ref_(const LxFile *fe);
 static u64  n_(u64 v);             /* 负 errno（定义在本文件后部） */
 
@@ -249,8 +250,10 @@ void lx_proc_attach(u64 as, u64 brk)
         p->ppid = 0u;
         p->pgid = p->pid;                  /* 首个进程自成一个进程组和会话 */
         p->sid = p->pid;
-        /* fd 表销毁时逐槽通知管道减 readers/writers：fdt 不认识管道，走钩子。 */
-        lx_fdtab_set_free_hook(pipe_drop_);
+        /* fd 表销毁时逐槽通知管道减 readers/writers：fdt 不认识管道，走钩子。
+         * VFS 文件（/data FAT）也要在这里还内核句柄，否则子进程一退出就漏一个
+         * FAT_MAX_FILES 槽，几十次 fork 之后 open 就报 ENOMEM。 */
+        lx_fdtab_set_free_hook(fd_free_hook_);
     }
     p = cur_();
     if (p == (LxProc *)0) {
@@ -1356,6 +1359,7 @@ u64 lx_proc_fork(LxRegs *r)
                 continue;
             }
             pipe_ref_(&ch->fd->ent[i]);        /* 复制出的端点各持一份引用 */
+            lx_fs_ref_ent(&ch->fd->ent[i]);    /* VFS 句柄同理：最后一个 close 才关 */
         }
     }
     setup_trampoline_(ch);
@@ -2028,6 +2032,23 @@ static void pipe_drop_(LxFile *fe)
     }
 }
 
+/* fd 表销毁（进程退出 / 线程组释放）时逐槽调用。pipe_drop_ 只管管道类；
+ * VFS 文件（/data FAT、ramfs）在这里把内核句柄还回去 —— 以前只挂
+ * pipe_drop_，子进程退出时那一个 `cmd > /data/x` 的 fd 没人收，FAT_MAX_FILES
+ * 8 个槽几十次 fork 就漏光，之后 open 全是 ENOMEM。close/dup2 覆盖也走
+ * lx_fs_release_vfs，三条路径共用一份回收逻辑。 */
+static void fd_free_hook_(LxFile *fe)
+{
+    if (fe == (LxFile *)0) {
+        return;
+    }
+    if (fe->kind == LX_FD_VFS) {
+        lx_fs_release_vfs(fe);
+        return;
+    }
+    pipe_drop_(fe);
+}
+
 /* 增加一个端点引用（dup2 / fork 复制 fd 表时用）。 */
 static void pipe_ref_(const LxFile *fe)
 {
@@ -2398,11 +2419,14 @@ u64 lx_proc_dup2(u64 oldfd, u64 newfd)
         return n_((u64)LX_EBADF);
     }
     nf = &p->fd->ent[newfd];
-    if (nf->node != LX_FD_NONE && nf->kind != LX_FD_FILE) {
+    if (nf->node != LX_FD_NONE && nf->kind == LX_FD_VFS) {
+        lx_fs_release_vfs(nf);                 /* 覆盖前把 FAT 句柄还回去 */
+    } else if (nf->node != LX_FD_NONE && nf->kind != LX_FD_FILE) {
         pipe_drop_(nf);
     }
     *nf = *of;
     pipe_ref_(nf);
+    lx_fs_ref_ent(nf);                         /* 后端句柄再多一份引用 */
     /* Linux：dup2 的目标 fd 必须清除 FD_CLOEXEC（只有 dup3 可以再设）。
      * ash 用 pipe2(O_CLOEXEC) 建管道再 dup2 到 0/1；不清这一点的话，
      * execve 时会把 dup 出的 stdin/stdout 关掉，外部命令管道全失效。 */
@@ -3619,13 +3643,15 @@ u64 lx_proc_read(u64 fd, u64 ubuf, u64 len)
     if (fe->kind == LX_FD_PTY) {
         return lx_pty_read(fe->node, ubuf, len, fe->pos == 0ull ? 1u : 0u);
     }
-    if (fd <= 2ull) {
-        /* M12：init 显式开了行规程之后，fd 0 才是真终端（阻塞读一行）；
-         * 没开就还是老行为——永远 EOF，L2..L6 的验收依赖这个。 */
+    /* 按 node 判“是不是控制台”，不能看 fd 号：`wc -l < /tmp/f` 里 0 号 fd 已是
+     * VFS 文件，以前照样落进 tty 分支，于是永远等键盘 —— `< file` 这条重定向
+     * 路径整体失效，读 stdin 的 applet（mkpasswd 等）直接挂住。只有 0 号 fd
+     * 真的是控制台时才阻塞读键盘（M12 语义），其余交给文件系统。 */
+    if (fe->node == LX_FD_CONSOLE) {
         if (fd == 0ull && lx_tty_enabled() != 0u) {
             return lx_tty_read(ubuf, len, lx_proc_yield);
         }
-        return 0ull;                       /* stdin 还没接键盘：EOF */
+        return 0ull;                       /* 1/2 号或没开行规程：EOF */
     }
     return lx_fs_read(fd, ubuf, len);
 }
@@ -4015,11 +4041,14 @@ u64 lx_proc_write(u64 fd, u64 ubuf, u64 len)
         }
         return lx_pty_write(fe->node, ubuf, len, fe->pos == 0ull ? 1u : 0u);
     }
-    /* 按 node 判目标，而不是 fd 号：dup 出来的高位 fd 也可能是终端或 VFS 文件。 */
+    /* 按 node/kind 判目标，而不是 fd 号：dup 出来的高位 fd 也可能是终端，
+     * 反过来 fd 1/2 被 `> file` 重定向后是 VFS 文件。以前这里对非控制台
+     * 的 fd 直接调 sys_write，而 sys_write 只看 fd 号（1/2 就写串口），于是
+     * `cmd > /data/o` 的输出全打到控制台、目标文件永远是空的。 */
     if (fe->node == LX_FD_CONSOLE) {
         return lx_console_put(ubuf, len);
     }
-    return lx_console_write(fd, ubuf, len);     /* 其余（/tmp 等）走 VFS */
+    return lx_fs_write(fd, ubuf, len);          /* VFS 文件 / /dev/null 等 */
 }
 
 /* ---- L7：线程创建 / 退出 / futex ----------------------------------------- */

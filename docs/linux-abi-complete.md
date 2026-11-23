@@ -1595,3 +1595,42 @@ M28–M57 补齐了 ABI 面，但交互式 Alpine 里 `cat /proc/cpuinfo` 仍报
 `ps`、`top -b -n 1`。`make check-linuxabi-m58` → PASS；统一回归纳入（54 项）。
 关键回归 M17/M19/M27/alpine-apps 全 PASS。已知遗留：`head -c N /proc/cpuinfo`
 的 "standard output: I/O error" 在本修复之前即存在，属 T4 范畴。
+
+---
+
+## M59：busybox 全量矩阵 + fd 共享语义（dup2/fork/close 引用计数）
+
+**问题**：Alpine minirootfs 的 304 个 busybox applet 之前只在少数几个分支里
+被零散验证过（`C6OS_ALPINE_PROC`/`C6OS_ALPINE_APPS`），没有全量、没有和真
+Linux 对照、也没有功能性验证。本轮补上之后立刻暴露出三个 fd 语义 bug ——
+它们让"重定向写文件 / 重定向读 stdin"这两条最基础的路径从来没有真正工作过：
+
+1. **`write(2)` 只看 fd 号**：`fd <= 2` 一律走控制台，`cmd > file` 的文件一个
+   字节都收不到。改为按 fd 槽的 node 判断（只有 `LX_FD_CONSOLE` 走控制台），
+   fd 1/2 被重定向到 VFS 时交给 `lx_fs_write`。
+2. **dup2/fork 共享的 VFS 句柄没有引用计数**：`open → dup2 → close(临时 fd)`
+   一 close 就把目标文件的 `g_os_files[]` 槽关了，之后的 `write` 全是 EBADF，
+   ash 报 `write error: Invalid argument`，盘上留下 0 字节文件；进程退出不
+   回收又导致 FAT `FAT_MAX_FILES=8` 泄漏（`can't create /data/o: Out of
+   memory`）。新增 `os_vfs_file_dup()`（`kernel/vfs.c6`）、`LOS_FsClose` 里
+   `refs > 1` 只减引用（`kernel/fsapi.c6`）、`lx_fs_ref_ent()` /
+   `lx_fs_ref_fdtab()`（`linux/fs.c`），dup2 与 fork 逐槽加引用。
+3. **`read(0)` 只看 fd 号**：`fd <= 2` 当控制台读，`wc -l < file` 永远读空、
+   读 stdin 的 applet 挂住。改为按 node 判，仅真正的控制台且行规程打开时才
+   阻塞读键盘。
+
+**新增验收** `make check-alpine-busybox`（`tools/run-alpine-sweep.sh` +
+`tests/alpine/busybox-sweep.sh` + `tools/busybox-matrix.py`）：A 段 304 个
+applet × 2 种派发形式（`busybox <applet>` / argv[0] 软链），与真 Linux 的
+baseline（`tests/alpine/busybox-baseline.tsv`）严格比对；F 段 150 条功能
+检查在 ramfs 上做真实读写/计算；另有 10 条 `/data` FAT 检查只报告。run 侧
+带 90 s 引导看门狗（El Torito 偶发卡死）、`XAR|` 偶发失败重跑（304 次
+fork+动态加载里约 1.5% 会偶发 rc=2）、QEMU 输出直写日志（走管道会在 ~4 KB
+处死锁）。
+
+**结果**：XA 303/304（唯一缺口 `readahead`，`readahead(2)` 未实现）、XB
+304/304 全部能执行；F 段 120/150，失败 30 条全部定位并登记在 `F_WAIVERS`
+（tar/gzip/bzip2 挂住或失败、`/proc`·网络信息类、进程/信号语义、`timeout`
+的 wait4 语义、`uniq`/`strings`/`xargs`、`stat` mode、ramfs 符号链接）。
+修完这三条之后 FAT 盘可写可回读。完整报告见
+`docs/busybox-alpine-report.md`；统一回归并入 `check-linuxabi-all.sh`。

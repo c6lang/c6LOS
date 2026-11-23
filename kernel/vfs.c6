@@ -230,6 +230,21 @@ OsFile *os_vfs_file_get(int fd)
     return &g_os_files[fd];
 }
 
+/* dup2/fork 复制 fd 时加一份引用。文件描述符可以在多处共享（shell 的
+ * `open + dup2 + close` 就是典型），最后一个 close 才真正关后端句柄。
+ * 以前只拷贝 LxFile、不记引用，于是 close 掉临时 fd 就把重定向目标的句柄
+ * 也关了，写进去全是 EBADF —— 这就是 `echo hi > file` 永远写不进去的真因。 */
+void os_vfs_file_dup(int fd)
+{
+    if (fd < 0 || fd >= (int)OS_MAX_FILES) {
+        return;
+    }
+    if (g_os_files[fd].used == 0u) {
+        return;
+    }
+    g_os_files[fd].refs++;
+}
+
 void os_vfs_file_free(int fd)
 {
     if (fd < 0 || fd >= (int)OS_MAX_FILES) {
