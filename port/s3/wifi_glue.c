@@ -2042,8 +2042,14 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
              * 直接再调一次 `esf_buf_setup()`。 */
             {
                 extern int esf_buf_setup(void);
+                extern void *esf_buf_alloc(u32 a, u32 b);
                 int rb = esf_buf_setup();
                 s3_ets_printf("[esfsetup] r=%d\n", rb);
+                /* §§1212：验证池子可用性——直接分一个试试。 */
+                {
+                    void *eb = esf_buf_alloc(1u, 0u);
+                    s3_ets_printf("[esfalloc] -> %x\n", (unsigned)eb);
+                }
             }
         }
         rs = wifi_start_process();

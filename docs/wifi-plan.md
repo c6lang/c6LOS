@@ -30069,3 +30069,36 @@ if (a14 == 0) a14 = 64
 - **真板最佳 222 行**（会话起点 79 行，提升 143 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1212 `esf_buf_alloc` 在 `esf_buf_setup` 成功后仍返回 NULL
+
+在 `esf_buf_setup()`（`r=0`）之后立刻 `esf_buf_alloc(1, 0)`：
+
+```
+[esfsetup]  r=0
+[esfalloc]  -> 0        ← 仍然是 NULL
+```
+
+真板 **227 行**（会话最佳）。
+
+⇒ **池子建好了，但分配器拿不到缓冲。**
+可能是：
+- 我的 `esf_buf_alloc(a,b)` 参数猜测不对（ROM 函数签名未知）；
+- 或分配器走的那条 handler 链需要 `wdev_funcs_init` 装的那个函数指针，
+  而它的上下文（`a10` 指向的结构）没被正确传入；
+- 或 `eb_space` 的链表头/计数还需要额外字段。
+
+## §1213 会话最终状态（round 160）
+
+- 仓库 `main`，工作树干净。
+- **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**本会话的全部结构性成果**（详见 §1164/§1165、§1169、§1182、§1210）：
+1. `g_ic` 正确分配 + 直调 `wifi_init_process`/`wifi_start_process`
+   ⇒ WiFi 首次 STARTED（`state=2`）、MAC 使能（`d14=1`）。
+2. `osi_wifi_int_disable/restore` 空操作 ⇒ 消除 `__real_pp_post` 时序窗口。
+3. 补 `g_ic+16` ⇒ 扫描真正进入 `perform scan` 并实际发 probe request。
+4. 直调 `pp_attach` + `esf_buf_setup` ⇒ TX 缓冲池首次被建立（`r=0`）。
+5. 修 `osi_log_write` 让它展开格式串（诊断可读性）。
