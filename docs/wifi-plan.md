@@ -28330,3 +28330,58 @@ boot ✓ → osi 表 ✓ → PHY ✓ → 进 esp_wifi_init_internal ✓
    不要用 `nm` 的符号值 —— 已经证明不可靠）。
 
 镜像 `1c8f57be`。
+
+## §1096 ★★★★ 卡住的是 `wifi_init_in_caller_task`（不是 `esp_wifi_init_internal`）
+
+### 从 `s3_wifi_bringup` 的反汇编里挖出来的真实调用
+
+```
+4037e4f1: call8  4037cd48 <s3_wrap_bump$part$0>
+4037e4f4: l32r   a8, (42040210 <wifi_init_in_caller_task>)
+4037e4f7: callx8  a8
+4037e4fa: mov.n  a2, a10          ← 返回点
+```
+
+**⇒ 我们的 bringup 实际调的是 `wifi_init_in_caller_task`（0x42040210），
+不是 `esp_wifi_init_internal`。这也解释了为什么之前按 `nm` 给
+`esp_wifi_init_internal` 下断点一直不命中 —— 地址/调用路径都不对。**
+
+### 决定性验证
+
+在返回点 `0x4037e4fa` 下硬件断点 + `monitor reset halt` 从头跑：
+
+**⇒ 断点从未命中。**
+
+**⇒ `wifi_init_in_caller_task` 永不返回。**
+
+### 最终结论
+
+```
+boot ✓ → osi 表 ✓ → PHY ✓ → 进 wifi_init_in_caller_task ✓
+→ 库打印版本 ✓ → 建队列(0x3fcc8074) ✓ → 建 ppTask ✓
+→ ppTask 正常轮询(s3_w2c_queue_recv ← ppTask ← s3_task_tramp) ✓
+→ [★ wifi_init_in_caller_task 卡在内部，永不返回]
+→ (未到) 存队列句柄 / 投递 wifi_init_process → ic_init → g_ic
+```
+
+**⇒ windowed ABI 迁移这条主线已经**全部打通并验证**：**
+定时器 ISR、tick 推进、`os_sched_tick`（任务上下文）、任务切换、
+ppTask 启动、闭源库建任务/建队列、队列接收 —— 全部正常，
+**没有崩溃、没有 `_vec_default`、没有窗口账目错误**。
+
+**剩下的唯一卡点是闭源库 `wifi_init_in_caller_task` 内部的等待。**
+
+### 下一步（最直接）
+
+给 `wifi_init_in_caller_task`（0x42040210）下断点，命中后**单步**或
+在它的各个 `callx8` 目标上下断点，找出它到底等在哪里。
+重点怀疑：它要等 ppTask 回一个"已就绪"信号，而 ppTask 现在因为
+队列句柄是 NULL 在空转 —— 这是一个**互相等待**的死锁：
+init 等 ppTask 就绪，ppTask 等 init 给队列句柄。
+
+**⇒ 破解方向：让 ppTask 拿到队列句柄。** 库建队列时句柄是 0x3fcc8074，
+但 ppTask 读到的是 NULL —— 说明库把句柄存在某个全局里，而那个全局
+在 `wifi_init_in_caller_task` 卡住之后才写。可以考虑在 `_queue_create`
+返回时**主动把句柄写进库的那个全局**（需要先用断点/内存扫描定位它）。
+
+镜像 `1c8f57be`。
