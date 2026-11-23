@@ -422,27 +422,25 @@ static int lx_net_spin_(int sd, void *buf, u32 len, LosSockAddr *a,
         rc = SalRecv(sd, buf, len);
     }
     while (rc == -11 && port_cycles() < guard) {
-        /* 轮询预算用完了，但进程还挂着闹钟/定时器：别急着报 EAGAIN，再等
-         * 一会儿让它到点。busybox ping 就是靠这个 —— 它 setitimer 之后在
-         * recvfrom 里等应答，如果预算先到期，回来的 EAGAIN 会被它打成一行
-         * "recvfrom: Resource temporarily unavailable"，而它想看到的是
-         * SIGALRM 引发的 EINTR（那个它直接忽略）。没有定时器的进程（比如
-         * m18 里对空队列做阻塞 recv 的用例）行为不变，仍然立刻 EAGAIN。 */
-        if (i >= limit && lx_proc_alarm_remain() == 0ull) {
-            /* 轮询预算用完了、也没有挂着的定时器。这时候还有两种收场：
-             *
-             *   - 有信号等着投递（典型是 SIGALRM 已经到点、但 busybox 用
-             *     signal() 装 handler 带 SA_RESTART，lx_proc_wait_intr 一直
-             *     说"继续等"）：必须回用户态让 handler 跑，否则 ping 的
-             *     "发下一个包"永远不执行。报 EINTR 是这里唯一正确的说法 ——
-             *     阻塞 socket 上 EAGAIN 本身就不是合法结果。
-             *   - 什么信号都没有：才按"真的没数据"报 EAGAIN（m18 依赖它）。 */
-            if (lx_proc_sig_pending() != 0) {
-                if (intr != (int *)0) {
-                    *intr = 1;
-                }
-                return rc;
+        /* 有信号待投递就立刻回用户态让 handler 跑：busybox ping 的节奏靠
+         * SIGALRM 的 handler 发下一个包，^C 的 SIGINT 也由 handler 收尾，
+         * 而信号只在系统调用出口投递，所以这里必须尽快把控制权交回去。
+         *
+         * M60 把这个检查放在"轮询预算烧完（500000 轮）"之后，本意是不让
+         * 阻塞 recv 过早报错，代价却是 handler 要等预算走完才跑：实测 ping
+         * 的间隔被拖成 ~5.5s（正好等于预算的耗时），^C 也要等同样久才生效。
+         * 预算只是"没数据时别死等"的兜底，和信号无关，检查提到循环最前面。 */
+        if (lx_proc_sig_pending() != 0) {
+            if (intr != (int *)0) {
+                *intr = 1;
             }
+            return rc;
+        }
+        /* 轮询预算用完了，但进程还挂着闹钟/定时器：别急着报 EAGAIN，再等
+         * 一会儿让它到点（到点后信号 pending，上面的检查会收尾）。没有
+         * 定时器的进程（比如 m18 里对空队列做阻塞 recv 的用例）行为不变，
+         * 仍然按预算报 EAGAIN。 */
+        if (i >= limit && lx_proc_alarm_remain() == 0ull) {
             break;
         }
         lx_net_pump();

@@ -534,8 +534,9 @@ u64 lx_sig_timedwait(u64 uset, u64 uinfo, u64 utimeout, u64 sigsetsize)
             return (u64)0 - LX_EINVAL;
         }
         have_deadline = 1;
-        /* port_cycles 口径是微秒（见 epoll_wait 的 ms*1000000 换算）。 */
-        deadline = port_cycles() + (u64)sec * 1000000ull + (u64)nsec / 1000ull;
+        /* port_cycles 口径是纳秒（和 lx_proc_poll 的 ms*1000000、alarm 的
+         * sec*1000000000 一致）：以前这里按微秒算，超时整整短了 1000 倍。 */
+        deadline = port_cycles() + (u64)sec * 1000000000ull + (u64)nsec;
     }
     /* 等待期间屏蔽 want：否则装了 handler 的信号会先被投递走、清掉 pending，
      * lx_sig_timedwait 就再也看不到它。退出时恢复原 mask。 */

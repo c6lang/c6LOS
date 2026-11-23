@@ -1471,3 +1471,66 @@ rootfs+tmpfs，`df -h` 根本列不出 /data。三处一起修：
 把 `stage2.ld`/`stage1.ld` 的基址下移到 0x11000、`stage1.S` 的远跳改成 `$0x11000`
 后，`.bss` 末尾从 0xA0CF8 回到 ~0x92000，flat.bin 从 ~252KB 降到 192KB（也顺手给
 boot16 的 0x4FB00 读入上限腾出余量）。
+
+---
+
+## 时间口径与等待里的信号（ping 间隔 / Ctrl-C，已通过）
+
+现象：`ping 8.8.8.8` 每 5 秒多才出一个应答（`-c 3` 要 11 秒才收尾）；`ping` 里按
+Ctrl-C，串口立刻回显 `^C`，可统计信息要再等 3～5 秒才打出来，期间终端像死了
+（要等下一次按键才有反应）。三个独立的根因：
+
+### 1) 自旋等待把信号压到预算末尾（`linux/socket.c`）
+
+`lx_net_spin_` 是"本进程泵网卡"的忙等：收包只能由阻塞的那个进程自己
+`lx_net_pump()`，所以 recv 不能真阻塞，只能一轮轮泵。M60 给它加的收尾条件是
+"预算 `LX_NET_SPIN_MAX = 500000` 轮烧完、且没有挂着的 alarm 时，**若有 pending
+信号**就返回 EINTR"（先回用户态让 handler 跑）。问题在于"预算烧完"是前提：
+
+- busybox ping 的节奏完全靠 `setitimer(ITIMER_REAL)` + SIGALRM（handler 里发
+  下一个包，见 networking/ping.c 的 `sendping_tail`）。闹钟 1 秒到点，进程正
+  卡在 `recvfrom` 的自旋里，而自旋要等 500000 轮烧完才收尾 —— TCG 下每轮约
+  11µs，合计 ≈5.5s，这就是"5 秒多"的来源。
+- Ctrl-C 同理：SIGINT 早就 pending（`lx_proc_wait_intr` 因为 busybox 用
+  `signal()` 装 handler、带 SA_RESTART，一直说"继续等"），照样要等预算耗尽。
+- `ping -c 3` 的 11 秒不是 3 个间隔，是 2 次预算。
+
+补丁：把"有 pending 信号"的检查提到循环**最前面**（`lx_proc_sig_pending` 的
+注释本来就写着"哪怕带 SA_RESTART 也必须先回用户态让 handler 跑一次"），预算
+只留给"真没数据"的兜底（m18 依赖的 EAGAIN 行为不变）。`poll`/`select`/
+`epoll_wait`/`lx_tty_read` 的等待循环同样改成 `wait_intr() != 0 ||
+sig_pending() != 0`，否则在这些地方等信号一样得等到超时。
+
+### 2) TSC 不是 1GHz，所有纳秒换算快 2.2 倍（`port/x86_64/irq.c`）
+
+`port_cycles()` 直接返回 `rdtsc`，而上层一律按"1 计数 = 1ns"在算
+（alarm/itimer/timerfd、`clock_gettime`、`/proc/uptime`、socket 自旋预算、
+fs mtime）。这台 Xeon 的 TSC 是 2.2GHz：补丁 1 之后 ping 的节奏确实跟着闹钟
+走了，但 1s 的闹钟 0.46s 就响 —— 还差 2.2 倍。同一个根因还让 `sleep 3` 只睡
+1.4s、`date +%s` 比墙钟快 2.2 倍、ping 显示的 `time=` 也放大 2.2 倍
+（92ms 其实是 42ms）。
+
+补丁：启动时（`x86_irq_init` 里、开中断之前）用 **PIT 通道 2 单次计数**标定：
+通道 2 的 gate（port 0x61 bit0）拉高后从 65535 递减，1193182/65535 ≈ 54.93ms
+后 port 0x61 bit5（timer 2 OUT）拉高；量 4 段共 ~220ms 反推 TSC 频率。实测
+**2194MHz**（基频 2.2GHz）。`port_cycles()` 改成 `(rdtsc * mul) >> 32` 的定点
+换算输出 ns（128 位中间值，clang 出 mulq/shrd，没有 libcall）；标定失败或结果
+离谱就退回 1GHz 老口径，行为不变。启动日志多一行
+`tsc: 2194 MHz（port_cycles 口径 = ns）`，时间对不对一眼可查。
+
+### 3) `sigtimedwait` 的时间单位笔误（`linux/sig.c`）
+
+`sigtimedwait` 的截止时间按**微秒**算（`sec*1000000 + nsec/1000`），可口径是
+ns —— 超时短了 1000 倍（m55 那个 20ms 超时实际只等 20µs）。顺手改成
+`sec*1000000000 + nsec`。
+
+### 验收
+
+`make check-alpine` 通过（回归）；交互式客机复测：
+
+- 启动日志打出 `tsc: 2194 MHz`；
+- `ping -c 3 8.8.8.8` 的应答在宿主时间戳 18.08 / 19.08 / 20.08 → 间隔 1.00s，
+  统计在同一瞬间打出；`time=` 42ms（和 slirp 的真实 RTT 相符）；
+- `date +%s` 跨 `sleep 3` 差 3（23.52 → 26.52，墙钟 3.00s）；
+- `ping 8.8.8.8` 里按 Ctrl-C：`^C`、统计、提示符全在同一瞬间出，随后
+  `echo AFTER_C` 正常。
