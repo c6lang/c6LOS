@@ -42,7 +42,10 @@
 #define LOS_SAL_E_ISCONN         106
 #define LOS_SAL_E_NOTCONN        107
 
-/* 地址：family + **主机序** port + **网络序** IPv4（addr == 0 表示任意地址） */
+/* 地址：family + **主机序** port + **主机序** IPv4（addr == 0 表示任意地址）。
+ * addr 的主机序口径与 LosNetIf.ip 一致：网络序字节 [a,b,c,d] 记成 0xaabbccdd。
+ * （早期注释写的"网络序"与实际实现不符 —— lx_sock 的解析/输出和协议栈内部
+ * 一直按主机序；M64 新增的 SalGetSockName/SalGetPeerName 依赖这个口径。） */
 typedef struct LosSockAddr {
     UINT16 family;
     UINT16 port;
@@ -69,6 +72,10 @@ typedef struct SalProto {
     INT32 (*recvfrom)(VOID *priv, VOID *buf, UINT32 len, LosSockAddr *a);
     INT32 (*setopt)(VOID *priv, INT32 opt, const VOID *val, UINT32 len);
     INT32 (*poll)(VOID *priv, UINT32 events);
+    /* M64：名字查询（getsockname/getpeername）。协议栈没实现的可以留 NULL，
+     * SAL 统一回 -EOPNOTSUPP。 */
+    INT32 (*getsockname)(VOID *priv, LosSockAddr *a);
+    INT32 (*getpeername)(VOID *priv, LosSockAddr *a);
 } SalProto;
 
 /* ---- 协议栈注册表 ---- */
@@ -90,6 +97,10 @@ INT32  SalSendTo(INT32 sd, const VOID *buf, UINT32 len, const LosSockAddr *a);
 INT32  SalRecvFrom(INT32 sd, VOID *buf, UINT32 len, LosSockAddr *a);
 INT32  SalSetSockOpt(INT32 sd, INT32 opt, const VOID *val, UINT32 len);
 INT32  SalPoll(INT32 sd, UINT32 events);
+/* M64：本地/对端地址查询（给 Linux ABI 的 getsockname/getpeername 用）。
+ * 未 bind/未 connect 时由协议栈层按 Linux 语义填 0.0.0.0:0 或 -ENOTCONN。 */
+INT32  SalGetSockName(INT32 sd, LosSockAddr *a);
+INT32  SalGetPeerName(INT32 sd, LosSockAddr *a);
 
 /* ---- 查询（调试/诊断用） ---- */
 INT32  SalLastError(INT32 sd);

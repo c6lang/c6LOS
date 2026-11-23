@@ -109,6 +109,23 @@ static INT32 salu_poll(VOID *priv, UINT32 events)
     return UdpSockPoll(salu_ud_(priv), events);
 }
 
+/* M64：getsockname/getpeername 转发到协议栈层。 */
+static INT32 salu_getsockname(VOID *priv, LosSockAddr *a)
+{
+    if (a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return UdpSockName(salu_ud_(priv), a);
+}
+
+static INT32 salu_getpeername(VOID *priv, LosSockAddr *a)
+{
+    if (a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return UdpSockPeerName(salu_ud_(priv), a);
+}
+
 INT32 SalUdpInit(VOID)
 {
     g_sal_udp.name = "udp";
@@ -127,5 +144,7 @@ INT32 SalUdpInit(VOID)
     g_sal_udp.recvfrom = salu_recvfrom;
     g_sal_udp.setopt = salu_setopt;
     g_sal_udp.poll = salu_poll;
+    g_sal_udp.getsockname = salu_getsockname;
+    g_sal_udp.getpeername = salu_getpeername;
     return SalRegister(&g_sal_udp);
 }

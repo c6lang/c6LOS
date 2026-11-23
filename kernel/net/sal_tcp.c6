@@ -106,6 +106,23 @@ static INT32 salt_poll(VOID *priv, UINT32 events)
     return TcpSockPoll(salt_sd_(priv), events);
 }
 
+/* M64：getsockname/getpeername 转发到协议栈层。 */
+static INT32 salt_getsockname(VOID *priv, LosSockAddr *a)
+{
+    if (a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return TcpSockName(salt_sd_(priv), a);
+}
+
+static INT32 salt_getpeername(VOID *priv, LosSockAddr *a)
+{
+    if (a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    return TcpSockPeerName(salt_sd_(priv), a);
+}
+
 INT32 SalTcpInit(VOID)
 {
     g_sal_tcp.name = "tcp";
@@ -124,5 +141,7 @@ INT32 SalTcpInit(VOID)
     g_sal_tcp.recvfrom = salt_recvfrom;
     g_sal_tcp.setopt = salt_setopt;
     g_sal_tcp.poll = salt_poll;
+    g_sal_tcp.getsockname = salt_getsockname;
+    g_sal_tcp.getpeername = salt_getpeername;
     return SalRegister(&g_sal_tcp);
 }

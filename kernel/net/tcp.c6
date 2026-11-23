@@ -507,6 +507,56 @@ INT32 TcpSockConnect(INT32 sd, UINT32 ip, UINT16 port)
     return 0;
 }
 
+/* M64：getsockname。未 bind/connect 回 0.0.0.0:0；有本地端口后地址取出口
+ * 网卡地址（单网卡、无策略路由）。监听 socket 也走这里，返回监听端口。 */
+INT32 TcpSockName(INT32 sd, LosSockAddr *a)
+{
+    TcpSock *s = (TcpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (a == (LosSockAddr *)0) {
+        return tcp_err_(22);
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = 0u;
+    a->addr = 0u;
+    if (s->lport != 0u) {
+        a->port = s->lport;
+        nif = NetIfGet(0u);
+        if (nif != (LosNetIf *)0) {
+            a->addr = nif->ip;
+        }
+    }
+    return 0;
+}
+
+/* M64：getpeername。监听/关闭态没有对端 → -ENOTCONN；SYN_SENT 已记下
+ * 目的地址，按 Linux 也回得出对端。 */
+INT32 TcpSockPeerName(INT32 sd, LosSockAddr *a)
+{
+    TcpSock *s = (TcpSock *)0;
+
+    s = tcp_get_(sd);
+    if (s == (TcpSock *)0) {
+        return tcp_err_(9);
+    }
+    if (a == (LosSockAddr *)0) {
+        return tcp_err_(22);
+    }
+    if (s->state == (UINT32)TS_CLOSED || s->state == (UINT32)TS_LISTEN ||
+        s->rport == 0u) {
+        return tcp_err_(107);            /* -ENOTCONN */
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = s->rport;
+    a->addr = s->rip;
+    return 0;
+}
+
 INT32 TcpSockSend(INT32 sd, const VOID *buf, UINT32 len)
 {
     TcpSock *s = (TcpSock *)0;
