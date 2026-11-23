@@ -29250,3 +29250,29 @@ C 包装替代薄壳、直接 defsym 去薄壳、按需 spill、初始化任务�
 - DHCP：无
 - TLS：无
 - qq.com body：无
+
+## §1160 `g_ic` 到底是谁写的（本轮新增取证）
+
+- `wifi_init_in_caller_task`（`0x4204088c`）反汇编确认：它只建两个锁
+  （OSI slot 8 `_mutex_create`、slot 19 `_recursive_mutex_create`），
+  **完全不写 `g_ic`**。
+- `ic_init`（`0x4201a824`）反汇编确认：只调 `trc_init` / `lmacInit` /
+  `pp_attach` / `wDev_Rxbuf_Init` / `pm_attach` / `hal_init`，
+  **也不写 `g_ic`，也不调 `ic_create_wifi_task`**。
+- 在 `__wrap_ic_create_wifi_task` 前后打印 `g_ic`：
+  ```
+  [ictask] in
+  [ictask] g_ic(before)=0
+  [ictask] -> 0 g_ic(after)=0
+  ```
+  ⇒ **`ic_create_wifi_task` 前后 `g_ic` 都是 0**。
+- 全量反汇编扫描 `g_ic` 的写入点，唯一直接 `s32i.n a10, a9, 0` 落在
+  `0x4204541a`（`ieee80211_cnx_attach` 附近），不是 `g_ic` 的主要赋值点。
+
+**结论**：`g_ic` 的赋值在 `wifi_init_process`（`0x4203a59c`，ppTask 的消息处理函数）
+里，而那个函数**从未执行**（`[scanmsg] ... 00000326 4203a59c` 只证明消息投递成功）。
+`wifi_start_process`（`0x4203a660`）第一句就是
+`l8ui a3, (g_ic+0x1E9)`——`g_ic=0` 时读地址 `0x1E9`，必然崩。
+
+**所以整条链的最后一道门就是：让 ppTask 真正消费 `wifi_init_process` 消息。**
+这仍然回到"初始化任务与 ppTask 无法同时推进"的调度问题。
