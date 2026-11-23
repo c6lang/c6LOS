@@ -29669,3 +29669,25 @@ g_ic+28 = 0x00040000
 
 **剩余卡点**：scan-state 参数未填充（`chan<0,0>, dur<0,0>`），
 需要继续追 `cnx_sta_scan_cmd` 内部；之后还有关联、DHCP、TLS、HTTPS 四大步。
+
+## §1184 扫描参数仍空（cfg[8]=0 也无变化）
+
+把 `cfg[8]` 从 6 改回 0（扫描全部信道），真板 210 行，
+但 `perform scan: ss_state=0x0, chan<0,0>, dur<0,0>` 完全一样。
+⇒ 显式信道不是原因。
+
+`[v1]wifi|? 0` 是 `wifi_log(1, <NULL str>, 0, ...)`——
+`perform scan` 之后驱动拿着空的 `ss_state`（`0x0`）继续走，
+于是报错返回。`ss_state` 在 `start scan` 那行打印的是 `0x3fcbb3f4`（有效指针），
+但到 `perform scan` 就变成 `0x0`，说明中间被清零或被换成了另一个变量。
+
+**下一步**：定位 `perform scan` 这条日志所在函数，看它从哪里取 `ss_state`，
+并确认 `cnx_sta_scan_cmd` 是否把 scan-state 挂在 `g_ic+16`（我们刚补的那个字段）上——
+如果是，我们补的 `g_cnxMgr` 可能类型不对，应当补真正的 scan-state 结构。
+
+## §1185 会话最终状态（round 146）
+
+- 仓库 `main`，工作树干净，会话最佳提交为 `9f5e37b` 之后的 §1184。
+- **真板最佳 210 行**（会话起点 79 行）。
+- **四项验收全部未取得**（AP 关联 0 / DHCP 0 / TLS 0 / body 0）。
+- **目标未完成。**
