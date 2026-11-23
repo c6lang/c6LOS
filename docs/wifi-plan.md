@@ -27490,3 +27490,60 @@ if (os_timeout_add(g_cur->id, ticks) != 0) { g_cur->delay_left = 0; return; }
 确认定时器 ISR 到底有没有在跑。
 
 （改动已撤回，镜像 `bff36e25`。）
+
+## §1075 ★★★★ 真正的根因：OS tick 的硬件定时器从来没被配置过
+
+### 实测证据（真板原始寄存器）
+
+修复前读 TIMG0（`0x6001F000`）：
+
+```
+T0CONFIG(0x00)     = 0x60002000   ← EN(bit31)=0，定时器没启用
+T0ALARMLO/HI       = 0, 0         ← 没有报警值
+INT_ENA_TIMERS(38) = 0            ← 定时器中断被禁用
+INT_RAW_TIMERS(3c) = 0            ← 没有挂起
+g_s3_diag[9]        = 0           ← s3_timer_irq 进入次数 = 0
+S3_TICK_PEND        = 0 且不增长
+```
+
+**⇒ 整个系统从来没有过 tick。** 全链后果：
+
+```
+没有 tick ⇒ os_tick_advance1 不推进
+         ⇒ 超时项永不到期（os_timeout_pop_expired 一次都没被调用）
+         ⇒ os_timeout_add 攒满 128 项后每次失败
+         ⇒ os_task_delay 走 if (os_timeout_add(...) != 0) return; 的提前返回
+         ⇒ 一次都不让出 CPU
+         ⇒ 任务切换从不发生（port_task_yield_c0 的三个出口断点全都不命中）
+         ⇒ 闭源库的 ppTask 永远起不来（任务表里它是 READY/prio=0/core=0）
+         ⇒ 那条带 wifi_init_process 的异步初始化消息永远没人处理
+         ⇒ ic_init 不执行 ⇒ g_ic 恒 NULL ⇒ esp_wifi_scan_start 恒返回 0x3002
+```
+
+这也解释了为什么之前 §1049~§1073 那些间接现象全都"看起来像上下文切换问题"。
+
+### 已落地的修复（`port/s3/console.c`，`port_init` 里）
+
+按 IDF 口径把 TIMG0 T0 配成 10ms 周期中断：
+
+- 解锁 `TIMG0+0x64 = 0x50D83AA1`
+- `T0LOADLO/HI = 0`，`T0LOAD = 1`（计数器归零）
+- `T0ALARMLO = 10000`（APB 80MHz / 80 = 1MHz ⇒ 10ms）
+- `INT_CLR_TIMERS = 1`，`INT_ENA_TIMERS |= 1`
+- `T0CONFIG = 0xC00A0400`（EN | INCREASE | DIVIDER=80 | ALARM_EN）
+- 重新上锁
+
+**修复后实测：`g_s3_diag[9]` 从 0 变成 10 —— 定时器 ISR 终于会进了。**
+
+### 还差两步（本轮受 IRAM 限制没做完）
+
+1. **ISR 里重新武装 ALARM**：TIMG 的 `ALARM_EN` 触发一次后被硬件自动清零
+   （读回 `T0CONFIG = 0xc00a0000`，bit10 掉了）⇒ 不加就只会来 10 次。
+2. **ISR 递增 `S3_TICK_PEND`（RTC 0x50001580）**：目前**没有任何代码递增它**，
+   `port_virtual_tick()` 永远返回 0。且消费点必须放在**任务上下文**
+   （`os_task_delay` 开头），因为主循环那处被 `if (t == 0)` 挡住、永不执行。
+
+**这两处都会往 IRAM 塞代码，而当前 `region IRAM overflowed by 32 bytes`。
+下次要么把这两段放进 `.flash.text` 的独立函数，要么先从别处腾 64 字节 IRAM。**
+
+镜像 `bc67eb2c`（含本节的定时器配置，构建通过、tree 只有 console.c 一处改动）。

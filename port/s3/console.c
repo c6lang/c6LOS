@@ -416,6 +416,40 @@ void port_init(void)
 #endif /* S3_NO_USB_REINIT */
 
     port_core_bind_self();   /* 先登记本核 PRID，后面 port_core_id() 才有意义 */
+    /* ★★★ §1075：**OS tick 的硬件定时器从来没配置过**。
+     *
+     * 真板实测（本轮）：
+     *   TIMG0.T0CONFIG(0x6001F000) = 0x60002000  ⇒ EN(bit31)=0，定时器没启用
+     *   T0ALARMLO/HI = 0                        ⇒ 没有报警值
+     *   INT_ENA_TIMERS(0x38) = 0                ⇒ 定时器中断被禁用
+     *   g_s3_diag[9]（s3_timer_irq 进入次数）= 0 ⇒ 一次 tick 都没来过
+     *   S3_TICK_PEND(0x50001580) = 0 且不增长
+     *
+     * 后果链：没有 tick ⇒ os_tick_advance1 不推进 ⇒ 超时项永不到期 ⇒
+     * os_timeout_add 攒满 128 项后每次都失败 ⇒ os_task_delay 走提前返回、
+     * 一次都不让出 CPU ⇒ 任务切换从不发生 ⇒ 闭源库的 ppTask 永远起不来
+     * ⇒ 那条带 wifi_init_process 的异步初始化消息永远没人处理 ⇒
+     * ic_init 不执行 ⇒ g_ic 恒 NULL ⇒ esp_wifi_scan_start 恒返回 0x3002。
+     *
+     * 这里按 IDF 的口径把 TIMG0 T0 配成 10ms 周期中断：
+     *   APB 80MHz / 80 = 1MHz，报警值 10000 个计数 = 10ms。
+     * 中断使能位（intenable bit6 = 0x40）start.S 已由 ROM 保留，无需再开。 */
+    {
+        volatile u32 *tg = (volatile u32 *)S3_TIMG0_BASE;
+
+        tg[0x64u / 4u] = 0x50D83AA1u;      /* 解锁（保护寄存器，防误写） */
+        tg[0x00u / 4u] = 0x60002000u;      /* 先关 T0：EN=0，保留 increase/divider */
+        tg[0x18u / 4u] = 0u;               /* T0LOADLO = 0 */
+        tg[0x1Cu / 4u] = 0u;               /* T0LOADHI = 0 */
+        tg[0x20u / 4u] = 1u;               /* T0LOAD：把 0 装入计数器 */
+        tg[0x10u / 4u] = 10000u;           /* T0ALARMLO = 10000（1MHz 下 = 10ms） */
+        tg[0x14u / 4u] = 0u;               /* T0ALARMHI = 0 */
+        tg[0x44u / 4u] = 1u;               /* INT_CLR_TIMERS：清掉残留 */
+        tg[0x38u / 4u] = tg[0x38u / 4u] | 1u;  /* INT_ENA_TIMERS：使能 T0 中断 */
+        /* T0CONFIG：EN(31)=1, INCREASE(30)=1, DIVIDER(13..28)=80, ALARM_EN(10)=1 */
+        tg[0x00u / 4u] = 0xC0000000u | (80u << 13) | 0x00000400u;
+        tg[0x64u / 4u] = 0u;               /* 重新上锁 */
+    }
     /* RTC 慢存跨 CPU 复位是**保留**的，诊断区若不清零，读回来的就是上一次
      * （甚至更早）启动的残留 —— 我们已经被这一点误导过：两处"库侧返回地址"
      * 看起来都落在 ppTask 里，其实是前一次启动写下的。所以启动时统一清掉。 */
