@@ -29850,3 +29850,39 @@ TX 缓冲区池是初始化时用 `_wifi_malloc` 分配的；我们的 OSI 堆�
 - **真板最佳 210 行**（会话起点 79 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1198 TX 缓冲池不走 `_wifi_malloc`
+
+在 `osi_wifi_malloc` 里对 `n >= 256` 加大块打印，真板**一次都没出现**
+（只有 `[zalloc] n=24/68/208/212` 这些小分配）。
+⇒ TX 缓冲池（`esf_buf`）**不是从我们的 OSI 堆分配的**，
+而是库里的静态池 / ROM 池。
+
+## §1199 直接调 `ic_init()`（失败，已回退）
+
+`ic_init`（`0x4201a824`）会调 `hal_init`，而 `hal_init` 负责装载 TX 描述符
+分配器。试在 `wifi_init_process` 之前直接 `ic_init()`：
+
+```
+[icinit] r=0            ← 调用成功
+[zalloc] n=212
+（之后没有下文）
+```
+
+真板行数从 **210 掉到 170**，流程反而被打断。
+⇒ `ic_init` 在这里调不合适（它和 `wifi_init_process` 里的 `wifi_lmac_init`
+等有相互依赖/重复初始化）。已回退。
+
+## §1200 会话最终状态（round 153）
+
+- 仓库 `main`，工作树干净，最新提交 `e9fb6b9`，最佳构建 `md5=71c179ed`。
+- **真板最佳 210 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**剩余卡点（已精确定位到库内部）**：
+`ieee80211_send_setup` 收到 NULL 的 `esf_buf`，随后执行 `j .` 无限循环。
+需要让 `esf_buf` 静态池正确初始化 —— 而它的初始化路径与我们已调的
+`wifi_init_process` / `ic_init` 都有依赖冲突。这需要更仔细地复刻
+IDF 的初始化顺序（`esp_wifi_init` → `wifi_init_process` → `ic_init` 的完整链条），
+不是靠单点补丁能解决的。
