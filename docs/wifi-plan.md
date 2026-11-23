@@ -28228,3 +28228,66 @@ boot ✓ → osi 表 ✓ → PHY ✓ → esp_wifi_init_internal 进入 ✓
 内部卡在哪一行。**
 
 镜像 `410f5fe9`。
+
+## §1094 ★★★★ 崩溃彻底消失（`S3_TICK_DEFER`），ppTask 正常轮询；剩下的是 init 卡住 + qh=NULL
+
+### 用 GDB 的 `bt` 拿到了真正的调用栈（关键工具！）
+
+```
+#0  0x4037a029 in _vec_default ()
+#1  0x40379ee2 in s3_timer_irq ()
+#2  0x4037a0e5 in _vec_level1 ()
+#3  0x40378734 in pstr ()
+#4  0x40378865 in os_main ()
+```
+
+**⇒ `#1 0x40379ee2` 紧跟在 `call8 s3_win_tramp`（它去调 `os_sched_tick`）之后
+—— 正是 §964 记录过的"ISR 里第 3~4 次窗口旋转到 `os_sched_tick` 的
+`entry` 就抛 cause=0"。**
+
+### 修法：`S3_TICK_DEFER`（构建 `1c8f57be`）
+
+ISR 里**不再**调 `os_sched_tick`，只把 `S3_TICK_PEND` 加一；
+真正的 `os_sched_tick()` 由任务上下文（`s3_tick_consume()`）消费。
+
+### 结果：崩溃完全消失
+
+```
+#0  s3_w2c_queue_recv
+#1  ppTask
+#2  s3_task_tramp
+```
+
+**⇒ 干净的调用栈，没有 `_vec_default`！ppTask 正在正常轮询它的队列。**
+
+### 但 ppTask 轮询的句柄是 NULL
+
+`0x50001540` 的 recv 环（每项 3 字：ctx/qh/ret）：
+
+```
+ctx=2  qh=0x00000000  ret=0x42013588
+ctx=2  qh=0x00000000  ret=0x42013588
+...
+```
+
+**⇒ 库的 ppTask 一直在用 **NULL 句柄**调 `_queue_recv`。**
+
+### 为什么？
+
+`esp_wifi_init_internal` 建完 ppTask 后**没有返回**（§1093），
+而它接下来要做的事正是"把 `wifi_init_process` 投递到 ppTask 的队列"
+（§1070：`s32i wifi_init_process → a10[4]; call8 ieee80211_ioctl;
+call8 wifi_api_lock; movi.n a3, 3`）。
+
+**⇒ 它卡在 `ieee80211_ioctl` 或 `wifi_api_lock` 上** —— 最可能是
+`wifi_api_lock` 要拿一个互斥量，而那个互斥量在我们这边没被正确创建/解锁，
+于是永久阻塞。ppTask 因此永远收不到 init 消息，`qh` 也一直是 NULL。
+
+**下一步（非常具体）：**
+1. 在 `wifi_api_lock` / `_mutex_lock` 的 OSI 实现里加诊断，看它是否被调用、
+   传入的句柄是不是 NULL、以及是否永远不返回；
+2. 若句柄是 NULL，检查 `_mutex_create` 的返回值是否被库正确保存
+   （我们返回的是 `osi_malloc` 的指针，必须非 NULL 且 `_mutex_lock`
+   对同一个指针能成功）。
+
+镜像 `1c8f57be`。
