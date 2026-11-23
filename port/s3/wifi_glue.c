@@ -2033,8 +2033,10 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
              * **是 NULL** ⇒ 它读地址 4 ⇒ 必崩。这里先把它补上。 */
             s3_fix_menuconfig();
             {
+                extern void s3_seed_tx_buffers(void);
                 int rp = pp_attach();
                 s3_ets_printf("[ppattach] r=%d\n", rp);
+                s3_seed_tx_buffers();
             }
             /* §§1210 ★★★：`pp_attach` 只能执行一次（真板返回 0x101），
              * 而它里面的 `esf_buf_setup`（建 TX 缓冲池）那次没成功。
@@ -3164,6 +3166,37 @@ extern int __real_pp_post(unsigned int ppq, unsigned int data);
 /* §§1208：`esf_buf_setup` 会读 `g_wifi_menuconfig + 4` 当缓冲个数，
  * 但真板上 `g_wifi_menuconfig @0x3fcd5660` 是 NULL ⇒ 它读地址 4 ⇒ 必崩。
  * 这里先把它补上（放 flash，避 IRAM 溢出）。 */
+/* §§1274 ★★★★ **自己把 TX 缓冲挂进空闲链表**。
+ *
+ * `esf_buf_alloc_dynamic` 在本构建里永远返回 0（见 §1270），
+ * 所以 `esf_buf_setup` / `esf_buf_alloc` 都拿不到缓冲。
+ * 但 `esf_buf_recycle(buf, type)` 是另一条路：它会把 buf 挂回
+ * `g_eb_list_desc[type]` 的空闲链表（前提 `desc+16` 非 0）。
+ * 所以：自己用 `_wifi_malloc` 分配几块、设好 `buf[26]=type`、
+ * 再调 `esf_buf_recycle` 挂进去。 */
+__attribute__((section(".flash.text")))
+void s3_seed_tx_buffers(void)
+{
+    extern unsigned char g_eb_list_desc[];
+    extern void *osi_malloc(u32 n);
+    extern int esf_buf_recycle(void *buf, u32 type);
+    extern int s3_ets_printf(const char *, ...);
+    volatile unsigned char *d = (volatile unsigned char *)g_eb_list_desc + 144u;
+    u32 i;
+
+    /* desc+16（idx=9）非 0，否则 recycle 直接返回 */
+    if (*(volatile unsigned short *)(void *)(d + 16u) == 0u) {
+        *(volatile unsigned short *)(void *)(d + 16u) = 32u;
+    }
+    for (i = 0u; i < 8u; i++) {
+        void *b = osi_malloc(1600u);
+        if (b == 0) { break; }
+        *((volatile unsigned char *)b + 26u) = 1u;   /* type = 1 */
+        (void)esf_buf_recycle(b, 1u);
+    }
+    s3_ets_printf("[seed] done i=%u\n", (unsigned)i);
+}
+
 __attribute__((section(".flash.text")))
 void s3_fix_menuconfig(void)
 {

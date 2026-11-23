@@ -30784,3 +30784,33 @@ mov  a2, a10
 (a) 换一个把 dynamic TX 缓冲编译进去的 `libpp.a`；或
 (b) 让 ppTask 按库的预期跑完整初始化序列（它可能走另一条静态注册路径），
     而那需要先把 `W2C_SPILL` 薄壳在 windowed ABI 下的窗口账目彻底解决。
+
+## §1274 自己播种 TX 缓冲（真板 231 行，新最佳）
+
+`esf_buf_alloc_dynamic` 永远是"失败桩"，所以走另一条路：
+`esf_buf_recycle(buf, type)` 会把 buf 挂回 `g_eb_list_desc[type]` 的空闲链表
+（前提 `desc+16` 非 0），并且它先调用 OSI slot 44（`_free`）。
+
+实现 `s3_seed_tx_buffers()`（`.flash.text`）：
+```c
+desc+16(idx=9) = 32;                    /* 让 recycle 不早返回 */
+for (i = 0; i < 8; i++) {
+    void *b = osi_malloc(1600);          /* 每个 esf_buf 约 1598 字节 */
+    *((u8 *)b + 26) = 1;                 /* buf->type = 1 */
+    esf_buf_recycle(b, 1);
+}
+```
+
+真板 **231 行**（此前 230，会话新高），`[seed] done i=8` —— 8 块全部走完。
+但 `[esfalloc] -> 0` 仍是 NULL，扫描仍卡在 TX。
+
+⇒ `esf_buf_recycle` 内部的 `_free`（我们的 `osi_free`）会把缓冲**真正释放回 OSI 堆**，
+而不是挂进库的空闲链表；随后它再用 `desc+16` 判断，逻辑上对不上。
+**⇒ 这条路径也不通。**
+
+## §1275 交付终态（最终）
+
+- 仓库 `main`，工作树干净。
+- **真板 231 行**（本会话起点 79 行，**提升 152 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
