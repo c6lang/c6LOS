@@ -57,6 +57,17 @@ u64 lx_sock_socketpair(u64 domain, u64 type, u64 proto, u64 usockvec)
 #define LX_SOL_SOCKET   1u
 #define LX_SOCK_MAX     64u
 
+/* M64：TCP 层 setsockopt 的 optname。C6 的 TCP 没有 Nagle/keepalive 可调，
+ * 但 curl 建连时会照样设一遍（TCP_NODELAY + TCP_KEEPIDLE/INTVL/CNT），
+ * 以前这些全被下面的 level!=SOL_SOCKET 判成 EINVAL，于是每建一次连就打四行
+ * "Could not set TCP_NODELAY: Invalid argument" / "Failed to set TCP_KEEPIDLE
+ * on fd N: errno 22"。这里按"接受但不生效"处理。 */
+#define LX_IPPROTO_TCP   6u
+#define LX_TCP_NODELAY   1u
+#define LX_TCP_KEEPIDLE  4u
+#define LX_TCP_KEEPINTVL 5u
+#define LX_TCP_KEEPCNT   6u
+
 /* SAL sd 上的 fd 引用计数：dup2/fork 复制出的别名各持一份，最后一份关闭时
  * 才 SalClose。sd 是固定小数组的下标，计数表同样静态即可，零动态分配。 */
 static u32 g_sock_refs[LOS_SAL_MAX_SOCKETS];
@@ -516,11 +527,23 @@ u64 lx_sock_setsockopt(u64 fd, u64 level, u64 optname, u64 uval, u64 optlen)
     int val;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
-    if (level != LX_SOL_SOCKET || optlen < 4ull ||
-        lx_user_ok(uval, 4ull, C6OS_PROT_R) == 0) {
+    if (optlen < 4ull || lx_user_ok(uval, 4ull, C6OS_PROT_R) == 0) {
         return (u64)0 - LX_EINVAL;
     }
     val = (int)*(const i32 *)uval;
+    if (level == LX_IPPROTO_TCP) {
+        /* M64：TCP 层的调参选项（Nagle/keepalive）照 Linux "选项存在但不生效"
+         * 处理 —— 收下回 0，别再让 curl 建一次连刷四行 errno 22。其它 TCP 选项
+         * 按 Linux 语义回 ENOPROTOOPT。 */
+        if (optname == LX_TCP_NODELAY || optname == LX_TCP_KEEPIDLE ||
+            optname == LX_TCP_KEEPINTVL || optname == LX_TCP_KEEPCNT) {
+            return 0ull;
+        }
+        return (u64)0 - LX_ENOPROTOOPT;
+    }
+    if (level != LX_SOL_SOCKET) {
+        return (u64)0 - LX_ENOPROTOOPT;
+    }
     (void)optname;                            /* SAL 目前只有一个通用 setopt */
     return lxs_err_(SalSetSockOpt((int)f->node, 0, (const void *)&val, 4u));
 }

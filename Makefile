@@ -2214,11 +2214,11 @@ check-alpine-curl: x86-alpine-curl
 		-drive format=raw,file=$(ALPINE_DATA),if=ide \
 		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
 		| tr -d '\r' | tee /tmp/check-alpine-curl.log >/dev/null
-	@for tag in curl-version-ok curl-https-ok curl-file-ok curl-done; do \
+	@for tag in curl-version-ok curl-https-ok curl-file-ok curl-tty-ok curl-done; do \
 		grep -q "$$tag" /tmp/check-alpine-curl.log \
 		  || { echo "FAIL: alpine curl（缺 $$tag）"; tail -80 /tmp/check-alpine-curl.log; exit 1; }; \
 	done
-	@echo "PASS: alpine curl（libcurl + OpenSSL：https 下载到 /data）"
+	@echo "PASS: alpine curl（libcurl + OpenSSL：https 下载到 /data，写 stdout 正常）"
 
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
