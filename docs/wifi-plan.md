@@ -27017,3 +27017,42 @@ g_ic@3fcd474c    = 0
 
 **21 项改进保留在 main**：§987、§998、§1024、§1032、§1050、**§1056**（决定性）。
 镜像 `6931f417d4500ad9f3d48c5353377eed`。
+
+## §1064 `ic_init` 确实从未被调用（双断点测试的间接证明）
+
+`esp_wifi_init_internal`（0x42040654）的调用序列：
+
+```
+wifi_osi_funcs_register → wifi_api_lock → wifi_log
+→ pm_funcs_init → wdev_funcs_init → net80211_funcs_init
+→ wifi_init_in_caller_task → ieee80211_ioctl
+```
+
+**里面没有 `ic_init`。** 而 `wifi_init_in_caller_task` 是遍历一张函数表
+（`callx8 a10`），所以 `ic_init` 若在表里就该被调到。
+
+双断点测试（一个打在 `ic_init` 0x4201a070，一个打在 `ic_create_wifi_task`
+0x4201a2fc）的结果是：**第一次 `continue` 命中的是断点 2** ——
+若 `ic_init` 在表里且在 `ic_create_wifi_task` 之前，先命中的必然是断点 1。
+
+**⇒ `ic_init` 从未被调用 ⇒ ic 对象从未创建 ⇒ `g_ic` 恒为 NULL
+⇒ `*(u8*)(g_ic+0x1E9) >= 2` 永不成立 ⇒ `esp_wifi_scan_start` 恒返回 0x3002。**
+
+### 为什么它没被调用
+
+最可能是 `wifi_init_in_caller_task` 遍历的那张初始化函数表不完整 ——
+而这张表由 `wifi_osi_funcs_register` / `net80211_funcs_init` 填充。
+前者依赖我们提供的 `wifi_osi_funcs_t` 结构；**某个槽位（或版本号/尺寸字段）
+不对，就可能让表少掉一项**。
+
+### 下一步（非常具体、可执行）
+
+1. 在 `wifi_init_in_caller_task`（0x420400dc）的循环里，
+   把 `callx8 a10` 的每个 `a10` 目标地址打印/记录一遍 ——
+   直接看这张表里到底有哪些初始化函数、少了哪一个；
+2. 对照 IDF 的 `esp_wifi_init` 期望的表内容，补上缺的那一项。
+
+**这一步做完，`g_ic` 就会自然被填上，后面的扫描/关联/DHCP/TLS/取页面
+全部是现成代码路径。**
+
+镜像 `6931f417d4500ad9f3d48c5353377eed`。
