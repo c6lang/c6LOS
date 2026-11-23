@@ -27227,3 +27227,37 @@ static void *osi_semphr_create(u32 max, u32 init)
 或者失败时把 `g_wifi_osi_heap` 的剩余量一起打出来。
 
 **（真板 USB 仍未接回，这一条还没上板验证。）**
+
+## §1068 最后一条静态线索：`_semphr_create` 的调用计数是 0
+
+`s3_wifi_dump_osi` 按索引升序打印**非零**计数（0..127），真板输出是：
+
+```
+[osi] start+scan 之后: 13=1 15=4 17=3 18=2 19=2 21=10 22=10 25=3 37=1 42=2 43=21 44=4 73=1 83=2 84=1 85=1
+```
+
+**⇒ 0..12 全部为 0 ⇒ idx 8（`_semphr_create`）从未被调用**，
+尽管 `OSI_SET(_semphr_create, osi_semphr_create)` 接线是对的（第 1559 行）。
+
+而 `wifi_init_in_caller_task` 的入口逻辑是：
+
+```asm
+420400df: l32r a3, (g_intr_lock_mux)
+420400e2: l32i a8, a3, 0
+420400e5: beqz a8, 420400f4     ← g_intr_lock_mux 为空才去 _semphr_create
+420400e8: l32r a3, (g_wifi_global_lock)
+```
+
+**⇒ 既然 `_semphr_create` 一次都没被调，`g_intr_lock_mux` 却必须非空才会跳过它
+—— 这两件事互相矛盾。**
+
+**⇒ 唯一自洽的解释：`wifi_init_in_caller_task` 在我们的启动里根本没被调用到。**
+（`esp_wifi_init_internal` 的调用点我们反汇编看到了 0x42040706，但状态机
+在 0x4204068a 处对 `state==1/2/3` 有多个分支，其中 `state==3` 直接跳到
+0x4204076c 早退。）
+
+**⇒ 下一步（必须上板）**：在 `wifi_init_in_caller_task`（0x420400dc）下断点，
+确认它到底有没有被调用；再在 `esp_wifi_init_internal` 里记录实际走的是哪个
+状态分支。这一步做完，"ic 为什么没建"就彻底闭环了。
+
+**（真板 USB 仍未接回，无法验证。）**
