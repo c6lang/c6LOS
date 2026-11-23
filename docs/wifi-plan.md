@@ -31164,3 +31164,34 @@ s32i a2, a10, 0x18c
 - 仓库 `main`，工作树干净，构建 `md5=ef9f49823099dbfad1cd1d430be5fb75`。
 - **真板 233 行**（会话最高；起点 79 行，+154）。
 - **四项验收全部未取得。目标未完成。**
+
+## §1305~§1307 ROM 里有另一份**真实**的 `esf_buf_alloc`
+
+用 ROM ELF（`esp32s3_rev0_rom.elf`）反汇编发现：
+- `esf_buf_alloc` @ **`0x4003edbc`**（ROM）
+- `esf_buf_alloc_dynamic` @ **`0x4003ebf8`**（ROM，**有真正的分配路径**：
+  `l16ui a9,a2,14; l16ui a8,a2,16; bltu a9,a8, <分配>`）
+
+而 `libpp.a` 里那份（`0x40388300`/`0x40388334`）是**恒返回 0 的桩**。
+
+`wdev_funcs_init`（`0x42021306`）把 `pp_wdev_funcs[0x188]` 写成 libpp 的桩。
+**运行时 patch 成 ROM 版**（`pp_wdev_funcs` @ `0x3fcef944` 是可写指针）：
+```
+[wdev] patched 188=4003edbc 18c=4003ebf8
+```
+真板 **234 行**（会话新高），`Init tx cache buffer num` 开始出现
+⇒ 说明扫描的 `ic_ebuf_alloc` 确实走上了 ROM 分配器。
+
+**但**：`esf_buf_setup_static` 内部用的是**直接 `l32r`+`call*` 到 libpp 桩**，
+不受 wdev 表影响，所以池子仍然建不起来（`alloc eb fail(0)`）。
+直接调 ROM `esf_buf_alloc` 会崩（缺库上下文）。
+
+**⇒ 最终结论**：TX 池必须由库自己的完整初始化序列创建；
+ROM 版分配器虽真实，但依赖 ppTask 初始化时建立的内部状态。
+**c6LOS 当前的调度与窗口约束撑不住那条序列，需要内核层面重写。**
+
+## §1308 交付终态（最终）
+
+- 仓库 `main`，工作树干净。
+- **真板 233 行**（会话最高）。
+- **四项验收全部未取得。目标未完成。**
