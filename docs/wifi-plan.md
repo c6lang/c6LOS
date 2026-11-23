@@ -29078,3 +29078,40 @@ scan_start=12290(0x3002 NOT_STARTED) → connect=12290
 - `scan_start`/`connect` 都返回 `12290 = 0x3002 NOT_STARTED`
 - `[wifi] 已关联，ssid= channel=0` 是**空值**，不是真关联
 - 四项验收（AP 关联 / DHCP / TLS / qq.com body）**全部未取得**
+
+## §1147 自旋+让出式 `os_task_delay`（实验，已回退）
+
+把 `os_task_delay` 从"`os_timeout_add` + BLOCKED + `port_task_yield`"改成
+"自旋 `while (os_tick_get() < end) { s3_tick_consume(); os_task_yield(); }`"，
+配合 **ISR 直接推进 `g_c6os_ticks`**（`port/s3/irq.c` 的 `s3_timer_irq()`，
+不是 console.c 的 `s3_tick_isr_tail`——那个函数根本没被调用）。
+
+真板结果：`g_c6os_ticks` 涨到 **29210**（时间推进完全正常、`TICK_PEND=0`），
+但 PC 停在 **`_win_unf8`（窗口下溢）**、`exccause=0x4(Level1Interrupt)`、
+`epc1=0x420136be`（在 `s3_w2c_queue_recv` 薄壳内，壳起点 `0x42013658` + 0x66）。
+⇒ 自旋让出把 recv 调用频率放大了几个数量级，于是薄壳的窗口问题被彻底暴露。
+
+## §1148 `W2C_SPILL` 的窗口账目分析
+
+`s3_win_spill` 反汇编（`0x42013778`）确认它是 **windowed** 函数（`entry a1,48`），
+并按 `a0` 的 CALLINC 位递归 `call4`/`call8`/`call12`，把 WINDOWBASE 推满一整圈。
+薄壳的调用序列：
+
+```
+entry  a1, 128        ; 窗口 +0
+call8  s3_win_spill   ; 窗口 +8，spill 内部再推满一圈后回到 +8
+retw                  ; （spill 自己）回到 +0
+callx8 target         ; 窗口 +8
+retw                  ; 回到 +0
+```
+
+账目**看起来**是平的，但真板在 `_win_unf8` 里死循环，说明 spill 的整圈轮转
+把某个祖先窗口物理覆盖了。**这是薄壳需要重写的核心问题**：
+在全 windowed 内核里，`W2C_SPILL` 应当只做 `entry` + 参数搬运，
+不应当再去推满整圈窗口。
+
+## §1149 当前最佳状态（commit 13a78e1）
+
+真板 167 行、无崩溃、`md5=d37a73a829989c565b1a5cfe9d046d56`。
+完整走完 init/start/scan/connect 链，但 `g_ic=0`、`scan_start`/`connect`
+都返回 `0x3002 NOT_STARTED`，四项验收**全部未取得**。
