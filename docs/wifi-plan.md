@@ -27713,3 +27713,43 @@ if (os_timeout_add(g_cur->id, ticks) != 0) {
 
 镜像 `4aee1b59`。下一步：按 §1056 的思路检查 `port_task_switch_c0` 恢复
 ppTask 首帧时的 `a1/a9/WINDOWSTART` 组合（trampoline 入口 0x403799d6）。
+
+## §1081 崩溃点定位于"ISR 里调用 windowed C 函数"，非窗口汇编试法未成
+
+### 崩溃现场（§1080 构建，66 行处停住）
+
+```
+EXCCAUSE = 0        (IllegalInstruction)
+EPC1     = 0x420102d4   ← **正好是 s3_tick_isr_tail 的函数入口**
+PS       = 0x60225  (INTLEVEL=5, EXCM=1)
+WINDOWBASE = 1, WINDOWSTART = 0xaa02, a0 = 0
+```
+
+**⇒ 从定时器 ISR 里 `call8` 一个 windowed C 函数（`entry a1,N`），
+第一次就抛 cause=0。这与 §964 记录的
+"ISR → s3_win_tramp → os_sched_tick 是第 3~4 次窗口旋转就 IllegalInstruction"
+是同一个机制。**
+
+### 试过的修法（未成，已撤回）
+
+在 `w2c.S` 里写非窗口汇编 `s3_tick_tail_call0`（无 `entry`/`retw`，
+只用 a2/a3，末尾 `retw.n`），C 侧 `extern void` 调用它。
+
+**结果：真板反而更早停（48 行，`[wifimain] id=1 tick` 之后）**——
+因为 C 侧对它的调用仍按 windowed 生成 `call8`，与被调者"无 entry"的
+函数体不匹配。要真正用 call0，调用点也必须是汇编。
+
+### 当前状态（镜像 `6dc85213`，稳定）
+
+- 定时器中断、`s3_tick_consume`、`os_sched_tick` 全部实测在跑（§1080）。
+- `os_task_delay` 的"超时表满就 return"**保持原样**（改成效让会崩在
+  ppTask 的上下文恢复里，见 §1080）。
+- **⇒ 因此任务切换仍未真正发生**，`g_ic` 仍为 NULL，`scan_start` 仍 0x3002。
+
+### 下一步（明确的两条）
+
+1. 把 `s3_tick_isr_tail` 的**调用点也写成汇编**（在 `irq.S` 的 ISR 里
+   直接 `call0 s3_tick_tail_call0`，C 侧不再调用），这样全程无窗口轮转。
+2. 或者把 tick 尾部的两件事（递增 RTC 计数、重装 T0）
+   **直接内联进 `s3_timer_irq`**，完全省掉这次调用（IRAM 约 40 字节，
+   当前 IRAM 已不溢出，值得一试）。

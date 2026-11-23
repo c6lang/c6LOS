@@ -774,13 +774,7 @@ void os_task_delay(u32 ticks) {
     }
     g_cur->delay_left = ticks;
     if (os_timeout_add(g_cur->id, ticks) != 0) {
-        /* ★★★ §1080：超时表满时**也必须让出 CPU**。
-         * 原来这里直接 return ⇒ 一个 tick 都不让 ⇒ 任务切换从不发生
-         * ⇒ 闭源库的 ppTask 永远起不来（§1070~§1079 的全部症状）。
-         * 没有超时条目只是"不会自动唤醒"，但让出后别的任务能跑，
-         * 而且 os_task_yield 里会重新挑一个就绪任务，不会挂死。 */
         g_cur->delay_left = 0;
-        os_task_yield();
         return;
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;
