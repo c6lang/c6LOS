@@ -67,6 +67,9 @@ static void task_release_locks(u32 id) {
 #define g_cur (g_cur_arr[g_core])
 
 static void make_ready(OsTask *t) {
+#if defined(C6OS_S3_DIAG)
+    *(volatile u32 *)0x50000D8Cu = *(volatile u32 *)0x50000D8Cu + 1u;
+#endif
     if (t->suspend_cnt > 0u) {
         t->state = (u8)OS_TASK_SUSP;
     } else {
@@ -77,6 +80,10 @@ static void make_ready(OsTask *t) {
 static u32 g_waiters = 0;
 
 static void unblock(OsTask *t, int result) {
+#if defined(C6OS_S3_DIAG)
+    port_putc('u');                    /* 谁被唤醒（§250） */
+    port_putc((int)('0' + (t->id & 7u)));
+#endif
     if (t->state == (u8)OS_TASK_BLOCKED && g_waiters > 0u) {
         g_waiters = g_waiters - 1u;
     }
@@ -164,6 +171,9 @@ int os_task_create_on(u32 core, const char *name, OsTaskEntry entry, void *arg,
     t->slice = (u32)C6OS_TIMESLICE;
     t->delay_left = 0;
     t->ctx = port_task_ctx_create(entry, arg, stack_size);
+#ifdef S3_ONE_ABI
+    port_switch_trace(7u, (u32)t->id, (u32)(void *)t->ctx);
+#endif
     if (t->ctx == 0) {
         t->state = (u8)OS_TASK_FREE;
         return -3;
@@ -297,9 +307,21 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     }
 #if defined(C6OS_S3_DIAG)
     {
-        /* 诊断：记录最近 8 次阻塞的 (任务 id, kind, obj) 到 RTC 0x50000C00。
-         * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。 */
-        volatile u32 *bd = (volatile u32 *)0x50000C00u;
+        /* 诊断：记录每个任务最后一次阻塞的信息到 RTC 0x50001C00。
+         * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。
+         *
+         * §463：这块原来在 0x50001A00，**和 port/s3/ctx.S §452 的 yield 轨迹
+         * 用的地址完全重叠**（trail 在 0x50001A00..0x50001A3F，idx 在 0x50001A40），
+         * 两边互相覆盖，实测读出来是混合垃圾（一个槽里同时出现 ctx 指针和
+         * sem 指针），根本没法解读。中间试过 0x50001C00，又撞上
+         * wifi_glue.c:317 的信号量追踪和 console.c:493，也不行。
+         * 现在放 0x50000600（0x50000600..0x5000073F 全空闲，
+         * 0x50000740 起才被 wifi_glue 占用）。
+         *
+         * 槽格式是**每槽 5 字**（不是 4）：
+         *   [+0]=obj [+1]=kind [+2]=port_cur_ctx() [+3]=g_cur->ctx [+4]=epcv
+         * 4 个槽共 20 字 = 80 字节。 */
+        volatile u32 *bd = (volatile u32 *)0x50000600u;
         u32 n_ = g_dbg_blk_n;
         g_dbg_blk_n = n_ + 1;
         u32 ctxv = (u32)(void *)g_cur->ctx;
@@ -337,13 +359,22 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
          * 表现为调用方在 _queue_recv 上不停重试。 */
         (void)os_timeout_cancel(g_cur->id);
     }
-    if (timeout != 0u && os_timeout_add(g_cur->id, timeout) != 0) {
+    /* §657: 库用 portMAX_DELAY = -1 (0xFFFFFFFF) 表示"永久等待"。
+     * 原来只有 timeout==0 被当成无限等待，-1 会被 os_timeout_add 算成
+     * deadline = now + 0xFFFFFFFF = now-1，立刻到期 → 超时解阻塞(-2)，
+     * 队列投递的 wake 被抢先，ppTask 空转（u2 连发）且第 6 条扫描消息
+     * 永远不被派发。两种取值都按"无超时"处理。 */
+    if (timeout != 0u && timeout != 0xFFFFFFFFu &&
+        os_timeout_add(g_cur->id, timeout) != 0) {
         g_cur->wait_obj = 0;
         g_cur->delay_left = 0;
         return -3;
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;
     g_waiters = g_waiters + 1u;
+#if defined(C6OS_S3_DIAG)
+    port_putc('b');          /* 阻塞计入 g_waiters（§250） */
+#endif
     return 0;
 }
 
@@ -351,6 +382,14 @@ int os_task_block_wait(void) {
     if (g_cur == 0) {
         return -1;
     }
+#ifdef S3_NO_SWITCH
+    /* §330 实验：阻塞时**不切换**，只打一个 'S' 然后原地打转。
+     * 用来判定"崩溃是否由 切走→切回 这条路径引起"。 */
+    port_putc('S');
+    for (;;) {
+        port_putc('.');
+    }
+#endif
     port_task_yield();
     return g_cur->wait_result;
 }
@@ -401,9 +440,6 @@ int os_task_wake_event(void *obj, u32 bits) {
     u32 i = 0;
     int woke = 0;
 
-    if (g_waiters == 0u) {
-        return 0;
-    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -425,10 +461,18 @@ int os_task_wake_event(void *obj, u32 bits) {
 u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     u32 i = 0;
     OsTask *best = 0;
-
-    if (g_waiters == 0u) {
-        return 0u;
+#if defined(C6OS_S3_DIAG)
+    /* 诊断（§250）：RTC 0x50001820 起 4 个字
+     *   [0]=调用次数 [1]=命中次数 [2]=g_waiters==0 的次数 [3]=make_ready 次数 */
+    {
+        volatile u32 *wd = (volatile u32 *)0x50000D80u;
+        wd[0] = wd[0] + 1u;
     }
+#endif
+
+    /* 不再用 g_waiters==0 做快速返回（§250）：计数器一旦与实际状态失配，
+     * 这里就会把真正的等待者跳过，消息永远发不出去（真板症状：消息入队了、
+     * 接收方一直不被唤醒）。直接扫任务表，代价可以忽略。 */
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj &&
@@ -440,8 +484,15 @@ u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
         i++;
     }
     if (best == 0) {
+#if defined(C6OS_S3_DIAG)
+        port_putc('.');      /* 没匹配上等待者（§250） */
+#endif
         return 0;
     }
+#if defined(C6OS_S3_DIAG)
+    port_putc('W');         /* 匹配上并 unblock（§250） */
+    *(volatile u32 *)0x50000D84u = *(volatile u32 *)0x50000D84u + 1u;
+#endif
     unblock(best, result);
     return best->id;
 }
@@ -453,9 +504,6 @@ int os_task_wake_first(void *obj, u8 kind, int result) {
 void os_task_wake_all(void *obj, int result) {
     u32 i = 0;
 
-    if (g_waiters == 0u) {
-        return;
-    }
     while (i < (u32)C6OS_MAX_TASKS) {
         OsTask *t = &g_tasks[i];
         if (t->state == (u8)OS_TASK_BLOCKED && t->wait_obj == obj) {
@@ -552,7 +600,14 @@ void os_sched_tick(void) {
 #if defined(C6OS_S3_DIAG)
     if (now >= 500u && g_snap_done == 0u) {
         g_snap_done = 1u;
+#ifndef S3_ONE_ABI
         port_snapshot();     /* 实现放在 port/s3/console.c（flash 里），省 IRAM */
+        /* §894: 全 windowed 下这条链 s3_timer_irq→s3_win_tramp→os_sched_tick
+         * →port_snapshot 是第 5 层 call8，超过 4 个窗口；port_snapshot 的
+         * entry 帧触发窗口轮转错乱，返回时 retw 拿到坏 CALLINC →
+         * exccause=0 / epc1=os_task_current_slot+0x68 / windowbase=0xa，
+         * 恰好在 tick=500 定死。诊断改用 JTAG 读 RTC，不在此处加窗口深度。 */
+#endif
     }
 #endif
     if (os_timeout_pending() != 0u) {
@@ -605,14 +660,13 @@ void os_task_start_core(u32 core) {
         OsTask *t = sched_pick(me);
 #if defined(C6OS_S3_DIAG)
         if (t != 0) {
-            /* 诊断：记录最近 8 次调度选中的 (任务 id, 状态)。
-             * 状态 4 = BLOCKED；若这里出现 4，说明选到了不该跑的任务。 */
-            volatile u32 *sd = (volatile u32 *)0x50000B00u;
-            u32 n_ = g_dbg_pick_n;
-            g_dbg_pick_n = n_ + 1;
-            sd[(n_ & 7) * 2] = t->id;
-            sd[(n_ & 7) * 2 + 1] = (u32)t->state;
-            sd[16] = g_dbg_pick_n;
+            /* §374：**调度热路径上不留任何 RTC 诊断写**。
+             * 原来这里每次选中任务都往 RTC 慢存写 3 个字（0x50000B00，后来又
+             * 撞过户、搬到 0x50001B00），而这条循环是每次上下文切换都要跑的；
+             * 诊断本身在"切换帧已经坏了"的场景下会把现场搅成一锅粥
+             *（§364 里 a1 恰好等于这个常量就是它造成的）。
+             * 需要时用 g_dbg_pick_n 在内存里数即可（不写 RTC）。 */
+            g_dbg_pick_n = g_dbg_pick_n + 1u;
         }
 #endif
         if (t == 0) {
@@ -635,6 +689,9 @@ void os_task_start_core(u32 core) {
         {
             u64 t0 = port_cycles();
             port_enter_task();
+#if defined(C6OS_S3_DIAG) && !defined(S3_ONE_ABI)
+            port_task_ctx_check(t->ctx);
+#endif
             port_task_switch(t->ctx);
             t->run_cycles = t->run_cycles + (port_cycles() - t0);
             t->switches = t->switches + 1u;
@@ -699,6 +756,18 @@ void os_task_delay(u32 ticks) {
     }
     if (ticks == 0u) {
         os_task_yield();
+        return;
+    }
+    /* §735: portMAX_DELAY (-1 = 0xFFFFFFFF) 是 FreeRTOS 的"永久等待"。
+     * os_task_block_prepare() 早就把这个值和 0 同等对待（§657），但这里漏了：
+     * os_timeout_add(id, 0xFFFFFFFF) 算出 deadline = now-1，下一个 tick 立刻到期
+     * → unblock(t,-2) → 库在 osi_task_delay 里无限重试（u2 连发、g_rc_n 冻结）。
+     * 两种取值都按"无超时"处理，并清掉残留的超时条目。 */
+    if (ticks == 0xFFFFFFFFu) {
+        (void)os_timeout_cancel(g_cur->id);
+        g_cur->delay_left = 0u;
+        g_cur->state = (u8)OS_TASK_BLOCKED;
+        port_task_yield();
         return;
     }
     g_cur->delay_left = ticks;

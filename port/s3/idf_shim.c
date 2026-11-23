@@ -19,7 +19,8 @@
 static u32 g_phy_ps;
 
 /* 调试：闭源库回调我们的胶水函数时打一个字符（限 40 个），用来定位它卡在哪 */
-int  ets_printf(const char *fmt, ...);
+int  s3_ets_printf(const char *fmt, ...);
+void s3_win_puts(const char *s);
 static u32 g_trace_n;
 
 void s3_beacon(u32 slot, u32 val);
@@ -29,7 +30,7 @@ void s3_win_trace(const char *s)
     s3_beacon(3u, 0xC0000000u | (g_trace_n & 0xFFFFu));
     if (g_trace_n < 40u) {
         g_trace_n = g_trace_n + 1u;
-        ets_printf("%s", s);
+        s3_ets_printf("%s", s);
     }
 }
 
@@ -188,5 +189,30 @@ int sprintf(char *dst, const char *fmt, ...)
     __builtin_va_start(ap, fmt);
     n = vsprintf_internal(dst, 1024, fmt, ap);
     __builtin_va_end(ap);
+    return n;
+}
+
+/* §479 ★★★ 我们自己的 ets_printf 实现，**完全不碰 ROM**。
+ *
+ * 之前一直用 ROM 的 `ets_printf`（0x4004423c，windowed、`entry a1,80`），
+ * 但它和我们这套混合 ABI 的调用链反复打架：只要格式串稍长或参数稍多，
+ * 就会在它自己的输出循环里跳飞（实测 cause=0x1c 取指错、excvaddr=0x17）。
+ * 本文件已经有 `vsprintf_internal`，直接格式化到局部 buffer 再逐字输出即可，
+ * 既没有 ABI 边界、也没有 ROM 的行为不确定性。
+ *
+ * 注意本文件按 `-mabi=windowed` 编译（给闭源库用），所以这里就是 windowed
+ * 函数，正好和 `call8 s3_ets_printf` 的调用点匹配。call0 单元走
+ * `s3_ets_printf_call0`（`port/s3/w2c.S` 的桥）。 */
+int s3_ets_printf(const char *fmt, ...)
+{
+    char tmp[200];
+    __builtin_va_list ap;
+    int n = 0;
+
+    if (fmt == 0) { return 0; }
+    __builtin_va_start(ap, fmt);
+    n = vsprintf_internal(tmp, (int)sizeof(tmp), fmt, ap);
+    __builtin_va_end(ap);
+    if (n > 0) { s3_win_puts(tmp); }
     return n;
 }

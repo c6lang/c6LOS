@@ -1,0 +1,109 @@
+/* 编译期冒烟测试：c6 侧能不能用我们的 POSIX socket 头 + lwIP 那套接口
+ *
+ * 这不是真机用例（真机要等 WiFi 关联跑通），只是为了把"c6 标准库的
+ * std/net/tcp.c6 将来能不能编"这件事变成一条可离线验证的命令：
+ *
+ *     make netcheck
+ *
+ * 它会用 c6c 编这个文件（-Iinclude -Iport/s3/lwip/posix），只要头文件之间
+ * 自洽、函数原型齐全就能过。docs/wifi-plan.md §209。
+ */
+#include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <poll.h>
+#include <arpa/inet.h>
+
+/* 1) getaddrinfo + connect + poll + send/recv 的完整一轮（不执行，只看类型） */
+static int netcheck_roundtrip(const char *host, int port)
+{
+    struct addrinfo hints = { 0 };
+    struct addrinfo *res = 0;
+    struct pollfd pfd = { 0 };
+    struct sockaddr_storage ss = { 0 };
+    socklen_t slen = (socklen_t)sizeof ss;
+    char portbuf[8] = { 0 };
+    char hello[8] = { 0 };
+    int fd = -1;
+    int n = 0;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    portbuf[0] = '4';
+    portbuf[1] = '4';
+    portbuf[2] = '3';
+    portbuf[3] = 0;
+    (void)port;
+    if (getaddrinfo(host, portbuf, &hints, &res) != 0 || res == 0) {
+        return -1;
+    }
+    fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        return -1;
+    }
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, 0, 0);
+    if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
+        (void)close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    (void)poll(&pfd, 1u, 1000);
+
+    hello[0] = 'G';
+    hello[1] = 'E';
+    hello[2] = 'T';
+    hello[3] = ' ';
+    hello[4] = '/';
+    hello[5] = 0;
+    n = (int)send(fd, hello, 5u, 0);
+    if (n > 0) {
+        n = (int)recv(fd, hello, 5u, MSG_PEEK);
+    }
+    if (getsockname(fd, (struct sockaddr *)&ss, &slen) == 0) {
+        n = n + (int)slen;
+    }
+    (void)shutdown(fd, SHUT_RDWR);
+    (void)close(fd);
+    return n;
+}
+
+/* 2) 字节序 / 字符串地址转换 —— TCP 客户端解析服务器地址要用 */
+static unsigned int netcheck_bytes(unsigned int in)
+{
+    unsigned short a = htons((unsigned short)443);
+    unsigned int b = htonl(in);
+    struct in_addr ia = { 0 };
+    const char *s = inet_ntoa(ia);
+    char buf[16] = { 0 };
+    int n = 0;
+
+    if (s != 0) {
+        n = (int)strlen(s);
+    }
+    ia.s_addr = inet_addr("127.0.0.1");
+    if (inet_pton(AF_INET, "10.0.0.1", buf) == 1) {
+        (void)inet_ntop(AF_INET, buf, buf, (socklen_t)sizeof buf);
+    }
+    (void)ntohs(a);
+    (void)ntohl(b);
+    return (unsigned int)n + (unsigned int)ia.s_addr;
+}
+
+int netcheck(void)
+{
+    int a = netcheck_roundtrip("qq.com", 443);
+    unsigned int b = netcheck_bytes(inet_addr("1.2.3.4"));
+
+    return a + (int)b;
+}

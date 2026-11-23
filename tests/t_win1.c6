@@ -1,0 +1,37 @@
+/* tests/t_win1.c6 —— 最小 windowed 任务验证（§239）
+ *
+ * 只建**一个** windowed 任务（s3_win_hello_task：打印 + 周期性 delay），
+ * 用来把"新建 windowed 任务的第一次进入"和"两个任务互相切换"分开。
+ */
+#include <string.h>
+
+extern void os_task_start(void);
+extern int os_task_create(const char *name, void *entry, void *arg, unsigned int prio, unsigned int stack_size);
+extern void os_icache_enable(void);
+extern void s3_beacon(unsigned int slot, unsigned int val);
+extern volatile unsigned int g_next_task_windowed;
+extern void port_putc(int c);
+extern void s3_win_hello_task(void *arg);
+
+static void pstr(const char *s)
+{
+    while (*s != 0) {
+        port_putc((int)*s);
+        s = s + 1;
+    }
+}
+
+void os_main(void)
+{
+    s3_beacon(0u, 0xB0000300u);
+    os_icache_enable();
+    pstr("M1 icache ok\n");
+    pstr("M2 建一个 windowed 任务\n");
+    g_next_task_windowed = 1u;
+    s3_beacon(1u, (unsigned int)os_task_create("w1", (void *)s3_win_hello_task, (void *)1u, 2u, 8192u));
+    s3_beacon(2u, (unsigned int)os_task_create("w2", (void *)s3_win_hello_task, (void *)2u, 3u, 4096u));
+    g_next_task_windowed = 0u;
+    pstr("M3 启动调度\n");
+    os_task_start();
+    for (;;) { }
+}

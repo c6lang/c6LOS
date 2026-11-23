@@ -5,7 +5,15 @@
 /* 4KB 环形日志：所有 kputc 同时写入环形缓冲，panic 时整段回放。
  * 格式化在 rt/kprintf.c（C + va_list）；本文件只做字符/字符串。 */
 
-#define KLOG_SIZE 4096u
+/* §964：4096 → 512。这块板子的 DRAM 在 0x3FCD9500 以上是坏区（见
+ * port/s3/link.ld），主栈顶被钉死在 0x3FCD9500，而 _stack_limit 又是
+ * _bss_end+0x800 —— .bss 一涨，**主栈就被挤没了**。真板取证：改这里之前
+ * _stack_limit=0x3FCD94F6、_stack_top=0x3FCD9500，主栈只剩 10 字节，
+ * 调度主循环（os_main 里那个 for(;;)）一直在吃下面那 2KB 护栏，
+ * 最后在窗口溢出处理里炸成 cause=0x1d StoreProhibited。
+ * 日志环只给 klog_dump()（shell/panic）用，512 字节够用，腾出 3584 字节
+ * 给主栈 —— 改完主栈约 3.6KB。 */
+#define KLOG_SIZE 512u
 
 static u8 klog_buf[KLOG_SIZE] = {0};
 static u32 klog_head = 0;

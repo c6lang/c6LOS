@@ -2,7 +2,13 @@
 # 用法：make C6_ROOT=/path/to/c6 s3
 
 C6_ROOT ?= $(HOME)/c6
-C6CC    := $(C6_ROOT)/tcc/c6
+# c6 编译器：默认用 c6 自己那份（$(C6_ROOT)/tcc/c6）。
+# 注意：新项目 c6c（/home/winger/c6/c6c/build/c6c）**不能**用来做这套构建 ——
+# 它只出 native ELF/汇编，没有"输出 C99 源码"的模式，而我们的流程是
+# c6→C99→xtensa-gcc。2026-11-16 老 c6 的可执行文件丢过一次，用
+#   make -C /home/winger/c6/tcc -j8 c6
+# 重新编出来即可。
+C6CC    ?= $(C6_ROOT)/tcc/c6
 XTP     := $(HOME)/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-
 XTGCC   := $(XTP)gcc
 # Xtensa 的两种 ABI：call0（本项目原来的选择）/ windowed（IDF 的闭源 WiFi·PHY
@@ -100,7 +106,8 @@ S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
 S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
            $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o \
-           $(BUILD)/obj/wifi_glue.o $(BUILD)/obj/wifi_stub.o
+           $(BUILD)/obj/wifi_glue.o $(BUILD)/obj/wifi_stub.o \
+           $(BUILD)/obj/wpa_crypto.o
 
 # 真正链闭源 WiFi 库（libnet80211/libpp）时才需要监管域数据表
 ifneq ($(findstring -DS3_WITH_WIFI,$(S3_CDEFS)),)
@@ -127,6 +134,7 @@ define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -DC6OS_S3_DIAG -c -o $(BUILD)/c99/ $(1)
+	@sed -i -E 's/unsigned char (__c99_d[0-9]+)\[/unsigned char __attribute__((aligned(4))) \1[/g' $(BUILD)/c99/$(notdir $(1:.c6=.c))
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 
@@ -222,9 +230,24 @@ $(BUILD)/obj/abi_thunk.o: port/s3/abi_thunk.S
 # 关键洞察：**恢复执行后的第一次返回**必须是宽 retw —— 欠载会把下一层窗口填
 # 回来，之后各层的 retw.n 就都合法了。
 # wifi_glue.c 加不了：它太大，关掉 transform 后分支偏移会越界（汇编报错）。
+# W2C 壳的两种实现（§231）：默认带着窗口 spill；S3_W2C_MIN=1 时换成极简版
+# （只 entry+callx0+retw，不做任何窗口操作），用来对照真板上的窗口相关故障。
+W2C_DEFS :=
+ifneq ($(S3_W2C_MIN),)
+W2C_DEFS += -DS3_W2C_MIN
+endif
+# S3_W2C_SAVEALL=1：壳保存/恢复全部 a0..a15（§245，理论正确版）
+ifneq ($(S3_W2C_SAVEALL),)
+W2C_DEFS += -DS3_W2C_SAVEALL
+endif
+
 $(BUILD)/obj/w2c.o: port/s3/w2c.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -Wa,--no-transform -c $< -o $@
+	# S3_CDEFS 必须传进来：全 windowed 构建里 w2c.S 要据此走「W2C 名字直接
+	# .set 到 windowed 目标」的分支；否则仍生成 call0 壳，用 callx0 调 windowed
+	# 内核函数 → a0 没有窗口标签 → 内核 retw 立刻 exccause=0（真板定死在
+	# os_task_current_slot 的 retw，g_sw_cnt 才 1）。
+	$(XTGCC) -Wa,--no-transform $(S3_CDEFS) $(W2C_DEFS) -c $< -o $@
 
 $(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
@@ -242,17 +265,25 @@ $(BUILD)/obj/irampad.o: port/s3/irampad.c $(S3_HDRS)
 # wifi_glue.c 里那批 wifi_osi_funcs_t 桩函数会被 **windowed ABI 的闭源库回调**，
 # 所以必须用 -mabi=windowed 编译；它自己对外暴露的入口（s3_wifi_osi_init 等）
 # 由 call0 侧经孤岛桥调用。
+# windowed 胶水的优化级别：默认 -Os；用 -O0 可以强制 GCC 在 retw 前显式恢复
+# a0（§255 的对照实验），也可以用来排查"寄存器被 call0 改掉"类问题。
+S3_SHIM_OPT ?= -Os
+
 $(BUILD)/obj/wifi_glue.o: port/s3/wifi_glue.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+
+$(BUILD)/obj/wpa_crypto.o: port/s3/wpa_crypto.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) $(S3_SHIM_OPT) -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -Wa,--no-transform -mtext-section-literals -c $< -o $@
+	$(XTGCC) -mabi=call0 $(S3_CDEFS) -Wa,--no-transform -mtext-section-literals -c $< -o $@
 
 $(BUILD)/obj/wifi_stub.o: port/s3/wifi_stub.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
@@ -268,7 +299,8 @@ $(BUILD)/obj/irq_asm.o: port/s3/irq.S
 
 $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) $(S3_CDEFS) -c $< -o $@
+
 
 # idf_shim.c 是给闭源库（windowed ABI）用的胶水，必须按 windowed 编译
 $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
@@ -286,17 +318,67 @@ $(BUILD)/obj/start.o: port/s3/start.S
 S3_STACK_TOP ?= 0x3FCEF000
 S3_IMG_FLAGS ?=
 S3_STACK_LD := -Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP)
+# §289：应用基址。0 = 我们的镜像自己当二级 bootloader（ROM 直接引导，历史默认）；
+# 0x20000 = 交给 IDF 真正的二级 bootloader 引导（先刷 bootloader@0x0 + 分区表@0x8000）。
+S3_APP_BASE ?= 0x0
+S3_APP_LD := -Wl,--defsym=__app_base=$(S3_APP_BASE)
+
+# 全 windowed 构建：闭源库回调使用的 s3_w2c_* 名字直接用 --defsym 指向
+# windowed 内核函数。GAS 的 .set 对跨对象符号无效、j 跳不到 IRAM，只有链接器
+# 能在符号解析后把名字绑到目标；否则 w2c.S 会退回 call0 壳，用 callx0 调
+# windowed 函数 → a0 无窗口标签 → 内核 retw exccause=0（g_sw_cnt=1 就崩）。
+ifneq ($(findstring -DS3_ONE_ABI,$(S3_CDEFS)),)
+S3_W2C_ALIAS := \
+	-Wl,--defsym=s3_w2c_delay=os_task_delay \
+	-Wl,--defsym=s3_w2c_wdt_feed=os_wdt_feed \
+	-Wl,--defsym=s3_w2c_wdt_start=os_wdt_start \
+	-Wl,--defsym=s3_w2c_irq_save=port_irq_save \
+	-Wl,--defsym=s3_w2c_irq_restore=port_irq_restore \
+	-Wl,--defsym=s3_w2c_sem_init=os_sem_init \
+	-Wl,--defsym=s3_w2c_sem_destroy=os_sem_destroy \
+	 \
+	-Wl,--defsym=s3_w2c_sem_post=os_sem_post \
+	-Wl,--defsym=s3_w2c_mutex_init=os_mutex_init \
+	-Wl,--defsym=s3_w2c_mutex_destroy=os_mutex_destroy \
+	 \
+	-Wl,--defsym=s3_w2c_mutex_post=os_mutex_post \
+	-Wl,--defsym=s3_w2c_queue_init=os_queue_init_ex \
+	-Wl,--defsym=s3_w2c_queue_put=os_queue_put_item \
+	-Wl,--defsym=s3_w2c_queue_get=os_queue_get_item \
+	-Wl,--defsym=s3_w2c_queue_count=os_queue_count \
+	-Wl,--defsym=s3_w2c_queue_try_get=os_queue_try_get_item \
+	-Wl,--defsym=s3_w2c_queue_try_put=os_queue_try_put_item \
+	-Wl,--defsym=s3_w2c_queue_destroy=os_queue_destroy \
+	-Wl,--defsym=s3_w2c_event_init=os_event_init \
+	-Wl,--defsym=s3_w2c_event_set=os_event_set \
+	-Wl,--defsym=s3_w2c_event_clear=os_event_clear \
+	 \
+	-Wl,--defsym=s3_w2c_event_destroy=os_event_destroy \
+	-Wl,--defsym=s3_w2c_event_get=os_event_get \
+	-Wl,--defsym=s3_w2c_task_create=os_task_create \
+	-Wl,--defsym=s3_w2c_task_delete=os_task_delete \
+	-Wl,--defsym=s3_w2c_task_suspend=os_task_suspend \
+	-Wl,--defsym=s3_w2c_task_resume=os_task_resume \
+	 \
+	-Wl,--defsym=s3_w2c_task_yield=os_task_yield \
+	-Wl,--defsym=s3_w2c_tick_get=os_tick_get \
+	-Wl,--defsym=s3_w2c_task_probe=os_task_probe \
+	-Wl,--defsym=s3_w2c_tick_hz=os_tick_hz \
+	-Wl,--defsym=s3_w2c_current_task=os_task_current_slot \
+	-Wl,--defsym=s3_w2c_slot_of_id=os_task_slot_of_id
+endif
 
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
-		$(S3_STACK_LD) \
+		$(S3_STACK_LD) $(S3_APP_LD) $(S3_W2C_ALIAS) \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
 $(BUILD)/c6os.bin: $(BUILD)/c6os.elf
 	esptool --chip esp32s3 elf2image $(S3_IMG_FLAGS) --flash-mode dio \
 		--flash-size 16MB --flash-freq 40m -o $@ $<
-	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@
+	@python3 tools/chkimg.py $(BUILD)/c6os.elf $@ $(S3_APP_BASE)
+	@python3 tools/patch_halinit.py $@ $(BUILD)/c6os.elf
 
 image-info: $(BUILD)/c6os.bin
 	esptool --chip esp32s3 image-info $<
@@ -447,7 +529,7 @@ $(BUILDH)/t_tick: $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll $(BUILDH)/port_sim.o
 	clang -fuse-ld=lld -o $@ $(BUILDH)/t_tick.ll $(BUILDH)/tick.ll \
 		$(BUILDH)/port_sim.o -L$(C6_ROOT)/tcc -ltcc1
 
-$(BUILDH)/task.ll $(BUILDH)/timeout.ll: kernel/task.c6
+$(BUILDH)/task.ll: kernel/task.c6
 	@mkdir -p $(BUILDH)
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude --emit-llvm -o $@ $<
 
@@ -3218,11 +3300,27 @@ S3_WIFI_MAIN ?= tests/t_s3_wifi3.c6
 WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
              -Wl,--wrap=ic_create_wifi_task -Wl,--wrap=ieee80211_ioctl_init \
              -Wl,--wrap=pp_create_task -Wl,--wrap=pp_post \
-             -Wl,--wrap=wifi_init_in_caller_task
+             -Wl,--wrap=wifi_init_in_caller_task \
+             -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
+             -Wl,--wrap=pm_offchan_ready_or_defer -Wl,--wrap=chm_acquire_lock \
+             -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan \
+             -Wl,--wrap=ic_tx_pkt
+# §846: S3_TARGET_BSSID 时在 flash 侧 wrap get_ap_records，把扫描结果的 BSSID
+# 改成目标 weforpay.com（wifi_glue.c 保持字节不变，避免破坏脆弱的同步扫描）
+ifdef S3_TARGET_BSSID
+WIFI_WRAP += -Wl,--wrap=cnx_add_rc
+WIFI_WRAP += -Wl,--wrap=ieee80211_send_mgmt
+WIFI_WRAP += -Wl,--wrap=sta_recv_mgmt
+endif
 # S3_FLASH_AUTO_MAP：镜像里有 IROM 段（闭源库代码在 flash 里）时必须打开 ——
 # 没有二级 bootloader 时没人配置 I-cache 的模式，取指会拿到 IllegalInstruction
 # （典型签名：PC = 函数首地址 + 2、cause=0）。见 docs/wifi-plan.md §15~24、§202。
 WIFI_CDEFS = -DS3_WITH_WIFI -DS3_WITH_LIBPHY -DS3_KEEP_SWD -DS3_FLASH_AUTO_MAP
+# S3_PHY_BISECT=1：打开 port/s3/win_island.c 里的"跨复位自动二分"（docs/wifi-plan.md §204）。
+# 一进 PHY 就整片从 USB 消失、只能人工断电的阶段，用它一次上电拿到故障子步骤。
+ifneq ($(S3_PHY_BISECT),)
+WIFI_CDEFS += -DS3_PHY_BISECT
+endif
 
 # 注意：目标文件的规则里**没有**把 S3_CDEFS 记成依赖，改了 -D 之后 make 不会
 # 重编已有对象（踩过一次：S3_FLASH_AUTO_MAP 没生效，镜像行为完全没变）。
@@ -3573,3 +3671,211 @@ check-linuxabi-m59: x86-m59
 		| grep -q "^PASS: m59socketpair" \
 	  && echo "PASS: linux-abi M59（socketpair）" \
 	  || { echo "FAIL: linux-abi M59"; tail -30 /tmp/check-m59.log; exit 1; }
+# ---------------------------------------------------------------------------
+# lwIP（IP 栈）—— 见 docs/wifi-plan.md §207
+#
+# 这一步**不**把 lwIP 接进 c6os.elf：WiFi 关联本身还没在真板上跑通，先接进去
+# 只会让镜像多一堆无法验证的代码。这里只做两件事，都可以离线验证：
+#   1) 用我们自己的 port/s3/lwip/{lwipopts.h,arch/cc.h} 把 IDF 的 lwIP 源码
+#      编成 build/lwip/liblwip.a（证明工具链/可移植性没问题）；
+#   2) 让 port/s3/lwip/c6_lwip_port.c（平台钩子 + netif 粘合）一起编进来，
+#      这样"要接的面"是编译期就确认过的，而不是等上板才发现缺符号。
+#
+# 为什么用 -mabi=windowed：linkoutput 要调 libnet80211 的
+# esp_wifi_internal_tx()（windowed ABI）。内核侧（call0）要调这些函数时
+# 一律走 port/s3/w2c.S 的正规壳，和现有 WiFi 岛的做法一致。
+LWIP_SRC  := $(IDF_ROOT)/components/lwip/lwip/src
+LWIP_DIR  := build/lwip
+LWIP_INC  := -Iport/s3/lwip -I$(LWIP_SRC)/include
+# 注意：这里**不能**加 -Wa,--no-transform。加上之后 gas 不再做分支松弛，
+# 编译器在 -Os 下生成的 bnez.n（窄分支）一旦位移超过 ±127 就报
+#   Error: operand 2 of 'bnez.n' has out of range value '4294967280'
+# （def.c 就是这么挂的）。--no-transform 只是我们给手写汇编（win_bridge.S）
+# 防 retw 缩窄用的，编译器生成的 windowed 代码不需要它。
+LWIP_CF   := -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
+             -mlongcalls -mtext-section-literals \
+             -Wall -Wextra -Wno-unused-parameter
+ifdef S3_TARGET_BSSID
+LWIP_CF   += -DS3_TARGET_BSSID
+endif
+LWIP_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
+             $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
+             $(wildcard $(LWIP_SRC)/api/*.c) \
+             $(wildcard $(LWIP_SRC)/netif/ethernet.c) \
+             port/s3/lwip/c6_lwip_port.c \
+             port/s3/lwip/c6_lwip_posix.c \
+             port/s3/lwip/sys_arch.c
+LWIP_HDRS := port/s3/lwip/lwipopts.h port/s3/lwip/arch/cc.h port/s3/lwip/arch/sys_arch.h
+
+define C6_LWIP_RULE
+$(LWIP_DIR)/obj/$(notdir $(basename $(1))).o: $(1) $(LWIP_HDRS)
+	@mkdir -p $(LWIP_DIR)/obj
+	$$(XTGCC) $(LWIP_CF) $(LWIP_INC) -c $$< -o $$@
+endef
+$(foreach f,$(LWIP_SRCS),$(eval $(call C6_LWIP_RULE,$(f))))
+
+LWIP_OBJS := $(addprefix $(LWIP_DIR)/obj/,$(addsuffix .o,$(notdir $(basename $(LWIP_SRCS)))))
+
+lwip: $(LWIP_DIR)/liblwip.a
+	@echo "lwip: $(words $(LWIP_OBJS)) 个对象 -> $<"
+
+$(LWIP_DIR)/liblwip.a: $(LWIP_OBJS)
+	@mkdir -p $(dir $@)
+	$(XTP)ar rcs $@ $^
+	@$(XTP)size $(LWIP_DIR)/obj/*.o | tail -1
+
+# 编译期冒烟测试：c6 侧用我们的 POSIX socket 头能不能编（不进镜像，纯检查）
+# 见 docs/wifi-plan.md §209。
+netcheck:
+	@mkdir -p $(BUILD)/netcheck
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) -Iport/s3/lwip/posix \
+		-c -o $(BUILD)/netcheck/ tests/t_s3_net.c6
+	@$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common -mlongcalls \
+		-Iport/s3/lwip -I$(LWIP_SRC)/include -c $(BUILD)/netcheck/t_s3_net.c -o $(BUILD)/netcheck/t_s3_net.o
+	@echo "netcheck: OK（c6 头 + lwIP POSIX 层两侧都能编）"
+
+# ---------------------------------------------------------------------------
+# wifip：WiFi + lwIP 一起链的镜像（docs/wifi-plan.md §210）
+#
+# 和 wifi 的区别只有两点：-DS3_WITH_LWIP（bringup 成功后接 IP 栈），
+# 以及把 build/lwip/liblwip.a 加进链接。目的有两个，都不需要真板：
+#   1) 验证"71KB 的 lwIP 和闭源 WiFi 库能一起塞进这颗芯片"（IRAM/DRAM 预算）；
+#   2) 验证 link.ld 把 lwIP 的 .text 正确路由进 .flash.text（否则 IRAM 直接爆）。
+IP_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP
+wifip: 
+	@rm -rf $(WIFI_DIR)
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
+	$(MAKE) C6_ROOT=$(C6_ROOT) lwip
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) S3_LEAN=1 \
+		S3_SKIP_C6="" \
+		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+		S3_CDEFS="$(IP_CDEFS)" S3_STACK_TOP=0x3FCD9000 \
+		S3_MAIN=$(S3_WIFI_MAIN) \
+		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
+		s3
+
+# TLS 1.2 基础件自测（宿主上跑，不需要板子）：docs/wifi-plan.md §212
+tls12check:
+	./tools/tls12_selftest.sh
+
+# 宿主上真连 qq.com 跑 TLS 1.2 握手 + HTTP GET（不需要板子）：§213
+tls12live:
+	./tools/tls12_live.sh
+
+# ---------------------------------------------------------------------------
+# TLS 1.2 客户端（.c6 写的）编成 windowed 静态库 —— 见 docs/wifi-plan.md §214
+#
+# 为什么要 windowed：它要和 lwIP（windowed，§210）以及闭源 WiFi 库直接互相调用，
+# 而内核是 call0。同一侧（windowed）内部调用没有 ABI 混用问题。
+#
+# 三个步骤：
+#   1) 剥掉 c6 标准库模块里的 `test "…" { … }` 自测块（否则会拖进 c6 切片运行时，
+#      详见 tools/c6_strip_tests.py 的说明）；
+#   2) c6c 编成 .c99；
+#   3) xtensa-gcc 按 -mabi=windowed 编成对象，归档成 build/wifi/tls/libtls.a。
+TLS_DIR   := $(WIFI_DIR)/tls
+TLS_SRC   := $(C6_ROOT)/std/core/types.c6 $(C6_ROOT)/std/core/bits.c6 \
+             $(C6_ROOT)/std/core/rand.c6 $(C6_ROOT)/std/encoding/aes.c6 \
+             $(C6_ROOT)/std/encoding/sha256.c6 $(C6_ROOT)/std/encoding/sha1.c6 \
+             $(C6_ROOT)/std/net/x25519.c6 \
+             net/aes_gcm.c6 net/tls12_prf.c6 net/rsa_verify.c6 \
+             net/cert_parse.c6 net/tls12_hs.c6
+TLS_NAMES := $(notdir $(basename $(TLS_SRC)))
+TLS_OBJS  := $(addprefix $(TLS_DIR)/obj/,$(addsuffix .o,$(TLS_NAMES)))
+
+define C6_TLS_RULES
+$(TLS_DIR)/src/$(notdir $(1)): $(1) tools/c6_strip_tests.py
+	@mkdir -p $(TLS_DIR)/src
+	python3 tools/c6_strip_tests.py $$< $$@
+$(TLS_DIR)/c99/$(notdir $(basename $(1))).c: $(TLS_DIR)/src/$(notdir $(1)) $(S3_HDRS)
+	@mkdir -p $(TLS_DIR)/c99
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) -Iport/s3/lwip/posix \
+		-c -o $(TLS_DIR)/c99/ $$<
+$(TLS_DIR)/obj/$(notdir $(basename $(1))).o: $(TLS_DIR)/c99/$(notdir $(basename $(1))).c
+	@mkdir -p $(TLS_DIR)/obj
+	$(XTGCC) -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
+		-mlongcalls -mtext-section-literals -Iinclude -c $$< -o $$@
+endef
+$(foreach src,$(TLS_SRC),$(eval $(call C6_TLS_RULES,$(src))))
+
+$(TLS_DIR)/libtls.a: $(TLS_OBJS)
+	@mkdir -p $(dir $@)
+	$(XTP)ar rcs $@ $^
+	@echo "libtls.a: $(words $(TLS_OBJS)) 个对象"
+
+# 板级 HTTPS 演示（windowed C）：bringup 之后用 lwIP socket 跑 TLS 1.2 + HTTP GET
+$(WIFI_DIR)/obj/c6_https_demo.o: port/s3/c6_https_demo.c
+	@mkdir -p $(WIFI_DIR)/obj
+	$(XTGCC) -mabi=windowed -DS3_WITH_WIFI $(S3_CDEFS) -Os -ffreestanding \
+		-fno-builtin -fno-common -mlongcalls -mtext-section-literals \
+		-Iinclude -Iport/s3/lwip -I$(LWIP_SRC)/include -c $< -o $@
+
+# https：在 wifip 的基础上加 TLS 1.2 客户端 + 板级 HTTPS 演示
+# WiFi 账号：make S3_WIFI_SSID='"名字"' S3_WIFI_PASS='"口令"'（见 port/s3/wifi_creds.h）
+# 没传就不定义，交给 port/s3/wifi_creds.h 里的默认（空串 = 跳过关联）
+WIFI_CREDS = $(if $(S3_WIFI_SSID),-DS3_WIFI_SSID=$(S3_WIFI_SSID)) \
+             $(if $(S3_WIFI_PASS),-DS3_WIFI_PASS=$(S3_WIFI_PASS))
+# PHY 校准模式（win_island.c 的 S3_PHY_CAL_MODE）：0=PARTIAL（默认）1=NONE 2=FULL。
+# 排查"register_chipv7_phy 挂死"时可以用 make ... S3_PHY_CAL_MODE=1 换个路径试试。
+ifneq ($(S3_PHY_CAL_MODE),)
+WIFI_CDEFS += -DS3_PHY_CAL_MODE=$(S3_PHY_CAL_MODE)
+endif
+# S3_PHY_VIA_OSI=1：不在 bringup 之前手动做 PHY 初始化，改成让 WiFi 库通过
+# OSI 的 _phy_enable 回调我们（IDF 的做法，§228）
+ifneq ($(S3_PHY_VIA_OSI),)
+WIFI_CDEFS += -DS3_PHY_VIA_OSI
+endif
+# S3_NO_PREEMPT=1：关掉定时器抢占切换，改成只在显式阻塞点切换（§235）
+ifneq ($(S3_NO_PREEMPT),)
+WIFI_CDEFS += -DS3_NO_PREEMPT
+endif
+# S3_NO_WIN_SPILL=1：w2c 壳不再 spill 祖先窗口（对照实验，§228）
+ifneq ($(S3_NO_WIN_SPILL),)
+WIFI_CDEFS += -DS3_NO_WIN_SPILL
+endif
+HTTPS_CDEFS = $(WIFI_CDEFS) -DS3_WITH_LWIP -DS3_WITH_HTTPS $(WIFI_CREDS)
+https:
+	@rm -rf $(WIFI_DIR)
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) $(WIFI_DIR)/libphy_win.a
+	$(MAKE) C6_ROOT=$(C6_ROOT) lwip
+	$(MAKE) C6_ROOT=$(C6_ROOT) BUILD=$(WIFI_DIR) S3_LEAN=1 \
+		S3_SKIP_C6="" \
+		S3_EXTRA_C6="kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+		             kernel/heap.c6 kernel/sem.c6 kernel/mutex.c6 kernel/queue.c6 kernel/event.c6" \
+		S3_CDEFS="$(HTTPS_CDEFS) $(S3_CDEFS)" S3_STACK_TOP=0x3FCD9500 \
+		S3_MAIN=$(S3_WIFI_MAIN) \
+		$(WIFI_DIR)/obj/c6_https_demo.o $(TLS_DIR)/libtls.a \
+		S3_EXTRA_LIBS="-Wl,--start-group $(WIFI_DIR)/libphy_win.a build/lwip/liblwip.a $(TLS_DIR)/libtls.a $(WIFI_DIR)/obj/c6_https_demo.o $(WIFI_LIBS) -Wl,--end-group $(WIFI_WRAP)" \
+		s3
+
+# ---- 一键上板（§217）--------------------------------------------------------
+# bringup：先刷"自动二分 + PHY 进度打印"的镜像（板子回来第一步用这个）
+bringup:
+	$(MAKE) C6_ROOT=$(C6_ROOT) S3_PHY_BISECT=1 wifi
+	./tools/s3run.sh $(WIFI_DIR)/c6os.bin 60
+
+# httpsflash：刷完整镜像（WiFi + lwIP + TLS），账号用 S3_WIFI_SSID/S3_WIFI_PASS 传
+httpsflash:
+	$(MAKE) C6_ROOT=$(C6_ROOT) https
+	./tools/s3run.sh $(WIFI_DIR)/c6os.bin 120
+
+# ---------------------------------------------------------------------------
+# lwipcheck：宿主上验证 lwIP 线程模型 + 我们的 sys_arch（docs/wifi-plan.md §227）
+#
+# 板子上除了 WiFi/PHY（闭源库）以外的软件层 —— lwIP、sys_arch、tcpip 线程、
+# tcpip_input 收包、BSD socket —— 都能在这里跑起来：两个 netif 交叉互联，
+# 跑一次完整的 TCP 回显。
+LWIP_HOST_DIR := build/hostlwip
+LWIP_HOST_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
+                  $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
+                  $(wildcard $(LWIP_SRC)/api/*.c) \
+                  $(LWIP_SRC)/netif/ethernet.c
+lwipcheck:
+	@mkdir -p $(LWIP_HOST_DIR)
+	cc -O2 -g -Wall -Wno-unused-parameter -Wno-address-of-packed-member \
+	   -DC6_LWIP_HOST -Iport/s3/lwip -Iport/s3/lwip/host -I$(LWIP_SRC)/include \
+	   -o $(LWIP_HOST_DIR)/sys_arch_test \
+	   $(LWIP_HOST_SRCS) port/s3/lwip/sys_arch.c \
+	   port/s3/lwip/host/arch_stub.c tests/sys_arch_host_test.c
+	./$(LWIP_HOST_DIR)/sys_arch_test

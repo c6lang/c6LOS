@@ -1,0 +1,120 @@
+/* cert_parse：从 DER 证书里取出 SubjectPublicKeyInfo（只做这一件事）
+ *
+ * 为什么不用 `std/data/x509.c6`（docs/wifi-plan.md §214）：
+ *   x509 依赖 `std/text/str.c6`，而 str 里有 c6 切片操作，会生成对 c6 语言运行时
+ *   （`__tcc_slice_index` 之类）的引用 —— 我们这套 `-ffreestanding` 的 ESP32-S3
+ *   镜像里没有那套运行时，链接会失败。TLS 1.2 客户端其实只需要"叶子证书里那段
+ *   SPKI 字节"，所以这里自己走 DER：只要按 tag 跳过 6 个字段就到了。
+ *
+ * 用法：
+ *
+ *     const u8 *spki = 0;
+ *     int spki_len = 0;
+ *     if (cert_leaf_spki(leaf_der, leaf_len, &spki, &spki_len) == 1) { ... }
+ *
+ * 输入是**单张证书**的 DER（调用方先从 Certificate 消息里按 3 字节长度切好）。
+ */
+#include <string.h>
+
+module net.cert_parse;
+import std.core.types;
+
+/* DER 长度字段：返回长度，*used 是长度字段本身占的字节数 */
+static int der_len(const u8 *p, int avail, int *used)
+{
+    int v = 0;
+    int n = 0;
+    int i = 0;
+
+    if (avail < 1) { return -1; }
+    if (p[0] < 0x80) {
+        *used = 1;
+        return (int)p[0];
+    }
+    n = (int)(p[0] & 0x7fu);
+    if (n < 1 || n > 3 || avail < 1 + n) { return -1; }
+    for (i = 1; i <= n; i++) {
+        v = (v << 8) | (int)p[i];
+    }
+    *used = 1 + n;
+    return v;
+}
+
+/* 读一个元素：*tag 是 tag 字节，返回内容长度，*body 指向内容，*total 是整个元素
+ * （tag + 长度 + 内容）的字节数。失败返回 -1。 */
+static int elem(const u8 *p, int avail, int *tag, const u8 **body, int *total)
+{
+    int used = 0;
+    int len = 0;
+
+    if (avail < 2) { return -1; }
+    len = der_len(p + 1, avail - 1, &used);
+    if (len < 0) { return -1; }
+    if (1 + used + len > avail) { return -1; }
+    *tag = (int)p[0];
+    *body = p + 1 + used;
+    *total = 1 + used + len;
+    return len;
+}
+
+/* Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+ * tbsCertificate ::= SEQUENCE {
+ *     [0] version(可选), serialNumber, signature, issuer, validity, subject,
+ *     subjectPublicKeyInfo, ... }
+ * 所以从 tbs 内容里按顺序跳过 version(若在)/serial/sigalg/issuer/validity/subject，
+ * 下一个 SEQUENCE 就是 SPKI。 */
+int cert_leaf_spki(const void *der, int derlen, const u8 **spki, int *spki_len)
+{
+    const u8 *p = (const u8 *)der;
+    const u8 *body = 0;
+    int tag = 0;
+    int total = 0;
+    int len = 0;
+    int avail = 0;
+    int i = 0;
+
+    if (der == 0 || spki == 0 || spki_len == 0 || derlen < 32) {
+        return 0;
+    }
+    /* 外层 Certificate SEQUENCE */
+    len = elem(p, derlen, &tag, &body, &total);
+    if (len < 0 || tag != 0x30) { return 0; }
+    /* 第一个孩子：tbsCertificate */
+    avail = len;
+    len = elem(body, avail, &tag, &body, &total);
+    if (len < 0 || tag != 0x30) { return 0; }
+
+    /* tbs 内容：逐个元素跳过 */
+    avail = len;
+    p = body;
+    for (i = 0; i < 6; i++) {
+        const u8 *b2 = 0;
+        int t2 = 0;
+        int tot2 = 0;
+        int l2 = 0;
+
+        if (avail < 2) { return 0; }
+        if (i == 0 && p[0] == 0xa0) {
+            /* [0] EXPLICIT version：跳过后重新从 serial 开始数 */
+            l2 = elem(p, avail, &t2, &b2, &tot2);
+            if (l2 < 0) { return 0; }
+            p = p + tot2;
+            avail = avail - tot2;
+            i = -1;                 /* 让循环重新开始数 serial */
+            continue;
+        }
+        if (i == 5) {
+            /* 第 6 个元素就是 SPKI：不跳过，直接返回 */
+            l2 = elem(p, avail, &t2, &b2, &tot2);
+            if (l2 < 0 || t2 != 0x30) { return 0; }
+            *spki = p;
+            *spki_len = tot2;
+            return 1;
+        }
+        l2 = elem(p, avail, &t2, &b2, &tot2);
+        if (l2 < 0) { return 0; }
+        p = p + tot2;
+        avail = avail - tot2;
+    }
+    return 0;
+}

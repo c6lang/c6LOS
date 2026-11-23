@@ -1,0 +1,161 @@
+/* tests/t_rsa_verify.c6 —— RSA PKCS#1 v1.5（SHA-256）验签自测
+ *
+ * 跑法（宿主上直接跑）：
+ *
+ *     /home/winger/c6/tcc/c6 -B /home/winger/c6/tcc -I/home/winger/c6 -Inet \
+ *         -o build/hostc6/rsa_verify_test \
+ *         /home/winger/c6/std/core/types.c6 /home/winger/c6/std/core/bits.c6 \
+ *         /home/winger/c6/std/encoding/sha256.c6 net/rsa_verify.c6 tests/t_rsa_verify.c6
+ *     ./build/hostc6/rsa_verify_test
+ *
+ * 测试向量是宿主上用 openssl 现场生成的（不是抄来的常量）：
+ *     openssl genrsa -out k.pem 2048
+ *     openssl dgst -sha256 -sign k.pem -out sig.bin msg.bin
+ *     openssl rsa -in k.pem -pubout -outform DER -out pub.der
+ * 覆盖 RSA-2048（qq.com 叶子证书）和 RSA-4096（中间/根证书）两种模长。
+ *
+ * 这一组必须全过：TLS 1.2 里服务端用证书私钥签 ServerKeyExchange，
+ * 我们就是靠它验签来确认"对面确实是证书持有者"（docs/wifi-plan.md §211/§212）。
+ */
+#include <stdio.h>
+#include <string.h>
+
+import std.core.types;
+import std.encoding.sha256;
+import net.rsa_verify;
+
+static const char spki2048[] =
+    "30820122300d06092a864886f70d01010105000382010f003082010a0282010100bef1b20818"
+    "e1bdef13deb54ac1518ae0ee69ecfe3c86e60562c302cb77019b02770c34b010da8c060050e2"
+    "f7d9f4397756460583754012a4c2304bbd747ce1d0d9165ec8b75a11376259c0b536af7ff5f7"
+    "f2238c8ea052a7d3cfe58534a44fb9b965c8530f978374329d5a99861161c9fd976db0944b93"
+    "a899d7be06be119d90055964765a58f782d1a26f1be68ef9d1b172b29c2855f3cff7e919e42f"
+    "2e3aad7a9847f0f4f215cc8b99e823e439b3f7fccb4f91ffcfad07ec4597a66daf41e2934423"
+    "4a9c5f7db24ab43aa73ea123e7370c29d80d82785085301aeb2ff35f726d17e7d351c2894979"
+    "bd71f416f6450292fd142fa83105c1c0f34a0ec8bf479b0203010001";
+static const char sig2048[] =
+    "a49e1c9eec682d29ac4b5247d2024b41f8ee49dc0c714fcec0ec7f8e01351dd48fd57c7e1927"
+    "7888f4352e41711ab6903eb2dd985b9c70d2f1f55e3b4ac413774a36d772efeb18bb900311b0"
+    "9ae89834edfd6aea1a6a32e8c2e2e290e00cfc347ca373df9311f22a7e63763a1387ef446fc2"
+    "f42763b271838d1d3f52a9eedb66e7b74f2606e508e9627bedc0e0d3f66638cbeac31c462d24"
+    "523c6ce3d5306147b9ab7744a44a2a383a1328a21d6adb9fdc9dc593858b7709ca5a200d8304"
+    "69e59722bdd2cee05ecb9307624c5a7cdadecebc83f92671bd665cfcc65e9b1b56bfc4d09b79"
+    "ec3f095b953b30f552d1976838cc0e446777736e89a92a9fc3de2c1c";
+static const char spki4096[] =
+    "30820222300d06092a864886f70d01010105000382020f003082020a0282020100a82b505f15"
+    "d76b3f7cbe75297d8fd415821558ff385f942f6313f554b14d66b97bb6226d301a644a8668bd"
+    "22ae346cef1fdefd8ef6513797888a603ff6c488f5eda8e744bea901aa7130d91f4cd0bbc95c"
+    "6aac5ffcb2a4cf6d1bb80120a05d65bd3829c54d6a8e1473bd2891fcc920aa33ec829b2855e2"
+    "93a701f84afe5022e7fa3e2b0a4696d5796da41befe67b30ec4aade6d867f5adbccffe7f44a2"
+    "665c950693805a957b4698a90d0d5618b7f346a54c501111db968c18c7feca03d30c832f11e3"
+    "a852daf95956861747b0871f38dbfc14eb290df4e46db6649966191669b58a8875a5d643e97c"
+    "9120df5a669e8971a9e169686cc7f4a10fc03fb34f1668d0312096cf92371c02004561fe35c7"
+    "5415cfe2e63b3381c3aba1d4b44ea4c53e57ac8824a73de4e98dd3208f6f62591b5dbd5ce8ae"
+    "b1823218706964d2b09b7b61da2fdb7cac251e7219d98a9e76e758e5d225f447fa8f3249fe2b"
+    "3d281829acd6e124feef31ac31adc0c549c50d3eb70e7c69823666aec1112fd9837abc7a2409"
+    "19d491d684593a85d27b2553cd8b8afc444e58a9fd3a47745897d9ac2dba17ae1a291cee34c6"
+    "c095f5a2ea62e4787fec94a9d2bfd931d7291fa1c0c1129d4d58ee0ec4e9597ca7bf70d7d24a"
+    "11d0baa32c57dd2fc254af9eef26bbd1e5be5993b4e52aa8624f0e70912ffc294e630e1dea28"
+    "497b0574fa2b78af79764f4df10203010001";
+static const char sig4096[] =
+    "83a0cdfadd2bb22ed6bb64097b1db7fd00e91b09cd3239e83e316519f47f0ae63b34a11b1206"
+    "af82a4a0c09f47b33d30d617b029421187b2acb2d632cac509d5162ca6e00437bdbb75ae2828"
+    "d7eaa827e7b8191cfdd3b4ee4abe09ed38bd44f3dccd3be512223a91e89ca1820949062e6623"
+    "97ce7abf6da5e68a8386e50e0099cdcd1c95d484a3befb106d44939edf8e48346fdbc3a63b2f"
+    "de8e71a64f8a0c9a1edf7088799abae9c9ae04abcf65d07d5609ecc3488aaa32c100b98c8871"
+    "191254f8131ec526524db9255ea428f690c0de8e03d50e4d21ad4fca0402590db9db5a517c3c"
+    "e09e98e27fcbf38d6cf4b2c8c0083b85c08dead329f37ccfa3a9e9f5262c423e1aabee9b5953"
+    "7fed1d07c79bf80fa258ce15fb8945a7aa093719a799ebd967f8c936beaea8b05c3bcbdc2357"
+    "54b64178fb17733812d6e6bdb22020f01cd19a0b084838c86902c05ee6f959738f810634c67b"
+    "80ac775e7d19f2456259f815e07e7d0a09a920b3e843a7b72732a39e80b7a0b53cdca800549c"
+    "90eaddcf41d610d3962c319a063476f6585aedb4e15f4c330928495258d04d753e9554ca2212"
+    "697b4e7f3782fbc649b3983cd0a8a924df241b3534b57ae7ca217e3d7b7b8a33ce805000f9a2"
+    "f0c92cbb5c1f1df09ab220c51ac240f139d8e01656b1d2ad59dea3c40b8c029c8c18a171ccf2"
+    "d854bcfc7dae007c77b306fe63d346125be6";
+static const char msg_hex[] =
+    "636c69656e745f72616e646f6d7c7c7365727665725f72616e646f6d7c7c63757276655f7061"
+    "72616d7320e6b58be8af95e6b688e681af";
+
+static int fails = 0;
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
+static int unhex(const char *s, u8 *out, int cap)
+{
+    int n = 0;
+
+    while (s[0] != 0 && s[1] != 0 && n < cap) {
+        int hi = hexval((int)s[0]);
+        int lo = hexval((int)s[1]);
+
+        if (hi < 0 || lo < 0) { return -1; }
+        out[n] = (u8)((hi << 4) | lo);
+        n = n + 1;
+        s = s + 2;
+    }
+    return n;
+}
+
+static void check(int cond, const char *what)
+{
+    if (!cond) {
+        printf("   FAIL %s\n", what);
+        fails = fails + 1;
+    } else {
+        printf("   ok   %s\n", what);
+    }
+}
+
+static void one(const char *tag, const char *spki_hex, const char *sig_hex,
+                const u8 *msg, int msglen, int expect_ok)
+{
+    u8 spki[1024] = { 0 };
+    u8 sig[512] = { 0 };
+    u8 bad[512] = { 0 };
+    RsaKey k = { { 0 }, { 0 }, 0, 0 };
+    int sl = 0;
+    int gl = 0;
+
+    sl = unhex(spki_hex, spki, 1024);
+    gl = unhex(sig_hex, sig, 512);
+    printf("== %s（spki %d 字节，签名 %d 字节）\n", tag, sl, gl);
+    check(rsa_parse_spki(spki, sl, &k) == 1, "解析 SPKI");
+    printf("   模数 %d limb（约 %d 位），指数 %d limb\n",
+           k.nlimbs, k.nlimbs * 32, k.elimbs);
+    check(k.nlimbs * 32 >= (expect_ok == 1 ? 2048 : 512), "模长合理");
+    check(rsa_pkcs1_sha256_verify(&k, msg, msglen, sig, gl) == 1, "合法签名通过");
+
+    /* 改消息 -> 必须失败 */
+    {
+        u8 m2[64] = { 0 };
+
+        memcpy(m2, msg, (usize)msglen);
+        m2[0] = (u8)(m2[0] ^ 1u);
+        check(rsa_pkcs1_sha256_verify(&k, m2, msglen, sig, gl) == 0, "改消息后拒绝");
+    }
+    /* 改签名 -> 必须失败 */
+    memcpy(bad, sig, (usize)gl);
+    bad[0] = (u8)(bad[0] ^ 1u);
+    check(rsa_pkcs1_sha256_verify(&k, msg, msglen, bad, gl) == 0, "改签名后拒绝");
+    /* 长度不对 -> 必须失败 */
+    check(rsa_pkcs1_sha256_verify(&k, msg, msglen, sig, gl - 1) == 0, "签名长度不符时拒绝");
+}
+
+int main(void)
+{
+    u8 msg[128] = { 0 };
+    int mlen = 0;
+
+    mlen = unhex(msg_hex, msg, 128);
+    printf("消息 %d 字节\n", mlen);
+    one("RSA-2048", spki2048, sig2048, msg, mlen, 1);
+    one("RSA-4096", spki4096, sig4096, msg, mlen, 1);
+    printf("%s（失败 %d 项）\n", fails == 0 ? "RSA 验签自测通过" : "自测失败", fails);
+    return fails == 0 ? 0 : 1;
+}

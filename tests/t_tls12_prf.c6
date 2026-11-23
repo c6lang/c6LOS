@@ -1,0 +1,110 @@
+/* tests/t_tls12_prf.c6 —— TLS 1.2 PRF（P_SHA256）自测
+ *
+ * 跑法（宿主上直接跑，docs/wifi-plan.md §212）：
+ *
+ *     /home/winger/c6/tcc/c6 -B /home/winger/c6/tcc -I/home/winger/c6 -Inet \
+ *         -o build/hostc6/tls12_prf_test \
+ *         /home/winger/c6/std/core/types.c6 /home/winger/c6/std/encoding/sha256.c6 \
+ *         net/tls12_prf.c6 tests/t_tls12_prf.c6
+ *     ./build/hostc6/tls12_prf_test
+ *
+ * 参考值是用宿主 python 的 hmac/hashlib 独立算出来的（不是抄我们自己的实现）：
+ *   pms = 00..2f（48 字节）, client_random = 40..5f, server_random = a0..bf
+ *   ms  = PRF(pms, "master secret", cr+sr, 48)
+ *   kb  = PRF(ms,  "key expansion", sr+cr, 72)
+ *   fin = PRF(ms,  "client finished", 10..2f, 12)
+ */
+#include <stdio.h>
+#include <string.h>
+
+import std.core.types;
+import std.encoding.sha256;
+import net.tls12_prf;
+
+static int fails = 0;
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') { return c - '0'; }
+    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+    return -1;
+}
+
+static int unhex(const char *s, u8 *out, int cap)
+{
+    int n = 0;
+
+    while (s[0] != 0 && s[1] != 0 && n < cap) {
+        int hi = hexval((int)s[0]);
+        int lo = hexval((int)s[1]);
+
+        if (hi < 0 || lo < 0) { return -1; }
+        out[n] = (u8)((hi << 4) | lo);
+        n = n + 1;
+        s = s + 2;
+    }
+    return n;
+}
+
+static int same(const u8 *a, const u8 *b, int n)
+{
+    int i = 0;
+
+    for (i = 0; i < n; i++) {
+        if (a[i] != b[i]) { return 0; }
+    }
+    return 1;
+}
+
+static void check(int cond, const char *what)
+{
+    if (!cond) {
+        printf("   FAIL %s\n", what);
+        fails = fails + 1;
+    } else {
+        printf("   ok   %s\n", what);
+    }
+}
+
+int main(void)
+{
+    u8 pms[48] = { 0 };
+    u8 cr[32] = { 0 };
+    u8 sr[32] = { 0 };
+    u8 ms[48] = { 0 };
+    u8 kb[72] = { 0 };
+    u8 fin[12] = { 0 };
+    u8 want_ms[48] = { 0 };
+    u8 want_kb[72] = { 0 };
+    u8 want_fin[12] = { 0 };
+    u8 fin_seed[32] = { 0 };
+    int i = 0;
+
+    for (i = 0; i < 48; i++) { pms[i] = (u8)i; }
+    for (i = 0; i < 32; i++) { cr[i] = (u8)(0x40 + i); }
+    for (i = 0; i < 32; i++) { sr[i] = (u8)(0xa0 + i); }
+    for (i = 0; i < 32; i++) { fin_seed[i] = (u8)(0x10 + i); }
+
+    (void)unhex("87a937430770213f392b5adc314060cd7d1dca70e70cafc95f34ff0a6f322849"
+                "e894584c22487665602224d77e4f4700", want_ms, 48);
+    (void)unhex("aae4d6fc95f7537bbdfb6ca89a820bb3cb4d775d6922c520bfa3f85e7feba63d"
+                "65985a87c352ca2bb73fc3891c487547303713e2e8f664a0cf715ae59b90287d"
+                "e2f8ec01adf1faf6", want_kb, 72);
+    (void)unhex("1b81f6aca6c2c6774f81f388", want_fin, 12);
+
+    printf("== master secret\n");
+    check(tls12_prf_secret(pms, 48, "master secret", cr, 32, sr, 32, ms, 48) == 1, "调用");
+    check(same(ms, want_ms, 48), "与参考值一致");
+
+    printf("== key expansion（注意 seed 顺序是 server_random+client_random）\n");
+    check(tls12_prf_secret(ms, 48, "key expansion", sr, 32, cr, 32, kb, 72) == 1, "调用");
+    check(same(kb, want_kb, 72), "与参考值一致");
+
+    printf("== finished（12 字节）\n");
+    check(tls12_prf_label(ms, 48, "client finished", fin_seed, 32, fin, 12) == 1, "调用");
+    check(same(fin, want_fin, 12), "与参考值一致");
+
+    printf("%s（失败 %d 项）\n", fails == 0 ? "TLS1.2 PRF 自测通过" : "自测失败", fails);
+    return fails == 0 ? 0 : 1;
+}
