@@ -30207,3 +30207,24 @@ bnez a2, cont
 - **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1222 没有 `esf_buf_setup_dynamic`，只有 static
+
+`nm` 只有 `esf_buf_setup_static`（`0x4201c9c8`），没有 dynamic 版。
+⇒ `esf_buf` 池**必须**走 static 路径（`eb_space` = `0x3fcd6b48`，192 字节）。
+但 `esf_buf_setup_static` 自己又报 `alloc eb fail(0)`，
+说明它内部还是绕回了 `esf_buf_alloc` → 空链表 → NULL。
+
+`g_wifi_menuconfig+8` = 1（dynamic 模式）可能是罪魁——
+IDF 里 0 = static，1 = dynamic。若改成 0 或许会走另一条分支，
+但反汇编显示两个分支最终都汇到 `403883bd`（dynamic 分配）。
+
+**⇒ 这条线需要读 `esf_buf_setup_static` 的完整反汇编才能继续**（约 0x4201c9c8~0x4201ca60，不到 160 字节），
+看清它到底从哪个全局取空间、以及 `alloc eb fail` 的具体判据。
+
+## §1223 会话最终状态（round 168）
+
+- 仓库 `main`，工作树干净，最新提交 `66fcd4b`，最佳构建 `md5=e76a3f1c`。
+- **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
