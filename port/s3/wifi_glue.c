@@ -3195,6 +3195,18 @@ void s3_seed_tx_buffers(void)
      * 根本不看空闲链表。 */
     *(volatile u32 *)(void *)(g_wifi_menuconfig + 8u) = 0u;
     *(volatile u32 *)(void *)(g_wifi_menuconfig + 84u) = 0u;
+    /* §§1310：把 wdev 函数表里的分配器换成 **ROM 版**
+     * （`libpp.a` 里那份在本构建下走不到分配路径）。 */
+    {
+        extern unsigned char *pp_wdev_funcs;
+        volatile u32 *wf = (volatile u32 *)(void *)pp_wdev_funcs;
+        if (wf != 0) {
+            wf[0x188u / 4u] = 0x4003edbcu;   /* ROM esf_buf_alloc */
+            wf[0x18cu / 4u] = 0x4003ebf8u;   /* ROM esf_buf_alloc_dynamic */
+            s3_ets_printf("[wdev] patched 188=%x 18c=%x\n",
+                          (unsigned)wf[0x188u / 4u], (unsigned)wf[0x18cu / 4u]);
+        }
+    }
     /* §§1289 ★★★★ 库真正用的是 **type=0 + idx 7/8/9**（管理帧）。
      * 从调用点反汇编：
      *   `403842ca: movi a11, 7;  movi a10, 0`  ⇒ esf_buf_alloc(0, idx=7)
@@ -3205,7 +3217,16 @@ void s3_seed_tx_buffers(void)
     ids[1] = 8u;
     for (t = 0u; t < 2u; t++) {
         u32 k = ids[t];
-        volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc + k * 16u;
+        /* §§1309 ★★★★★ **真正的列表基址在 `g_eb_list_desc_ptr`（`0x3fcef92c`）里！**
+         *
+         * ROM 版 `esf_buf_alloc`（`0x4003edbc`）：
+         *   `l32r a6, g_eb_list_desc_ptr ; l32i.n a6, a6, 0`
+         *   `addx4 a7, idx*4, a6` ⇒ desc = **base + idx*16**
+         *   `l32i.n a6, a7, 0` → 空闲链表头
+         * 真板 `g_eb_list_desc_ptr` = **`0x3fcbb3ac`**，
+         * 而我们之前一直往 `g_eb_list_desc`（`0x3fcbb354`，**根本不是列表**）里写。 */
+        extern unsigned char *g_eb_list_desc_ptr;
+        volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc_ptr + k * 16u;
         void *head = 0;
         void *prev = 0;
         u32 i2;
