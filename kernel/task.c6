@@ -774,7 +774,9 @@ void os_task_delay(u32 ticks) {
     }
     g_cur->delay_left = ticks;
     if (os_timeout_add(g_cur->id, ticks) != 0) {
+        /* ★★★ §1082：超时表满时也必须让出 CPU（否则永不切换任务）。 */
         g_cur->delay_left = 0;
+        os_task_yield();
         return;
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;

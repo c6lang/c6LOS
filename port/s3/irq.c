@@ -289,8 +289,27 @@ void *s3_timer_irq(u32 frame_sp)
     u32 cc = 0;
     g_s3_diag[9]++;
     /* §1076：实时钟推进与 T0 重装都放 flash 里（IRAM 只差几十字节）。 */
-    { extern void s3_tick_isr_tail(void); s3_tick_isr_tail(); }   /* §699: 定时器 ISR 实际进入次数 */
-
+    /* ★★★ §1082：tick 尾部**完全内联**，不调用任何函数。
+     *
+     * §1081 真板实测：从 ISR 里 call8 到 windowed C 函数（s3_tick_isr_tail），
+     * 在它 `entry` 上抛 cause=0 IllegalInstruction（EPC1 = 函数入口）。
+     * 改用汇编非窗口函数也不行（C 侧仍生成 call8）。
+     * ⇒ 唯一稳妥的写法就是在这里内联，彻底不产生任何调用/窗口轮转。
+     *
+     * 做两件事：递增 S3_TICK_PEND(0x50001580)；重装 TIMG0 T0 报警。 */
+    {
+        /* ★★★ §1082：tick 尾部只做一件事 —— 递增 S3_TICK_PEND。
+         *
+         * §1081 真板实测：从 ISR 里 call8 到 windowed C 函数会在它 `entry`
+         * 上抛 cause=0 IllegalInstruction（EPC1 = 函数入口）⇒ 必须内联。
+         *
+         * 为什么不需要重装 TIMG0：真正触发本 ISR 的是 **ccompare0**
+         * （§1080 实测 _vec_level1 / s3_timer_irq 都在反复命中），
+         * 而 `s3_timer_rearm()` 每次都会把 ccompare0 重新推到 ccount+N，
+         * 定时器自己就续上了。TIMG0 在这个链路上根本不参与。
+         * 只留这一行 store，IRAM 才放得下。 */
+        *(volatile u32 *)0x50001580u = *(volatile u32 *)0x50001580u + 1u;
+    }
     /* §370：**自愈看门狗**。板子一旦"CPU 死转 + USB 从总线上消失"，就只能
      * 人工断电重插（这轮就吃了一次）。这里在定时器中断里挂上 RTC 看门狗：
      * 中断还在跑就每 10ms 喂一次；一旦真的卡死（中断停了/死循环），8 秒后

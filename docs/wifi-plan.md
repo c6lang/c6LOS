@@ -27753,3 +27753,78 @@ WINDOWBASE = 1, WINDOWSTART = 0xaa02, a0 = 0
 2. 或者把 tick 尾部的两件事（递增 RTC 计数、重装 T0）
    **直接内联进 `s3_timer_irq`**，完全省掉这次调用（IRAM 约 40 字节，
    当前 IRAM 已不溢出，值得一试）。
+
+## §1082 任务切换终于跑起来，但立刻撞上"调用者窗口被破坏"
+
+### 本轮改动（构建 `f7adc272`）
+
+1. **tick 尾部完全内联进 `s3_timer_irq`**，只留一行
+   `*(volatile u32*)0x50001580 += 1`：
+   - §1081 证明从 ISR `call8` 到 windowed C 函数必崩（EPC1 = 函数入口）；
+   - 也确认了**不需要重装 TIMG0** —— 真正触发 ISR 的是 `ccompare0`，
+     `s3_timer_rearm()` 每次都会把它推到 `ccount+N`，定时器自己续上。
+2. **`os_task_delay` 在超时表满时也 `os_task_yield()`**（§1080）。
+
+### 真板结果：真·任务切换发生了，但立刻崩
+
+串口在 67 行处停住，最后两行：
+
+```
+[task] 库建任务 fn=403823a4 id=2 stack=16384 prio=29(->2)
+.b
+```
+
+崩溃现场（halt 后读）：
+
+```
+EXCCAUSE  = 28 (0x1C LoadProhibited)
+EPC1      = 0x42017214   ← os_task_start_core+0x94 的 `l32i.n a13, a1, 20`
+EXCVADDR  = 0xfffffff4   (= -12)
+a1        = 0            ← ★ 调用者的栈指针没了
+WB = 2, WS = 0xbf54, a0 = 0x3fcc68fc
+PC = 0x4037a02d <_vec_default+65>: j 自己   ← 进了默认异常死循环
+```
+
+`os_task_start_core` 那段是：
+
+```asm
+4201720f: callx8 a8          ; port_cycles()
+42017212: l32i.n a8, a1, 0
+42017214: l32i.n a13, a1, 20 ; ← a1 已经是 0，崩在这里
+```
+
+而 `port_cycles` 本身完全正常：
+
+```asm
+40378ccc <port_cycles>:
+    entry a1, 32
+    rsr.ccount a2
+    movi.n a3, 0
+    retw.n
+```
+
+**⇒ 所以不是 `port_cycles` 写坏了 a1，而是 `callx8` 返回时调用者的窗口
+没有恢复 —— `WS=0xbf54` 这种位型（16 个窗口里一堆被标活）本身就说明
+窗口账目是乱的。**
+
+**⇒ 这与 §1056 修掉的 `a1=0`（`s32e a4,a0,-32` 落到 0xffffffe0）是同一类
+问题，只是这次发生在内核主循环的 `callx8` 上，而不是库回调的阻塞点。**
+
+### 结论
+
+链路已经推进到"**只要任务真的被切换就会撞上窗口恢复 bug**"这一步：
+
+```
+timer ISR 正常 → TICK_PEND → s3_tick_consume → os_sched_tick → 超时到期
+→ os_task_delay 真正阻塞 → 调度器选中 ppTask → port_task_switch →
+[★ 崩在这里：调用者 a1=0，WB=2/WS=0xbf54]
+```
+
+**下一步（很明确）**：查 `_win_unf8`/`_win_ovf8` 与 `RESTORE_FRAME` 在
+**任务切换那一刻**的 `WINDOWSTART` 处理。§1050 已经在 `RESTORE_FRAME` 里
+做过 "WS-union"（`rsr a6, windowstart / or a3, a3, a6 / wsr a3, windowstart`），
+现在要确认 ppTask 的**首帧**（由 `port_task_ctx_create` 构造、
+trampoline 入口 0x403799d6）恢复时，这个 union 是否把不该活的窗口也标活了
+（`WS=0xbf54` 就是强烈信号）。
+
+（本轮镜像 `f7adc272`；若要回到能完整跑 130 行的稳定版，`git checkout 6dc85213 -- .`。）
