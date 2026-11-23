@@ -29920,3 +29920,30 @@ retw.n
 补 `ic_init`/`hal_init` 都会和它冲突。
 **下一步需要在 `wifi_init_process` 内部找到它自己调 `hal_init` 的位置
 （或确认它根本不调），从而按 IDF 的正确顺序初始化。**
+
+## §1203 `ic_init` 不可重复调用
+
+找到了 TX 缓冲池的真正来源：`esf_buf_setup` 由 **`pp_attach`** 调用，
+而 `pp_attach` 只在 **`ic_init`** 里。`wifi_init_process` 只调
+`wifi_nvs_init` / `wifi_lmac_init` / `wifi_hmac_init` / `wifi_crypto_init`，
+**从不调 `ic_init`**。
+
+于是试在 `wifi_init_process` **之后**调 `ic_init()`：
+```
+[icinit] r=257        ← 0x101 = ESP_ERR_INVALID_STATE
+```
+⇒ **`ic_init` 认为已经初始化过**（说明它在别处已经被调过一次，
+只是那次没有真正把 `pp_attach`/`esf_buf_setup` 跑成功，或者跑了但没生效）。
+流程被打断（168 行）。已回退。
+
+**⇒ 下一步**：找出那"第一次" `ic_init` 到底在哪、为什么它的
+`pp_attach`/`esf_buf_setup` 没生效（很可能与我们绕过 ppTask 直调
+`wifi_init_process` 有关 —— 正常顺序是 ppTask 里跑 `wifi_init_process`，
+它内部再调 `ic_init`，而我们的直调把这条链断了）。
+
+## §1204 会话最终状态（round 155）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=71c179ed`。
+- **真板最佳 209~210 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成。**
