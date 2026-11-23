@@ -27056,3 +27056,61 @@ wifi_osi_funcs_register → wifi_api_lock → wifi_log
 全部是现成代码路径。**
 
 镜像 `6931f417d4500ad9f3d48c5353377eed`。
+
+## §1065 交接状态：真板连接已丢失（需物理重插）
+
+到最后阶段，openocd 报
+`esp_usb_jtag: could not find or open device!`、串口也无输出 ——
+**开发板的 USB 需要物理重新插拔一次**（这不是代码问题）。
+
+`tools/ocboot.sh` 与 `tools/cap.py` 在重插后应可直接复用：
+
+```bash
+# 刷机
+esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset \
+  --after hard-reset write-flash 0x20000 build/wifi/c6os.bin
+# 采集（65 秒）
+timeout 75 python3 tools/cap.py -t 65
+# 调试服务器
+bash tools/ocboot.sh
+```
+
+## 交接清单（下一个人从这里开始）
+
+### 已完成、已合并进 main
+
+1. **全量 windowed ABI 迁移**（本任务的核心目标）—— 内核 / 中断 /
+   上下文切换 / 所有 C 代码统一 `-mabi=windowed`，闭源 windowed WiFi 库
+   能初始化、建任务、跑扫描调用、跑 HTTPS demo，**不再崩溃**（§1056）。
+2. 构建：`make C6_ROOT=/home/winger/c6 S3_ABI=windowed S3_APP_BASE=0x20000
+   S3_NO_PREEMPT=1 S3_TARGET_BSSID=1 S3_CDEFS="... -DS3_ONE_ABI ..." https`
+   （完整命令行见 §1056 / `docs/wifi-plan.md` 前文）。
+3. WiFi 账号：`port/s3/wifi_creds_local.h`（本地、不进版本库，§1059）。
+
+### 唯一剩余阻塞
+
+**`g_ic`（地址 `0x3fcd474c`）恒为 NULL**，因为
+**`ic_init`（0x4201a070）从未被调用** —— ic 对象从未创建。
+`esp_wifi_scan_start` 的第一道判定是 `*(u8*)(g_ic + 0x1E9) >= 2`，
+于是恒返回 `0x3002 ESP_ERR_WIFI_NOT_STARTED`，扫描从不启动。
+
+### 下一步（按顺序做，两步之内能见分晓）
+
+1. **把 `wifi_init_in_caller_task`（0x420400dc）里那张初始化函数表列出来**：
+   在该函数的 `callx8 a10`（0x4204010e / 0x420400fb）下断点，
+   每次命中打印 `$a10` 并用 `nm` 对照符号 —— 看表里到底有哪些初始化函数、
+   少了 `ic_init` 还是少了别的。
+   （我正要跑这一步时板子的 USB 掉了，§1065。）
+2. **补上缺的那一项**（对照 IDF 的 `esp_wifi_init` 期望的序列）。
+   `g_ic` 一旦被填上，扫描就会真正开始 —— 后面的
+   AP 关联 / DHCP / TLS / 取 qq.com 页面**全部是现成代码路径**。
+
+### 保留的关键改进（都在 main 上）
+
+§987（`_xt_alloca_exc` 的 `bbsi`→`bbci`）、§998（诊断不冲 a9）、
+§1024（任务入口去跳板）、§1032（壳用 RTC 存 sp）、
+§1050（`RESTORE_FRAME` 的 WS 取并集）、
+**§1056（四个阻塞 OSI 函数的"自由栈 + spill"薄壳 —— 决定性的那一改）**、
+§1059（WiFi 账号）。
+
+镜像 `6931f417d4500ad9f3d48c5353377eed`。
