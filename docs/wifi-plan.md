@@ -30392,3 +30392,30 @@ TX 缓冲池建不好 ← 绕过了 ppTask 的正常初始化序列 ← 绕过�
 - 仓库 `main`，工作树干净，最新提交 `5be8dd5`。
 - 最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`，真板稳定 **228 行**。
 - **四项验收全部未取得。目标未完成。**
+
+## §1242~§1244 `esf_buf_setup` 参数语义与 static 路径（均未成功）
+
+**§1242**：反汇编铁证 —— `esf_buf_setup` 里 `mov a11, a2`，
+而 `esf_buf_setup_static` 用 `s16i a3, desc+10` 把第二个参数当**个数**写进描述符。
+⇒ **`esf_buf_setup` 的参数是"缓冲个数"，不是缓冲区指针。**
+之前无参调用（a2 垃圾）、以及后续传 2048 字节指针（被当成天文数字的个数）都是错的。
+改成 `esf_buf_setup((void *)64u)` ⇒ `[esfsetup] r=0`，但真板掉到 **151 行**
+（64 个缓冲远超 `eb_space` 的 192 字节 ⇒ 内存损坏）。
+
+**§1243**：`esf_buf_setup((void *)1u)` ⇒ **227 行**（等于最佳），`r=0`，
+但 `[esfalloc] -> 0` 仍是 NULL、`Init static tx buffer num: 0`。
+
+**§1244**：把 `g_wifi_menuconfig+8`（dynamic 模式位）改成 0 走 static 路径
++ 传个数 1 ⇒ **226 行**，`Init static tx buffer num` 仍是 **0**。
+⇒ 即使 `esf_buf_setup` 返回 0，它也没真正建出缓冲。
+
+**⇒ 这条线到此为止**：库的 TX 池初始化依赖一整套我们没复刻的上下文
+（`g_wifi_menuconfig` 各字段的真实含义、`desc+16` 计数、`eb_space` 容量约束），
+盲试的代价是内存损坏。
+
+## §1245 交付终态（round 176）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板稳定 227~228 行**（本会话起点 79 行，**提升 148~149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
