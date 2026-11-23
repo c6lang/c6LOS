@@ -447,7 +447,7 @@ static int osi_mutex_lock(void *p)
         B_IN(4u);
         int pr = s3_w2c_mutex_pend((void *)&m->m, 0u);
 
-        ok = (pr == 0) ? 0 : -1;   /* §1066: _mutex_lock 契约 0=成功 */
+        ok = (pr == 0) ? 1 : 0;
         B_OUT(4u);
         if (g_dbg_sync != 0u) {
             s3_ets_printf("[lockok] t=%u pr=%d ok=%d\n", (unsigned)s3_w2c_current_task(),
@@ -465,7 +465,7 @@ static int osi_mutex_unlock(void *p)
         s3_ets_printf("[unlock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
     }
-    return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 0 : -1;  /* §1066 */
+    return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 1 : 0;
 }
 
 /* ---- 事件组 ---- */
