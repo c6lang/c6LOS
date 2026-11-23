@@ -30372,3 +30372,23 @@ scan/assoc/DHCP/TLS/HTTPS 才有机会。
 TX 缓冲池建不好 ← 绕过了 ppTask 的正常初始化序列 ← 绕过的原因是
 `W2C_SPILL` 手写薄壳在 windowed ABI 下高频调用必崩（`retw` 窗口用尽）。
 要打破它需要架构级重写，而不是单点补丁。
+
+## §1240 确认：扫描直调确实在跑，且卡在 TX
+
+`wifi_glue.c:2414` 的 `__real_wifi_scan_start_process(g_s3_real_scan_msg)`
+**确实被调用了**（`[scanmsg] ... 00000305 ...` 证明 `g_s3_real_scan_msg` 已捕获），
+但没有打出 `[scanp2] direct r=...`。
+⇒ **它进去之后就卡住了**，而 GDB 采样显示 PC 固定在
+`ieee80211_send_setup+36` 的 `j .` 断言循环。
+
+**所以整条扫描路径 100% 卡在 TX 缓冲池这一件事上**：
+`esf_buf_alloc` 拿不到缓冲 → `ieee80211_send_setup` 的 `bnez.n a2` 失败 →
+库执行自己的 `while(1)`。
+
+而 TX 池建不好，是因为我们绕过了 ppTask 的正常初始化序列（见 §1237 的闭环）。
+
+## §1241 交付终态（round 174）
+
+- 仓库 `main`，工作树干净，最新提交 `5be8dd5`。
+- 最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`，真板稳定 **228 行**。
+- **四项验收全部未取得。目标未完成。**
