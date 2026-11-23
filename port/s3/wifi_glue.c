@@ -2353,7 +2353,17 @@ int s3_wifi_scan(void)
         u32 sm = g_s3_real_scan_msg;
         if (r == 0 && sm != 0u) {
             extern int __real_wifi_scan_start_process(void *msg);
-            int sr = __real_wifi_scan_start_process((void *)sm);
+            extern unsigned char g_wifi_nvs[];
+            int sr;
+            /* §§1178：`wifi_scan_start_process` 的第一个检查是
+             * `(*(u8*)(*g_wifi_nvs) & 0xFD) == 1`（存储类型必须是 RAM），
+             * 否则直接 `return -1`。真板实测该字节是 **0x80**，
+             * 所以直调永远返回 -1。这里在调用前强制修正为 1。 */
+            {
+                u32 nv = *(volatile u32 *)(void *)g_wifi_nvs;
+                if (nv != 0u) { *(volatile unsigned char *)(void *)nv = 1u; }
+            }
+            sr = __real_wifi_scan_start_process((void *)sm);
             s3_ets_printf("[scanp2] direct r=%d\n", sr);
         }
     }

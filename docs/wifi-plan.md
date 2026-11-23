@@ -29536,3 +29536,49 @@ if (r == 0 && g_s3_real_scan_msg != 0u) {
 不真正阻塞，而是把 CPU 让回初始化任务；初始化任务在每次 API 调用之间
 主动调一次 `s3_pp_pump_once()` 去取一条消息并**只在不会阻塞时**执行它。
 这样两个任务变成"一个真正的协作式多任务"，不需要抢占也不需要窗口跨越。
+
+## §1178 扫描直调的失败点定位（本轮最后一处取证）
+
+`wifi_scan_start_process`（`0x4203a89c`）反汇编：
+
+```
+l32r a3, g_wifi_nvs
+l32i.n a3, a3, 0
+l32i.n a4, a2, 12          ; msg->[12]
+l8ui a3, a3, 0            ; *(u8*)(*g_wifi_nvs) —— 存储类型
+l8ui a5, a2, 8            ; msg->[8]
+and  a3, a3, 253          ; & 0xFD
+beqi a3, 1, ok
+movi a10, -1              ; ← 不满足就 return -1
+ok:
+call8 reset_cs_thres
+...
+call8 ieee80211_sta_scan(config, ic)
+l32r a2, g_ic
+l32i a2, a2, 116
+beqz a2, return           ; g_ic+116 == 0 时直接返回扫描结果
+moveqz a3, a2, a10
+neg  a10, a3              ; 否则把失败折成 -1
+```
+
+**真板实测**：`*(u8*)*g_wifi_nvs = 0x80` ⇒ `0x80 & 0xFD = 0x80 ≠ 1` ⇒ 必然 `-1`。
+在调用前把它强制改成 1 之后，真板打出 **`[v4]wifi|Start wifi scan`**
+（说明已经走过第一道检查、进到 `ieee80211_sta_scan`），但**仍返回 -1**
+——失败点在 `ieee80211_sta_scan` 内部（或 `g_ic+116` 那条分支）。
+
+## §1179 当前最佳状态
+
+**真板 199 行**（启用 `-DS3_HOME_EARLY` 后比 196 行再多 3 行，
+并首次出现 `[pppost] ppq=25`，说明协议栈又往前走了一段）。
+
+**构建命令（最终）**：
+```
+make C6_ROOT=/home/winger/c6 S3_ABI=windowed S3_APP_BASE=0x20000 S3_NO_PREEMPT=1 \
+  S3_TARGET_BSSID=1 \
+  S3_CDEFS="-DS3_INJECT_IDF_CAL -DS3_TRACE_IOCTL -DS3_TRACE_SCANMSG -DS3_SCAN_CHAN39 \
+    -DS3_FORCE_SYNC_SCAN -DS3_RC_SEED -DS3_RC_DRIVE -DS3_RC_HANDOFF -DS3_ONE_ABI \
+    -DS3_SKIP_FLASH_INIT -DS3_STA_CHANNEL6 -DS3_TICK_DEFER -DS3_HOME_EARLY" \
+  S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_ONE_ABI -DS3_SKIP_FLASH_INIT -DS3_TICK_DEFER" https
+```
+
+**四项验收仍未取得。目标未完成。**
