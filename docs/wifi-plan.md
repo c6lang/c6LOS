@@ -29228,3 +29228,25 @@ DHCP（无）、TLS（无）、qq.com body（无）。
 即用 `rsr a9, windowbase; bgeui a9, 8, skip` 把 spill 变成按需触发——
 这样浅窗口时完全不做那次整圈轮转，深窗口时才 spill，两头都不失控。
 这是目前唯一还没试过、且理论上能同时满足两个约束的方案。
+
+## §1158 按需 spill（实验，已回退）
+
+在 `W2C_SPILL` 里加 `rsr a9, windowbase; bltui a9, 8, 6f`，只在
+`windowbase >= 8` 时才 `call8 s3_win_spill`。
+
+真板结果：**78 行**，卡在 `[delay] ticks=1`。
+⇒ **spill 在浅窗口时也是必需的**，不能按需跳过。此路已封。
+
+## §1159 本轮最终状态
+
+**真板 167 行、无崩溃、`md5=d37a73a829989c565b1a5cfe9d046d56`、工作树干净。**
+
+已试过并回退的方案（本轮）：ISR 推进 tick、轮转调度、自旋让出式 delay、
+C 包装替代薄壳、直接 defsym 去薄壳、按需 spill、初始化任务改优先级 0/20。
+**全部无效。**
+
+**四项验收仍全部未取得**：
+- AP 关联：只有 `[wifi] 已关联，ssid= channel=0`（**空值**，不是真关联）
+- DHCP：无
+- TLS：无
+- qq.com body：无
