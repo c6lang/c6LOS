@@ -26898,3 +26898,37 @@ rom 0x1E9 byte    = 0
 镜像 `bff36e2543ffe178da9c5d85070fb0a7`；串口 129 行。
 **windowed ABI 层完全可用（§1056）；WiFi 账号已修好（§1059）；
 剩下这一个闭源库内部 `g_ic` 创建失败问题。**
+
+## §1061 手动补调 `ic_init()` —— 被库以 `INVALID_STATE` 拒绝
+
+在 `esp_wifi_start` 之后若 `g_ic == NULL` 就补调一次 `ic_init()`：
+
+```
+[wifi] §1061 补调 ic_init=257 g_ic=0
+[wifi] scan_start=12290
+```
+
+`257 = 0x101 = ESP_ERR_INVALID_STATE`，`g_ic` 仍然为 0。
+
+**⇒ 闭源库内部状态自相矛盾：它的"已初始化"标志在
+`esp_wifi_init_internal` 里被置上了，但真正创建 ic 对象、写 `g_ic` 的那一步
+没有执行；`ic_init` 又因为有那个标志而直接拒绝重入。**
+
+### 最终结论（本轮）
+
+**windowed ABI 全量迁移这一层已经完全可用**（§1056 是决定性的突破）：
+- 内核 / 中断 / 上下文切换 / 所有 C 代码统一 `-mabi=windowed` ✓
+- 闭源 windowed WiFi 库：`esp_wifi_init_internal -> 0`、`bringup rc=0`、
+  建任务、PHY 校准、跑扫描调用、跑 HTTPS demo —— **全部不再崩** ✓
+
+**挡在验收项前面的是两个纯功能性问题，与 ABI 无关：**
+1. WiFi 账号从来没配过 —— **已修**（§1059，`wifi_creds_local.h`）；
+2. ~~`g_ic` 未创建导致 `ESP_ERR_WIFI_NOT_STARTED`~~ —— **已定位到确切地址与判定式**
+   （§1060：`*(u8*)(g_ic + 0x1E9) >= 2`，而 `g_ic(0x3fcd470c) == NULL`；
+   §1061：`ic_init` 以 `INVALID_STATE` 拒绝补建）。
+
+**下一步唯一要做的事**：找出 `esp_wifi_init_internal` 里"置初始化标志"与
+"创建 ic 并写 g_ic"之间的分叉，看是哪个 OSI 空桩/我们的哪个 `--wrap=` 让它跳过了
+后半段 —— 修好之后扫描、关联、DHCP、TLS、取页面应该能一路通下来。
+
+镜像 `6931f417d4500ad9f3d48c5353377eed`（§1061 实验版，已回退源码）。
