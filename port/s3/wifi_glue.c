@@ -1421,15 +1421,21 @@ static u32 osi_wifi_int_disable(void)
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
 
     p[2] = p[2] + 1u;
-    return s3_w2c_irq_save();
+    /* §§1169：**单核 + 无抢占** 下不需要真的关中断。
+     * `pp_post` 在这个临界区里做 `pp_sig_cnt` 的读-改-写；
+     * 我们原来走 `s3_w2c_irq_save()`（= `port_irq_save`，要写 PS 寄存器），
+     * 开销大且会把 `__real_pp_post` 推进一个极窄的时序窗口（真板：
+     * `__wrap_pp_post` 里多一条指令就从 195 行掉到 90 行卡 `[pq]`）。
+     * 改成空操作后这个窗口应该消失。 */
+    return 0u;
 }
 
 static void osi_wifi_int_restore(u32 state)
 {
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
 
+    (void)state;
     p[3] = p[3] + 1u;
-    s3_w2c_irq_restore(state);
 }
 
 static int osi_is_from_isr(void) { return 0; }
@@ -2338,6 +2344,19 @@ int s3_wifi_scan(void)
     r = esp_wifi_scan_start((const void *)cfg, 0);
 #endif
     s3_ets_printf("[wifi] scan_start=%d\n", r);
+    /* §§1170：直接处理扫描消息（绕开 ppTask）。
+     * `g_s3_real_scan_msg` 是 `__wrap_pp_post` 里既有的捕获（`m[0]==0x305`）。
+     * §1169 把 `_wifi_int_disable/restore` 改成空操作后，`__real_pp_post` 的时序窗口
+     * 应已消失，这里加代码不应再把真板打回 90 行。 */
+    {
+        extern u32 g_s3_real_scan_msg;
+        u32 sm = g_s3_real_scan_msg;
+        if (r == 0 && sm != 0u) {
+            extern int __real_wifi_scan_start_process(void *msg);
+            int sr = __real_wifi_scan_start_process((void *)sm);
+            s3_ets_printf("[scanp2] direct r=%d\n", sr);
+        }
+    }
 #ifdef S3_DIRECT_SCAN_CALL
     /* §675: init 时 patch 的 g_timer_func 被库覆盖回真函数；扫描前再 patch 一次，
      * 判定 pp_post(0,0) 是否真的驱动 ieee80211_timer_do_process。 */

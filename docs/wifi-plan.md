@@ -29405,3 +29405,26 @@ rs = wifi_start_process();             /* → 0 */
 **四项验收仍未取得**：AP 关联 0、DHCP 0、TLS 0、qq.com body 0。
 卡点：扫描消息堆在 `xphyQueue` 里没人取（ppTask 拿不到 CPU），
 而任何绕过尝试都会踩到 `__real_pp_post` 的时序窗口。
+
+## §1169~§1170 ★ 消除 `__real_pp_post` 的时序脆弱性
+
+**§1169**：`osi_wifi_int_disable` / `osi_wifi_int_restore` 原来走
+`s3_w2c_irq_save()` / `s3_w2c_irq_restore()`（= `port_irq_save/restore`，
+要写 PS 寄存器）。`pp_post` 的临界区就是这两处。
+改成**空操作**（单核 + `S3_NO_PREEMPT` 下不需要真关中断）后：
+
+- 真板仍是 195 行，但 `__wrap_pp_post` 里加代码**不再把系统打回 90 行**。
+- `__real_pp_post` 的极窄时序窗口消失。
+
+**§1170**：有了 §1169，直接处理扫描消息变得可行：
+```c
+extern u32 g_s3_real_scan_msg;              /* __wrap_pp_post 里既有的捕获 */
+if (r == 0 && g_s3_real_scan_msg != 0u) {
+    int sr = __real_wifi_scan_start_process((void *)g_s3_real_scan_msg);
+}
+```
+真板：**196 行**，`[scanp2] direct r=-1` —— 能正常返回、不再卡死。
+`r=-1` 说明该消息已被消费过或扫描已在进行中，需要重新构造消息。
+
+**这是本轮第二个结构性进展**：把"任何代码改动都会卡 `[pq]`"这个障碍清掉了。
+后续可以直接处理 `ppq==6` 的所有消息（扫描/连接/认证），完全绕开 ppTask。
