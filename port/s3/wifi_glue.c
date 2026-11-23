@@ -2295,10 +2295,10 @@ int s3_wifi_scan(void)
      * → "2G channel bitmap is 0 in 2G band" → 返回 -1，扫描被拒。
      * 正确做法：channel 字段在偏移 8（l8ui a2,8 → scan_set_desChan）。
      * 这里显式锁信道 6；cfg[32..39] 全部保持 0。 */
-    /* §§1184：先不锁信道（cfg[8]=0 ⇒ 扫全部信道）。
-     * 真板上 `perform scan: chan<0,0>, dur<0,0>` 说明扫描参数空着；
-     * 先排除"显式指定信道导致状态机未初始化"这个可能。 */
-    cfg[8] = 0;
+    /* §§1188：恢复锁定信道 6。§1184 把它改成 0 后行为完全一样，
+     * 说明 `channel=0` 是**日志参数错位**的产物（见 §1186），不是配置真的为 0。
+     * 锁定目标 AP 的信道对后续关联更有利。 */
+    cfg[8] = 6;
 #endif
 #ifdef S3_PM_WAKE
     /* §691: ppProcessTxQ (40380963) 在发 probe 前调 pm_is_waked(ROM 4003c364)，

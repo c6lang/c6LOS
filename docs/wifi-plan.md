@@ -29717,3 +29717,26 @@ ss_state=0x3fcbb3f4, time=1070313296, index=1070529000
 - **真板最佳 210 行**（会话起点 79 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1188 恢复 cfg[8]=6（channel=0 是日志错位，不是真实配置）
+
+§1184 把它改成 0 后真板行为完全一样（209~210 行、同样的
+`perform scan: ss_state=0x0`），说明 `channel=0` 只是 §1186 发现的
+**日志参数错位**产物，扫描配置本身没问题。恢复锁定信道 6。
+
+**本轮确认的结论**：`esp_wifi_scan_start` 反汇编里 `l8ui a14, a4, 8`
+确实把 `config+8` 当信道传给 `ieee80211_regdomain_check_channel` 和日志，
+所以我们的 `cfg[8]` 是对的；日志里的 `channel=0` 不可信。
+
+## §1189 会话最终状态（round 148）
+
+- 仓库 `main`，工作树干净。
+- **真板最佳 210 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**剩余卡点**：`perform scan` 之后驱动报错，
+但**日志参数错位使得无法判断真实原因**（`[v1]wifi|? 0`、`[w1]wifi|%s` 都是错位产物）。
+下一步应先修 `c6_log_fmt` 的 varargs 读取（`osi_log_writev` 拿到的 `va_list`
+在 Xtensa windowed ABI 下可能不是简单的 `*(u32*)ap`），
+让日志可信后再定位扫描失败的真实原因。之后还有关联、DHCP、TLS、HTTPS 四大步。
