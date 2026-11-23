@@ -766,8 +766,13 @@ int tls12_read_app(Tls12 *s, void *p, int cap)
         if (type != RT_APP) {
             return 0;
         }
+        /* 记录可能比调用方的缓冲大（TLS_REC_MAX = 6144）。整条记录已经从套接字
+         * 读进 g_rec 了，**截断比报错好**：页面缓冲只有 2KB，但验收只需要响应
+         * 开头那几百字节（响应头之后的部分）。原来 `return -1` 会让一条 3KB 的
+         * 记录直接判失败 —— 而 qq.com 这种站点一条记录装下整个响应头很正常。
+         * 返回截断后的长度，调用方 `total += n` 也不会越界。 */
         if (n > cap) {
-            return -1;
+            n = cap;
         }
         memcpy(p, rec, (usize)n);
         return n;

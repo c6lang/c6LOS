@@ -20,6 +20,7 @@
     .literal .Lsw_cnt,  g_sw_cnt
     .literal .Lts_cnt,  g_ts_cnt
     .literal .Ldbg2,    0x50001800
+    .literal .Lwrap_diag, 0x50001C00   /* §884 */
     /* §450：错位闸门专用区。
      * **不能放在 0x50001800+32..+44** —— 那 4 个字被 `kernel/task.c6:430`
      * 的唤醒诊断占着，写进去会被它覆盖（真板实测读出来是随机值）。
@@ -39,17 +40,34 @@
     .literal .Lsrail_idx, 0x50001B40
     .literal .Lwscratch, g_win_scratch
     .literal .Ltmpsp,   g_ctx_tmp_sp
+    .literal .Lareg_magic, 0x41524547
     .literal .Lyl_cnt,  g_yl_cnt
+    .literal .Lwt_diag, 0x50001E00
 
+
+/* §934: 手写帧补 [sp-12]=上一帧 sp（_win_unf8 用），a9=当前 sp。 */
+    .macro  WIN_CHAIN_FIX prevsp, scratch
+    addi    \scratch, a1, -12
+    s32i    \prevsp, \scratch, 0
+    /* §995 曾在这里试过加一条 `memw`（怀疑帧链 store 没排空、被窗口溢出
+     * 处理体读到旧的 0）。实测**无效**（仍 `bWu1b`），已删除。
+     * §997 进一步查明：之前"加几条 store 就能过关"其实是**寄存器污染**
+     * （那段代码冲掉了 a10，而 `_win_unf8` 要求 a8..a15 被保持），
+     * 不是时序问题。 */
+    mov     a9, a1
+    .endm
 
 /* §304：把当前所有祖先窗口整圈 spill 到各自栈帧（同 w2c.S 的 WIN_SPILL）。
  * 任务切换前必须先做：否则被切走任务的寄存器还压在物理窗口里，
  * 等它被调度回来时物理寄存器已经是别的任务的内容了。 */
     .macro  S3_SPILL_ALL
     rsr     a8, ps
-    extui   a9, a8, 4, 1
-    bnez    a9, 55f
-    rsr     a9, epc1
+    extui   a10, a8, 4, 1
+    bnez    a10, 55f
+    l32r    a4, .Lwscratch
+    rsr     a10, epc1
+    s32i    a10, a4, 16
+    s32i    a8, a4, 20          /* §945: 保存原始 a8（库指针），宏末尾恢复 */
     movi    a10, -32
     and     a10, a10, a8
     movi    a11, 1
@@ -70,7 +88,16 @@
     rotw    4
     wsr     a8, ps
     rsync
-    wsr     a9, epc1
+    /* normalize WS to single bit */
+    rsr     a10, windowbase
+    movi    a11, 1
+    ssl     a10
+    sll     a11, a11
+    wsr     a11, windowstart
+    isync
+    l32i    a10, a4, 16
+    wsr     a10, epc1
+    l32i    a8, a4, 20          /* §945: 恢复 a8 —— 否则库指针被 PS 冲掉 */
 55:
     .endm
 
@@ -249,10 +276,58 @@
      *  两个值其实都完全合法），窗口全被归一化掉。 */
     srli    a6, a3, 16
     bnez    a6, 43f                 /* WINDOWSTART 高位非 0 ⇒ 非法 */
-    wsr     a3, windowstart         /* a3 = 上面读出的 68，即 WINDOWSTART */
+    /* §910 ★★ 必须写回帧里保存的**完整** WS（真板 0xaa00 = bit 9/11/13/15），
+     * 不能像 §907 那样写成 1<<WB 单比特。真板证据（§908 那次）：
+     *   epc1 = 0x403798f2 = port_task_yield 壳里的 `retw.n`
+     *   WB=10(异常入口 rotw-1 前是 11)，WS=0x1000(只有 bit12)。
+     * `retw` 会把 WB 从 12 旋到 11（CALLINC=1），落进**调用者**的窗口；
+     * 单比特 WS 的 bit11=0 ⇒ 该窗口非法 ⇒ WindowUnderflow ⇒
+     * _win_unf8 的 `l32e a7,a1,-12` 拿 a1=0 当 sp ⇒ 双重异常 excvaddr=-12。
+     * 多位 WS 正是嵌套 windowed 调用链所需要的：每一层活窗口都得置位。
+     * §907 引入单比特是为了躲开"写 WS 时 WB 还是上一个任务的" —— 那个
+     * 问题已由 §908（先清 PS.WOE、并且真的写 wsr windowbase）解决，
+     * 所以这里恢复写回完整 a3（帧[68]）。
+     * a3 在上面 `srli a6,a3,16` 之后没被改过，仍是保存的 WINDOWSTART。
+     * 顺序仍是先 WS 后 WB：wsr windowbase 会重映射 aN，a3 必须先消费掉。 */
+    /* §908 ★★ WSR.WINDOWSTART/WINDOWBASE 必须在 PS.WOE=0 时写 —— IDF
+     * SET_STACK 宏就是先 `ps &= ~(WOE|OWB|CALLINC)` 再写窗口寄存器的。
+     * 真板证据：epc1 正好停在 `wsr.windowbase a5` 那条指令，exccause=0x1c、
+     * 双重异常落在 _win_ovf12+3（`l32e a0,a1,-12`，a1=0xf ⇒ excvaddr=3）。
+     * WOE=1 时改窗口基址会让硬件按新映射去解释旧窗口，立即触发窗口异常。
+     * 保留 bit0..7（INTLEVEL/EXCM/UM）和 bit20..31，清掉 bit8..19
+     * （OWB + CALLINC + WOE）；末尾 §905 会用帧里的 PS 整体写回。 */
+    rsr     a7, ps
+    extui   a6, a7, 0, 8
+    srli    a7, a7, 20
+    slli    a7, a7, 20
+    or      a7, a7, a6
+    wsr     a7, ps
+    rsync
+#ifdef S3_SPILL_SHELL
+    movi    a6, 1
+    ssl     a5
+    sll     a6, a6
+    wsr     a6, windowstart
+#else
+    /* ★★★★ §1050（**根因修法**）：写回帧里的 WINDOWSTART 之前，
+     * **先和硬件当前的 WINDOWSTART 取并集**。
+     *
+     * §1049 实测：到 ppTask 故障那一刻，`RESTORE_FRAME` 已经跑了 **258 次**
+     * （`0x50000400` 的计数 = 0x102）。而每次恢复都用**帧里保存的 WS 整值**
+     * 去覆盖硬件 —— 那份快照只反映"任务被切走那一刻"的窗口状态。
+     *
+     * 但 windowed 调用链的**祖先窗口在切走、切回之间一直活着**，
+     * 它们的位必须保持。直接覆盖就会把"当前仍 live 的窗口位"抹掉，
+     * 于是下一次 `retw` 误判为欠载、从没写过的溢出记录里恢复 ⇒ `a1 = 3`。
+     *
+     * 取并集既保留了帧里的意图，又不会丢掉此刻仍活着的窗口位。 */
+    rsr     a6, windowstart
+    or      a3, a3, a6
+    wsr     a3, windowstart         /* §910 + §1050: 帧 WS ∨ 当前 WS */
+#endif
     isync
-    /* §504：去掉 `wsr windowbase`（§503-C 实测它本身就是故障点），
-     * 基址由恢复段末尾的 `wsr ps`(OWB) + `rfe` 负责装回。 */
+    wsr     a5, windowbase
+    isync
     l32r    a4, .Ltmpsp
     l32i    a1, a4, 0               /* 取回帧指针（此时窗口已是本任务的）*/
     j       44f
@@ -306,6 +381,24 @@
 9:
     wsr     a2, epc1
     l32i    a2, a1, 64
+    /* §905 ★★ 必须把 PS.OWB 改成本任务保存的 WINDOWBASE。
+     * `call8`/`retw` 只改 WINDOWBASE 硬件寄存器，**不会**同步 PS.OWB；
+     * PS.OWB 只在进异常/中断时由硬件写入。我们的 task yield 是普通 call8
+     * 进来的（不是 IDF 那种软件中断），所以帧里存的 PS.OWB 是**旧的**：
+     * 真板实测 帧[68]=WS=0xaa00(bit 9/11/13/15)、帧[72]=WB=15，
+     * 但 帧[64]=PS=0x00060a00 ⇒ OWB=10。rfe 按 OWB 把 WB 设回 10，
+     * 而 WS bit10=0 ⇒ (WS>>WB)&1==0 非法组合，任务一 retw 就在
+     * `_win_ovf8` 里拿 a1=0xf 当 sp 双重异常打死在 `_vec_default`。
+     *
+     * 修法：清掉 PS 的 bit8..11，再把帧[72] 的 WB 移进 OWB，
+     * 这样 rfe 装回的 WB 和上面的 wsr windowstart 才是同一套状态。 */
+    l32i    a6, a1, 72
+    srli    a7, a2, 12
+    slli    a7, a7, 12          /* 保留 bit12..31（含 CALLINC/WOE），下面放回 */
+    extui   a2, a2, 0, 8        /* 保留 INTLEVEL/EXCM/UM 等低 8 位 */
+    slli    a6, a6, 8           /* WINDOWBASE << 8 → PS.OWB（bit8..11） */
+    or      a2, a2, a6
+    or      a2, a2, a7
     movi    a3, 16
     or      a2, a2, a3
     wsr     a2, ps
@@ -325,6 +418,24 @@
     l32i    a13, a1, 48
     l32i    a14, a1, 52
     l32i    a15, a1, 56
+#ifdef S3_SPILL_SHELL
+    l32r    a8, .Lareg_magic
+    l32i    a9, a1, 108
+    bne     a8, a9, 94f
+    l32i    a0, a1, 80
+    l32i    a2, a1, 84
+    l32i    a3, a1, 88
+    l32i    a4, a1, 92
+    l32i    a5, a1, 96
+    l32i    a6, a1, 100
+    l32i    a7, a1, 104
+94:
+    /* §942: 标记检查用 a8/a9 当 scratch，必须无条件恢复 —— a9 是
+     * windowed 调用的 spill 指针，留成 magic 会让下一次 call8 写飞。
+     * 放在 94: 之后，ISR 帧（无标记）也能恢复。 */
+    l32i    a8, a1, 28
+    l32i    a9, a1, 32
+#endif
     /* §372：sp 由帧自己给出（偏移 76）。**必须用 `l32i a1, a1, 76` 这种
      * 自加载写法** —— 此时 a0..a15 都已经从帧里恢复好了，任何一个临时寄存器
      * 都会毁掉刚恢复的值。基址用的是旧 a1，所以一条指令就够。
@@ -342,6 +453,27 @@
     bltu    a1, a3, 81f
     l32r    a3, .Lstkhi2
     bgeu    a1, a3, 81f
+    /* ★ §967（真 bug，真板取证见 docs/wifi-plan.md）：
+     * **恢复完 a1 之后必须把 a9 也设成这个 a1。**
+     *
+     * windowed ABI 里 sp 的"影子"在 a9：`call8/callx8` 的被调者拿到的 a1
+     * 来自**调用者的 a9**（§890）。`entry a1,N` 会自己把 a9 设好，所以
+     * 函数内部的第二层调用没问题；但**任务恢复的这一刻没有 `entry`** ——
+     * `rfe` 直接把窗口装回来，a9 取的是帧里的偏移 32 槽。
+     * `port_task_ctx_create` 把整帧 20 个字清零（§339），所以新任务的
+     * a9 就是 **0**；被切走的任务那一格也可能停在一个早先的暂存值上。
+     *
+     * 真板现场（§967，记录在 RTC `0x500018c0`）：
+     *   ppTask 在 `403822c7: or a11,a1,a1` 时 a1 还是对的 `0x3fcc4790`，
+     *   紧接着 `403822ca: callx8 a5` 把 a9 当成了被调者的 sp；返回后
+     *   a1 被 `_win_unf8` 还原成 0，下一句 `403822d3: l32i.n a5,a1,0`
+     *   读地址 0 → `exccause=0x1c`(LoadStoreAlignment)、`excvaddr=0`，
+     *   落进 `_vec_level1` 的坏 sp 闸门原地死转（就是 `bWu1b` 之后卡住）。
+     *
+     * IDF 的 SET_STACK 也是这么约定的：`a9 = new_sp`。这里补上，
+     * 让"任何被恢复的上下文"都满足 a9 == a1 这个不变式。
+     * 放在范围检查之后：a3 已经被当 scratch 用掉了，这里只用 a1。 */
+    mov     a9, a1
     rfe
 81:
     l32r    a3, .Lbadsp
@@ -362,9 +494,17 @@
 84: j       84b
     .endm
 
+#ifdef __XTENSA_CALL0_ABI__
     .global port_task_switch
     .type   port_task_switch, @function
 port_task_switch:
+#else
+    /* §884: 全 windowed 构建里本函数被 call8 调用；原 call0 体改名为 _c0，
+     * 由下面的 windowed 壳 entry→call0→retw 进入，保证 a1 是正确的 sp。 */
+    .global port_task_switch_c0
+    .type   port_task_switch_c0, @function
+port_task_switch_c0:
+#endif
     /* 这里**不** spill：spill 放在 w2c 的壳里做。
      * 原因（本轮定死）：窗口溢出槽位落在"被 spill 的那个窗口的调用者的
      * 栈指针下方"，而 port_task_switch 运行在我们自己的 call0 内核栈上，
@@ -391,6 +531,27 @@ port_task_switch:
      * 改成 -128，帧占 `[sp-128, sp-48)`，与槽位区完全不相交。
      * （`_vec_level1` 早就用 -128 了，见 §361；这里漏改了。） */
     addi    a1, a1, -128
+    /* ★ §973（真 bug）：`mov a9, a1` **必须在 `s32i a9, a1, 32` 之后**。
+     *
+     * 原来这两句的顺序是
+     *     addi a1, a1, -128
+     *     mov  a9, a1          ← 先把 a9 改成"新帧的 sp"
+     *     ...
+     *     s32i a9, a1, 32      ← 于是存进帧里的是 a1-128，不是被打断上下文的 a9
+     * 帧偏移 32 是"恢复时要写回 a9 的那一格"。存错的后果不是立刻崩：
+     * 任务被切回来时 a9 = sp-128，而 windowed ABI 要求 a9 == sp
+     * （`call8/callx8` 的被调者 a1 取调用者的 a9）。于是任务下一次
+     * `callx8` 的被调者拿着 `sp-128` 当栈跑，返回时 `_win_unf8`
+     * 把 a1 还原成别处的值。
+     *
+     * 真板现场（docs/wifi-plan.md §967/§968/§971，RTC `0x500018c0`）：
+     *   `a9 = 0x3fcc4710`、而任务真实 sp = `0x3fcc4790` ——
+     *   **差值正好 0x80 = 128 = 这一帧的大小**，一字不差地指向这里。
+     *   后续 `403822d3: l32i.n a5,a1,0` 读地址 0 → `exccause=0x1c`、
+     *   `excvaddr=0`，掉进 `_vec_level1` 的坏 sp 闸门死转（`bWu1b` 之后卡住）。
+     *
+     * `mov a9, a1` 本身不能删：它是在给**后面那条 call8** 准备
+     * "callee 的 a1 = caller 的 a9"（§896）。所以只把它挪到存完之后。 */
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -406,6 +567,23 @@ port_task_switch:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
+    mov     a9, a1
+#ifdef S3_SPILL_SHELL
+    /* §939: 显式存当前窗口 a0..a7 到帧尾 + 打标记（ISR 帧没这些槽）。 */
+    s32i    a0, a1, 80
+    s32i    a2, a1, 84
+    s32i    a3, a1, 88
+    s32i    a4, a1, 92
+    s32i    a5, a1, 96
+    s32i    a6, a1, 100
+    s32i    a7, a1, 104
+    l32r    a8, .Lareg_magic
+    s32i    a8, a1, 108
+    /* §940: [sp-12] 链必须在所有寄存器存完后再写 —— WIN_CHAIN_FIX 用
+     * a8/a10 做 scratch，放前面会毁掉刚存进 frame[28]/[36] 的 a8/a10。 */
+    addi    a10, a1, 128
+    WIN_CHAIN_FIX a10, a8
+#endif
     /* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
      *
      * 原来 RESTORE_FRAME 结尾写死 `addi a1, a1, 80`，而 §361 把中断帧改成了
@@ -601,9 +779,51 @@ port_task_switch:
 8:
     RESTORE_FRAME
 
+#ifndef __XTENSA_CALL0_ABI__
+    /* §885: windowed 壳 —— **尾跳**而非 entry+call0。
+     *
+     * 被 windowed C 用 callx8 调用时，进入本壳的寄存器：
+     *   a0 = 带 CALLINC=2 标记的返回地址（0x82xxxxxx）；
+     *   a1 = 合法 sp（call8 的 callee a1 = 调用者 a9，编译器已备好）；
+     *   a2 = ctx 参数（call8 的 callee a2 = 调用者 a10）。
+     * 上一版用 `entry a1,64` 会执行 `rotw -CALLINC`，把逻辑寄存器重新映射，
+     * a2 立刻变成调用者的旧 a2（实测 0x60a00，一个 PS 值）—— ctx 就此丢失。
+     *
+     * c0 体**从不正常返回**，结尾总是 RESTORE_FRAME → rfe 切到目标任务；
+     * 而它算 EPC 用 `(a0 & 0x3fffffff)|0x40000000`，恰好把 CALLINC 标记剥掉
+     * 换回 flash 高位（0x82018f5b → 0x42018f5b，正是 callx8 的下一条）。
+     * 所以直接尾跳：a0、a2 原样带进 c0，保存的帧完全正确；将来该任务被
+     * 切回时 rfe 恢复带标记的 a0，调用者的 retw 自会转回窗口。
+     * 参照 win_bridge.S：call8 进来的函数用 addi 而非 entry 即可。 */
+    .align  4
+    .global port_task_switch
+    .type   port_task_switch, @function
+port_task_switch:
+    /* §891: windowed C 用 `callx8` 调进来。真板帧实测：callx8 **不轮转窗口**，
+     * 它把带 CALLINC 的返回地址写进 a8，而 a0 还是调用者的旧值
+     * （a0=0x82018c00、a8=0x82018b00、a2=任务结构 t、a10=ctx）。
+     * c0 从 a0 算 EPC、从 a2 取 ctx，所以两者都要先纠正：
+     *   a0 <- a8  ⇒ EPC = 0x42018b00（callx8 的下一条）
+     *   a2 <- a10 ⇒ ctx 而不是 t
+     * 只修 a2 时 EPC 仍指向旧 a0 的 retw.n，切回来立刻崩 —— 这就是上一版
+     * 只加 mov a2,a10 反而更糟的原因。
+     * §895: IDF 正统 SPILL_ALL_WINDOWS 试过（entry+5×rotw）：第一次切换就在
+     * 第 3 个 `and a12,a12,a12` 上 exccause=0x1d（脏 a9 写飞），因为我们的
+     * 中断/切换帧是 call0 风格、没有合法的 a9 链。故仍走本补丁。 */
+    mov     a0, a8
+    mov     a2, a10
+    j       port_task_switch_c0
+#endif
+
+#ifdef __XTENSA_CALL0_ABI__
     .global port_task_yield
     .type   port_task_yield, @function
 port_task_yield:
+#else
+    .global port_task_yield_c0
+    .type   port_task_yield_c0, @function
+port_task_yield_c0:
+#endif
     /* 诊断：入口计数（Ldbg2+28），区分"没被调用"与"调用后空指针早退" */
     l32r    a14, .Ldbg2
     l32i    a15, a14, 28
@@ -638,6 +858,27 @@ port_task_yield:
      * 改成 -128，帧占 `[sp-128, sp-48)`，与槽位区完全不相交。
      * （`_vec_level1` 早就用 -128 了，见 §361；这里漏改了。） */
     addi    a1, a1, -128
+    /* ★ §973（真 bug）：`mov a9, a1` **必须在 `s32i a9, a1, 32` 之后**。
+     *
+     * 原来这两句的顺序是
+     *     addi a1, a1, -128
+     *     mov  a9, a1          ← 先把 a9 改成"新帧的 sp"
+     *     ...
+     *     s32i a9, a1, 32      ← 于是存进帧里的是 a1-128，不是被打断上下文的 a9
+     * 帧偏移 32 是"恢复时要写回 a9 的那一格"。存错的后果不是立刻崩：
+     * 任务被切回来时 a9 = sp-128，而 windowed ABI 要求 a9 == sp
+     * （`call8/callx8` 的被调者 a1 取调用者的 a9）。于是任务下一次
+     * `callx8` 的被调者拿着 `sp-128` 当栈跑，返回时 `_win_unf8`
+     * 把 a1 还原成别处的值。
+     *
+     * 真板现场（docs/wifi-plan.md §967/§968/§971，RTC `0x500018c0`）：
+     *   `a9 = 0x3fcc4710`、而任务真实 sp = `0x3fcc4790` ——
+     *   **差值正好 0x80 = 128 = 这一帧的大小**，一字不差地指向这里。
+     *   后续 `403822d3: l32i.n a5,a1,0` 读地址 0 → `exccause=0x1c`、
+     *   `excvaddr=0`，掉进 `_vec_level1` 的坏 sp 闸门死转（`bWu1b` 之后卡住）。
+     *
+     * `mov a9, a1` 本身不能删：它是在给**后面那条 call8** 准备
+     * "callee 的 a1 = caller 的 a9"（§896）。所以只把它挪到存完之后。 */
     s32i    a0, a1, 0
     s32i    a2, a1, 4
     s32i    a3, a1, 8
@@ -653,6 +894,23 @@ port_task_yield:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
+    mov     a9, a1
+#ifdef S3_SPILL_SHELL
+    /* §939: 显式存当前窗口 a0..a7 到帧尾 + 打标记（ISR 帧没这些槽）。 */
+    s32i    a0, a1, 80
+    s32i    a2, a1, 84
+    s32i    a3, a1, 88
+    s32i    a4, a1, 92
+    s32i    a5, a1, 96
+    s32i    a6, a1, 100
+    s32i    a7, a1, 104
+    l32r    a8, .Lareg_magic
+    s32i    a8, a1, 108
+    /* §940: [sp-12] 链必须在所有寄存器存完后再写 —— WIN_CHAIN_FIX 用
+     * a8/a10 做 scratch，放前面会毁掉刚存进 frame[28]/[36] 的 a8/a10。 */
+    addi    a10, a1, 128
+    WIN_CHAIN_FIX a10, a8
+#endif
     /* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
      *
      * 原来 RESTORE_FRAME 结尾写死 `addi a1, a1, 80`，而 §361 把中断帧改成了
@@ -768,6 +1026,29 @@ port_task_yield:
     retw
 #endif
 
+#ifndef __XTENSA_CALL0_ABI__
+    /* §884: windowed 壳，同 port_task_switch。 */
+    .align  4
+    .global port_task_yield
+    .type   port_task_yield, @function
+port_task_yield:
+    entry   a1, 64
+#ifdef S3_SPILL_SHELL
+    /* §937: 壳帧自己的 [sp-12] 也必须初始化 —— SPILL_ALL 溢出的第一个窗口
+     * 就是当前壳，_win_ovf8 的 `l32e a0,a1,-12` 从这里取"上一帧 sp"。
+     * entry a1,64 只改 a1，不写这一格；不补就是垃圾 a9/a0。 */
+    addi    a10, a1, 64
+    addi    a8, a1, -12
+    s32i    a10, a8, 0
+    mov     a9, a1
+    S3_SPILL_ALL
+#endif
+    s32i    a0, a1, 0
+    call0   port_task_yield_c0
+    l32i    a0, a1, 0
+    retw
+#endif
+
     .global port_ps_get
     .type   port_ps_get, @function
 port_ps_get:
@@ -803,7 +1084,45 @@ s3_win_tramp:
      * [a1+N-32, a1+N-4]；N=16 会把 a4..a7 的槽放到**帧外**，
      * 溢出/欠载处理体按 [sp-32,sp) 找槽时就会落到别人的帧里。 */
     entry   a1, 48
+/* ★ §977（**根因**）：`WIN_CHAIN_FIX` 必须**无条件**执行，
+     * 不能藏在 `#ifdef S3_SPILL_SHELL` 里。
+     *
+     * `S3_SPILL_SHELL` 在最终构建里**从来没定义过**（Makefile 里搜不到），
+     * 所以这两件事在这条跳板上从来没发生过：
+     *   1. `[a1-12] = 上一帧 sp`（帧链）
+     *   2. `a9 = a1`
+     *
+     * 真板硬件断点实测（docs/wifi-plan.md §976/§977，gdb 硬件断点，
+     * pc = ppTask+3，即 `entry a1,48` 刚执行完）：
+     *     a1 = 0x3fcc4790   ✓ 正确
+     *     a9 = 0x3fcc0660   ✗ 完全是别处的垃圾
+     *     [a1-12] = 0x00000000   ✗ 帧链根本没写
+     * 而 `_win_ovf8` 第一步就是 `l32e a0, a1, -12` 去取帧链，
+     * 拿到 0 之后 `s32e a4, a0, -32` 就往 0xffffffe0 写；
+     * 下溢那侧则从**从没被写过的清零栈**里还原 a0..a3，
+     * 于是 a0 = a1 = 0 —— 正好等于闸门记录里存下的那两个 0
+     * （RTC `0x500018c0`），随后 `403822d3: l32i.n a5,a1,0` 读地址 0，
+     * `exccause=0x1c`(LoadStoreAlignment) → 掉进 `_vec_level1` 死转，
+     * 串口就停在 `bWu1b`。
+     *
+     * IDF 的 `SET_STACK`（xt_instr_macros.h:39）就是
+     * `*(sp-12) = sp + SAVE_AREA_OFFSET(48)`，和这里的
+     * `prevsp = a1 + 48` 完全一致，所以这本来就是"windowed 根帧"的
+     * 标准动作，不该受任何调试开关控制。 */
+    addi    a10, a1, 48
+    WIN_CHAIN_FIX a10, a8
     s32i    a0, a1, 0
+    /* §906：进 callx8 之前的窗口现场，定位 os_sched_tick entry 的 cause=0。
+     * 0x50001E00..1E10 在清零区(0x50000200..0x50001F00)内且 1E80 才被占用。 */
+    l32r    a6, .Lwt_diag
+    s32i    a1, a6, 0
+    s32i    a4, a6, 4
+    rsr     a7, ps
+    s32i    a7, a6, 8
+    rsr     a7, windowstart
+    s32i    a7, a6, 12
+    rsr     a7, windowbase
+    s32i    a7, a6, 16
     mov     a8, a4               /* 壳的 a4 = tramp 的 a12 = 目标地址 */
     callx8  a8
     l32i    a0, a1, 0
@@ -837,6 +1156,11 @@ s3_task_tramp:
     slli    a9, a9, 2
     add     a9, a3, a9
     s32i    a12, a9, 16
+    /* §890 全 windowed ABI：新任务的帧里 a9 被清零，而 call8 的被调者
+     * a1 = 调用者 a9。任务体是 windowed C，它再 callx8 到 os_sched_tick
+     * 时对方 entry a1,144 会拿到 a1=0（真板 epc1=os_sched_tick、excvaddr=0）。
+     * 进入任务体前必须把 a9 设成合法 sp。 */
+    mov     a9, a1
     /* a4 是入口的 ABI 标志（由 port_task_ctx_create 从 g_next_task_windowed 写入）：
      *   0 -> 我们自己的 call0 任务，用 callx0
      *   1 -> 闭源库的 windowed 任务（如 ppTask），必须先置 PS.WOE 再 callx8，
@@ -859,7 +1183,33 @@ s3_task_tramp:
      * 所以先 `call8` 到**近处的 windowed 跳板** `s3_win_tramp`（本文件内、
      * 同一个段），由它去 `callx8` 远端入口 —— 此时窗口已经轮转过，
      * `callx8` 只是在已经正确的窗口里做一次远调用。 */
-    call8   s3_win_tramp
+    /* ★★★ §1024（**结构修法**）：**直接 `callx8 a12`，去掉 s3_win_tramp 这一级窗口**。
+     *
+     * tr45 实测：把跳板调用从 `call8` 换成 `callx8`，ppTask 仍是
+     * `wb=4 / ws=0x15` —— 说明 §412 那句"`callx8` 不推进 WINDOWSTART"
+     * **是错的**（两者都会轮转窗口）。
+     * 而跳板存在的唯一理由是 `call8` 的 ±128KB 相对位移够不到 flash 入口；
+     * `callx8 寄存器` 没有位移限制，**根本不需要跳板**。
+     *
+     * 收益：任务入口少占一级窗口 ⇒ ppTask 从 **WB=2** 起（而不是 4），
+     * 窗口环上多一个槽。§1023 的机制是"库的调用链绕环一圈，把跳板的窗口
+     * 和 ppTask 自己的窗口当空闲回收"（tr44：第一次调用前 ws=0x15，
+     * 返回后变 ws=0x10），多一个槽能显著推迟这次回卷。
+     *
+     * 同时补上根帧的帧链 `[sp-12]`：`s3_task_tramp` 没有 `entry`，
+     * a1 就是恢复出来的任务 sp，链值写 `a1+48`（对齐 IDF SET_STACK 的
+     * `sp + SAVE_AREA_OFFSET`），溢出处理体才不会拿脏链算落点。 */
+    movi    a10, 48
+    add     a10, a10, a1
+    addi    a8, a1, -12
+    s32i    a10, a8, 0
+    mov     a9, a1
+    /* §1036 曾在这里试过 `callx4`（只轮转 1 个窗口）。它**确实**让 ppTask 落在
+     * WB=1、并且两次调用返回后 a1 不再被破坏（坏 sp 崩溃消失），
+     * 但 CALLINC=1 会破坏编译器"调用一律 call8（CALLINC=2）"的假设，
+     * 结果在别处出现非法的 `retw.n`（epc1=0x4037d7d6, exccause=0）。
+     * **方向已验证（窗口层级是关键），但 callx4 不是合法修法，已撤回。*/
+    callx8  a12
     call0   os_task_exit
     j       1f
 2:
@@ -873,6 +1223,7 @@ s3_task_tramp:
     .literal .Lepclo,  0x40000000
     .literal .Lepchi,  0x44000000
     .literal .Lbadrec, 0x50001880
+    .literal .Lwtramp, s3_win_tramp
 
     .section .text, "ax", @progbits
     .align  4

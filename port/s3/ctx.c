@@ -70,7 +70,15 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
  * §447 已经把"开关形同虚设"的 bug 修掉，现在 spill 只在 `w2c.S` 的
  * 3 个壳里跑（都有 `l32r a8,12b / l32i / beqz a8, 5f` 守卫），
  * 不会再在 call0 内核帧上触发溢出处理体写飞。 */
+#ifdef S3_ONE_ABI
+/* 全 windowed ABI：所有 C/汇编都是真窗口帧，硬件溢出/欠载处理体按标准
+ * 帧链工作；IDF 的 s3_win_spill 靠 call12 递归把 WB 推满一圈，在我们的
+ * 手写内核帧上会用脏 a9 写飞（真板 epc1=s3_win_spill+0x2b、
+ * excvaddr=0xffffffe0、exccause=0x1d）。这里默认关掉，窗口由硬件维护。 */
+u32 g_s3_win_spill_en = 0u;
+#else
 u32 g_s3_win_spill_en = 1u;
+#endif
 
 S3Ctx g_sched[C6OS_MAX_CORES];
 /* 诊断计数（ctx.S 里自增后覆写到 RTC，避免 RTC 初值随机的干扰） */
@@ -175,8 +183,36 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
      * 写 `top` ⇒ 任务从 a1 = top 起跑、往下用栈，启动帧 `[top, top+128)`
      * 落在**栈顶之上的保留区**里，永远不会被自己的栈覆盖。 */
     f[19] = top;
+    /* §896：windowed ABI 的根帧必须自己种下溢出链的 `[sp-12]`。
+     * IDF 的 SET_STACK (xt_instr_macros.h:39) 明确 `*(sp-12) = new_sp`：
+     * "the windowOverflow handler expects to look at the previous frame's
+     * stackpointer to find the extra save area"。新任务没有调用者来写这一格，
+     * 不种就是把 0 留给 `_win_ovf8` 的 `l32e a0,a1,-12`，于是
+     * `s32e a4,a0,-32` 写到 0xffffffe0 → StoreProhibited(exccause=0x1d)。
+     * 真板：新任务一进 s3_win_wifi_main_task 的嵌套 callx8 就双异常。
+     * 这里在帧下方 12 字节处写入帧自己的 sp（无调用者时的自然"上一帧"），
+     * 溢出与下溢都用同一格，自洽。 */
+#ifdef S3_ONE_ABI
+    /* IDF SET_STACK: [sp-12] = new_sp = sp + SAVE_AREA_OFFSET(48)；
+     * 溢出处理体 `l32e a0,a1,-12` 拿到它后 `s32e a4,a0,-32` 把 a4..a7
+     * 写到 [sp+16..sp+28]，落在 [top,top+128) 这块已经 rfe 用不到的
+     * 上下文帧里，而不是踩在 s3_win_tramp 的活帧 [top-48,top) 上。 */
+    /* IDF SET_STACK 在 sp 上方留出 48 字节 base+extra save area，
+     * `_win_ovf8` 从 [sp-12] 取"上一帧 sp"后把 a4..a7 溢写到
+     * [prev-32..prev-20] = [top+16..top+28]，正好落在本帧 f[4..7]
+     * （rfe 之后就不再用的初始寄存器槽）。这里把 16 字节 base save area
+     * 的其余三格也显式清零：a0 没有调用者 = 0，a2/a3 也不该是栈垃圾。 */
+    *(volatile u32 *)(top - 16u) = 0u;        /* a0: 无调用者 */
+    *(volatile u32 *)(top - 12u) = top + 48u; /* 上一帧 sp（IDF 模式）*/
+    *(volatile u32 *)(top -  8u) = 0u;        /* a2 */
+    *(volatile u32 *)(top -  4u) = 0u;        /* a3 */
+#endif
     f[1] = (u32)entry;                 /* a2 */
+#ifdef S3_ONE_ABI
+    f[3] = 1u;
+#else
     f[3] = g_next_task_windowed;       /* a4：入口的 ABI 标志 */
+#endif
     g_next_task_windowed = 0;
     f[2] = (u32)arg;                   /* a3 */
     f[15] = (u32)s3_task_tramp;        /* EPC */
@@ -188,7 +224,19 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
      * OWB 决定 `rfe` 返回后的 WINDOWBASE，继承别人的 OWB 会让新任务
      * （闭源库的 ppTask）落到一个非法/别人的窗口基址上。
      * 清 0 之后 RESTORE_FRAME 会写 WS=1、rfe 装回 OWB=0 ⇒ 干净起步。 */
-    f[16] = (port_ps_get() & ~0x1Fu & ~0xF00u) | 0x40000u;
+    {
+        u32 ps_;
+        /* 不能调用 port_ps_get()：此处调用链已达 4 层窗口，第 5 次 call8
+         * 触发窗口溢出，溢出处理体会破坏 a7（保存 c 的寄存器），
+         * 于是返回 0x60a00（PS & ~0x1f）而非 ctx 指针。直接 rsr 读 PS。 */
+        __asm__ __volatile__("rsr %0, ps" : "=a"(ps_));
+        /* §900：CALLINC(bits16-17) 必须清零，不能继承调用者的。
+         * IDF uxInitialiseStackFrame 显式写 PS_CALLINC(1)（"假装被 call4 过"），
+         * 我们自己的 tramp 直接消费 a2/a3、随后用 call8 自行设置 CALLINC，
+         * 所以取 0 最干净。继承来的 CALLINC 会让窗口轮转多转一格，
+         * retw 从 a4(f[3]=1) / a5(f[4]=0) 槽里读出 a0=1/a1=0。 */
+        f[16] = (ps_ & ~0x1Fu & ~0xF00u & ~0x30000u) | 0x40000u;
+    }
     c->sp = top;
     *(volatile u32 *)c->stack = 0xC6C0DEADu;
     return c;

@@ -16,6 +16,20 @@ _vecbase:
     .org 0x080
     j   _win_ovf8
     .org 0x0C0
+    /* §997：这里曾经埋过一段"延时补偿"（9 条指令，碰 a10/a11），一度让
+     * `ppTask` 越过 `bWu1b`。**已撤回** —— 那是一段**寄存器污染**，不是修复：
+     *
+     * 证据：把这段里的常量从 `0x50001D00` 改成 `0x50001F00`，
+     * `[wifi] bringup rc` 就从 `0x50002000` 变成 `0x50002400` ——
+     * **返回值跟着我这段代码里的常量走**，说明 `esp_wifi_init_internal`
+     * 的返回值其实是**我这段代码把 a10 冲掉之后泄漏出来的残值**。
+     *
+     * 而 IDF 的 `_WindowUnderflow8` 明确要求 **a8..a15 必须被保持**，
+     * 我"只用 a10/a11 所以无冲突"的假设是错的 —— 处理体虽然自己不碰
+     * a8..a15，但**被它打断的代码**需要这些寄存器原样回来。
+     *
+     * ⇒ 这一段必须删掉。它给出的"过关"是假的，`rc` 也因此是假的。
+     * 同时这也解释了 §993/§996 为什么看着"能过"却带着一个不合理的 rc。*/
     j   _win_unf8
     .org 0x100
     j   _win_ovf12
@@ -70,9 +84,8 @@ _win_unf4:
 
     .align 4
 _win_ovf8:
-    /* §505：不用 [a1-12] 链。真板 `a9` 有效（前四条 store 都过），
-     * 但链上的 a0 是垃圾，第 5 条 store 就 StoreProhibited 双异常。
-     * 8 个寄存器全部落到 [a9-32,a9) —— 被溢出那一帧的窗口保存区。 */
+#ifdef __XTENSA_CALL0_ABI__
+    /* §505：不用 [a1-12] 链（call0 构建下窗口帧是假的）。 */
     bltui   a9, 0x100, 2f
     s32e    a0, a9, -16
     s32e    a1, a9, -12
@@ -82,11 +95,25 @@ _win_ovf8:
     s32e    a5, a9, -28
     s32e    a6, a9, -24
     s32e    a7, a9, -20
+#else
+    /* §876: 全 windowed 必须用 IDF 原版 —— a4..a7 落到调用者帧 [a0-32,-20)，
+     * 单基址镜像会把它们写进被溢出帧自己的保存区，underflow 时填错。 */
+    s32e    a0, a9, -16
+    l32e    a0, a1, -12
+    s32e    a1, a9, -12
+    s32e    a2, a9,  -8
+    s32e    a3, a9,  -4
+    s32e    a4, a0, -32
+    s32e    a5, a0, -28
+    s32e    a6, a0, -24
+    s32e    a7, a0, -20
+#endif
 2:  rfwo
 
     .align 4
 _win_unf8:
-    /* §505：和新的 ovf8 布局镜像。 */
+#ifdef __XTENSA_CALL0_ABI__
+    /* §505：和新的 ovf8 布局镜像（call0 构建下这些向量基本不触发）。 */
     l32e    a0, a9, -16
     l32e    a1, a9, -12
     l32e    a2, a9,  -8
@@ -95,10 +122,24 @@ _win_unf8:
     l32e    a5, a9, -28
     l32e    a6, a9, -24
     l32e    a7, a9, -20
+#else
+    /* §874: 全 windowed 构建必须用 IDF 原版 —— 关键多了 l32e a7,a1,-12
+     * 从调用者帧找 a4..a7 的保存区；§505 的单基址镜像会填错这 4 个寄存器。 */
+    l32e    a0, a9, -16
+    l32e    a1, a9, -12
+    l32e    a2, a9,  -8
+    l32e    a7, a1, -12
+    l32e    a3, a9,  -4
+    l32e    a4, a7, -32
+    l32e    a5, a7, -28
+    l32e    a6, a7, -24
+    l32e    a7, a7, -20
+#endif
     rfwu
 
     .align 4
 _win_ovf12:
+#ifdef __XTENSA_CALL0_ABI__
     /* §505：同 ovf8，不用 [a1-12] 链。 */
     bltui   a13, 0x100, 2f
     s32e    a0,  a13, -16
@@ -114,10 +155,27 @@ _win_ovf12:
     s32e    a9,  a0,  -28
     s32e    a10, a0,  -24
     s32e    a11, a0,  -20
+#else
+    /* §876: 全 windowed 用 IDF 原版链加载。 */
+    s32e    a0,  a13, -16
+    l32e    a0,  a1,  -12
+    s32e    a1,  a13, -12
+    s32e    a2,  a13,  -8
+    s32e    a3,  a13,  -4
+    s32e    a4,  a0,  -48
+    s32e    a5,  a0,  -44
+    s32e    a6,  a0,  -40
+    s32e    a7,  a0,  -36
+    s32e    a8,  a0,  -32
+    s32e    a9,  a0,  -28
+    s32e    a10, a0,  -24
+    s32e    a11, a0,  -20
+#endif
 2:  rfwo
 
     .align 4
 _win_unf12:
+#ifdef __XTENSA_CALL0_ABI__
     /* §505：和新的 ovf12 布局镜像。 */
     l32e    a0,  a13, -16
     l32e    a1,  a13, -12
@@ -131,6 +189,22 @@ _win_unf12:
     l32e    a9,  a13, -28
     l32e    a10, a13, -24
     l32e    a11, a13, -20
+#else
+    /* §874: 同 unf8，全 windowed 用 IDF 原版链加载。 */
+    l32e    a0,  a13, -16
+    l32e    a1,  a13, -12
+    l32e    a2,  a13,  -8
+    l32e    a11, a1,  -12
+    l32e    a3,  a13,  -4
+    l32e    a4,  a11, -48
+    l32e    a5,  a11, -44
+    l32e    a6,  a11, -40
+    l32e    a7,  a11, -36
+    l32e    a8,  a11, -32
+    l32e    a9,  a11, -28
+    l32e    a10, a11, -24
+    l32e    a11, a11, -20
+#endif
     rfwu
 
 /* level-2..6 的中断：闪背光 N 下（N = 等级）后停住。
@@ -143,6 +217,11 @@ _vec_lvl\n:
     .endm
 
     .section .text, "ax", @progbits
+
+/* §1028 曾在这里放过一个"记录里的 a0/a1 为 0 就保留原值"的加固版
+ * `_win_unf8_safe`。真板实测**无效**（故障记录逐字节不变，仍然
+ * epc1=0x42013313 / a1=0 / exccause=0x1d），说明**欠载处理器根本没跑**，
+ * a1 是在一次"干净 retw"之后真的为 0。已删除，恢复原始处理体。 */
     .align 4
     VEC_LVL 2
     VEC_LVL 3
@@ -204,6 +283,27 @@ _vec_lvl_common:
  * 由那条 `rfwu` 回到被打断的 `movsp` 上重试。 */
 _vec_user:
     wsr     a0, excsave1        /* 硬件不会自动存 a0，alloca 处理体要用 */
+    /* §875: 双异常会把 0x50000100 的现场覆盖成第二次异常；这里在调用任何
+     * windowed C 之前，用纯汇编把**第一次**异常的 cause/vaddr/epc1/a0 记到
+     * 0x50000180（新槽，不冲突），便于定位 windowed 启动的真凶。 */
+    movi    a2, 0x50000180
+    rsr     a3, exccause
+    s32i    a3, a2, 0
+    rsr     a3, excvaddr
+    s32i    a3, a2, 4
+    rsr     a3, epc1
+    s32i    a3, a2, 8
+    s32i    a0, a2, 12
+    movi    a3, 0xC6F12501       /* 魔数：标记本槽已写 */
+    s32i    a3, a2, 16
+    /* §906：异常瞬间的窗口现场（a1/ps/WS/WB），定位 os_sched_tick 的 cause=0。 */
+    s32i    a1, a2, 20
+    rsr     a3, ps
+    s32i    a3, a2, 24
+    rsr     a3, windowstart
+    s32i    a3, a2, 28
+    rsr     a3, windowbase
+    s32i    a3, a2, 32
     rsr     a0, exccause
     bnei    a0, 5, 1f
     j       _xt_alloca_exc
@@ -223,13 +323,31 @@ _xt_alloca_exc:
     xor     a2, a2, a3          /* 把 PS.OWB 改成新基址 */
     wsr     a2, ps
     rsync
-    bbsi.l  a4, 31, 2f          /* 按 CALLINC 选欠载向量（分支够不着，用 j） */
-    j       _win_unf4
-2:  rotw    -1
-    bbsi.l  a8, 30, 3f
-    j       _win_unf8
-3:  rotw    -1
+    /* ★ §987（**真 bug**）：这两个条件是**反的**。IDF 原文
+     * （`xtensa_vectors.S` 的 `_xt_alloca_exc`）是：
+     *     bbci.l a4, 31, _WindowUnderflow4
+     *     rotw   -1
+     *     bbci.l a8, 30, _WindowUnderflow8
+     *     rotw   -1
+     *     j              _WindowUnderflow12
+     * 即 **bit31 为 0 → unf4**、**bit30 为 0 → unf8**。
+     * 我们原来写的是 `bbsi`（bit 为 1 才跳），把条件取反了：
+     *   - call4（bit31=0）碰巧还落到 `j _win_unf4` ✓
+     *   - **call8（bit31=1, bit30=0）本该进 `_win_unf8`，却被 `bbsi a4,31`
+     *     送到 2f，再 `bbsi a8,30` 不跳，于是 `j _win_unf12` ✗**
+     * 多转一次 `rotw -1` 且按 12 个寄存器还原 ⇒ **WINDOWBASE 被改成
+     * 非 4 对齐的值** ⇒ WINDOWSTART 出现"幽灵位"（真板实测 `WS=0x14`，
+     * 其中 bit2 的窗口基址根本不合法）⇒ 之后 `retw` 认为调用者窗口还
+     * live，**跳过 WindowUnderflow**，`a1` 直接用物理寄存器里的垃圾
+     * （真板实测 `a1=0`）⇒ `ppTask+0x33: l32i.n a5,a1,0` 读地址 0
+     * ⇒ `bWu1b` 死住。见 §986 的现场记录。 */
+    bbci.l  a4, 31, 4f          /* bit31 清 ⇒ 按 call4 还原 */
+    rotw    -1
+    bbci.l  a8, 30, 5f          /* bit30 清 ⇒ 按 call8 还原 */
+    rotw    -1
     j       _win_unf12
+4:  j       _win_unf4
+5:  j       _win_unf8
 
 _vec_exc:
 #ifdef __XTENSA_CALL0_ABI__
@@ -244,6 +362,9 @@ _vec_exc:
 
     .align 4
 _vec_default:
+    /* §946: a2 在下面会被当 RTC 基址冲掉，先存故障现场 a2 到 +60 */
+    movi    a3, 0x50000100
+    s32i    a2, a3, 60
     /* 未处理向量/双重异常现场存进 RTC 慢速内存（CPU 复位后不丢，esptool
      * read-mem 0x50000100 起 16 字节即可读到）：
      *   +0x100 标记 0xBAD0 / +0x104 EXCCAUSE / +0x108 EXCVADDR / +0x10C EPC1
@@ -276,6 +397,8 @@ _vec_default:
     rsr     a3, excsave1
     s32i    a3, a2, 44
     s32i    a13, a2, 48          /* §504：_win_ovf12 的 spill 基址就是 a13 */
+    s32i    a12, a2, 52          /* §943: 故障现场 a12 */
+    s32i    a8, a2, 56           /* §944: 故障现场 a8（故障指令 l32i a8,a8,40 的基址） */
 1:
     j       1b
 
@@ -356,6 +479,17 @@ _vec_level1:
     s32i    a13, a1, 48
     s32i    a14, a1, 52
     s32i    a15, a1, 56
+    /* §896：windowed ABI 的两个 prerequisites，IDF 异常入口和本文件
+     * s3_task_tramp (ctx.S:908) 都有，唯独这个定时器 ISR 漏了：
+     *  (1) [sp-12] = 被中断的 sp —— _win_ovf8 的 `l32e a0,a1,-12` 链头。
+     *      不写就是 0，溢出时 `s32e a4,a0,-32` 落到 0xffffffe0 →
+     *      StoreProhibited(exccause=0x1d)，epc1 停在 port_putc 的 entry。
+     *  (2) a9 = a1 —— call8 后 callee 的 a1 = caller 的 a9；这里用 addi
+     *      (不是 entry) 开帧，硬件不会自动把 a9 跟着挪，必须在 call8 前
+     *      显式同步，否则 s3_timer_irq 的 entry 会踩在 ISR 帧上。
+     * 用 a2 做 scratch：它下面马上被 `rsr a2,epc1` 覆盖。 */
+    addi    a2, a1, 128
+    s32e    a2, a1, -12
     rsr     a2, epc1
     s32i    a2, a1, 60
     /* level-1 没有 EPS1：PS 由软件保存，去掉 EXCM/INTLEVEL 后回写。 */
@@ -401,6 +535,7 @@ _vec_level1:
     wsr     a2, ps
     rsync
     mov     a10, a1              /* 参数：陷阱帧指针 */
+    mov     a9, a1               /* §896：call8 后 callee 的 a1 = caller 的 a9 */
     call8   s3_timer_irq
     beqz    a10, 2f              /* 返回值也在 a10（callee 的 a2） */
     l32i    a1, a10, 64
@@ -433,6 +568,12 @@ _vec_level1:
      *   2. 帧指针必须先藏进 `g_ctx_tmp_sp`，因为重映射会把 `a1` 也换掉。
      * `ctx.S` 那边这段在 `rsil 15` 里，中断上下文里本身就是 INTLEVEL≥1，
      * 定时器是 level-1、不会自我抢占，所以共用这个全局不会打架。 */
+    /* §900 全 windowed ABI：IDF 的 `_xt_user_exit` 在 `rfe` 前**不碰**窗口 CSR，
+     * `rfe` 自己按 PS.OWB 恢复 WINDOWBASE。这里再写一遍 WS/WB 会和 `rfe`
+     * 的结果 desync（WB 被写两次，WS 却不是同一套状态），被中断的 windowed
+     * 函数 `retw` 就落到错的物理窗口上 —— 真板表现为 printf 的 retw 拿到
+     * a0=1（等于任务帧的 a4 槽）后 cause=0。直接跳到寄存器恢复段。 */
+    j       44f
     l32i    a2, a1, 68
     beqz    a2, 44f                 /* 68 == 0 ⇒ 没写过，别碰窗口 */
     l32i    a3, a1, 72
@@ -453,6 +594,14 @@ _vec_level1:
     bnez    a6, 45f                 /* WINDOWSTART 高位非 0 ⇒ 非法（只有低 16 位有意义） */
     l32r    a6, .Ltmpsp_i
     s32i    a1, a6, 0
+    /* §1039 曾在这里把"硬件当前 WS"与"帧里的 WS"取并集再写回，
+     * 想保住 §1035 里丢失的 bit 0。真板实测**无效**：
+     * 第一次 windowed 调用前后仍是 `ws = 0x05 → 0x04`。
+     * ⇒ 这条 level-1 中断返回路径也不是清掉 bit 0 的元凶。已撤回。 */
+    /* §1046 曾在这里去掉 ISR 恢复里的 `wsr windowbase`（怀疑中断把 WB 写成 0
+     * 后按帧恢复 a0..a15，其中写 a9 正好踩掉 phys 9 = ppTask 的 a1）。
+     * 真板实测：故障记录**逐字节不变**（a1=3 / wb=2 / ws=0x05）。
+     * ⇒ 不是它，已恢复。 */
     wsr     a2, windowstart
     isync
     wsr     a3, windowbase

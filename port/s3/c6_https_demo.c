@@ -114,20 +114,7 @@ static int https_get(const char *host, const char *path, char *out, int cap)
     }
     if (s_tls_state == 0) {
         s_tls_state = (unsigned char *)malloc((unsigned int)net__tls12_hs__tls12_state_size());
-        if (s_tls_rec == 0) {
-        s_tls_rec = (unsigned char *)malloc(6400);
-        s_tls_enc = (unsigned char *)malloc(2048);
-        s_tls_out = (unsigned char *)malloc(1024);
-        s_tls_hs = (unsigned char *)malloc(6400);
-        if (s_tls_rec == 0 || s_tls_enc == 0 || s_tls_out == 0 || s_tls_hs == 0) {
-            printf("[https] TLS 缓冲申请失败\n");
-            lwip_close(fd);
-            return -1;
-        }
-        (void)net__tls12_hs__tls12_set_buffers(s_tls_rec, 6400, s_tls_enc, 2048,
-                                               s_tls_out, 1024, s_tls_hs, 6400);
-    }
-    if (s_tls_state == 0) {
+        if (s_tls_state == 0) {
             printf("[https] TLS 状态申请失败（%d 字节）\n",
                    net__tls12_hs__tls12_state_size());
             lwip_close(fd);
@@ -175,24 +162,35 @@ static int https_get(const char *host, const char *path, char *out, int cap)
 /* 供 win_island.c 的 S3_WITH_HTTPS 分支调用；返回 0 表示成功拿到页面数据 */
 int c6_https_demo(void)
 {
-    char *page = (char *)malloc(4096);
+    /* §957: 4096 → 2048。读循环的退出条件是 `total >= cap - 2048`，所以
+     * cap=4096 时实际上也只攒到 2048 字节就 break 了，多出的 2KB 纯浪费；
+     * 而 OSI 堆只有 48KB（wifi_glue.c 的 g_wifi_heap_mem[12288]）、库自己还要用。
+     * 打印只取前 700 字节，2048 完全够。省下的 2KB 留给 TLS 缓冲。 */
+    char *page = (char *)malloc(2048);
 
     net__tls12_hs__tls12_trace = 1;
     if (page == 0) {
         printf("[https] 页缓冲申请失败\n");
         return -1;
     }
-    memset(page, 0, 4096);
+    memset(page, 0, 2048);
     printf("[https] === 开始取 https://qq.com/ ===\n");
-    if (https_get("qq.com", "/", page, 4096) <= 0) {
+    if (https_get("qq.com", "/", page, 2048) <= 0) {
         printf("[https] 失败\n");
         return -1;
     }
     printf("[https] ---- 响应开头 ----\n");
-    if (strlen(page) > 700) {
-        page[700] = 0;          /* wp_vfmt 不保证支持 %.700s，先手工截断 */
+    {
+        /* 响应头会吃掉 700 字节里的大半，而验收要看的是**页面 body**：
+         * 找到 \r\n\r\n，从它之后开始打印。不新增字符串，省 BSS/栈余量。 */
+        const char *sep = find_str(page, "\r\n\r\n");
+        char *show = (sep != 0) ? (char *)(sep + 4) : page;
+
+        if (strlen(show) > 700) {
+            show[700] = 0;      /* wp_vfmt 不保证支持 %.700s，先手工截断 */
+        }
+        printf("%s\n", show);
     }
-    printf("%s\n", page);
     printf("[https] ---- 响应结尾 ----\n");
     if (find_str(page, "HTTP/1.1") != 0) {
         printf("[https] 成功：拿到了 HTTP 响应\n");

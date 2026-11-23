@@ -28,6 +28,8 @@
 6:  .word   0x50000F00   /* 诊断区 2：s3_w2c_queue_get 的调用者 */
     .align  4
 12: .word   g_s3_win_spill_en  /* spill 总开关（见 ctx.c / wifi_glue.c） */
+    .align  4
+4:  .word   0x50001FA0   /* §1032：壳用它**存自己的 sp**（不依赖任何寄存器）*/
 
 /* ---- 把祖先窗口整圈 spill 到栈上（IDF SPILL_ALL_WINDOWS 的完整版）------
  * 与 `xt_asm_utils.h` 里那个裸宏相比，官方 `_xt_context_save` 还多做三件事，
@@ -52,14 +54,94 @@
 #ifdef S3_ONE_ABI
 /* §332：全 windowed 构建下**不需要壳** —— 内核也是 windowed，同一套 ABI，
  * 名字直接别名到目标函数即可（省掉 entry/callx0/retw 和 spill）。 */
+    /* 全 windowed 下 W2C 名字由链接器的 --defsym 直接指向 windowed 目标函数；
+     * 这里不生成任何壳（GAS 的 .set 对跨对象符号无效）。 */
     .macro  W2C name, target
-    .global \name
-    .set    \name, \target
     .endm
     .macro  W2C_TRACE name, target
-    .global \name
-    .set    \name, \target
     .endm
+    /* ★★★ §1015（**真正的根因修法**）：全 windowed 构建下 `WIN_SPILL`
+     * **不能**是空宏！
+     *
+     * 原来这里写着"全 windowed 下内核自己管窗口，定义成空宏即可"。
+     * 这个理由漏掉了一个关键事实：
+     * **内核是 windowed 只保证"调用时"窗口账目正确，不保证"任务切换后"正确。**
+     *
+     * Xtensa 的寄存器窗口只有 64 个 areg（16 个 4 寄存器窗口，绕成一个环）。
+     * ppTask 阻塞在 `osi_queue_recv` 里时，它的**祖先窗口还活在寄存器文件里**
+     * —— 此时一旦发生任务切换，另一个任务的 `call8` 链会把窗口基址推着绕过
+     * 一整圈，**把 ppTask 还活着的那几个祖先窗口物理覆盖掉**。
+     * ppTask 被换回来时，`a1`（物理寄存器 17）里已经是别的任务留下的值，
+     * 最终就是 0；随后 `ppTask+0x33` 的 `l32i.n a5, a1, 0` 以 0 为基址访存，
+     * `exccause=0x1c` / `excvaddr=0`，掉进坏 sp 闸门 —— 就是困扰三十多轮的 `bWu1b`。
+     *
+     * 证据链：
+     *   - `irq.c:410` 的注释早就写明"在中断里切走 = 让另一个任务去轮转窗口文件
+     *     ⇒ 回来时祖先窗口已被覆盖，a1 变成垃圾"，并说阻塞点靠本宏 spill 保平安；
+     *   - §1014 读 RTC 切换轨迹，**切换确实在发生**（另一个任务 sp=0x3fcc6870）；
+     *   - §1000 证明本宏在最终构建里是空宏 ⇒ **那句"靠 spill 保平安"落空了**；
+     *   - §1010 自动续跑过滤显示整个启动只有一次涉及 ppTask 栈区的欠载，而且
+     *     是健康的 ⇒ a1 变 0 跟欠载处理器无关；
+     *   - §980 全关中断故障照旧 ⇒ 因为阻塞点切换不是中断驱动的。
+     *
+     * 现在内核已经是 windowed（帧里有 `[sp-12]` 帧链），`s3_win_spill`
+     * 官方实现可以安全工作，所以把这段恢复回来。它破坏 a8..a11（caller-saved，
+     * 本壳本来就不依赖它们跨调用），a2..a7 先存帧里空闲的 [a1+64..84] 再取回。 */
+    /* §1055 曾在 §1050 之上重开祖先窗口 spill（`osi_queue_recv` 正是 §1054
+     * 指出的"有自由栈的 windowed 边界"）。真板实测：spill 确实跑了
+     * （`ws=0xaaaa` = 整圈轮转后的位型），故障点也再次前移
+     * （epc1 0x42017010 → 0x42017040），但仍死在 `port_task_switch` 附近。
+     * ⇒ 方向对，但只给 `_queue_recv` 一处加壳不够（还有别的阻塞点）。已撤回。*/
+    .macro  WIN_SPILL
+    .endm
+
+    /* ★★★★ §1056（§1054 的落地）：给**会阻塞**的 OSI 函数恢复一层薄壳，
+     * 壳里先 `entry a1,128`（帧下方留出 128 字节**自由栈**），
+     * 再 `call8 s3_win_spill` 把祖先窗口 spill 到自己栈上 ——
+     * 这正是 `ctx.S` 里 `port_task_switch_c0` 注释要求的"安全边界"。
+     *
+     * sp 先存到 RTC（`0x50001FA0 + 8`，复用 §1032 的字面量 4:），
+     * 因为 spill 的整圈轮转可能把它毁掉（§1030 的教训）。
+     *
+     * 真机上这些函数是**会阻塞**的（sem/mutex/event/delay），
+     * 阻塞就会切任务，切任务就会毁掉祖先窗口 —— 所以必须逐个加壳。 */
+    .macro  W2C_SPILL name, target
+    .align  4
+9:  .word   \target
+    .align  4
+    .global \name
+    .type   \name, @function
+\name:
+    entry   a1, 128
+    l32r    a8, 4b
+    s32i    a1, a8, 8
+    s32i    a2, a1, 64
+    s32i    a3, a1, 68
+    s32i    a4, a1, 72
+    s32i    a5, a1, 76
+    s32i    a6, a1, 80
+    s32i    a7, a1, 84
+    mov     a9, a1
+    call8   s3_win_spill
+    l32r    a8, 4b
+    l32i    a1, a8, 8
+    l32i    a2, a1, 64
+    l32i    a3, a1, 68
+    l32i    a4, a1, 72
+    l32i    a5, a1, 76
+    l32i    a6, a1, 80
+    l32i    a7, a1, 84
+    mov     a9, a1
+    l32r    a8, 9b
+    callx8  a8
+    retw
+    .endm
+
+    /* 会阻塞的四个：取信号量 / 锁互斥量 / 等事件 / 任务延时 */
+    W2C_SPILL s3_w2c_sem_pend,   os_sem_pend
+    W2C_SPILL s3_w2c_mutex_pend, os_mutex_pend
+    W2C_SPILL s3_w2c_event_wait, os_event_wait
+    W2C_SPILL s3_w2c_task_delay, os_task_delay
 #else
     .macro  WIN_SPILL
     /* §386 教训：**绝不能在这个宏里放 `.word` 字面量**。
@@ -429,9 +511,33 @@ s3_w2c_sp_probe:
     .type   osi_queue_recv, @function
 osi_queue_recv:
     /* 这条壳是 ppTask 真正阻塞的地方，spill 必须在这里做（理由见文件头
-     * WIN_SPILL 的注释）：此刻 a1 就是本壳的帧基址，帧下 64 字节还是空闲栈，
-     * 祖先窗口的槽位全部落在自由区里。 */
+     * WIN_SPILL 的注释）：此刻 a1 就是本壳的帧基址，帧下的 48 字节
+     * （IDF 溢出向量用 [sp-16..-4]，帧链在 [sp-12]）都在自由栈里。 */
     entry   a1, 128
+/* §934/§955: [sp-12] = 上一帧 sp（帧链），_win_ovf8/_win_unf8 都要用。
+     * 地址必须是**本壳当前的 sp - 12** —— 现在 sp 始终 = B（-64 死区已删），
+     * 所以 [B-12] = B+128（ppTask 的 sp）与下面 callx8 真正使用的 sp 一致。
+     * 这条链是 windowed ABI 的硬性要求，**不能挂在实验开关后面**，
+     * 否则最终构建（不定义 S3_SPILL_SHELL）里这条链根本不存在，
+     * 溢出/欠载时硬件就把垃圾当帧链用。 */
+    movi    a10, 128
+    add     a10, a10, a1
+    addi    a8, a1, -12
+    s32i    a10, a8, 0
+    mov     a9, a1
+    /* §1041 曾在壳入口把 WINDOWSTART 全 16 位都标成 live（逼每次调用都走溢出
+     * spill），用来验证"window N 的 a9 与 window N+4 的 a1 同一物理寄存器、
+     * 绕环到 WB=0 时踩掉 ppTask 的 a1"这个别名机制。
+     * 真板实测：故障记录**逐字节不变**（a1=3 / epc1=0x403822ef）。已撤回。*/
+    /* §1040 曾在这里把 window 0 的 WS 位（bit 0）显式补回再进深层调用，
+     * 想让硬件走正常溢出 spill 而不是从空记录欠载。
+     * 真板实测：`ws` 确实变成 0x05（补位生效），但故障记录**一模一样**
+     * （a1=3 / epc1=0x403822ef）⇒ 欠载到 window 0 也不是最终机制。已撤回。*/
+    /* ★★ §1032：把本壳 sp 存进 **RTC 内存**，返回后从内存取回。
+     * §1030 试过用 callee-saved 的 a13 保存，实测 a13 也被污染成
+     * 0x50001308 ⇒ 这条链上没有任何寄存器可信。内存不会骗人。*/
+    l32r    a8, 4b
+    s32i    a1, a8, 0
     s32i    a12, a1, 20
     s32i    a13, a1, 24
     s32i    a14, a1, 28           /* §367：调用者的 a6/a7 也是 callee-saved */
@@ -451,20 +557,92 @@ osi_queue_recv:
     l32r    a8, 12b
     l32i    a9, a8, 0
     beqz    a9, .Lrecv_nospill
+    /* §1000：这里**本来就是空操作**。
+     *
+     * 曾怀疑 `s3_win_spill` 的深 call12 级联把 ppTask 的活窗口盖掉
+     * （依据是 §999 在 `_win_ovf8` 入口采样 12 次，a9 全在
+     * `0x3fcc05xx..07xx`，没有一次落在 ppTask 的 `0x3fcc47xx`）。
+     * 把这行注释掉重新构建，**md5 与改前逐字节一致**（`a994b452…`）
+     * ⇒ 最终构建里 `WIN_SPILL` 是空宏（见本文件开头 62 行处的说明），
+     * 这条路径根本没代码。**该假设排除。** */
     WIN_SPILL
 .Lrecv_nospill:
     mov.n   a10, a2
     mov.n   a11, a3
+    /* §1029 曾在这里把 recv 超时强制成 0 做"非阻塞 ⇒ 不切换"的判别。
+     * 实测：调用期间 `RESTORE_FRAME` 计数**完全没变**（514→514，零次切换），
+     * 但崩溃照旧（epc1=0x42013313 / a1=0）⇒ **任务切换也被排除**。
+     * 行为已恢复。*/
     mov.n   a12, a4
     l32r    a9, 11b
     s32i    a0, a9, 0            /* 诊断：callx8 之前的 a0 */
-    addi    a1, a1, -64          /* 死区：spill 槽位在 [a1-64, a1) */
+    /* §955 ★★ 删除原来的 `addi a1,a1,-64`（及配对 `addi a1,a1,64`）——
+     * 它让帧链错位 64 字节。IDF _WindowOverflow8/_WindowUnderflow8 的约定是
+     * 槽位相对**当前 sp**：[sp-16..-4] = 本窗口 a0..a3，[sp-12] = 调用者 sp。
+     * 链写在 [B-12]，若 sp 变成 B-64 而链不跟着挪，硬件就去 [B-76] 读链，
+     * 把别处的链值（c0 帧写的 B+128）当成 a2 之类恢复出来 —— 真板签名正是
+     * a2 = a1+0x80（128 = 帧大小）、a8 = 带标签返回地址。
+     * 删掉后 sp 始终 = B，链 [B-12] = B+128 与真正调用时的 sp 一致。
+     * 那个"死区"本来也不需要：被调者 `entry a1,N` 的帧顶 16 字节就是留给
+     * 调用者的溢出槽（IDF 的 ppTask 就把 a0 存在 [sp+16]）。 */
+    /* §948：诊断把 a9 冲成 0x50001560（RTC 共享内存），而 windowed ABI 下
+     * 被调者的 a1 = 调用者的 a9 —— 必须恢复成当前 sp，否则 body 把 RTC 当栈。 */
+or      a9, a1, a1
+    /* §1030 曾在这里把壳 sp 存进 a13 并在返回后写回 a1，试图绕过 a1 丢失。
+     * 实测**更糟**：`retw` 时 PS.CALLINC 变成 0，它没有返回而是落到
+     * 紧随其后的 `ill`（epc1=0x42013332 / exccause=0 非法指令），
+     * 且 a13 被污染成 0x50001308。已撤回。*/
     l32r    a8, 8b
     callx8  a8
-    addi    a1, a1, 64
-    l32r    a9, 11b
-    s32i    a0, a9, 4            /* 诊断：callx8 之后的 a0 */
+    /* ★★ §998（**根因**）：这里绝对不能再用 **a9** 当诊断的临时基址！
+     *
+     * 原来写的是 `l32r a9, 11b / s32i a0, a9, 4`，把 a9 冲成了
+     * `0x50001560`（RTC 共享内存）。而 windowed ABI 下 **`retw` 一旦触发
+     * 窗口欠载，`_win_unf8` 就是拿 a9 当"本帧 sp"去 `[a9-12]` 读帧链**：
+     *   _win_unf8: l32e a0, a9, -16 / l32e a1, a9, -12 / ...
+     * a9 = 0x50001560 ⇒ 它从 RTC 里读出一堆垃圾当 a0/a1 恢复 ——
+     * **正好就是 §986 抢到的现场：a1 = 0、a0 = 0**（而 [真正sp-12] 里
+     * 存着正确的 0x3fcc4790，所以我们一直以为"处理器没被调用"）。
+     *
+     * 实测证据（gdb 硬件断点）：在这个 `retw` 上 `a9 = 0x50001560`、
+     * `a1 = 0x3fcc4710`（正确）、`a0 = 0x803822d9`（正确，CALLINC=2），
+     * 而它的调用者 ppTask 在 `+0x2d` 处拿到的 a1 = 0。
+     *
+     * §948 已经发现过同一函数里**前一处** `l32r a9, 11b` 的同类问题
+     * 并在后面补了 `or a9,a1,a1`；这**第二处**在 `callx8` 之后、
+     * `retw` 之前，被漏掉了。
+     *
+     * 修法：诊断改用 a8（本壳自己可随意用的 scratch），并在 `retw` 前
+     * 重新把 a9 置成本帧 sp，保证任何欠载路径都拿到正确帧链。 */
+    l32r    a8, 11b
+    s32i    a0, a8, 4
+    l32r    a8, 4b
+    l32i    a1, a8, 0            /* ★ §1032：从 RTC 取回本壳 sp */            /* 诊断：callx8 之后的 a0 */
     mov.n   a2, a10
+    /* ★★★ §1011（据 §1009/§1010 实测）：`retw` 之前把**两个**溢出槽都填好。
+     *
+     * §1009 从 RTC 坏 sp 记录拿到权威现场：`ps = 0x00060c10` 里 **CALLINC = 2**。
+     * `retw` 正常完成会把它清零；保持 2 说明**这条 retw 没完成** —— 它触发了
+     * WindowUnderflow，`_win_unf8` 跑了，`rfwu` 把控制直接送回返回地址，
+     * 而 ppTask 拿到的 a0/a1 就是处理器从槽里读出来的值。
+     * （§1008 之前"处理器没运行"的推论因此作废。）
+     *
+     * `_win_unf8` 读 `[a9-16]` → a0、`[a9-12]` → a1。实测 ppTask 在 `+0x2d`
+     * 拿到的 **a0 = a1 = 0** ⇒ 那两个槽当时都是 0。
+     * §999 只补写了 `[-12]`、**漏了 `[-16]`**，所以 a0 仍然是 0 ——
+     * 这也解释了为什么 §999 独立看"无效"：它只修好了一半。
+     *
+     * 这里一次写全两个槽（a8 当 scratch；a10 已被上面的 `mov.n a2,a10` 释放）：
+     *   [B-16] = 当前 a0（带 CALLINC 标签的返回地址）
+     *   [B-12] = 调用者 sp = B + 128
+     * 必须写在 `l32i a0, a1, 16` **之前**，因为那条会覆盖 a0。 */
+    movi    a10, 128
+    add     a10, a10, a1           /* a10 = B + 128 = 调用者 sp */
+    addi    a8, a1, -16
+    s32i    a0, a8, 0              /* [B-16] = 返回地址（含 CALLINC 标签）*/
+    s32i    a10, a8, 4             /* [B-12] = 调用者 sp */
+    memw
+    or      a9, a1, a1             /* a9 = 本帧 sp（retw 欠载用）*/
     l32i    a0,  a1, 16
     l32i    a12, a1, 20
     l32i    a13, a1, 24
@@ -567,6 +745,11 @@ s3_ets_printf_call0:
     mov     a14, a6                /* arg4 → callee 的 a6 */
     mov     a15, a7                /* arg5 → callee 的 a7 */
     l32r    a8, 16b
+    /* §955：同属 windowed ABI 的硬性要求 —— 被调者的 a1 = 调用者的 a9。
+     * 本壳用 `addi a1,a1,-48` 建帧（不轮转窗口），所以 a9 仍是调用者的值；
+     * 不改成当前 sp 的话，s3_ets_printf 的 `entry a1,80` 会把帧开在调用者
+     * 栈上，与本壳保存的 a0/a12..a15 直接重叠。 */
+    or      a9, a1, a1
     callx8  a8
     mov     a2, a10                /* 返回值 */
     l32i    a0, a1, 0
@@ -576,3 +759,4 @@ s3_ets_printf_call0:
     l32i    a15, a1, 16
     addi    a1, a1, 48
     ret
+

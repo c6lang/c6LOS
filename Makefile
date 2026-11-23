@@ -99,6 +99,7 @@ define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
 	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
+	@sed -i -E 's/unsigned char (__c99_d[0-9]+)\[/unsigned char __attribute__((aligned(4))) \1[/g' $(BUILD)/c99/$(notdir $(1:.c6=.c))
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 
@@ -207,7 +208,11 @@ endif
 
 $(BUILD)/obj/w2c.o: port/s3/w2c.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -Wa,--no-transform $(W2C_DEFS) -c $< -o $@
+	# S3_CDEFS 必须传进来：全 windowed 构建里 w2c.S 要据此走「W2C 名字直接
+	# .set 到 windowed 目标」的分支；否则仍生成 call0 壳，用 callx0 调 windowed
+	# 内核函数 → a0 没有窗口标签 → 内核 retw 立刻 exccause=0（真板定死在
+	# os_task_current_slot 的 retw，g_sw_cnt 才 1）。
+	$(XTGCC) -Wa,--no-transform $(S3_CDEFS) $(W2C_DEFS) -c $< -o $@
 
 $(BUILD)/obj/phy_init_data.o: port/s3/phy_init_data.c $(S3_HDRS)
 	@mkdir -p $(BUILD)/obj
@@ -243,7 +248,7 @@ $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=call0 -Wa,--no-transform -mtext-section-literals -c $< -o $@
+	$(XTGCC) -mabi=call0 $(S3_CDEFS) -Wa,--no-transform -mtext-section-literals -c $< -o $@
 
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj
@@ -255,7 +260,8 @@ $(BUILD)/obj/irq_asm.o: port/s3/irq.S
 
 $(BUILD)/obj/ctx_asm.o: port/s3/ctx.S
 	@mkdir -p $(BUILD)/obj
-	$(XTGCC) -mabi=$(S3_ABI) -c $< -o $@
+	$(XTGCC) -mabi=$(S3_ABI) $(S3_CDEFS) -c $< -o $@
+
 
 # idf_shim.c 是给闭源库（windowed ABI）用的胶水，必须按 windowed 编译
 $(BUILD)/obj/idf_shim.o: port/s3/idf_shim.c $(S3_HDRS)
@@ -278,9 +284,54 @@ S3_STACK_LD := -Wl,--defsym=S3_STACK_TOP=$(S3_STACK_TOP)
 S3_APP_BASE ?= 0x0
 S3_APP_LD := -Wl,--defsym=__app_base=$(S3_APP_BASE)
 
+# 全 windowed 构建：闭源库回调使用的 s3_w2c_* 名字直接用 --defsym 指向
+# windowed 内核函数。GAS 的 .set 对跨对象符号无效、j 跳不到 IRAM，只有链接器
+# 能在符号解析后把名字绑到目标；否则 w2c.S 会退回 call0 壳，用 callx0 调
+# windowed 函数 → a0 无窗口标签 → 内核 retw exccause=0（g_sw_cnt=1 就崩）。
+ifneq ($(findstring -DS3_ONE_ABI,$(S3_CDEFS)),)
+S3_W2C_ALIAS := \
+	-Wl,--defsym=s3_w2c_delay=os_task_delay \
+	-Wl,--defsym=s3_w2c_wdt_feed=os_wdt_feed \
+	-Wl,--defsym=s3_w2c_wdt_start=os_wdt_start \
+	-Wl,--defsym=s3_w2c_irq_save=port_irq_save \
+	-Wl,--defsym=s3_w2c_irq_restore=port_irq_restore \
+	-Wl,--defsym=s3_w2c_sem_init=os_sem_init \
+	-Wl,--defsym=s3_w2c_sem_destroy=os_sem_destroy \
+	 \
+	-Wl,--defsym=s3_w2c_sem_post=os_sem_post \
+	-Wl,--defsym=s3_w2c_mutex_init=os_mutex_init \
+	-Wl,--defsym=s3_w2c_mutex_destroy=os_mutex_destroy \
+	 \
+	-Wl,--defsym=s3_w2c_mutex_post=os_mutex_post \
+	-Wl,--defsym=s3_w2c_queue_init=os_queue_init_ex \
+	-Wl,--defsym=s3_w2c_queue_put=os_queue_put_item \
+	-Wl,--defsym=s3_w2c_queue_get=os_queue_get_item \
+	-Wl,--defsym=s3_w2c_queue_count=os_queue_count \
+	-Wl,--defsym=s3_w2c_queue_try_get=os_queue_try_get_item \
+	-Wl,--defsym=s3_w2c_queue_try_put=os_queue_try_put_item \
+	-Wl,--defsym=s3_w2c_queue_destroy=os_queue_destroy \
+	-Wl,--defsym=s3_w2c_event_init=os_event_init \
+	-Wl,--defsym=s3_w2c_event_set=os_event_set \
+	-Wl,--defsym=s3_w2c_event_clear=os_event_clear \
+	 \
+	-Wl,--defsym=s3_w2c_event_destroy=os_event_destroy \
+	-Wl,--defsym=s3_w2c_event_get=os_event_get \
+	-Wl,--defsym=s3_w2c_task_create=os_task_create \
+	-Wl,--defsym=s3_w2c_task_delete=os_task_delete \
+	-Wl,--defsym=s3_w2c_task_suspend=os_task_suspend \
+	-Wl,--defsym=s3_w2c_task_resume=os_task_resume \
+	 \
+	-Wl,--defsym=s3_w2c_task_yield=os_task_yield \
+	-Wl,--defsym=s3_w2c_tick_get=os_tick_get \
+	-Wl,--defsym=s3_w2c_task_probe=os_task_probe \
+	-Wl,--defsym=s3_w2c_tick_hz=os_tick_hz \
+	-Wl,--defsym=s3_w2c_current_task=os_task_current_slot \
+	-Wl,--defsym=s3_w2c_slot_of_id=os_task_slot_of_id
+endif
+
 $(BUILD)/c6os.elf: $(S3_OBJ) port/s3/link.ld
 	$(XTGCC) -mabi=$(S3_ABI) -nostdlib -Wl,-T,port/s3/link.ld \
-		$(S3_STACK_LD) $(S3_APP_LD) \
+		$(S3_STACK_LD) $(S3_APP_LD) $(S3_W2C_ALIAS) \
 		-o $@ $(S3_OBJ) $(S3_EXTRA_LIBS) -lgcc
 	$(XTP)size $@
 
@@ -1480,7 +1531,18 @@ S3_WIFI_MAIN ?= tests/t_s3_wifi3.c6
 WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
              -Wl,--wrap=ic_create_wifi_task -Wl,--wrap=ieee80211_ioctl_init \
              -Wl,--wrap=pp_create_task -Wl,--wrap=pp_post \
-             -Wl,--wrap=wifi_init_in_caller_task
+             -Wl,--wrap=wifi_init_in_caller_task \
+             -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
+             -Wl,--wrap=pm_offchan_ready_or_defer -Wl,--wrap=chm_acquire_lock \
+             -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan \
+             -Wl,--wrap=ic_tx_pkt
+# §846: S3_TARGET_BSSID 时在 flash 侧 wrap get_ap_records，把扫描结果的 BSSID
+# 改成目标 weforpay.com（wifi_glue.c 保持字节不变，避免破坏脆弱的同步扫描）
+ifdef S3_TARGET_BSSID
+WIFI_WRAP += -Wl,--wrap=cnx_add_rc
+WIFI_WRAP += -Wl,--wrap=ieee80211_send_mgmt
+WIFI_WRAP += -Wl,--wrap=sta_recv_mgmt
+endif
 # S3_FLASH_AUTO_MAP：镜像里有 IROM 段（闭源库代码在 flash 里）时必须打开 ——
 # 没有二级 bootloader 时没人配置 I-cache 的模式，取指会拿到 IllegalInstruction
 # （典型签名：PC = 函数首地址 + 2、cause=0）。见 docs/wifi-plan.md §15~24、§202。
@@ -1532,6 +1594,9 @@ LWIP_INC  := -Iport/s3/lwip -I$(LWIP_SRC)/include
 LWIP_CF   := -mabi=windowed -Os -ffreestanding -fno-builtin -fno-common \
              -mlongcalls -mtext-section-literals \
              -Wall -Wextra -Wno-unused-parameter
+ifdef S3_TARGET_BSSID
+LWIP_CF   += -DS3_TARGET_BSSID
+endif
 LWIP_SRCS := $(wildcard $(LWIP_SRC)/core/*.c) \
              $(wildcard $(LWIP_SRC)/core/ipv4/*.c) \
              $(wildcard $(LWIP_SRC)/api/*.c) \

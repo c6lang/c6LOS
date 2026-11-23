@@ -5,6 +5,7 @@
 #include "c6os/types.h"
 #include "c6os/flash.h"
 #include "wifi_creds.h"
+#include "idf_cal.h"        /* §653: IDF 真板 cal_data 注入实验 */
 
 /* os_wdt_feed/os_wdt_start 是 call0 的 C 函数，windowed 岛里要经 w2c 壳调（§228） */
 extern void s3_w2c_wdt_feed(void);
@@ -187,7 +188,14 @@ static phy_cal_data_t g_phy_cal;
  * S3 上就是往 SYSCON_WIFI_CLK_EN(0x60026014) 塞两组位：
  *   WIFI_BT_COMMON = 0x78078F   （WiFi/BLE 共用时钟）
  *   PHY_EN         = 0x400000   （PHY 校准模块时钟）
- * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。 */
+ *   CLK_320M_OEN   = 0x40       （320MHz 时钟输出使能，见 §608/§610）
+ * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。
+ *
+ * §610 关键修复：IDF 运行时 WIFI_CLK_EN=0xff87d850，bit6(0x40) 是置位的；
+ * 我们此前只 OR 了 0x78078F|0x400000，得到 0xfffce7bf —— bit6 始终是 0。
+ * JTAG 在 hal_init 处二分证明：只要补上 bit6（0xfffce7ff），hal_init 写的
+ * d14 kick 就立刻被硬件应答（d14=1）；缺 bit6 时整块 0x60033xxx MAC 寄存器
+ * 写入被静默丢弃，扫描 0 AP、关联超时。这个 320M 时钟正是 MAC 硬件的门控。 */
 static void s3_win_phy_clock_enable(void)
 {
     volatile u32 *clk = (volatile u32 *)0x60026014u;
@@ -199,6 +207,7 @@ static void s3_win_phy_clock_enable(void)
 #endif
     *clk = *clk | 0x78078Fu;
     *clk = *clk | 0x400000u;
+    *clk = *clk | 0x40u;              /* §610: SYSCON_CLK_320M_OEN */
 }
 
 /* PHY 初始化会动内部 USB PHY（IDF 里由 phy_bbpll_en_usb 之类处理），
@@ -299,8 +308,22 @@ static void s3_win_phy_power_on(void)
     *pwc = *pwc & ~(1u << 17);              /* 解除 WiFi 掉电 */
     while (k < 400u) { k = k + 1u; }        /* ~10us @40MHz */
     s3_win_phy_clock_enable();              /* 打开 modem 时钟 */
-    *rst = *rst | 0x2A1Fu;                  /* modem 复位：assert */
-    *rst = *rst & ~0x2A1Fu;                 /* modem 复位：release */
+    /* §703: IDF 的 esp_phy_enable() 只在 phy_get_modem_flag()==0（首次 enable）
+     * 时做模块上电/复位，后续 enable 只调 phy_wakeup_init()+phy_track_pll()。
+     * 我们以前每次 _phy_enable 回调都重发这次 modem 复位脉冲 —— 真板日志里
+     * hal_init 之后（line 130 setintr / line 142 d14=1）又来两次回调
+     * （line 148、164，后者正是 scan start），每次都 assert SYSCON_WIFI_RST_EN，
+     * 把 hal_init 刚写好的 MAC 寄存器全部清零（JTAG 实测 d14=1→0、
+     * 0x60033120=0x23006→0），于是扫描收不到任何 AP、关联超时。
+     * 复位脉冲只发一次，与 IDF 语义一致。 */
+    {
+        static u32 s_modem_reset_done = 0u;
+        if (s_modem_reset_done == 0u) {
+            *rst = *rst | 0x2A1Fu;          /* modem 复位：assert */
+            *rst = *rst & ~0x2A1Fu;         /* modem 复位：release */
+            s_modem_reset_done = 1u;
+        }
+    }
     *iso = *iso & ~(1u << 28);              /* 解除隔离 */
     /* §288：BBPLL 上电。IDF 的二级 bootloader 在 rtc_clk_init() 里会调
      * clk_ll_bbpll_enable()，把 RTC_CNTL_OPTIONS0 的三个 FORCE_PD 清掉：
@@ -394,6 +417,22 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
 
+#ifdef S3_INJECT_IDF_CAL
+    /* §653: 注入从真板 NVS 提取的 IDF cal_data 非零段（136 段/469 字节），
+     * 验证 §611 的"g_phy_cal 全零导致扫描 0 AP"假设。
+     * 版本 0x2c7、MAC 与上面一致，结构完全对齐。 */
+    {
+        const u8 *p = s3_idf_payload;
+        unsigned k;
+        for (k = 0u; k < sizeof(s3_idf_runs) / sizeof(s3_idf_runs[0]); k++) {
+            win_memcpy(g_phy_cal.v + s3_idf_runs[k].off, p, s3_idf_runs[k].n);
+            p += s3_idf_runs[k].n;
+        }
+        s3_ets_printf("[phy] injected IDF cal (%u runs)\n",
+                      (unsigned)(sizeof(s3_idf_runs) / sizeof(s3_idf_runs[0])));
+    }
+#endif
+
     /* ① 解除 WiFi 掉电 + 开 modem/PHY 时钟 + 复位脉冲 + 解隔离
      *    （= IDF 的 wifi_bt_common_module_enable + phy_module_enable） */
     s3_win_phy_power_on();
@@ -442,6 +481,14 @@ int s3_win_phy_enable(void)
         if (rc == 0) {
             s_phy_calibrated = 1u;
         }
+    }
+
+    /* §700: IDF 的 esp_phy_enable() 在 register_chipv7_phy() 之后立刻调
+     * phy_track_pll() → phy_param_track_tot(wifi=true, ble=false)，做 RF PLL
+     * 校准。我们一直没调，怀疑是"MAC 有帧、RF 却发不出去"的根因。 */
+    {
+        extern void phy_param_track_tot(int en_wifi, int en_ble_154);
+        phy_param_track_tot(1, 0);
     }
 
     /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */

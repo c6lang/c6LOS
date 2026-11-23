@@ -277,9 +277,15 @@ static void s3_isr_mark(u32 i)
 extern void os_wdt_start(u32 secs);
 extern void os_wdt_feed(void);
 
+extern volatile u32 g_s3_diag[12];   /* §699: 定义在 wifi_glue.c */
+
+/* §705: WiFi level-1 中断在 ISR 里只置这个标志；真正的窗口化库 ISR 由
+ * 任务上下文（s3_wifi_scan 轮询循环）调用，避免在任意 WINDOWBASE 上 call8。 */
+volatile u32 g_wifi_isr_pending = 0u;
 void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
+    g_s3_diag[9]++;   /* §699: 定时器 ISR 实际进入次数 */
 
     /* §370：**自愈看门狗**。板子一旦"CPU 死转 + USB 从总线上消失"，就只能
      * 人工断电重插（这轮就吃了一次）。这里在定时器中断里挂上 RTC 看门狗：
@@ -293,50 +299,59 @@ void *s3_timer_irq(u32 frame_sp)
     }
 #endif
 
-    /* 记下被打断的主流程 PC（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
-     * 就知道主流程停在哪条指令上。 */
+    /* §633: 记录 Xtensa INTERRUPT SR —— 哪个 CPU 中断在挂起（WiFi=bit?）*/
+    {
+        u32 ipend = 0;
+        volatile u32 *pd = (volatile u32 *)0x50000A00u;
+        __asm__ __volatile__("rsr %0, interrupt" : "=r"(ipend));
+        pd[0] = ipend;
+        pd[1] = pd[1] + 1u;
+        /* §642: 把 WiFi MAC/PWR 的 level-1 中断分派给库注册的 ISR。
+         * 库用 src=0/2 → intr=0，ints_on(mask=1)，所以看 bit0。
+         * 只在 MAC 事件位有效时调，避免定时器中断误入。 */
+        if (ipend & 1u) {
+            u32 ie = 0;
+            g_s3_diag[10]++;   /* §699: WiFi 中断挂起次数 */
+            /* §705: 不能在 call0 的 ISR 里直接 call8 进 windowed 库 ISR ——
+             * 中断可能在任意 WINDOWBASE 上打断，call8 旋转窗口后 retw 与
+             * 调用者的 CALLINC 不配套，真板实测 a0 被写成垃圾、掉进
+             * _vec_default。只在这里置位，由任务上下文（s3_wifi_scan 轮询
+             * 循环）调用 s3_wifi_isr_dispatch()。
+             * §708: 但 MAC 中断是电平触发的 —— 不 ack 就会在 rte 之后立刻
+             * 再次进入，真板实测 ~42M 次 ISR、任务永远拿不到 CPU（epc1 卡在
+             * port_idle）。这里先屏蔽 intenable 的 WiFi 位止住风暴；等任务
+             * 上下文跑完 wDev_ProcessFiq（它会清 MAC/PWR 事件寄存器）后再
+             * 由 s3_wifi_scan 重新使能。 */
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
+            ie &= ~1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
+            g_wifi_isr_pending = 1u;
+            pd[2] = pd[2] + 1u;
+        }
+    }
+    /* 记下被打断的主流程 ccount（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
+     * 就知道主流程停在哪条指令上。§715: PC 采样块已删（腾 IRAM 给 PWR 诊断）。 */
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
     g_isr_cc = cc;
-    {
-        /* 诊断：把被打断的主流程 PC 采样进 RTC 0x50000780（每 256 次刷新一次）。
-         * 卡死时读它就知道主流程停在哪条指令上。 */
-        static u32 pc_n;
-        static u32 pc_last;
-        u32 ipc = 0;
-        volatile u32 *pd = (volatile u32 *)0x50000780u;
-
-        __asm__ __volatile__("rsr %0, epc1" : "=r"(ipc));
-        pc_n = pc_n + 1u;
-        if (ipc != pc_last) {
-            pc_last = ipc;
-            pd[0] = ipc;
-            pd[1] = pd[1] + 1u;      /* PC 变化次数 */
-        }
-        if ((pc_n & 0xFFu) == 0u) { pd[2] = pc_n; }
-    }
-    /* §344：**第一次**发现 WINDOWBASE 不是 4 的倍数时记现场。
-     * 合法的窗口基址只能是 0/4/8/.../60；出现 9（真板实测）说明某处
-     * `rotw` 奇数步进后没归位 —— 之后所有虚拟寄存器（包括 a1）全部映射错。 */
-    {
-        u32 wb = 0;
-        volatile u32 *q = (volatile u32 *)0x50000900u;
-
-        __asm__ __volatile__("rsr %0, windowbase" : "=r"(wb));
-        if ((wb & 3u) != 0u && q[0] == 0u) {
-            u32 ip = 0;
-            u32 ws = 0;
-
-            __asm__ __volatile__("rsr %0, epc1" : "=r"(ip));
-            __asm__ __volatile__("rsr %0, windowstart" : "=r"(ws));
-            q[0] = 0xBAD2u;
-            q[1] = wb;
-            q[2] = ip;
-            q[3] = ws;
-        }
-    }
+    /* §708: 删掉旧的"WINDOWBASE 首违例记录"块（§344）——它早已完成使命，
+     * 这里腾出的 IRAM 给中断屏蔽/恢复用。 */
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
+#ifdef S3_TICK_DEFER
+    /* §964：tick 只在这里计数 —— 纯内存 +1，**不做任何窗口轮转**。
+     * 真正的 os_sched_tick() 交给调度主循环在任务上下文里调
+     * （port_virtual_tick()，见 console.c）。
+     * 原因（真板取证）：ISR 里 s3_timer_irq→s3_win_tramp→os_sched_tick
+     * 是这条链上的第 3~4 次窗口旋转，到 os_sched_tick 的
+     * `entry a1, 144` 时真板抛 cause=0 IllegalInstruction，
+     * EPC1 正好等于 os_sched_tick 入口，PS=0x00060031（EXCM=1、WOE=0）。 */
+    {
+        volatile u32 *tp = (volatile u32 *)0x50001580u;
+
+        *tp = *tp + 1u;
+    }
+#endif
     {
         static u32 isr_n;
         volatile u32 *ic = (volatile u32 *)0x50000700u;
@@ -368,7 +383,25 @@ void *s3_timer_irq(u32 frame_sp)
         st_n = st_n + 1u;
         if ((st_n & 0xFFu) == 0u) { ic[0] = st_n; }
     }
+#ifndef S3_TICK_DEFER
+#ifdef S3_ONE_ABI
+    /* §891 全 windowed ABI：本 ISR 在 IRAM(0x40379xxx)，os_sched_tick 在
+     * flash(0x420189a4)，GCC 的 -mlongcalls 生成 `l32r a8; callx8 a8`。
+     * 真板证据：epc1=os_sched_tick 入口，a1=0，excvaddr=0 —— 进 os_sched_tick
+     * 时窗口没有轮转（callx8 只置 CALLINC、不推进 WINDOWSTART），
+     * 于是 `entry a1,144` 拿到错的 a1。
+     * 和任务入口一样，改用近处(0x40379858，call8 范围内)的 s3_win_tramp：
+     * 它先由硬件 call8 轮转好窗口，再 callx8 远端真正入口。 */
+    __asm__ __volatile__(
+        "mov    a12, %0\n\t"
+        "call8  s3_win_tramp\n\t"
+        :
+        : "r"(os_sched_tick)
+        : "a12", "a0", "memory");
+#else
     os_sched_tick();
+#endif
+#endif /* S3_TICK_DEFER */
     s3_isr_mark(5u);
     if (g_hook != 0) {
         g_hook();

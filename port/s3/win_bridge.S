@@ -14,6 +14,14 @@
 
     .section .text, "ax", @progbits
 
+/* §879: 全 windowed 构建下，这些 call0→windowed 桥被 windowed 代码用 call8 调用，
+ * a0 带 CALLINC 标记；必须用 retw 回退窗口，否则 ret 跳到带标记地址 → cause=0。 */
+#ifdef S3_ONE_ABI
+#define BRIDGE_RET retw
+#else
+#define BRIDGE_RET ret
+#endif
+
 /* u32 s3_win_call_add(u32 a, u32 b) —— 从 call0 调 windowed 的 s3_win_add() */
     .align  4
     .global s3_win_call_add
@@ -47,7 +55,7 @@ s3_win_call_add:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_phy_cal(void) —— 从 call0 调 windowed 孤岛的 s3_win_phy_cal() */
     .align  4
@@ -78,7 +86,7 @@ s3_win_call_phy_cal:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_deep(u32 n) —— 从 call0 调 windowed 的深递归函数 */
     .align  4
@@ -110,7 +118,7 @@ s3_win_call_deep:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_flash_add(u32 a, u32 b) —— 调放在 flash 段里的 windowed 函数 */
     .align  4
@@ -145,7 +153,7 @@ s3_win_call_flash_add:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_flash_pat(void) —— 取 flash 段里图案数组的地址 */
     .align  4
@@ -177,7 +185,7 @@ s3_win_call_flash_pat:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_flash_addr(void) —— 取 flash 里那个函数的地址（验证 call 目标） */
     .align  4
@@ -208,7 +216,7 @@ s3_win_call_flash_addr:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_flash_leaf(u32 a) —— 调 flash 里的叶子函数 */
     .align  4
@@ -240,7 +248,7 @@ s3_win_call_flash_leaf:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* ---- 放在 flash 段里的手写 windowed 叶子函数 ----
  * 必须成对写 `entry` / 宽 `retw`（§202 真板实测）：
@@ -301,7 +309,7 @@ s3_win_call_flash42:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_phy_enable(void) —— 从 call0 调 windowed 的 PHY 初始化 */
     .align  4
@@ -332,7 +340,7 @@ s3_win_call_phy_enable:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_wifi_main(void) —— call0 任务里跑整条 WiFi 主流程（§241）
  *
@@ -441,7 +449,7 @@ s3_win_call_wifi_main:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* §416：windowed 跳板。被 `call8` 调（硬件完成窗口轮转），再 `callx8`
  * 远端 windowed 入口。`entry` 建立 CALLINC 记账，`retw` 才能正确退回去。
@@ -495,7 +503,14 @@ s3_win_puts:
     entry   a1, 48
     s32i    a0, a1, 0
     l32r    a8, .Lputs
+#ifdef S3_ONE_ABI
+    /* §880: 全 windowed 构建里 port_puts 是 windowed 函数，必须用 callx8；
+     * 参数搬到 a10（call8 轮转后 callee 的 a2 = 调用者的 a10）。 */
+    mov     a10, a2
+    callx8  a8
+#else
     callx0  a8
+#endif
     l32i    a0, a1, 0
     retw
 
@@ -528,7 +543,7 @@ s3_win_call_phy_cal_word:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_deep12(u32 n) —— 验 call12 的窗口溢出/欠载 */
     .align  4
@@ -560,7 +575,7 @@ s3_win_call_deep12:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* void s3_win_call_log(const char *s) —— 从 call0 让 ROM 打印一行 */
     .align  4
@@ -591,7 +606,7 @@ s3_win_call_log:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_phy_step(int step) */
     .align  4
@@ -623,7 +638,7 @@ s3_win_call_phy_step:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_phy_funcs(void) —— 读 g_phyFuns 的内容 */
     .align  4
@@ -654,7 +669,7 @@ s3_win_call_phy_funcs:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_cache_enable(void) —— 从 call0 调 windowed 孤岛，再由孤岛调
  * ROM 的 Cache_Enable_ICache(0x40001878)。ROM 是 windowed ABI，必须走这条路。 */
@@ -686,7 +701,7 @@ s3_win_call_cache_enable:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_cache_invalidate(void) */
     .align  4
@@ -717,7 +732,7 @@ s3_win_call_cache_invalidate:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_irom_mmu_end(void) */
     .align  4
@@ -748,7 +763,7 @@ s3_win_call_irom_mmu_end:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_drom_mmu_end(void) */
     .align  4
@@ -779,7 +794,7 @@ s3_win_call_drom_mmu_end:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_cache_invalidate_addr(u32 addr, u32 size) */
     .align  4
@@ -810,7 +825,7 @@ s3_win_call_cache_invalidate_addr:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* s3_win_call_ache_suspend_icache */
     .align  4
@@ -841,7 +856,7 @@ s3_win_call_ache_suspend_icache:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* s3_win_call_ache_resume_icache */
     .align  4
@@ -872,7 +887,7 @@ s3_win_call_ache_resume_icache:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 /* s3_win_call_cache_suspend_icache */
     .align  4
     .global s3_win_call_cache_suspend_icache
@@ -902,7 +917,7 @@ s3_win_call_cache_suspend_icache:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 /* s3_win_call_cache_resume_icache */
     .align  4
     .global s3_win_call_cache_resume_icache
@@ -932,7 +947,7 @@ s3_win_call_cache_resume_icache:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_config_icache_mode(u32 size, u32 ways, u32 line) */
     .align  4
@@ -963,7 +978,7 @@ s3_win_call_config_icache_mode:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_wifi_init(void *cfg) */
     .align  4
@@ -994,7 +1009,7 @@ s3_win_call_wifi_init:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_osi_init(void) —— 初始化 OSI 表并返回其指针 */
     .align  4
@@ -1025,7 +1040,7 @@ s3_win_call_osi_init:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_fn1(u32 fn, u32 arg) */
     .align  4
@@ -1056,7 +1071,7 @@ s3_win_call_fn1:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* 提供一个 .flash.rodata 里的数据对象：确保镜像里**总有 DROM 段**。
  * （bootloader 的 mmu_hal_map_region 在没有 DROM 段时会 assert 失败。） */
@@ -1097,7 +1112,7 @@ s3_win_call_osi_dump:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_cfg_ptr(void) —— 从 call0 取 windowed 侧分配的地址 */
     .section .text, "ax", @progbits
@@ -1129,7 +1144,7 @@ s3_win_call_cfg_ptr:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_calls_ptr(void) —— 从 call0 取 windowed 侧分配的地址 */
     .section .text, "ax", @progbits
@@ -1161,7 +1176,7 @@ s3_win_call_calls_ptr:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_bringup(void) */
     .section .text, "ax", @progbits
@@ -1213,7 +1228,7 @@ s3_win_call_bringup:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
 
 /* u32 s3_win_call_wifi_start(void) —— 调 esp_wifi_start() */
     .section .text, "ax", @progbits
@@ -1245,4 +1260,43 @@ s3_win_call_wifi_start:
     l32i    a14, a1, 12
     l32i    a15, a1, 16
     addi    a1, a1, 32
-    ret
+    BRIDGE_RET
+
+/* §642: void s3_win_call_wifi_isr(void) —— 从 call0 的 level-1 ISR 调 windowed 的库 ISR */
+    .align  4
+    .global s3_win_call_wifi_isr
+    .type   s3_win_call_wifi_isr, @function
+s3_win_call_wifi_isr:
+    addi    a1, a1, -32
+    s32i    a0, a1, 0
+    s32i    a12, a1, 4
+    s32i    a13, a1, 8
+    s32i    a14, a1, 12
+    s32i    a15, a1, 16
+    rsr     a12, ps
+    s32i    a12, a1, 20
+    /* §704: call8 旋转 windowbase 8 个寄存器，但 call0 调用者返回时不会
+     * 自动恢复。原来用 `ret` 返回 —— windowbase 每次 ISR 泄漏 2，真板 JTAG
+     * 实测 windowbase=0xe、返回 call0 的 port_idle 里 a0 读到垃圾掉进
+     * _vec_default。必须显式保存并在 call8 后恢复 windowbase。 */
+    rsr     a12, windowbase
+    s32i    a12, a1, 24
+    movi    a13, 1
+    slli    a13, a13, 18
+    or      a12, a12, a13
+    wsr     a12, ps
+    rsync
+    call8   s3_wifi_isr_dispatch
+    l32i    a12, a1, 24
+    wsr     a12, windowbase
+    rsync
+    l32i    a12, a1, 20
+    wsr     a12, ps
+    rsync
+    l32i    a0, a1, 0
+    l32i    a12, a1, 4
+    l32i    a13, a1, 8
+    l32i    a14, a1, 12
+    l32i    a15, a1, 16
+    addi    a1, a1, 32
+    BRIDGE_RET

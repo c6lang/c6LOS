@@ -221,6 +221,12 @@ __attribute__((section(".flash.text"))) void port_switch_trace(u32 tag, u32 id, 
     t[k_ * 4u + 1u] = id;
     t[k_ * 4u + 2u] = ctx;
     t[k_ * 4u + 3u] = n_;
+#ifdef S3_ONE_ABI
+    /* §892: 全 windowed ABI 下本函数若连续 callx8 到 port_putc 30 次，
+     * callx8 不轮转窗口、port_putc 的 entry 反复压同一帧 → 只打印出第一个
+     * 'S' 就崩。改成**只写 RTC 环形区、完全不打印**（RTC 可由 JTAG 读）。 */
+    (void)tag; (void)id; (void)ctx;
+#endif
 }
 
 __attribute__((section(".flash.text"))) void port_snapshot(void)
@@ -356,7 +362,9 @@ void port_init(void)
 
     /* 如果镜像里有 flash 段（IROM），在这里把 MMU 映射建好、打开 I-cache ——
      * 没有二级 bootloader 时 ROM 不会做这件事，不建映射 flash 里的代码就取指失败。 */
+#ifndef S3_SKIP_FLASH_INIT
     os_flash_init();
+#endif
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);
@@ -446,9 +454,26 @@ void port_panic_halt(void)
     }
 }
 
+/* §964：延时 tick 的待处理计数。定时器 ISR 每次 +1（纯内存操作），
+ * 调度主循环在这里消费，然后**在任务上下文里**调 os_sched_tick()。
+ *
+ * 为什么不在 ISR 里直接调：真板实测 ISR 里
+ * s3_timer_irq → s3_win_tramp → os_sched_tick 是第 3~4 次窗口旋转，
+ * 到 os_sched_tick 的 `entry a1,144` 就抛 cause=0 IllegalInstruction
+ * （EPC1 = 入口，PS=0x00060031：EXCM=1、WOE=0）。放到任务上下文里，
+ * 窗口深度归零，这条链就没有问题了。
+ *
+ * 用 RTC 慢速内存而不是 .bss：当前布局下 _stack_limit 只比 _stack_top
+ * 低 10 字节，一个 u32 都塞不进去。0x50001580 这段没别的用处。 */
+#define S3_TICK_PEND (*(volatile u32 *)0x50001580u)
+
 u32 port_virtual_tick(void)
 {
-    return 0u;
+    if (S3_TICK_PEND == 0u) {
+        return 0u;
+    }
+    S3_TICK_PEND = S3_TICK_PEND - 1u;
+    return 1u;
 }
 
 /* ---- 诊断输出：纯 call0，不经过 windowed 岛 ------------------------------

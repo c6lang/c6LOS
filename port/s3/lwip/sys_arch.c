@@ -288,10 +288,10 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     g_lwip_stage[2] = (unsigned int)(void *)thread;   /* 线程入口 */
     g_lwip_stage[3] = (unsigned int)(void *)arg;      /* 线程参数 */
 
-    /* lwIP 某些配置下 stacksize 是 0，传下去会被内核当成最小值（1KB），
-     * 对 tcpip 线程远远不够 —— 这里兜个底。 */
-    if (stacksize < 4096) {
-        stacksize = 4096;
+    /* §841: tcpip 线程栈：4096 窗口溢出，16384 把 40960 栈池占满导致
+     * os_task_create TRAP。取 8192（24576+8192=32768，留 8192 余量）。 */
+    if (stacksize < 8192) {
+        stacksize = 8192;
     }
 
     g_next_task_windowed = 1u;

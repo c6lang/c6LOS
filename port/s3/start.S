@@ -139,6 +139,10 @@ _start:
     or      a2, a2, a3
     wsr     a2, ps
     rsync
+#ifdef __XTENSA_CALL0_ABI__
+    /* §873: 4 层 call8 预热只服务于 call0 内核里 w2c 壳的 rotw spill；
+     * 全 windowed 构建没有 w2c 壳，这段 call8 反而让 WB 转到 0xf、WS=0xa800，
+     * 紧接着 port_init 里 retw.n cause=0。故仅在 call0 构建保留。 */
     l32r    a1, .Lsp
     call8   .Lprime1
     j       .Lprime_done
@@ -166,6 +170,7 @@ _start:
     entry   a1, 32
     retw
 .Lprime_done:
+#endif /* __XTENSA_CALL0_ABI__ */
 
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
@@ -262,7 +267,22 @@ _start:
     /* windowed ABI：C 函数入口是 `entry sp,N`、出口是 `retw`，必须用 call8 进去
      * （窗口 base += 8），否则它 retw 时会退回到错误的窗口直接跑飞。
      * 之前就是这里用 call0 调 port_init：banner 打完一返回就炸。 */
+    /* ★ §967：`call8` 之前**必须自己把 a9 设成 sp**。
+     *
+     * Xtensa 的 call8 只是把 a0 写成带 CALLINC 的返回地址、并把 WINDOWSTART
+     * 推进一格；被调者拿到的 a1 来自**调用者的 a9**（`entry` 才会把
+     * a9 = a1 设好）。`_start` 是裸 call0 汇编、没有 entry，所以到这里
+     * a9 还是 ROM 留下来的垃圾。
+     *
+     * 后果不是"进去就崩"，而是更阴的：`_start` 那个窗口的 a9 是垃圾，
+     * 后面任何一次窗口溢出（`_WindowOverflow8`）都会拿**调用者的 a9** 当
+     * spill 基址往 `[a9-16]`/`[a9-32]` 写 —— 写到 0x90119ac0 这种地址就是
+     * StoreProhibited（cause=0x1d）。真板取证见 §965/§966：a1 正好等于
+     * `_stack_top`，说明出事的正是最外层这一发。
+     * `s3_task_tramp` 早就按 §890 这么修过了，启动这份漏了。 */
+    mov     a9, a1
     call8   port_init
+    mov     a9, a1
     call8   os_main
 #endif
 3:

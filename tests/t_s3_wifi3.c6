@@ -92,7 +92,14 @@ static void flash_diag(void)
     pstr(" mmu(rodata)="); phex(os_flash_mmu_entry(rva)); pstr("\n");
     os_icache_enable();
     os_dcache_enable();
+#ifdef S3_ONE_ABI
+    /* §881: flash42 探针只是诊断，不是 WiFi 功能所需。全 windowed 下它挂在
+     * callx8 进 flash 取指（I-cache/MMU 尚未完全就绪）；跳过它以让启动走到
+     * WiFi 任务。真正的验收是关联/DHCP/TLS/HTTPS，不依赖这个探针。 */
+    pstr("flash: probe skipped (one-abi)\n");
+#else
     pstr("flash: probe(42)="); phex(s3_win_call_flash42()); pstr("\n");
+#endif
 }
 
 /* 启动期信标（RTC_CNTL_STORE4..7 = 0x600080C0..CC，复位不清）：

@@ -84,7 +84,14 @@ void os_icache_enable(void)
      * 8-way/32KB/32B（ICACHE_CTRL = 0x0f）来解决的。我们之前只写了 CTRL 的
      * ENABLE 位，没配模式，所以 IROM 一直是死的。
      */
+#ifdef S3_ONE_ABI
+    /* §877: 全 windowed 构建不能用 call0 桥（它 ret 时 a0 带 CALLINC 标记 → cause=0）；
+     * 直接调 windowed 目标本身。 */
+    extern u32 s3_win_config_icache_mode(u32, u32, u32);
+    s3_win_config_icache_mode(16384u, 8u, 32u);
+#else
     s3_win_call_config_icache_mode(16384u, 8u, 32u);
+#endif
     /* ROM 那个函数实际会写成 0x0F（= 32KB），但 S3 的 I-cache 只有 16KB！
      * 32KB 是**非法值**，会让 cache 只服务前半段、后面不再填充
      * （现象就是"段内前 16KB 能取指、后面全是 trap"）。

@@ -79,15 +79,84 @@ extern int  esp_wifi_internal_tx(int iface, void *buffer, unsigned short len);
 extern int  esp_wifi_internal_reg_rxcb(int iface, void *cb);
 extern void esp_wifi_internal_free_rx_buffer(void *eb);
 
+/* §848: 扫描 rec[0] 是最强邻居，RC seed 把它的 BSSID 灌进 cnx 节点 →
+ * 连邻居 → WPA 密码不符 → 无 DHCP 回应（TX=5/RX=0）。
+ * §846 wrap get_ap_records 破坏库 BSS 链表；§847 wrap scan_start 破坏扫描
+ * （--wrap 拦截库内部所有调用点）。改为 wrap cnx_add_rc：只在 seed 的固定
+ * slot 地址上把 BSSID(+4..+9) 改成目标，库自身调用（别的指针）原样透传。
+ * wifi_glue.c 保持字节不变（任何改动都破坏脆弱的同步扫描）。 */
+#ifdef S3_TARGET_BSSID
+extern void __real_cnx_add_rc(void *bss);
+void __wrap_cnx_add_rc(void *bss)
+{
+    if ((unsigned long)bss == 0x3fcd6b48ul) {
+        unsigned char *b = (unsigned char *)bss;
+        b[4] = 0xdcu; b[5] = 0xd8u; b[6] = 0x7cu;
+        b[7] = 0x5au; b[8] = 0x7au; b[9] = 0x46u;
+    }
+    __real_cnx_add_rc(bss);
+}
+#endif
+
+/* §852: 诊断 mgmt 帧发送——auth/assoc 帧到底有没有尝试发出去。
+ * send_mgmt(buf,subtype,extra): a11=subtype(176=auth,32=assoc_req,160=disassoc)
+ * 复用 g_lwip_stage[2]=总调用/[3]= subtype 位图（不新增 BSS，scan 对布局极敏感）。
+ * [2]/[3] 平时只被 sys_thread_new 写，而 tcpip 线程没起，运行时恒为 0。 */
+extern volatile unsigned int g_lwip_stage[8];
+
+/* §859: 软件 wrap 计数管理帧 RX 路径（比 JTAG 硬件断点可靠）。
+ * sta_recv_mgmt 是窗口化库函数；wrap 透传全部 6 个寄存器参数。
+ * 复用 g_lwip_stage[4] 高 16 位计数（低 16 位送 send_mgmt 返回），避免新增 BSS
+ * （新增 BSS 会破坏脆弱的同步扫描布局，见 §860）。 */
+extern volatile unsigned int g_lwip_stage[8];
+extern void *__real_sta_recv_mgmt(void *, void *, void *, void *, void *, void *);
+void *__wrap_sta_recv_mgmt(void *a, void *b, void *c, void *d, void *e, void *f)
+{
+    g_lwip_stage[4] += 0x10000u;   /* 高 16 位 = sta_recv_mgmt 调用数 */
+    return __real_sta_recv_mgmt(a, b, c, d, e, f);
+}
+
+extern void *__real_ieee80211_send_mgmt(void *buf, int subtype, int extra);
+void *__wrap_ieee80211_send_mgmt(void *buf, int subtype, int extra)
+{
+    g_lwip_stage[2]++;                       /* mgmt 帧发送总次数 */
+    if (subtype == 176 || subtype == 0xb0) {
+        /* §863: AUTH 构造瞬间记录 g_chm home/current，判定是否被 chm_is_at_home_channel
+         * 延迟入队。打包进 stage[2] 高 16 位：bit16..23=home, bit24..31=current。 */
+        unsigned int chmp = *(volatile unsigned int *)0x3fcef850u;
+        unsigned int home = chmp ? *(volatile unsigned char *)(chmp + 80u) : 0xffu;
+        unsigned int cur  = chmp ? *(volatile unsigned char *)(chmp + 82u) : 0xffu;
+        g_lwip_stage[2] |= (home << 16) | (cur << 24);
+        if (chmp && home != cur) {
+            /* §864: 就在 AUTH 构造前把 home 设成 current，让紧随其后的
+             * chm_is_at_home_channel() 返回真 → 帧直接 ic_tx_pkt 发出而不入延迟队列。 */
+            *(volatile unsigned char *)(chmp + 80u) = (unsigned char)cur;
+        }
+        g_lwip_stage[3] |= 0x1u;  /* auth */
+    }
+    else if (subtype == 32 || subtype == 0x20) { g_lwip_stage[3] |= 0x2u; } /* assoc_req */
+    else if (subtype == 160 || subtype == 0xa0) { g_lwip_stage[3] |= 0x4u; } /* disassoc */
+    {
+        void *ret = __real_ieee80211_send_mgmt(buf, subtype, extra);
+        g_lwip_stage[4] = (g_lwip_stage[4] & 0xffff0000u) | ((unsigned int)(unsigned long)ret & 0xffffu);   /* 低16=send_mgmt 返回；高16=sta_recv_mgmt 计数 */
+        return ret;
+    }
+}
+
 static err_t c6_lwip_linkoutput(struct netif *nif, struct pbuf *p)
 {
     (void)nif;
+    g_lwip_stage[5]++;            /* linkoutput 调用次数（DHCP Discover 等） */
     if (p == 0) {
         return ERR_ARG;
     }
     /* LWIP_NETIF_TX_SINGLE_PBUF=1 保证了这里 p 是单块连续 buffer */
-    if (esp_wifi_internal_tx(C6_WIFI_IF_STA, p->payload, (unsigned short)p->tot_len) != 0) {
-        return ERR_IF;
+    {
+        int tr = esp_wifi_internal_tx(C6_WIFI_IF_STA, p->payload, (unsigned short)p->tot_len);
+        g_lwip_stage[7] = (unsigned int)tr;   /* §849: 最近一次 TX 返回码；0=成功 */
+        if (tr != 0) {
+            return ERR_IF;
+        }
     }
     return ERR_OK;
 }
@@ -107,11 +176,12 @@ static err_t c6_lwip_netif_init_cb(struct netif *nif)
 /* 收到一帧（由注册给 esp_wifi_internal_reg_rxcb 的回调转进来）。
  * buffer 是完整的 802.3 帧（从目的 MAC 开始），eb 是库自己的 buffer 句柄，
  * 处理完必须用 esp_wifi_internal_free_rx_buffer() 还回去。 */
-static int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
+int c6_lwip_rx(void *buffer, unsigned short len, void *eb)
 {
     struct netif *nif = netif_default;
     struct pbuf *p;
 
+    g_lwip_stage[6]++;            /* RX 回调被库调用次数 */
     if (nif != 0 && buffer != 0 && len != 0u) {
         p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
         if (p != 0) {
@@ -143,7 +213,17 @@ int c6_lwip_start(const unsigned char *mac)
     int i;
 
     LWSTAGE(0x201);
-    lwip_init();
+    /* §959 ★ 必须是 tcpip_init，不能是 lwip_init。
+     *
+     * lwipopts.h 里 NO_SYS=0、LWIP_SOCKET/LWIP_NETCONN 都开着，BSD socket 全走
+     * netconn → tcpip_send_msg_wait_sem → tcpip_mbox，而 tcpip_mbox 只有
+     * tcpip_init() 才会创建。原来这里调 lwip_init()，而整个镜像里**没有任何
+     * 一处**调 tcpip_init —— 反汇编确认 `sys_thread_new` 的唯一调用点就在
+     * `tcpip_init` 体内（0x420855a7），所以 tcpip 线程从来没起来过。
+     * 后果：lwip_socket()/connect()/getaddrinfo() 没有线程可等，DHCP 也没人
+     * 驱动。验收要的 DHCP 地址、TLS、HTTP 全都过不去。
+     * tcpip_init 内部会自己调 lwip_init 并 sys_thread_new("tcpip")。 */
+    tcpip_init(0, 0);
     LWSTAGE(0x202);
     /* NO_SYS=0：收包必须交给 tcpip 线程处理（`tcpip_input` 会把它塞进
      * tcpip 的邮箱）。之前这里传的是 `ethernet_input`，等于在 WiFi 的 RX
@@ -160,6 +240,10 @@ int c6_lwip_start(const unsigned char *mac)
     }
     /* DHCP 拿地址；拿不到就退回静态（本函数返回后由调用方等待/超时） */
     netif_set_up(n);
+    /* §843: dhcp_start() 先检查 netif_is_link_up()；只 set_up 不够，
+     * link 位没置的话它进 INIT 状态等 dhcp_network_changed()，而 NO_SYS=0
+     * 又没有 tcpip 线程驱动 → Discover 永远不发。这里直接置 link up。 */
+    netif_set_link_up(n);
     LWSTAGE(0x204);
     /* DHCP 特意**推迟到关联成功之后**再启动（§253）：现在立刻 dhcp_start 会在
      * 发第一包时经过 esp_wifi_internal_tx → 库里的发送路径，而这时还没关联 AP，
@@ -170,6 +254,12 @@ int c6_lwip_start(const unsigned char *mac)
      * 这一步同样依赖 WiFi 驱动已经 start 起来，早调就是踩未初始化的内部状态。 */
     LWSTAGE(0x206);
     return 0;
+}
+
+/* §960: dhcp_start 必须在 tcpip 线程里执行 —— 见 c6_lwip_start_dhcp 的说明。 */
+static void c6_dhcp_start_cb(void *arg)
+{
+    (void)dhcp_start((struct netif *)arg);
 }
 
 /* 关联成功之后再启动 DHCP（§253）。 */
@@ -183,20 +273,27 @@ int c6_lwip_start_dhcp(void)
     if (netif_default == 0) {
         return -1;
     }
-    dhcp_start(netif_default);
+    /* §960: §959 把 tcpip 线程真正拉起来之后，dhcp_start 就不能再从这个
+     * （WiFi 主任务）上下文直接调了：它要 udp_new/udp_bind/udp_connect 并挂
+     * dhcp_fine_tmr，而 tcpip 线程此刻正在跑 sys_timeouts —— 两边并发改同一份
+     * dhcp 状态。tcpip_callback() 是**阻塞版**（tcpip.h:88 的宏
+     * `block != 0 ? tcpip_callback : tcpip_try_callback` 印证），
+     * 回调在 tcpip 线程里执行完才返回。 */
+    (void)tcpip_callback(c6_dhcp_start_cb, (void *)netif_default);
     LWSTAGE(0x212);
     return 0;
 }
 
-/* 主循环里定期调（NO_SYS=1 时 lwIP 不自己跑） */
+/* §959: NO_SYS=0 下超时由 tcpip 线程自己驱动，**不能再从别的线程**调
+ * sys_check_timeouts() —— 那会和 tcpip 线程并发改同一份 timer 链表。
+ * 留这个空函数只是为了不动调用点。 */
 void c6_lwip_poll(void)
 {
-    sys_check_timeouts();
 }
 
 /* ---- 等 DHCP 拿到地址（§215）------------------------------------------
- * WiFi 事件系统我们没接，所以"拿到 IP 没有"直接看 netif 的地址：DHCP 是 lwIP
- * 自己跑的，只要把 sys_check_timeouts() 转起来 + 定期让出 CPU，它就会自己完成。
+ * WiFi 事件系统我们没接，所以"拿到 IP 没有"直接看 netif 的地址：DHCP 由
+ * tcpip 线程驱动（§959），这里只定期让出 CPU 并检查地址。
  * 返回 1 = 拿到地址（非 0 且不是 0.0.0.0）。 */
 extern unsigned int s3_w2c_task_delay(unsigned int ticks);
 
@@ -205,7 +302,6 @@ int c6_lwip_wait_ip(int ms)
     int waited = 0;
 
     while (waited < ms) {
-        sys_check_timeouts();
         if (netif_default != 0) {
             const ip4_addr_t *a = netif_ip4_addr(netif_default);
 
