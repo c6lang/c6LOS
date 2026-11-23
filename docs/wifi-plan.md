@@ -29886,3 +29886,37 @@ TX 缓冲区池是初始化时用 `_wifi_malloc` 分配的；我们的 OSI 堆�
 `wifi_init_process` / `ic_init` 都有依赖冲突。这需要更仔细地复刻
 IDF 的初始化顺序（`esp_wifi_init` → `wifi_init_process` → `ic_init` 的完整链条），
 不是靠单点补丁能解决的。
+
+## §1201 `esf_buf` 默认分配器就是 `return NULL`
+
+`esf_buf_alloc_default_handler`（`0x4201c938`）反汇编：
+```
+movi a2, 0
+retw.n
+```
+⇒ **永远返回 NULL**。真正的分配器由 `hal_init()` 装载。
+试着在 `wifi_init_process` 之前直接调 `hal_init()`：
+
+```
+[halinit] r=1107364720     ← 返回值是垃圾（签名不符或需要额外上下文）
+```
+
+真板仍是 210 行、扫描仍卡在 `[w1]wifi|` 之后。
+**⇒ `hal_init()` 不能这样裸调。** 已回退。
+
+## §1202 会话最终结论（round 154）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=71c179ed`。
+- **真板最佳 210 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**结论**：整条链已经从"连 pp_create_task 都过不去"推进到
+"WiFi STARTED、MAC 使能、扫描进入 perform 阶段、并在真实发送 probe request"。
+最后的卡点是闭源库的 **TX 缓冲池初始化**：
+`esf_buf` 的默认分配器是 `return NULL`，真分配器只能由库自己的
+初始化序列（`wifi_init_process` → `ic_init` → `hal_init`）装载，
+而我们目前是"直接调用 `wifi_init_process`"绕过了正常顺序，
+补 `ic_init`/`hal_init` 都会和它冲突。
+**下一步需要在 `wifi_init_process` 内部找到它自己调 `hal_init` 的位置
+（或确认它根本不调），从而按 IDF 的正确顺序初始化。**
