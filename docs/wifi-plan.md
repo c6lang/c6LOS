@@ -29171,3 +29171,28 @@ CALLINC 已经对不上。§1150 试过"保存 a0..a15 全部 16 个寄存器 + 
 编译一个 C 包装函数（例如 `int s3_win_wrap_queue_recv(void *qh, void *item, u32 ticks)
 { return osi_queue_recv_body(qh, item, ticks); }`），让编译器自己生成正确的
 `entry`/`call8`/`retw` 序列，彻底删掉手写汇编薄壳。这样窗口账目由编译器保证。
+
+## §1155 C 包装函数替代手写薄壳（实验，已回退）
+
+按 §1154 的建议，把 5 个 `W2C_SPILL` 全部换成 `-mabi=windowed` 编译的 C 包装：
+
+```c
+int s3_w2c_sem_pend(void *s, u32 timeout) { return os_sem_pend(s, timeout); }
+int s3_w2c_mutex_pend(void *m, u32 timeout) { return os_mutex_pend(m, timeout); }
+u32 s3_w2c_event_wait(void *e, u32 mask, u32 mode, u32 timeout)
+{ return os_event_wait(e, mask, mode, timeout); }
+void s3_w2c_task_delay(u32 ticks) { os_task_delay(ticks); }
+int s3_w2c_queue_recv(void *qh, void *item, u32 ticks)
+{ return osi_queue_recv_body(qh, item, ticks); }
+```
+
+真板结果：**78 行、输出变乱码**（`b`、`Wu1b`）。比原来的 167 行更差。
+
+⇒ 说明手写薄壳里 `entry a1,128` 预留的那 128 字节**自由栈**是必需的：
+任务切换时 `port_task_switch_c0` 要把祖先窗口 spill 到这块自由栈上。
+纯 C 包装的 `entry` 帧不够大，切任务就把调用者的窗口写飞。
+
+**正确的做法应当是：C 包装函数 + 显式 128 字节（或更大）栈预留，
+例如 `__attribute__((aligned(16))) volatile u32 pad[32];` 放在函数入口，
+或者用 `entry a1, 128` 的手写壳但**只做一次 `call8`**（不做 spill、不做 `callx8`，
+把目标函数的地址直接放进 `call8` 的立即数范围）。
