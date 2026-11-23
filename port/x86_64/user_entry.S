@@ -103,7 +103,15 @@ x86_syscall_entry:
     movq %rsp, %rdi                      /* &LxRegs */
     call x86_syscall_dispatch
 /* 返回用户态的唯一出口：RSP 指向一个 LxFrame（15 个通用寄存器 + 用户 RSP）。
- * 系统调用返回与 x86_resume_user 共用这段，保证只有一份恢复逻辑。 */
+ * 系统调用返回与 x86_resume_user 共用这段，保证只有一份恢复逻辑。
+ *
+ * 用户 RSP 必须直接按内存操作数取（pushq 8(%rsp)），不能借通用寄存器中转：
+ * Linux 的 syscall 只破坏 RCX/R11，R10 是普通参数寄存器，用户态会跨 syscall
+ * 保留它。以前 `popq %r10` 把用户 RSP 装进 R10 后就直接压栈，返回用户态时
+ * R10 变成了栈指针 —— musl 的 __stdout_write 正好把要写的 len 存在 R10 里
+ * （`mov %rdx,%r10` → syscall(TIOCGWINSZ) → `mov %r10,%rdx`），于是 writev
+ * 的长度成了栈地址、整段写入 EFAULT，curl 把 body 打向终端就报
+ * "(23) Failure writing output to destination"。 */
 .globl x86_ret_to_user
 x86_ret_to_user:
     popq %r15
@@ -121,9 +129,8 @@ x86_ret_to_user:
     popq %rcx
     popq %rbx
     popq %rax                            /* 系统调用返回值 */
-    popq %r10                            /* 用户 RSP */
     pushq $0x23                          /* SS  = 用户数据 | 3 */
-    pushq %r10
+    pushq 8(%rsp)                        /* 用户 RSP：帧顶那格，压了 SS 后偏移 8 */
     pushq %r11                           /* RFLAGS（用户原值） */
     pushq $0x2b                          /* CS  = 用户代码 | 3 */
     pushq %rcx                           /* RIP */

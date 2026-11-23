@@ -85,6 +85,13 @@ static const char kScript[] =
     "curl --version > /dev/null && echo curl-version-ok; "
     "curl -sS -o /data/qq.html https://qq.com && echo curl-https-ok; "
     "test -s /data/qq.html && echo curl-file-ok; "
+    /* 把 body 直接打到终端：musl 的 __stdout_write 会先把 len 存进 R10、跨
+     * ioctl(TIOCGWINSZ) 之后再用它调 f->write。syscall 返回破坏 R10 时 len
+     * 就成了栈地址，writev 整段 EFAULT → curl 报
+     * "(23) Failure writing output to destination"，body 一个字节都出不来。
+     * 只有这条才走 fwrite → stdout，`-o` 落盘绕开了它（M64 的四个 tag 当初
+     * 因此漏掉了这个 bug）。 */
+    "curl -sS https://qq.com && echo curl-tty-ok; "
     "echo curl-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet

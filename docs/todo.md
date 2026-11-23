@@ -1406,6 +1406,42 @@ zstd-libs，其余 musl/libssl3/libcrypto3/zlib 来自 minirootfs）。guest 里
 > 先用它区分"TLS/HTTP 坏了"还是"DNS 坏了"；`curl --version` 能打印不代表 DNS
 > 可用（c-ares 只在真正解析时才建 socket）。
 
+### 补丁：`curl` 打终端报 (23) + TCP 选项 errno 22（已通过）
+
+上面四个 tag 只覆盖 `-o` 落盘。用户在 guest 里直接 `curl -v https://qq.com`
+会看到每建一次连刷四行 `Could not set TCP_NODELAY: Invalid argument` /
+`Failed to set TCP_KEEPIDLE on fd N: errno 22`，以及
+`curl: (23) Failure writing output to destination, passed 137 returned 0`。
+两处都是内核的锅：
+
+1. **`port/x86_64/user_entry.S`（写不出去的真凶）**：`x86_ret_to_user` 以前
+   `popq %r10` 把帧顶的"用户 RSP"装进 R10 就直接压给 iretq，返回用户态时
+   **R10 变成本进程的栈指针**。Linux 的 `syscall` 只破坏 RCX/R11，R10 是普通
+   参数寄存器；musl 的 `__stdout_write` 恰好把要写的 len 存在 R10 里跨
+   `ioctl(TIOCGWINSZ)` 保住（反汇编 `ld-musl-x86_64.so.1`：
+   `mov %rdx,%r10` → `syscall` → `mov %r10,%rdx`），于是 `__stdio_write`
+   建出的第二个 iovec 是 `{body, 用户RSP}`，`lx_user_ok` 判 EFAULT、
+   `fwrite` 返回 0，curl 报 (23)。改成 `pushq 8(%rsp)` 直接按内存操作数取
+   帧里的用户 RSP，不借任何通用寄存器（压 SS 之后该格偏移 8，x86 的
+   `PUSH m` 源地址按压栈前的 RSP 算，已用宿主小程序验证过）。
+   **排查手法**：在 `lx_proc_writev` 里临时打印 fd/cnt/iov/rsp 和 iovec
+   内容，能看到 `len=0x7fffffffd400` 正好等于 `rsp+0x70`
+   （= `__stdout_write` 调 `__stdio_write` 时的 RSP），指向 R10 被覆盖。
+2. **`linux/socket.c` `lx_sock_setsockopt`**：以前只认 `SOL_SOCKET`，curl 对
+   `IPPROTO_TCP` 设 `TCP_NODELAY`(1) / `TCP_KEEPIDLE`(4) / `TCP_KEEPINTVL`(5)
+   / `TCP_KEEPCNT`(6) 全被判 `EINVAL`。C6 的 TCP 没有 Nagle/keepalive 可调，
+   按"选项存在但不生效"收下回 0；其它 level 按 Linux 语义回
+   `ENOPROTOOPT`(92)（`include/c6os/linux_abi.h` 补了这个 errno）。SAL 侧
+   本来就接受（TCP 的 `salt_setopt` 是空实现），以前只是被 ABI 层挡住。
+
+`tests/t_iso_alpine.c6` 的 curl 脚本补一条
+`curl -sS https://qq.com && echo curl-tty-ok`（只有它走 `fwrite` → stdout，
+`-o` 绕开了这条路径，所以 M64 当初没发现），`Makefile` 的 tag 断言跟着加
+`curl-tty-ok`；`make check-alpine-curl` 五个 tag 全绿。
+
+> 已知缺口（与本条无关，未修）：shell 的 `> /data/xxx` 重定向对 fd 0/1/2 目前
+> 不生效（写仍然直接进终端），要落盘请用 `curl -o /data/xxx`。
+
 ---
 
 ## 挂载点语义（cd / df，已通过）
