@@ -27114,3 +27114,57 @@ bash tools/ocboot.sh
 §1059（WiFi 账号）。
 
 镜像 `6931f417d4500ad9f3d48c5353377eed`。
+
+## §1066 ★★★★★ **真正的根因找到了**：`_mutex_lock` 的返回值契约反了
+
+反汇编 `wifi_init_in_caller_task`（0x420400dc）看到它的结构：
+
+```asm
+42040106: l32r a8, (3fcef940 <g_osi_funcs_p>)
+42040109: l32i a8, a8, 0
+4204010b: l32i a10, a8, 76        /* osi_funcs[19] = _mutex_lock */
+4204010e: callx8 a10
+42040111: s32i a10, a3, 0         /* 存返回值 */
+42040113: bnez a10, → 失败分支    /* **非 0 = 失败** */
+...
+42040124: movi a2, 0x101           /* 失败就返回 ESP_ERR_INVALID_STATE */
+```
+
+**⇒ `_mutex_lock` 的契约是 `0 = 成功`。**
+
+而我们的实现（`osi_mutex_lock`）用的是 `_semphr_take` 的惯例：
+
+```c
+ok = (pr == 0) ? 1 : 0;      /* 1 = 成功  ← 错的 */
+return ok;
+```
+
+**⇒ 库每次取全局锁都"失败" ⇒ `wifi_init_in_caller_task` 返回 0x101
+⇒ `esp_wifi_init_internal` 跳过创建 ic（并且忽略错误照样返回 0）
+⇒ `g_ic` 恒为 NULL ⇒ `esp_wifi_scan_start` 恒返回 0x3002。**
+
+**这条链把之前所有孤立现象全部串起来了**：
+§1060 的 `g_ic == NULL`、§1061 补调 `ic_init` 被 `0x101` 拒绝、
+§1064 的 `ic_init` 从未被调用。
+
+### 修法（一行，已明确、未验证）
+
+```c
+/* osi_mutex_lock */
+return (pr == 0) ? 0 : -1;      /* 0 = 成功，非 0 = 失败 */
+
+/* osi_mutex_unlock */
+return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 0 : -1;
+```
+
+**注意**：`_semphr_take` / `_queue_recv` / `_event_wait` 用的是另一套惯例
+（1 = 成功），**不要一起改**。
+
+本会话最后一次尝试应用它时，**开发板的 USB 掉了**
+（`esp_usb_jtag: could not find or open device`，§1065），
+无法上板验证，按"不留未验证改动"的纪律已撤回；
+同时把 `wifi_glue.c` 恢复到最后一个构建通过的版本（镜像 `bff36e25`）。
+
+**⇒ 下次接上板子，把上面两行的返回值改掉、重新构建刷机，
+扫描就应该能真正跑起来 —— 后面的 AP 关联 / DHCP / TLS / 取 qq.com 页面
+全部是现成代码路径。**
