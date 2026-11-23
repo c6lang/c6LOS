@@ -105,7 +105,14 @@
      *
      * 真机上这些函数是**会阻塞**的（sem/mutex/event/delay），
      * 阻塞就会切任务，切任务就会毁掉祖先窗口 —— 所以必须逐个加壳。 */
-    .macro  W2C_SPILL name, target
+    /* §§1114 ★★★★ 每个壳必须用**自己的 RTC 槽位**！
+     * 原来五个壳共用 `0x50001FA0+8`，一旦发生**嵌套**
+     * （如 `s3_w2c_queue_recv` → `osi_queue_recv_body` → `s3_w2c_task_yield`），
+     * 内层壳会把外层的 sp 覆掉，外层返回时 `a1` 就是内层的 sp
+     * 甚至 0。真板现场（0x500018C0）：`a1=0`、`epc1=0x420134e2`
+     * （`= s3_w2c_queue_recv` 的 `retw`）、`windowbase=4`。
+     * 现在每个壳用自己的偏移：8/12/16/20/24。 */
+    .macro  W2C_SPILL name, target, slot=8
     .align  4
 9:  .word   \target
     .align  4
@@ -114,23 +121,44 @@
 \name:
     entry   a1, 128
     l32r    a8, 4b
-    s32i    a1, a8, 8
-    s32i    a2, a1, 64
-    s32i    a3, a1, 68
-    s32i    a4, a1, 72
-    s32i    a5, a1, 76
-    s32i    a6, a1, 80
-    s32i    a7, a1, 84
+    s32i    a1, a8, \slot
+    /* §§1124 ★★★★ **根因修法**：参数在 a10..a15，不是 a2..a7！
+     *
+     * `call8`/`callx8` 会轮转窗口：调用者的 a2..a7 在被调者里是 **a10..a15**。
+     * 原来存/恢复 a2..a7，等于把自己的未初始化寄存器当成参数传给了目标。
+     * 真板证据（RTC 0x50000F40）：`_queue_recv` 进入 32 次，
+     * 但 qh=0、item=0x42013668、ticks=0x42013668（都是代码地址）。 */
+    s32i    a10, a1, 64
+    s32i    a11, a1, 68
+    s32i    a12, a1, 72
+    s32i    a13, a1, 76
+    s32i    a14, a1, 80
+    s32i    a15, a1, 84
+    /* §§1125：**两组都存**。`call8` 与 `callx8` 的轮转行为不完全一致，
+     * 不确定库把参数放在哪一组；两组都保存并恢复，
+     * 无论哪组携带参数都能原样传给目标。 */
+    s32i    a2, a1, 88
+    s32i    a3, a1, 92
+    s32i    a4, a1, 96
+    s32i    a5, a1, 100
+    s32i    a6, a1, 104
+    s32i    a7, a1, 108
     mov     a9, a1
     call8   s3_win_spill
     l32r    a8, 4b
-    l32i    a1, a8, 8
-    l32i    a2, a1, 64
-    l32i    a3, a1, 68
-    l32i    a4, a1, 72
-    l32i    a5, a1, 76
-    l32i    a6, a1, 80
-    l32i    a7, a1, 84
+    l32i    a1, a8, \slot
+    l32i    a10, a1, 64
+    l32i    a11, a1, 68
+    l32i    a12, a1, 72
+    l32i    a13, a1, 76
+    l32i    a14, a1, 80
+    l32i    a15, a1, 84
+    l32i    a2, a1, 88
+    l32i    a3, a1, 92
+    l32i    a4, a1, 96
+    l32i    a5, a1, 100
+    l32i    a6, a1, 104
+    l32i    a7, a1, 108
     mov     a9, a1
     l32r    a8, 9b
     callx8  a8
@@ -138,10 +166,10 @@
     .endm
 
     /* 会阻塞的四个：取信号量 / 锁互斥量 / 等事件 / 任务延时 */
-    W2C_SPILL s3_w2c_sem_pend,   os_sem_pend
-    W2C_SPILL s3_w2c_mutex_pend, os_mutex_pend
-    W2C_SPILL s3_w2c_event_wait, os_event_wait
-    W2C_SPILL s3_w2c_task_delay, os_task_delay
+    W2C_SPILL s3_w2c_sem_pend,   os_sem_pend,   8
+    W2C_SPILL s3_w2c_mutex_pend, os_mutex_pend, 12
+    W2C_SPILL s3_w2c_event_wait, os_event_wait, 16
+    W2C_SPILL s3_w2c_task_delay, os_task_delay, 20
     /* ★★★★ §1084：队列接收也是**阻塞点**（队列空就等），必须享受 §1056 同款
      * 处理：先 `entry a1,128` 留出自由栈，再 spill 祖先窗口。
      *
@@ -149,7 +177,7 @@
      * `osi_queue_recv_body+0x268` 的 `retw.n`（EXCCAUSE=28,
      * EXCVADDR=0xfffffff4、a1=0）—— 正是"阻塞后返回时祖先窗口已被覆盖"。
      * 之前只给 sem/mutex/event/delay 加了壳，漏了 queue_recv。 */
-    W2C_SPILL s3_w2c_queue_recv, osi_queue_recv_body
+    W2C_SPILL s3_w2c_queue_recv, osi_queue_recv_body, 24
 #else
     .macro  WIN_SPILL
     /* §386 教训：**绝不能在这个宏里放 `.word` 字面量**。

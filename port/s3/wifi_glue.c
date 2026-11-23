@@ -16,6 +16,16 @@ void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
 volatile u32 g_osi_calls[128];
+
+/* §1113：RTC 自初始化计数。RTC 未清零，读到的值 >1000 就当垃圾重置。
+ * 本项目里这是唯一可靠的观测手段（GDB 读 DRAM 读到 0/垃圾、flash 断点不命中）。 */
+__attribute__((section(".flash.text"))) static void s3_cnt(u32 addr)
+{
+    volatile u32 *cp = (volatile u32 *)addr;
+    u32 v = *cp;
+    if (v > 1000u) { v = 0u; }
+    *cp = v + 1u;
+}
 extern int s3_ets_printf(const char *fmt, ...);
 
 /* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
@@ -320,6 +330,8 @@ static void *osi_semphr_create(u32 max, u32 init)
 }
 static void osi_semphr_delete(void *sem)
 {
+    s3_ets_printf("[sdel] sem=%08x t=%u\n", (unsigned)(u32)sem, (unsigned)s3_w2c_current_task());
+    s3_cnt(0x50000E70u);
     WSem *s = (WSem *)sem;
     if (s != 0 && s->magic == WSEM_MAGIC) { (void)s3_w2c_sem_destroy((void *)&s->s); s->magic = 0u; osi_free(s); }
 }
@@ -343,6 +355,10 @@ static int osi_semphr_take(void *sem, u32 ticks)
                    (unsigned)((s != 0) ? s->seq : 0u), (unsigned)ticks);
     }
     int ok;
+    if (ticks == 0xFFFFFFFFu) {
+        s3_ets_printf("[take!] sem=%08x t=%u\n", (unsigned)(u32)sem, (unsigned)s3_w2c_current_task());
+    }
+    s3_cnt(0x50000E64u);
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
     B_IN(1u);
@@ -355,6 +371,8 @@ static int osi_semphr_give(void *sem)
 {
     WSem *s = (WSem *)sem;
     int r;
+    s3_ets_printf("[give] sem=%08x t=%u\n", (unsigned)(u32)sem, (unsigned)s3_w2c_current_task());
+    s3_cnt(0x50000E68u);
     HIT_OF(_semphr_give);
     if (g_dbg_sync != 0u) {
         s3_ets_printf("[give] t=%u sem#%u\n", (unsigned)s3_w2c_current_task(),
@@ -410,7 +428,10 @@ static u32 g_mtx_seq = 0u;
 
 static void *osi_mutex_create(void)
 {
-    void *m = wmux_new();
+    void *m;
+    s3_ets_printf("[mux] in\n");
+    m = wmux_new();
+    s3_ets_printf("[mux] -> %08x\n", (unsigned)(u32)m);
 
     HIT_OF(_mutex_create);
     if (m != 0) {
@@ -425,8 +446,12 @@ static void *osi_mutex_create(void)
 }
 static void *osi_recursive_mutex_create(void)
 {
+    void *r;
+    s3_ets_printf("[rmux] in\n");
     HIT_OF(_recursive_mutex_create);
-    return wmux_new();
+    r = wmux_new();
+    s3_ets_printf("[rmux] -> %08x\n", (unsigned)(u32)r);
+    return r;
 }
 static void osi_mutex_delete(void *p)
 {
@@ -610,10 +635,9 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_send);
-    if (g_dbg_sync != 0u) {
-        s3_ets_printf("[send] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
-                   (unsigned)qh, (unsigned)ticks);
-    }
+    /* §§1127：临时无条件打印，确认 pp_post 是否真的进到 _queue_send。 */
+    s3_ets_printf("[send] t=%u qh=%x tk=%x q=%x\n", (unsigned)s3_w2c_current_task(),
+               (unsigned)qh, (unsigned)ticks, (unsigned)q);
     if (q == 0 || q->magic != WQ_MAGIC) {
         SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
         SDIAG[1] = (u32)((WQ *)qh)->magic;
@@ -646,6 +670,37 @@ extern void *port_cur_ctx(void);
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     {
+        /* §§1123：**最顶端计数**。+0=进入次数，+1=qh，+2=item，+3=ticks。 */
+        volatile u32 *c = (volatile u32 *)0x50000F40u;
+        u32 v = c[0]; if (v > 1000000u) { v = 0u; } c[0] = v + 1u;
+        c[1] = (u32)qh;
+        c[2] = (u32)item;
+        c[3] = ticks;
+    }
+    /* §§1120 ★★★★：**每次 recv 都推进一次时间**。
+     *
+     * `S3_TICK_DEFER` 下时间只能由任务调 `s3_tick_consume()` 推进。
+     * ppTask 手上有好几条库消息（pp_post 调了 7 次），它在 recv
+     * 循环里一直有消息可取、从不阻塞；而内核又是无抢占的
+     * ⇒ tick 永远无人消费 ⇒ 初始化任务的 `os_task_delay(1)` 永不到期。
+     * 真板现场：`[delay] ticks=1 t=1` → `[give] ...` 之后再无进展。 */
+    {
+        extern void s3_tick_consume(void);
+        extern void os_task_yield(void);
+        static u32 s_rn = 0u;
+        s3_tick_consume();
+        /* §§1121：周期性让出。ppTask 手上有消息时会在 recv 里一直转，
+         * 无抢占内核下初始化任务即使已被唤醒也拿不到 CPU。
+         * 注意：这里直接调 windowed 的 `os_task_yield()`（普通 call8），
+         * **不能**用 `s3_w2c_task_yield`（那是另一层 W2C_SPILL 壳，嵌套进来会把 a1 弄成 0）。 */
+        /* §§1130：周期性 `os_task_yield()` 已**移除**。
+         * 它在 recv 的 W2C_SPILL 壳深处调 `port_core_id()`，而那时 `a1` 已被
+         * 壳子从 RTC 槽里恢复成了坏值（真板：`a1=8`、
+         * `exccause=0x1d`、`excvaddr=0xfffffff0`、`epc1=0x40378dfb`（`port_core_id` 的 `entry`））。
+         * 库任务已降到优先级 20，不再需要抢占式让出。 */
+        (void)s_rn;
+    }
+    {
         /* 诊断：记录"是谁"在调 _queue_recv —— 用 port 视角的当前上下文，
          * 这是唯一能区分初始化任务与 WiFi 任务的可靠标识。 */
         volatile u32 *rr = (volatile u32 *)0x50001540u;
@@ -672,7 +727,6 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
          * 在 S3_NO_PREEMPT=1 的内核里，ppTask 于是一个**不让出的空转**，
          * 初始化任务永远回不来（切换环 0x50001500 明确显示：切到 id=2 之后再没切回）。
          * 让出 CPU 后，init 任务可以继续把 s_pp_task_create_sem 等资源建好。 */
-        s3_w2c_task_yield();
         return 0;
     }
     /* §1087：库有时会传进来一个**垃圾小值**（真板实测 qh=0x05，
@@ -764,10 +818,24 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
             d_[12] = recv_n_;
         }
     }
+    {
+        volatile u32 *c = (volatile u32 *)0x50000EE0u;
+        u32 v = c[0]; if (v > 1000000u) { v = 0u; } c[0] = v + 1u;
+        c[1] = ticks;
+        c[2] = w_ticks(ticks);
+        c[3] = (u32)(void *)q;
+        c[4] = q->q.count;
+        c[5] = (u32)item;
+    }
     if (ticks == 0u) {
         r = s3_w2c_queue_try_get((void *)&q->q, item);
     } else {
         r = s3_w2c_queue_get((void *)&q->q, item, w_ticks(ticks));
+    }
+    {
+        volatile u32 *c = (volatile u32 *)0x50000EE0u;
+        u32 v = c[6]; if (v > 1000000u) { v = 0u; } c[6] = v + 1u;
+        c[7] = (u32)(int)r;
     }
     {
         /* 诊断：每次收到的返回值 + 当前队列 count，判断第一次是"真收到"
@@ -842,7 +910,15 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
                            u32 prio, void *handle)
 {
     int id;
-    u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
+    /* §§1126 ★★★★ 库任务必须比初始化任务**低**优先级。
+     * 原来 `31 - prio`：ppTask 的 prio=29 ⇒ p=2（极高）。内核是无抢占的，
+     * ppTask 一旦得到 CPU 就在 recv 循环里不让出；即使初始化任务已被
+     * `unblock()` 置为 READY，`port_task_yield` 也永远挑 ppTask（优先级更高）。
+     * 真板现场：`[delay] ticks=1 t=1` → `[give]` 之后再无进展，而超时计数
+     * 0x50001600 已经是 1（说明超时确实到期并解除了阻塞）。
+     * 改成固定低优先级 20（数字越大越低），保证初始化任务先跑完。 */
+    u32 p = 20u;
+    (void)prio;
     HIT_OF(_task_create);
     /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深，
      * 所以要抬。但栈池只有 24KB（port/s3/ctx.c 的 S3_STACK_POOL，§219），
@@ -914,6 +990,7 @@ static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); ret
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
 static void osi_task_delay(u32 ticks)
 {
+    s3_ets_printf("[delay] ticks=%u t=%u\n", (unsigned)ticks, (unsigned)s3_w2c_current_task());
     if (g_dbg_sync != 0u) {
         s3_ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
                    (unsigned)ticks);
@@ -1201,7 +1278,19 @@ static void *osi_zalloc_internal(u32 n)  { OSI_HIT(89); return osi_calloc(1u, n)
 static void *osi_wifi_malloc(u32 n)      { OSI_HIT(90); return osi_malloc(n); }
 static void *osi_wifi_realloc(void *p, u32 n)     { OSI_HIT(91); return osi_realloc(p, n); }
 static void *osi_wifi_calloc(u32 n, u32 sz)       { OSI_HIT(92); return osi_calloc(n, sz); }
-static void *osi_wifi_zalloc(u32 n)      { OSI_HIT(93); return osi_calloc(1u, n); }
+static void *osi_wifi_zalloc(u32 n)
+{
+    /* §§1117：esp_wifi_init_internal 在 wifi_init_in_caller_task 之后
+     * 调 osi[93]=_wifi_zalloc(24)，之后才调 ieee80211_ioctl。
+     * 打印能分辨它是不是卡在这里。 */
+    s3_ets_printf("[zalloc] n=%u\n", (unsigned)n);
+    OSI_HIT(93);
+    {
+        void *r = osi_calloc(1u, n);
+        s3_ets_printf("[zalloc] -> %08x\n", (unsigned)(u32)r);
+        return r;
+    }
+}
 
 static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
 
@@ -1856,6 +1945,30 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     s3_ets_printf("[wifi] set_config=%d\n", r3);
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+    /* §§1128 ★★★★：`esp_wifi_start()` 只是把 `wifi_start_process`
+     * 投进 wifi 任务的队列，真正建 `g_ic` 的是**那个任务**。
+     * 我们把库任务降到优先级 20（低于初始化任务）后，
+     * 初始化任务不主动阻塞，ppTask 就永远抢不到 CPU，
+     * `wifi_start_process` 从未执行 ⇒ `g_ic` 恒为 0 ⇒ `esp_wifi_scan_start`
+     * 在 `*(u8*)(g_ic+0x1E9) < 2` 处返回 0x3002 (NOT_STARTED)。
+     * 这里主动睡一下：初始化任务 BLOCKED 后 ppTask 就能跑，
+     * 它在 recv 里消费 tick 推进超时，睡满后我们自然醒来。 */
+    {
+        /* §§1129：用**1 tick 小步轮询**代替长延时。
+         * tick 只在任务上下文的 `s3_tick_consume()` 里推进，而库任务优先级
+         * 低于我们，只有我们 BLOCKED 时它才能跑。长延时 (10 tick) 会因为
+         * "谁也不推进 tick" 而永远不到期；1 tick 小步只需 ppTask 回到 recv
+         * 一次就能醒。每次醒来检查 `g_ic`，建好就走。 */
+        extern unsigned char g_ic[];
+        extern void os_task_delay(u32 ticks);
+        u32 it;
+        for (it = 0u; it < 200u; it++) {
+            if (*(volatile u32 *)(void *)g_ic != 0u) { break; }
+            os_task_delay(1u);
+        }
+        s3_ets_printf("[wifi] g_ic=%x (等了 %u 次)\n",
+                      (unsigned)*(volatile u32 *)(void *)g_ic, (unsigned)it);
+    }
     /* §1059：ESP_ERR_WIFI_NOT_STARTED 说明库内部没进 started 状态。
      * 读同一个状态机（§421 定位的 `g_wifi_osi_funcs_md5 + 4`），
      * 看 esp_wifi_start 到底有没有推进它。 */
@@ -2847,8 +2960,12 @@ int __wrap_misc_nvs_init(void)
 extern int __real_ic_create_wifi_task(void);
 int __wrap_ic_create_wifi_task(void)
 {
+    int r;
     s3_wrap_bump(2u);
-    return __real_ic_create_wifi_task();
+    s3_ets_printf("[ictask] in\n");
+    r = __real_ic_create_wifi_task();
+    s3_ets_printf("[ictask] -> %d\n", r);
+    return r;
 }
 
 extern int __real_ieee80211_ioctl_init(void);
@@ -2858,7 +2975,9 @@ int __wrap_ieee80211_ioctl_init(void)
 {
     int r;
     s3_wrap_bump(3u);
+    s3_ets_printf("[ioctl_init] in\n");
     r = __real_ieee80211_ioctl_init();
+    s3_ets_printf("[ioctl_init] -> %d\n", r);
 #ifdef S3_TRACE_IOCTL
     /* §655: 库把 g_config_func 设成内部 callx8 固定地址，--wrap 抓不到。
      * 这里直接把指针换成带日志的 wrapper，判定 ppTask 是否真的走到 ioctl 分发。 */

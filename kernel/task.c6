@@ -302,7 +302,18 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     if (g_cur == 0 || port_in_isr() != 0u) {
         return -1;
     }
+    {
+        volatile u32 *bc = (volatile u32 *)0x50000EA0u;
+        u32 bv = bc[0];
+        if (bv > 100000u) { bv = 0u; }
+        bc[0] = bv + 1u;
+        bc[1] = g_cur->id;
+        bc[2] = timeout;
+        bc[3] = (u32)kind;
+    }
     if (g_sched_lock[core] != 0u) {
+        { volatile u32 *bc = (volatile u32 *)0x50000EA0u;
+          u32 bv = bc[4]; if (bv > 100000u) { bv = 0u; } bc[4] = bv + 1u; }
         return -4; /* 调度锁内不允许阻塞 */
     }
 #if defined(C6OS_S3_DIAG)
@@ -390,6 +401,16 @@ int os_task_block_wait(void) {
         port_putc('.');
     }
 #endif
+    /* §§1119 ★★★★ 关键修复：**阻塞前先消费 pending tick**。
+     *
+     * `S3_TICK_DEFER` 下时间推进完全靠任务调 `s3_tick_consume()`。
+     * 真板死锁：初始化任务 `os_task_delay(1)` 阻塞，ppTask 阻塞在
+     * xphyQueue 上，**两个任务都不消费 tick** ⇒ 超时永不到期
+     * ⇒ 初始化任务永远醒不来 ⇒ `pp_create_task` 不返回。
+     * 真板现场：`[delay] ticks=1 t=1` 之后永远没有 `[sdel]`。
+     *
+     * 在这里消费，就能让它人阻塞时推进时间。 */
+    { extern void s3_tick_consume(void); s3_tick_consume(); }
     port_task_yield();
     return g_cur->wait_result;
 }
@@ -773,6 +794,17 @@ void os_task_delay(u32 ticks) {
         return;
     }
     g_cur->delay_left = ticks;
+    /* §§1118 ★★★★ 关键修复：**不能直接阻塞睡下去**。
+     *
+     * `S3_TICK_DEFER` 下时间推进完全靠任务调 `s3_tick_consume()`。
+     * 但一旦所有任务都阻塞了（真板：初始化任务睡 1 tick，
+     * ppTask 阻塞在 xphyQueue 上），**没有任何任务去消费 tick**，
+     * 超时永不到期 ⇒ 初始化任务永远醒不来 ⇒ `pp_create_task` 不返回。
+     * 真板现场：最后一行 `[delay] ticks=1 t=1`，之后永远没有 `[sdel]`。
+     *
+     * 所以当前任务要么阻塞并依赖别人推进时间，要么自己推进。
+     * 这里用自旋：反复 `s3_tick_consume()` 直到 `delay_left` 归零。
+     * 代价是延时期间占 CPU，但在只有两个任务、延时又很短的初始化阶段完全可接受。 */
     if (os_timeout_add(g_cur->id, ticks) != 0) {
         /* ★★★ §1082：超时表满时也必须让出 CPU（否则永不切换任务）。 */
         g_cur->delay_left = 0;

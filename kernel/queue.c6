@@ -131,6 +131,19 @@ int os_queue_put(OsQueue *q, void *item, u32 timeout) {
 }
 
 int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
+    {
+        /* §§1122：诊断计数（RTC 自初始化）。
+         * 0x50000EB0+0=进入次数，+4=q 不合法次数，
+         * +8=cap==0 次数，+12=阻塞次数，+16=取到消息次数。 */
+        volatile u32 *c = (volatile u32 *)0x50000EB0u;
+        u32 v = c[0]; if (v > 1000000u) { v = 0u; } c[0] = v + 1u;
+        if (q == 0 || q->magic != QUEUE_MAGIC || out == 0) {
+            u32 w = c[1]; if (w > 1000000u) { w = 0u; } c[1] = w + 1u;
+            c[5] = (u32)q;
+            c[6] = (q != 0) ? q->magic : 0u;
+            c[7] = (u32)out;
+        }
+    }
     if (q == 0 || q->magic != QUEUE_MAGIC || out == 0) {
         return -1;
     }
@@ -139,10 +152,14 @@ int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
         int r = 0;
 
         if (q->magic != QUEUE_MAGIC || q->cap == 0u) {
+            { volatile u32 *c = (volatile u32 *)0x50000EB0u;
+              u32 w = c[2]; if (w > 1000000u) { w = 0u; } c[2] = w + 1u; }
             os_obj_unlock(st);
             return -1;
         }
         if (q->count != 0u) {
+            { volatile u32 *c = (volatile u32 *)0x50000EB0u;
+              u32 w = c[4]; if (w > 1000000u) { w = 0u; } c[4] = w + 1u; }
             slot_read(q, q->head, out);
             q->head = q->head + 1u;
             if (q->head == q->cap) {
@@ -153,6 +170,8 @@ int os_queue_get_item(OsQueue *q, void *out, u32 timeout) {
             os_obj_unlock(st);
             return 0;
         }
+        { volatile u32 *c = (volatile u32 *)0x50000EB0u;
+          u32 w = c[3]; if (w > 1000000u) { w = 0u; } c[3] = w + 1u; }
         r = os_task_block_prepare(q, timeout, Q_WAIT_GET, 0u);
         os_obj_unlock(st);
         if (r != 0) {

@@ -79,6 +79,8 @@ SECTIONS
     /* kprintf 只被日志/panic 打印用，不参与中断路径；WiFi 全量镜像里 IRAM
      * 只剩几十字节余量（§202），把它挪到 flash 换出 1KB。 */
     *kprintf.o(.literal .literal.* .text .text.*)
+    /* §§1116：腾 IRAM 给占调度。idf_shim 不在中断路径上。 */
+    *idf_shim.o(.literal .literal.* .text .text.*)
     /* 调度器内核代码放 flash：WiFi 全量镜像 IRAM 只剩一两百字节余量，task.o
      * 有 11KB。port_task_switch/yield 在 ctx.S（仍留 IRAM），中断入口在 irq.S，
      * 所以切换路径本身不经过 flash。 */
