@@ -28134,3 +28134,46 @@ intenable = 0x40           ← 只剩定时器
 "故意停机"这个调试行为。**
 
 镜像 `410f5fe9`。
+
+## §1092 ★★★ 系统已经"活着"了：tick 在跑、任务在切换，但 ppTask 没跑完初始化
+
+### 决定性诊断（RTC 计数器）
+
+```
+0x50000700 (ISR 计数)   = 0x5e00 (24064 次)
+0x50001580 (TICK_PEND)  = 0x5ecc (24268)
+0x50000400 (RESTORE 次数) = 3
+0x50001500 (切换环):
+   tag=7 id=1 ctx=3fcc68b0 n=1     ← 建任务
+   tag=1 id=1 ctx=3fcc68b0 n=2     ← 一次切换
+   tag=7 id=2 ctx=3fcc68fc n=3     ← 建任务（ppTask）
+```
+
+**⇒ 系统**不再是"崩死"**：定时器中断进了 24064 次，TICK_PEND 一直在涨，
+说明 tick 链完全正常。之前几轮读到的"PC 冻结"其实是采样到了同一个
+**轮询循环**里的不同位置（不同 boot 的 PC 各不相同：0x40378e14 /
+0x420135b6 / 0x42013495 / 0x4201751e）。**
+
+### 但 `g_ic` 仍然是 0
+
+```
+0x3fcd474c (g_ic) = 0x00000000
+```
+
+**⇒ ppTask 确实被切进去执行了（在 `s3_w2c_queue_recv` 壳里反复轮询它的队列），
+但 `wifi_init_process → wifi_lmac_init → ic_init` 这条链没有跑，
+所以 `g_ic` 还是 NULL。**
+
+**⇒ 也就是说：`esp_wifi_init_internal` 把 `wifi_init_process` 投递到 ppTask 的
+队列之后，ppTask 并没有真正执行它（或者执行了但提前返回）。**
+
+### 下一步（很具体）
+
+1. 在 `wifi_init_process`（每次构建都要重新 `nm` 解析地址）下断点，
+   确认它到底有没有被调用；
+2. 若没被调，说明投递的队列消息没被 ppTask 取到 —— 查
+   `osi_queue_recv` 的 `ticks` 参数与 `osi_queue_send` 的配对，
+   以及 ppTask 轮询的那个队列句柄是否就是 `esp_wifi_init_internal`
+   投递的那个（`wq_resolve` 的兜底查找可能把它们对错了）。
+
+镜像 `410f5fe9`。
