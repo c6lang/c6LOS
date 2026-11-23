@@ -30181,3 +30181,29 @@ bnez a2, cont
 - **真板最佳 227 行**（会话起点 79 行，提升 148 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成。**
+
+## §1220 `esf_buf` 的鸡生蛋问题（最终定位）
+
+`esf_buf_alloc`（`0x403882cc`）成功路径：
+```
+403883bd: l32r a10, g_eb_list_desc    ; 0x3fcbb354
+403883c0: addx4 a3, a3, a3
+403883c7: addx4 a10, a3, a10
+403883cd: call8 esf_buf_alloc_dynamic ; ← 从链表取
+```
+`g_wifi_menuconfig+8` = 1 ⇒ 走 **dynamic** 路径。
+而 dynamic 池要靠 `_wifi_malloc` 分配，我们实测**从未调用过 >=256 字节的分配**。
+`esf_buf_setup` → `esf_buf_setup_static` → `esf_buf_alloc` 又回到同一个空链表
+⇒ **`esf_buf_setup_static: alloc eb fail(0)` 的鸡生蛋**。
+
+**要打破它**，需要在 `esf_buf_setup` 之前**先把 dynamic 池从 OSI 堆分配出来**
+（即调用库里的 `esf_buf_setup_dynamic` 或等价函数，参数是缓冲个数 32），
+或者把 `g_wifi_menuconfig+8` 改成 0 让它走 static 路径
+（但 static 路径也需要预先分配 `eb_space`）。
+
+## §1221 会话最终状态（round 166）
+
+- 仓库 `main`，工作树干净，最新提交 `8c0e6c8`，最佳构建 `md5=e76a3f1c`。
+- **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
