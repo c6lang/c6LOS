@@ -1,4 +1,4 @@
-# 任务板（M0–M65）
+# 任务板（M0–M65 + WiFi bring-up）
 
 > 状态列：`未开始` / `进行中` / `完成` / `阻塞`
 > 规则：每个里程碑一个提交；验收数字写进提交信息；P0 未完成不进入 M0。
@@ -1537,9 +1537,11 @@ ns —— 超时短了 1000 倍（m55 那个 20ms 超时实际只等 20µs）。
 
 ---
 
-## 发布回归记录（2026-11-23）
+## 发布回归记录（2026-11-23，v0.1.0）
 
-发布前在最终树上重跑全部门禁：
+main 在发布准备期间前进了 300 个提交（windowed ABI 迁移、闭源 WiFi 库、lwIP、
+TLS 1.2/HTTPS 客户端，见 docs/wifi-plan.md §1063 起）。发布分支已合并 main
+（`eb696c0`），以下门禁全部在合并后的树上重跑：
 
 | 门禁 | 结果 |
 |---|---|
@@ -1556,7 +1558,10 @@ ns —— 超时短了 1000 倍（m55 那个 20ms 超时实际只等 20µs）。
   指令（按设计由 risc6 覆盖）。
 - 真板 L4（S3 烧写/长稳）不在本机执行，按 `docs/porting-esp32s3.md` 上板。
 
-本轮修复的 CI 断点见提交 `8fddd42`：S3 专有诊断埋点的宏隔离、`C6OS_VFS=0`
+本轮修复的 CI 断点：`8fddd42` 做了 S3 专有诊断埋点的宏隔离、`C6OS_VFS=0`
 的 L1/L2 构建、S3 默认内核缺 `mutex/event` 与 `os_queue_try_*`、基线 `make s3`
-的 WiFi 桩、M35 缺失的 ELF 构建规则。此前这些断点会让 `check-host`、
+的 WiFi 桩、M35 缺失的 ELF 构建规则。合并 main 时又处理了它带入的同类断点
+（`eb696c0`）：`make_ready`/`unblock`/`os_task_wake_first_id` 的 RTC 裸写与
+`port_putc` 轨迹、`port_task_ctx_check` 均改由 `C6OS_S3_DIAG` 隔离，并为新增的
+`__real_*` --wrap 目标补了普通构建的桩。此前这些断点会让 `check-host`、
 `check-all` 和 Linux ABI 的 L1/L2/M35 直接失败，与功能代码本身无关。

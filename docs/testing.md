@@ -146,11 +146,11 @@ make s3 && make flash
 ## 8. 门禁清单（合并前）
 
 ```sh
-make lint               # 4 个 lint + 符号白名单
 make check-host         # L1 全绿
-make check-rv32         # L2 全绿
-make check-bare         # L3 全绿
-make s3                 # 镜像可生成，size 在预算内
+make check-all          # L1/L2/L3（host + x86-64 裸机 + rv32/rv32bare 构建）
+make check-linuxabi-all # 56 项 Linux ABI + Alpine 回归
+make s3                 # 镜像可生成，chkimg 通过
+make wifi               # 闭源 WiFi 库全链（可选，需 IDF 闭源 .a）
 # L4 人工执行上板阶梯，记录串口日志到 build/logs/
 ```
 
