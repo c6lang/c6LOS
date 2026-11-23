@@ -16,7 +16,7 @@ void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
 volatile u32 g_osi_calls[128];
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 
 /* 诊断：把库的回调序列记进 RTC 慢存（0x50000000 区，CPU/看门狗复位都不丢），
  * 串口不可靠时用 `esptool read-mem 0x50000200` 直接读回来。
@@ -30,6 +30,11 @@ static u32 g_osi_ring_n = 0u;
  * 必须和函数体里的 g_recv_seq 分开：共用一个序号时两边的写入互相覆盖，
  * 真板上表现为"两次 recv 的库侧返回地址一模一样"，把 task1 的那条冲掉了。 */
 u32 g_lra_seq = 0u;
+
+/* §674: 库自己构造的 scan-start 消息（b0=0x305），由 __wrap_pp_post 截获。
+ * §629 的手工消息布局不对（msg[0]=5、m[4]=0），FSM 立刻 cancel/end；
+ * 这里保存库构造的真消息指针，交给直接调用路径用。 */
+u32 g_s3_real_scan_msg = 0u;
 
 #define OSI_HIT(i) do { \
     g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
@@ -56,7 +61,20 @@ static u32 glue_ret0(void)
 /* 堆内存放在 **BSS 静态数组**里：由 IDF bootloader 统一清零、不会和
  * .data/.bss 里的其它符号重叠（之前硬编码 0x3FCB8000 正好压在 _bss 段里，
  * 一分配就踩坏内核全局变量）。 */
-static u32 g_wifi_heap_mem[16384];      /* 64KB */
+/* §432：**从 64KB 降到 32KB**。
+ *
+ * 原来 64KB 把 `.bss` 顶到 `_bss_end = 0x3fcd8c6e`，而 https 目标的
+ * `_stack_top = 0x3FCD9500`、`_stack_limit = _bss_end + 0x800`，
+ * 于是**主栈只剩 146 字节**。真板实测 `port_task_switch` 的外出 sp 是
+ * `0x3fcd9390` —— 已经低于 `_stack_limit`，从头就在往 `.bss` 里写。
+ * 全局变量被自己踩烂，什么怪现象都出得来。
+ *
+ * 32KB 之后 `_bss_end = 0x3fcd0c6e`，主栈有 ~32KB，恢复正常。 */
+/* §437：32KB **不够** —— 真板崩在 `ram_chip_i2c_readReg`：
+ *   `l32i a8, a8, 0x168` 且 vaddr=0x168，即 a8 是 0
+ * （某个 i2c 函数表指针没分配出来）。库在 PHY 阶段就要这么多堆。
+ * 48KB 是"能装下库"与"给主栈留够"之间的折中。 */
+static u32 g_wifi_heap_mem[12288];      /* 48KB */
 #define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
 #define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 
@@ -114,6 +132,15 @@ static void *osi_malloc(u32 n)
         }
         if ((u32)b + (u32)sizeof(WhBlk) + b->size > end) { break; }
         b = (WhBlk *)((u8 *)b + sizeof(WhBlk) + b->size);
+    }
+    /* §297：堆耗尽——库很可能没检查返回值就直接解引用（真板上表现为
+     * cause=0x1d、EXCVADDR=NULL+偏移）。这里记次数和最近一次的大小，并
+     * 在第一次失败时打一行，方便判断要不要扩堆。 */
+    *(volatile u32 *)0x50000748u = *(volatile u32 *)0x50000748u + 1u;
+    *(volatile u32 *)0x5000074cu = n;
+    if (*(volatile u32 *)0x50000748u == 1u) {
+        extern int s3_ets_printf(const char *fmt, ...);
+        s3_ets_printf("[heap] 分配失败 n=%u\n", (unsigned)n);
     }
     return 0;
 }
@@ -257,7 +284,13 @@ static u32 w_ticks(u32 t)
 }
 
 /* ---- 信号量 ---- */
-typedef struct { WOsSem s; u32 magic; } WSem;
+/* 同步点追踪（§229）：只在 bringup 期间打开，打印信号量的建/给/取，
+ * 用来定位"init 卡在等哪个同步对象"。 */
+u32 g_dbg_sync = 0u;
+static u32 g_sem_seq = 0u;
+static u32 g_sem_id_of(void *p) { (void)p; return 0u; }
+
+typedef struct { WOsSem s; u32 magic; u32 seq; } WSem;
 #define WSEM_MAGIC 0x53454D31u
 
 static WSem *wsem_new(u32 max, u32 init)
@@ -266,6 +299,13 @@ static WSem *wsem_new(u32 max, u32 init)
     if (s == 0) { return 0; }
     if (s3_w2c_sem_init((void *)&s->s, init, max) != 0) { osi_free(s); return 0; }
     s->magic = WSEM_MAGIC;
+    g_sem_seq = g_sem_seq + 1u;
+    s->seq = g_sem_seq;
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[semnew] #%u p=%08x max=%u init=%u t=%u\n",
+                   (unsigned)s->seq, (unsigned)(void *)s, (unsigned)max, (unsigned)init,
+                   (unsigned)s3_w2c_current_task());
+    }
     return s;
 }
 
@@ -285,19 +325,19 @@ static void osi_semphr_delete(void *sem)
 static u32 g_sem_n = 0u;
 static void sem_trace(u32 op, u32 obj, u32 ticks, u32 r)
 {
-    volatile u32 *t = (volatile u32 *)0x50001C00u;
-    u32 k = g_sem_n & 7u;
-
-    g_sem_n = g_sem_n + 1u;
-    t[k * 5u]      = g_sem_n;
-    t[k * 5u + 1u] = op;
-    t[k * 5u + 2u] = obj;
-    t[k * 5u + 3u] = ticks;
-    t[k * 5u + 4u] = r;
+    /* 诊断环暂时停用（§243）：它本身在真板上引发了 LoadProhibited
+     * （inlined 之后 l32i.n a8, a6, 0 里 a6 是 0）。诊断不该主导故障，
+     * 先把它变成空函数，等主流程通了再恢复。 */
+    (void)op; (void)obj; (void)ticks; (void)r;
 }
 static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
+
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[take] t=%u sem#%u tk=%x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)((s != 0) ? s->seq : 0u), (unsigned)ticks);
+    }
     int ok;
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
@@ -312,6 +352,10 @@ static int osi_semphr_give(void *sem)
     WSem *s = (WSem *)sem;
     int r;
     HIT_OF(_semphr_give);
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[give] t=%u sem#%u\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)((s != 0) ? s->seq : 0u));
+    }
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(2u, (u32)sem, 0u, 0xEEu); return 0; }
     r = (s3_w2c_sem_post((void *)&s->s) == 0) ? 1 : 0;
     sem_trace(2u, (u32)sem, 0u, (u32)r);
@@ -358,10 +402,22 @@ static void *wmux_new(void)
     return (void *)m;
 }
 
+static u32 g_mtx_seq = 0u;
+
 static void *osi_mutex_create(void)
 {
+    void *m = wmux_new();
+
     HIT_OF(_mutex_create);
-    return wmux_new();
+    if (m != 0) {
+        g_mtx_seq = g_mtx_seq + 1u;
+        *(u32 *)((u8 *)m + 8u) = g_mtx_seq;   /* WMtx 的第 3 个字当序号 */
+        if (g_dbg_sync != 0u) {
+            s3_ets_printf("[mtxnew] #%u p=%08x t=%u\n", (unsigned)g_mtx_seq,
+                       (unsigned)m, (unsigned)s3_w2c_current_task());
+        }
+    }
+    return m;
 }
 static void *osi_recursive_mutex_create(void)
 {
@@ -382,11 +438,21 @@ static int osi_mutex_lock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_lock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[lock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
+    }
     {
         int ok;
         B_IN(4u);
-        ok = (s3_w2c_mutex_pend((void *)&m->m, 0u) == 0) ? 1 : 0;
+        int pr = s3_w2c_mutex_pend((void *)&m->m, 0u);
+
+        ok = (pr == 0) ? 1 : 0;
         B_OUT(4u);
+        if (g_dbg_sync != 0u) {
+            s3_ets_printf("[lockok] t=%u pr=%d ok=%d\n", (unsigned)s3_w2c_current_task(),
+                       pr, ok);
+        }
         return ok;
     }
 }
@@ -395,6 +461,10 @@ static int osi_mutex_unlock(void *p)
     WMtx *m = (WMtx *)p;
     HIT_OF(_mutex_unlock);
     if (m == 0 || m->magic != WMTX_MAGIC) { return 0; }
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[unlock] t=%u m#%u p=%08x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)*(u32 *)((u8 *)m + 8u), (unsigned)(void *)m);
+    }
     return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 1 : 0;
 }
 
@@ -435,6 +505,10 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
                                      u32 ticks)
 {
     WEvt *e = (WEvt *)g;
+
+    s3_ets_printf("[evwait] t=%u g=%x bits=%x all=%d tk=%x\n",
+               (unsigned)s3_w2c_current_task(), (unsigned)(void *)g,
+               (unsigned)bits, wait_all, (unsigned)ticks);
     u32 got;
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
@@ -466,7 +540,11 @@ static u32 g_rc_n = 0u;
 static u32 g_fr_n = 0u;
 static u32 g_gr_n = 0u;
 volatile u32 g_recv_seq = 0u;
+#ifdef S3_WIFI_NOBLOCK
+u32 g_wifi_noblock = 1u;   /* §916: 编译期打开，测试"windowed 深调用链阻塞即崩"假说 */
+#else
 u32 g_wifi_noblock = 0u;   /* 实验开关：默认关闭 */
+#endif
 static u32 g_ql_n = 0u;
 static u32 g_ql_id[4];
 
@@ -528,6 +606,10 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_send);
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[send] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)qh, (unsigned)ticks);
+    }
     if (q == 0 || q->magic != WQ_MAGIC) {
         SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
         SDIAG[1] = (u32)((WQ *)qh)->magic;
@@ -643,8 +725,21 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     /* 关键诊断：在**阻塞发生的那一刻**记下是谁、收哪个队列、等多久。
      * RTC 环在真板上会互相覆盖、read-mem 又会先复位，只有这里直接打印
      * 才可靠（一次启动只有两三次）。 */
-    ets_printf("[recv] t=%u qh=%x tk=%x\n", (unsigned)s3_w2c_current_task(),
-               (unsigned)(void *)qh, (unsigned)ticks);
+    {
+        /* §320 实验：这条打印原来走 s3_ets_printf + s3_w2c_current_task()（一个
+         * windowed 壳）。真板上崩溃点正好是 ROM printf 内部那个 `retw.n`，
+         * 所以先把它换成"只写 RTC、不调任何函数"的记法，看崩溃是否跟着消失。 */
+        static u32 recv_n_;
+        if (recv_n_ < 3u) {
+            volatile u32 *d_ = (volatile u32 *)0x50000600u;
+            u32 k_ = recv_n_ * 4u;
+            d_[k_ + 0u] = (u32)(void *)qh;
+            d_[k_ + 1u] = (u32)ticks;
+            d_[k_ + 2u] = 0x52454356u;   /* 'RECV' */
+            recv_n_ = recv_n_ + 1u;
+            d_[12] = recv_n_;
+        }
+    }
     if (ticks == 0u) {
         r = s3_w2c_queue_try_get((void *)&q->q, item);
     } else {
@@ -668,6 +763,16 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         ev[g_ev_n & 7u] = (s3_w2c_current_task() << 8) | 2u;
         g_ev_n = g_ev_n + 1u;
     }
+#if 0  /* §676: ppTask(windowed) 里的 printf 会把 ppTask 卡在 port_putc；
+        * 第 6 条消息后的 [recvq] 本身就是干扰源，先关掉看 FSM 是否继续。 */
+    {
+        u32 tid = s3_w2c_current_task();
+        if (tid == 2u && (r == 0u || ticks != 0xFFFFFFFFu)) {
+            s3_ets_printf("[recvq] id=%u ticks=%x r=%d it=%x\n",
+                          tid, ticks, r, (u32)item);
+        }
+    }
+#endif
     B_OUT(2u);
     if (r != 0) {
         QDIAG[1] = (u32)(-r);               /* 1=没有当前任务 3=超时表满 … */
@@ -715,10 +820,42 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
     int id;
     u32 p = (prio > 31u) ? 0u : (31u - prio);   /* IDF 越大越高，我们越小越高 */
     HIT_OF(_task_create);
-    /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深。
-     * 统一抬到平台允许的上限（port/s3/ctx.c 的 S3_STACK_SZ = 8192）。 */
-    if (stack < 8192u) { stack = 8192u; }
+    /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深，
+     * 所以要抬。但栈池只有 24KB（port/s3/ctx.c 的 S3_STACK_POOL，§219），
+     * 抬到 8192 的话"bringup 任务 8KB + ppTask 8KB + lwIP tcpip 4KB"就快满了，
+     * 所以这里取 6144：够深调用的余量，又给别的任务留位置。
+     *
+     * §469：**改成 8192**。§468 抓到闭源 `pp` 任务崩溃时 `a7 = 0xc4b00000`
+     * （windowed ABI 的 callee-saved 寄存器，只会存在栈上），
+     * 而 `excvaddr = 0xc4b0002c` 恰好等于 `a7 + 44`，
+     * 那个 `+44` 出现在 `ppTxFragmentProc` 里 —— 也就是这个任务自己。
+     * callee-saved 被写坏 = 自己的栈被覆盖，而库里 `ppTask` 只要 3584、
+     * 我们抬到 6144 仍嫌紧。`S3_STACK_POOL` 在 §449 已从 24KB 提到 40KB
+     * （`bringup 8K + pp 8K + lwIP 4K = 20K`，还剩 20K），够抬。 */
+    /* §727: 真板 JTAG 实测 ppTask(ctx[1]) 在扫描期间 sp=0x3fcbf150，
+     * 低于其栈基 0x3fcbf670 达 0x520 字节 —— 8192 栈溢出，压进了 wifi 主任务
+     * 的栈区，导致 ppTask 在 os_task_delay 里状态损坏、xphyQueue 第 6 条之后
+     * 再也不消费。栈池 40960（§449），当前仅用 16KB，抬到 16384 安全。 */
+    /* §959 ★ 24576 → 16384。
+     *
+     * lwIP 的 tcpip 线程（lwipopts NO_SYS=0）要 8192（sys_arch.c 的下限），
+     * 而栈池 S3_STACK_POOL 只有 40960：
+     *     wifi 主任务 16384 + ppTask + tcpip 8192 ≤ 40960  ⇒  ppTask ≤ 16384
+     * 原来 clamp 到 24576 时：16384 + 24576 = 40960 **正好用光**，
+     * tcpip 线程分不到栈 → os_task_create 返回 0 → lwip_socket/getaddrinfo
+     * 没有线程可等，DHCP 也起不来，验收的整条后半段全断。
+     * §727 的 JTAG 实测结论本来就是"8192 会溢出，抬到 16384 安全"，
+     * 24576 是后来额外加的余量 —— 那时候 tcpip 线程还不存在，所以够用。 */
+    if (stack < 16384u) { stack = 16384u; }
     g_next_task_windowed = 1u;   /* 库的任务入口都是 windowed ABI */
+#ifdef S3_NO_LIB_TASKS
+    /* §366 排查：**不真的建库任务**，只给个假句柄。用来判定崩溃是
+     * 发生在"库任务开始执行"之后，还是主流程自己继续走就会崩。 */
+    id = 1;
+    if (handle != 0) { *(u32 *)handle = 1u; }
+    s3_ets_printf("[task] 跳过库任务 fn=%08x\n", (unsigned)(u32)fn);
+    return 1;
+#endif
     id = s3_w2c_task_create(name, fn, arg, p, stack);
     /* 诊断：库传进来的入口函数、参数、栈、返回的任务 id，以及调用者 id */
     {
@@ -730,6 +867,8 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
         td[4] = s3_w2c_current_task();
         td[5] = prio;
     }
+    s3_ets_printf("[task] 库建任务 fn=%08x id=%d stack=%u prio=%u(->%u)\n",
+               (unsigned)(u32)fn, id, (unsigned)stack, (unsigned)prio, (unsigned)p);
     if (id < 0) { return 0; }
     /* 句柄用稳定的表下标，和 _task_get_current_task() 同一口径 */
     if (handle != 0) { *(u32 *)handle = s3_w2c_slot_of_id((u32)id); }
@@ -749,14 +888,77 @@ static u32 osi_task_ms_to_tick(u32 ms)
 }
 static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); return 31u; }
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
-static void osi_task_delay(u32 ticks) { s3_w2c_task_delay(ticks); }
+static void osi_task_delay(u32 ticks)
+{
+    if (g_dbg_sync != 0u) {
+        s3_ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
+                   (unsigned)ticks);
+    }
+    s3_w2c_task_delay(ticks);
+}
+
+/* ---- PHY 使能/关闭（§228）------------------------------------------------
+ * IDF 的 OSI 表把这两个槽位接到 esp_phy_enable/disable(PHY_MODEM_WIFI)，也就是
+ * "WiFi 库自己在合适时机回调我们做 PHY 初始化"。我们之前把这槽位留空、改成自己
+ * 在 bringup 之前手动调 register_chipv7_phy —— 实测那条路会在库里忙等死转
+ * （卡在 set_chan_freq_hw_init 之后的 RF 等待里）。
+ * 现在改回 IDF 的语义：库回调时再做。 */
+extern int s3_win_phy_enable_hook(void);
+
+static int osi_phy_enable(void)
+{
+    HIT_OF(_phy_enable);
+    return (s3_win_phy_enable_hook() == 0) ? 0 : -1;
+}
+
+static int osi_phy_disable(void)
+{
+    HIT_OF(_phy_disable);
+    return 0;
+}
+
+/* §520：IDF 在 wifi_hw_start() 里的顺序是
+ *   _wifi_apb80m_request → _wifi_clock_enable → _phy_enable → _wifi_rtc_disable_iso
+ *   → _wifi_reset_mac → hal_init。
+ * _wifi_reset_mac 映射到 periph_module_reset(PERIPH_WIFI_MODULE)，即脉冲
+ * SYSTEM_WIFIMAC_RST (0x60026018 bit2)。我们以前把这个 OSI 槽位留成 glue_ret0，
+ * MAC 从没在 PHY enable **之后**复位过 —— 而 hal_init 等的 0x60033d14 bit0
+ * 很可能就是"MAC 复位释放/与 BB 同步"的硬件应答。补上它。 */
+static void osi_wifi_reset_mac(void)
+{
+    volatile u32 *rst = (volatile u32 *)0x60026018u;
+    volatile u32 k;
+
+    HIT_OF(_wifi_reset_mac);
+    *rst = *rst | (1u << 2);            /* SYSTEM_WIFIMAC_RST assert */
+    for (k = 0u; k < 400u; k++) { }
+    *rst = *rst & ~(1u << 2);           /* release */
+    s3_ets_printf("[wifi] reset_mac pulse done\n");
+}
+
+static void osi_wifi_rtc_enable_iso(void)
+{
+    volatile u32 *iso = (volatile u32 *)0x60008094u;   /* RTC_CNTL_DIG_ISO */
+
+    HIT_OF(_wifi_rtc_enable_iso);
+    *iso = *iso | (1u << 28);                           /* WIFI_FORCE_ISO */
+}
+
+static void osi_wifi_rtc_disable_iso(void)
+{
+    volatile u32 *iso = (volatile u32 *)0x60008094u;
+
+    HIT_OF(_wifi_rtc_disable_iso);
+    *iso = *iso & ~(1u << 28);
+}
+
 
 /* ---- 日志：把库自己打的信息送到我们的串口 ---- */
 /* 注意：这里**不能**调 port_puts —— 它是 call0 编译的，从 windowed 代码
  * 调过去会把寄存器窗口搞乱（实测 cause=0x14 InstrPageTableErr，
- * 返回地址被 OR 上 bit31）。ROM 的 ets_printf 从 windowed 调是安全的
+ * 返回地址被 OR 上 bit31）。ROM 的 s3_ets_printf 从 windowed 调是安全的
  * （s3_win_log 一直这么用）。 */
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 
 /* 只有落在 flash/IROM/IRAM/DRAM 里的指针才当字符串用。 */
 static int c6_ok_str(u32 p)
@@ -831,16 +1033,16 @@ static void c6_log_fmt(const char *fmt, void *app)
         }
     }
     out[o] = '\0';
-    ets_printf("%s", out);
+    s3_ets_printf("%s", out);
 }
 
 static void osi_log_write(u32 level, const char *tag, const char *fmt, const char *arg)
 {
     OSI_HIT(83);
     if (level < 2u) {
-        ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
-        if (c6_ok_str((u32)(void *)fmt)) { ets_printf("%s", fmt); }
-        ets_printf("\n");
+        s3_ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+        if (c6_ok_str((u32)(void *)fmt)) { s3_ets_printf("%s", fmt); }
+        s3_ets_printf("\n");
     }
     (void)arg;
 }
@@ -850,23 +1052,24 @@ static void osi_log_writev(u32 level, const char *tag, const char *fmt,
                            void *ap, char *buf, u32 len)
 {
     OSI_HIT(84);
-    if (level > 2u) { return; }             /* 只打 WARN/ERROR，避免刷屏 */
-    ets_printf("[v%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+    /* §641: 临时放开全部级别，看库自己的 scan FSM 日志 */
+    if (level > 6u) { return; }
+    s3_ets_printf("[v%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
     if (!c6_ok_str((u32)(void *)fmt)) {
         /* fmt 不是字符串：把 va_list 里的东西直接摊开看 */
         u32 p = (ap != 0) ? *(u32 *)ap : 0u;
-        ets_printf("(fmt=%08x)", (u32)(void *)fmt);
+        s3_ets_printf("(fmt=%08x)", (u32)(void *)fmt);
         if (p >= 0x3F000000u && p < 0x3FE00000u) {
             u32 i;
             u32 *w = (u32 *)p;
-            ets_printf(" args@%08x:", p);
-            for (i = 0u; i < 6u; i++) { ets_printf(" %08x", w[i]); }
+            s3_ets_printf(" args@%08x:", p);
+            for (i = 0u; i < 6u; i++) { s3_ets_printf(" %08x", w[i]); }
         }
-        ets_printf("\n");
+        s3_ets_printf("\n");
         return;
     }
     c6_log_fmt(fmt, ap);
-    ets_printf("\n");
+    s3_ets_printf("\n");
     (void)buf; (void)len;
 }
 static u32 osi_log_timestamp(void) { OSI_HIT(85); return 0u; }
@@ -889,14 +1092,81 @@ static u32 osi_slowclk_cal_get(void) { return 0u; }
 /* ---- 其它琐碎项 ---- */
 static int osi_env_is_chip(void) {
     HIT_OF(_env_is_chip); return 1; }
+
+/* 真实 MAC：DHCP / WPA / 扫描都要用，返回全零 MAC 会让上层行为莫名其妙
+ * （有些 AP 直接拒绝，DHCP 客户端身份也不合法）。IDF 的 esp_read_mac() 语义：
+ * type 0 = STA/BASE、1 = AP、2 = BT，按最后 1 字节 +type 派生。
+ * 这块板 efuse 里的 base MAC 是 cc:8d:a2:ec:99:c4（§192 从 IDF 启动日志抄下来的）。
+ * TODO: 改成从 efuse 读，而不是写死。 */
+static const u8 s3_base_mac[6] = { 0xccu, 0x8du, 0xa2u, 0xecu, 0x99u, 0xc4u };
+
 static u32 osi_read_mac(u8 *mac, u32 type)
 {
+    u32 i;
+
     HIT_OF(_read_mac);
-    u32 i = 0;
-    (void)type;
-    if (mac != 0) { while (i < 6u) { mac[i] = 0u; i = i + 1u; } }
+    if (mac == 0) { return 1u; }
+    i = 0u;
+    while (i < 6u) { mac[i] = s3_base_mac[i]; i = i + 1u; }
+    mac[5] = (u8)(mac[5] + (u8)type);
     return 0u;
 }
+
+/* ---- NVS 槽位：**必须返回错误码，不能返回 0** -------------------------
+ *
+ * 这一条是静态统计（tools/osislots.py）挖出来的隐患：libnet80211 的
+ * `wifi_nvs_load`、libcore 的 `misc_nvs_load`、libmesh 的 `esp_mesh_nvs_*`
+ * 都会走 `_nvs_open` / `_nvs_get_blob` 这条链。写成"一律返回 0"的话：
+ *   1) IDF 的 esp_err_t 里 0 就是 ESP_OK —— 库以为配置打开成功了；
+ *   2) 接着它拿一个**没初始化过**的 handle 去 `_nvs_get_blob`，还是返回 0（成功），
+ *      于是把调用方 buffer 里的**未初始化内容**当成"上次保存的校准数据/配置"用下去。
+ * 正确做法是返回 nvs 的真实错误码，让库走"没存过 → 用默认值"的正常分支。 */
+#define OSI_NVS_ERR_NOT_INITIALIZED 0x1101
+#define OSI_NVS_ERR_NOT_FOUND       0x1102
+
+static int osi_nvs_open(const char *name, u32 mode, u32 *out)
+{
+    HIT_OF(_nvs_open);
+    (void)name; (void)mode;
+    /* §589: 模拟一个已初始化但**全空**的 NVS 分区：open 必须成功，
+     * 后续 get_* 返回 NOT_FOUND 让库走默认值分支。 */
+    if (out != 0) { *out = 1u; }
+    return 0;
+}
+static void osi_nvs_close(u32 h) { HIT_OF(_nvs_close); (void)h; }
+static int osi_nvs_get(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_FOUND; }
+static int osi_nvs_put(const char *tag) { (void)tag; return OSI_NVS_ERR_NOT_INITIALIZED; }
+
+#define OSI_NVS_STUB_GET(name, slot) \
+    static int name(u32 h, const char *k, void *out) \
+    { HIT_OF(slot); (void)h; (void)k; (void)out; return OSI_NVS_ERR_NOT_FOUND; }
+#define OSI_NVS_STUB_SET(name, slot) \
+    static int name(u32 h, const char *k, void *val) \
+    { HIT_OF(slot); (void)h; (void)k; (void)val; return 0; }
+
+OSI_NVS_STUB_GET(osi_nvs_get_i8,   _nvs_get_i8)
+OSI_NVS_STUB_GET(osi_nvs_get_u8,   _nvs_get_u8)
+OSI_NVS_STUB_GET(osi_nvs_get_u16,  _nvs_get_u16)
+OSI_NVS_STUB_SET(osi_nvs_set_i8,   _nvs_set_i8)
+OSI_NVS_STUB_SET(osi_nvs_set_u8,   _nvs_set_u8)
+OSI_NVS_STUB_SET(osi_nvs_set_u16,  _nvs_set_u16)
+
+static int osi_nvs_get_blob(u32 h, const char *k, void *out, u32 *len)
+{
+    HIT_OF(_nvs_get_blob);
+    (void)h; (void)k; (void)out;
+    if (len != 0) { *len = 0u; }
+    return OSI_NVS_ERR_NOT_FOUND;
+}
+static int osi_nvs_set_blob(u32 h, const char *k, const void *val, u32 len)
+{
+    HIT_OF(_nvs_set_blob);
+    (void)h; (void)k; (void)val; (void)len;
+    return 0;
+}
+static int osi_nvs_commit(u32 h) { HIT_OF(_nvs_commit); (void)h; return 0; }
+static int osi_nvs_erase_key(u32 h, const char *k) { HIT_OF(_nvs_erase_key); (void)h; (void)k; return 0; }
+
 
 /* 库对同一份实现会用不同槽位调用（内部堆 / wifi 专用堆），分开包装
  * 才能从 RTC 追踪里看出到底是哪个槽位在失败。 */
@@ -910,6 +1180,275 @@ static void *osi_wifi_calloc(u32 n, u32 sz)       { OSI_HIT(92); return osi_call
 static void *osi_wifi_zalloc(u32 n)      { OSI_HIT(93); return osi_calloc(1u, n); }
 
 static u32 osi_free_heap_size(void) { return S3_WIFI_HEAP_SIZE / 2u; }
+
+/* ---- 中断相关槽位：先做成"记录 + 空实现"，用来判断库到底用不用（§216）----
+ *
+ * 静态统计（tools/osislots.py）显示 libnet80211/libpp/libcore **没有**直接读过
+ * `_set_isr`/`_ints_on`/`_set_intr` 这些槽位，但为了确认（万一它们通过别的间接
+ * 路径用到了），这里把它们从"纯 glue_ret0"换成会记账的实现：真上板时如果库确实
+ * 调了，RTC 慢存里就有参数可查，我们据此再决定要不要接内核的中断表。
+ *
+ * RTC 慢存布局（和 §202 里其它信标错开）：
+ *   0x50000B00  set_isr 环：8 项 × 2 字（中断号, 处理函数）
+ *   0x50000B40  ints_on 次数 / 最后一次 mask
+ *   0x50000B48  ints_off 次数 / 最后一次 mask
+ *   0x50000B50  set_intr 环：4 项 × 4 字（cpu, source, num, prio）
+ *   0x50000B90  event_post 环：16 项 × 2 字（event_base, event_id）+ 计数
+ */
+#define IRQ_RING_BASE  0x50000B00u
+#define EVT_RING_BASE  0x50000B90u
+
+static void rec2(u32 base, u32 idx, u32 a, u32 b)
+{
+    volatile u32 *p = (volatile u32 *)base;
+
+    p[(idx & 7u) * 2u] = a;
+    p[(idx & 7u) * 2u + 1u] = b;
+    p[16] = p[16] + 1u;             /* 第 16 个字当计数器 */
+}
+
+/* §642: 真实中断接线：保存库注册的 ISR，接进内核 level-1 中断分派 */
+extern void intr_matrix_set(u32 cpu, u32 src, u32 intr);
+
+static void (*s_wifi_isr_fn[8])(void *arg);
+static void *s_wifi_isr_arg[8];
+
+extern volatile u32 g_s3_diag[12];   /* §699: 前置声明（定义在文件末尾） */
+/* §715: PWR 事件寄存器（0x60035118）从未测过。wDev_ProcessFiq 的 TBTT/TSF
+ * 定时器事件从 PWR 取（a5=0x1e → wdev_process_tbtt；a6=0x1e0 → tsf_timer）。
+ * 扫描 dwells 靠这些定时器推进；如果 PWR 一直为 0，就是"定时器没跑"。 */
+volatile u32 g_s3_pwr_or = 0u;
+#ifdef S3_NOOP_DATA_RX
+/* §868: 数据帧 RX-success 的空处理（丢弃数据帧，避免 ROM TRAP）。 */
+__attribute__((section(".flash.text")))
+void s3_noop_data_rx(void *a) { (void)a; }
+#endif
+
+void s3_wifi_isr_dispatch(void)
+{
+    void (*fn)(void *) = s_wifi_isr_fn[0];
+    g_s3_diag[8]++;   /* §699: BSS 计数器：WiFi ISR 实际触发次数（RTC 区被踩坏，不可用） */
+    /* §709: 在 wDev_ProcessFiq 清掉事件之前抓取 MAC/PWR 事件寄存器，
+     * 判断中断到底是 RX_DONE(真收到帧) 还是只有 TX/TBTT 之类的伪事件。
+     * §711: 改为 OR 累积，看清整个扫描期间出现过的所有事件位。 */
+    g_s3_diag[11] |= *(volatile u32 *)0x60033c3cu;
+    g_s3_pwr_or |= *(volatile u32 *)0x60035118u;
+    if (fn != 0) { fn(s_wifi_isr_arg[0]); }
+}
+
+static int osi_set_intr(u32 cpu_no, u32 source, u32 intr_num, u32 prio)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x50u);
+
+    s3_ets_printf("[setintr] cpu=%u src=%u num=%u prio=%u\n", cpu_no, source, intr_num, prio);
+    intr_matrix_set(cpu_no, source, intr_num);   /* §642: 真接中断矩阵 */
+    p[(p[16] & 3u) * 4u] = cpu_no;
+    p[(p[16] & 3u) * 4u + 1u] = source;
+    p[(p[16] & 3u) * 4u + 2u] = intr_num;
+    p[(p[16] & 3u) * 4u + 3u] = prio;
+    p[16] = p[16] + 1u;
+    return 0;
+}
+
+static int osi_clear_intr(u32 source, u32 intr_num) { (void)source; (void)intr_num; return 0; }
+
+static int osi_set_isr(int n, void *fn, void *arg)
+{
+    volatile u32 *p = (volatile u32 *)IRQ_RING_BASE;
+
+    s3_ets_printf("[setisr] n=%d fn=%x arg=%x\n", n, (u32)fn, (u32)arg);
+    rec2(IRQ_RING_BASE, p[16], (u32)n, (u32)fn);
+    if (n >= 0 && n < 8) { s_wifi_isr_fn[n] = (void (*)(void *))fn; s_wifi_isr_arg[n] = arg; }
+    return 0;
+}
+
+static int osi_ints_on(u32 mask)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    { u32 v; __asm__ __volatile__("rsr %0, intenable" : "=r"(v));
+      __asm__ __volatile__("wsr %0, intenable" : : "r"(v | mask));
+      __asm__ __volatile__("rsync"); }
+    s3_ets_printf("[ints_on] mask=%x\n", mask);
+    p[0] = p[0] + 1u;               /* 次数 */
+    p[1] = mask;                    /* 最后一次 mask */
+    return 0;
+}
+
+static int osi_ints_off(u32 mask)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x48u);
+
+    { u32 v; __asm__ __volatile__("rsr %0, intenable" : "=r"(v));
+      __asm__ __volatile__("wsr %0, intenable" : : "r"(v & ~mask));
+      __asm__ __volatile__("rsync"); }
+    s3_ets_printf("[ints_off] mask=%x\n", mask);
+    p[0] = p[0] + 1u;
+    p[1] = mask;
+    return 0;
+}
+
+/* 真的关中断（§226）：IDF 这两个槽位就是 portENTER_CRITICAL/portEXIT_CRITICAL。
+ * 只记账的空实现会让库以为自己在临界区里，实际上并发完全没保护（队列/链表
+ * 可能被 ISR 和任务同时改）。库在临界区里**不会阻塞**（IDF 下同样如此），
+ * 所以用内核的 rsil/wsr ps 是安全的。 */
+extern u32 s3_w2c_irq_save(void);
+extern void s3_w2c_irq_restore(u32 state);
+
+static u32 osi_wifi_int_disable(void)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    p[2] = p[2] + 1u;
+    return s3_w2c_irq_save();
+}
+
+static void osi_wifi_int_restore(u32 state)
+{
+    volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
+
+    p[3] = p[3] + 1u;
+    s3_w2c_irq_restore(state);
+}
+
+static int osi_is_from_isr(void) { return 0; }
+
+/* 事件：库通过它上报 WIFI_EVENT/IP_EVENT。我们没接事件系统，但**记下来**：
+ * 上板时 RTC 里能看到 event_base/event_id，就知道关联到哪一步了。 */
+static int osi_event_post(const char *base, int id, void *data, u32 size, u32 ticks)
+{
+    volatile u32 *p = (volatile u32 *)EVT_RING_BASE;
+    u32 n = p[32];
+
+    s3_ets_printf("[post] base=%08x id=%d\n", (u32)(void *)base, id);
+    (void)data; (void)size; (void)ticks;
+    p[(n & 15u) * 2u] = (u32)(void *)base;
+    p[(n & 15u) * 2u + 1u] = (u32)id;
+    p[32] = n + 1u;
+    return 0;
+}
+
+/* ---- §687: ETS 软件定时器适配（OSI slot 56..60）-------------------------
+ * 之前这 5 个槽位全是 glue_ret0：库调用 _timer_arm 后没有任何定时器会触发，
+ * scan 状态机因此停在第一信道（[v4]wifi|first chan=0 / num=0）。
+ * 这里用内核 tick（TICK_HZ=100，10ms/格）实现最小软件定时器；
+ * 回调由 s3_ets_timer_dispatch() 在 windowed 上下文触发。
+ * ETSTimer 布局（rom/ets_sys.h）：next@0 expire@4 period@8 func@12 arg@16。 */
+#define S3_ETS_TIMER_MAX 4u
+typedef struct {
+    void *t;
+    void (*fn)(void *);
+    void *arg;
+    u32 expire;      /* tick 绝对截止；0=未 armed */
+    u32 period;      /* tick 周期；0=一次性 */
+    u8 active;
+} S3EtsTimer;
+static S3EtsTimer s3_ets_timers[S3_ETS_TIMER_MAX];
+/* §698: 0x50001100 是被踩坏的 RTC 区（读到 1242037968 垃圾），
+ * 导致 `<=24` 守卫永远不成立、[tarm] 从不打印。改用 BSS 计数器。 */
+extern volatile u32 g_s3_diag[12];   /* 定义在文件末尾 */
+#define s3_ets_arm_n (g_s3_diag[6])
+extern u64 s3_w2c_tick_get(void);
+
+__attribute__((section(".flash.text")))
+static S3EtsTimer *s3_ets_find(void *t, int create)
+{
+    u32 i = 0;
+    while (i < S3_ETS_TIMER_MAX) {
+        if (s3_ets_timers[i].active != 0u && s3_ets_timers[i].t == t) {
+            return &s3_ets_timers[i];
+        }
+        i++;
+    }
+    if (create == 0) { return (S3EtsTimer *)0; }
+    i = 0;
+    while (i < S3_ETS_TIMER_MAX) {
+        if (s3_ets_timers[i].active == 0u) {
+            S3EtsTimer *e = &s3_ets_timers[i];
+            e->t = t; e->fn = (void (*)(void *))0; e->arg = (void *)0;
+            e->expire = 0u; e->period = 0u; e->active = 1u;
+            return e;
+        }
+        i++;
+    }
+#ifdef S3_TIMER_RECLAIM
+    /* §837: 库 init 阶段 setfn 占满 4 槽且都不 arm(expire=0)。AUTH 定时器
+     * 注册新 t 时无空槽 → arm 失败。回收一个未 arm 的槽给新 t。 */
+    i = 0;
+    while (i < S3_ETS_TIMER_MAX) {
+        S3EtsTimer *e = &s3_ets_timers[i];
+        if (e->expire == 0u && e->period == 0u) {
+            e->t = t; e->fn = (void (*)(void *))0; e->arg = (void *)0;
+            e->expire = 0u; e->period = 0u; e->active = 1u;
+            return e;
+        }
+        i++;
+    }
+#endif
+    return (S3EtsTimer *)0;
+}
+
+__attribute__((section(".flash.text")))
+static void osi_timer_setfn(void *t, void *fn, void *arg)
+{
+    S3EtsTimer *e = s3_ets_find(t, 1);
+    if (e != 0) { e->fn = (void (*)(void *))fn; e->arg = arg; }
+}
+
+__attribute__((section(".flash.text")))
+static void osi_timer_disarm(void *t)
+{
+    S3EtsTimer *e = s3_ets_find(t, 0);
+    if (e != 0) { e->expire = 0u; e->period = 0u; }
+}
+
+__attribute__((section(".flash.text")))
+static void osi_timer_done(void *t)
+{
+    S3EtsTimer *e = s3_ets_find(t, 0);
+    if (e != 0) { e->active = 0u; e->fn = (void (*)(void *))0; e->arg = (void *)0; e->t = (void *)0; }
+}
+
+__attribute__((section(".flash.text")))
+static void osi_timer_arm_ms(void *t, u32 ms, int repeat)
+{
+    S3EtsTimer *e = s3_ets_find(t, 1);
+    u32 ticks = (ms + 9u) / 10u;             /* 1 tick = 10ms */
+    if (ticks == 0u) { ticks = 1u; }
+    if (e == 0) { return; }
+    s3_ets_arm_n = s3_ets_arm_n + 1u;
+    if (s3_ets_arm_n <= 24u) {
+        s3_ets_printf("[tarm] t=%x ms=%u rep=%d ticks=%u fn=%x\n",
+                      (u32)t, ms, repeat, ticks, (u32)e->fn);
+    }
+    e->expire = (u32)s3_w2c_tick_get() + ticks;
+    e->period = (repeat != 0) ? ticks : 0u;
+}
+
+__attribute__((section(".flash.text")))
+static void osi_timer_arm_us(void *t, u32 us, int repeat)
+{
+    osi_timer_arm_ms(t, (us + 999u) / 1000u, repeat);
+}
+
+__attribute__((section(".flash.text")))
+void s3_ets_timer_dispatch(void)
+{
+    u32 now = (u32)s3_w2c_tick_get();
+    u32 i = 0;
+    while (i < S3_ETS_TIMER_MAX) {
+        S3EtsTimer *e = &s3_ets_timers[i];
+        if (e->active != 0u && e->expire != 0u && (i32)(now - e->expire) >= 0) {
+            void (*fn)(void *) = e->fn;
+            g_s3_diag[7]++;   /* §698: 记录 timer 实际触发次数 */
+            void *arg = e->arg;
+            if (e->period != 0u) { e->expire = e->expire + e->period; }
+            else { e->expire = 0u; }
+            if (fn != 0) { fn(arg); }
+        }
+        i++;
+    }
+}
 
 /* ---- 表装配：用 __builtin_offsetof，彻底避免手数下标 ---- */
 #define OSI_SET(slot, fn) \
@@ -934,7 +1473,39 @@ void s3_wifi_osi_init(void)
     u32 i = 0;
 
     while (i < n) { tab[i] = (void *)glue_ret0; i = i + 1u; }
+    /* §447：**默认关闭**祖先窗口 spill（原先要 `S3_NO_WIN_SPILL` 才关，默认是开）。
+     * 理由见 w2c.S 里 WIN_SPILL 宏的注释：`s3_win_spill` 是 IDF 官方实现，靠把
+     * WINDOWBASE 推满一整圈来触发硬件溢出，而溢出处理体要用 `[a1-12]` 帧链 ——
+     * call0 内核的帧里没有这条链，于是拿脏 a9 写飞（§446 现场：StoreProhibited
+     * excvaddr=0x0005ffe0、epc1=s3_win_spill+0x40 的 call12、windowbase=14）。
+     *
+     * 关掉是安全的：W2C 壳自己已经把 a0..a15 完整存进帧（0..60 那 16 条 s32i），
+     * 窗口快照完整，wb 稳定在 0..4 不会绕圈。
+     * 需要开启做对照实验时用 `-DS3_WIN_SPILL`。 */
+/* ★★★ §1016（**根因修法**）：全 windowed 构建下也**必须**打开祖先窗口 spill。
+     *
+     * 原来这里只允许 `S3_WIN_SPILL && !S3_ONE_ABI`。当时关掉的理由是
+     * "W2C 壳已经把 a0..a15 完整存进帧，窗口快照完整，wb 稳定在 0..4 不绕圈，
+     *  窗口由硬件维护"。
+     *
+     * **这条前提是错的。** 硬件只保证"同一个执行流内"窗口账目正确；
+     * 一旦任务在阻塞点被切走，另一个任务的 `call8` 链会把 16 个窗口的环
+     * 推着转过一整圈，**把本任务还活着的祖先窗口在物理寄存器里覆盖掉**。
+     * 壳把寄存器存进自己的帧救不了这件事 —— 被覆盖的是**祖先**的窗口，
+     * 而祖先的帧没人去写。切回来时祖先的 `a1` 就变成了别的任务留下的值。
+     *
+     * `irq.c:410` 的注释其实早就把这个机制写对了，并且明确说"阻塞点靠壳里的
+     * WIN_SPILL 保平安"—— 但在 `S3_ONE_ABI` 下那段 WIN_SPILL 是空宏（§1000/§1015），
+     * 于是那句保证落空了三十多轮。
+     *
+     * 现在打开它是安全的：内核已全 windowed，每个帧都有 `[sp-12]` 帧链
+     * （§934/§955 修复，壳入口也显式写了），`s3_win_spill` 的溢出处理体
+     * 因此能算对落点 —— 当年用脏 a9 写飞的前提（call0 内核无帧链）已经不存在。 */
+#if defined(S3_WIN_SPILL) && !defined(S3_ONE_ABI)
     g_s3_win_spill_en = 1u;
+#else
+    g_s3_win_spill_en = 0u;
+#endif
 
     /* 头尾不是函数指针，而是版本号和魔数：
      *   ESP_WIFI_OS_ADAPTER_VERSION = 0x00000008
@@ -964,6 +1535,23 @@ void s3_wifi_osi_init(void)
     OSI_SET(_queue_send_from_isr, osi_queue_send);
     OSI_SET(_queue_send_to_back,  osi_queue_send);
     OSI_SET(_queue_send_to_front, osi_queue_send);
+    /* §1019 最终判别实验的结论（接线已恢复）：把 `_queue_recv` 指向
+     * 纯 `return 0` 的 windowed 函数 `glue_ret0`，故障记录 `0x500018c0`
+     * **一模一样**（a1=0 a0=0 epc1=0x403822df wb=4 ws=0x14）。
+     * ⇒ **ppTask 调用任何 windowed 内核函数，返回后 a1 都是 0**，
+     *   与具体实现、窗口层数、是否阻塞全部无关 ⇒ 靶子是 ppTask 的
+     *   初始帧 / 窗口账目本身。 */
+    /* §1033 判别结论（接线已恢复）：§1032 让壳能完整返回后，把
+     * `_queue_recv` 指向纯 `return 0` 的 windowed 函数（**完全不经壳**），
+     * 故障记录仍然一模一样（a1=3 / epc1=0x403822ef / wb=2）
+     * ⇒ **壳已完全洗清**，破坏发生在"ppTask 做任何 windowed 调用"本身。*/
+    /* §1044 直接推论实测（接线已恢复）：去掉壳那一层（`_queue_recv` 直连
+     * `osi_queue_recv_body`），故障记录**逐字节不变**（a1=3 / epc1=0x403822ef）
+     * ⇒ 少一层不够；链本身就有 7 层，而 16 窗口从 WB=2 起只够 6 层（§1043）。*/
+    /* §1045 最浅链路判别结论（接线已恢复）：`_queue_recv` 直连内核队列函数
+     * （ppTask→内核，只有 2 层窗口、根本不可能绕环），故障记录**逐字节不变**
+     * （a1=3 / epc1=0x403822ef）⇒ **§1043 的深度/绕环理论也被推翻**：
+     * 任何 windowed 调用返回后 ppTask 的 a1 都会被写成小常数，与深度无关。*/
     OSI_SET(_queue_recv,        osi_queue_recv);
     OSI_SET(_queue_msg_waiting, osi_queue_msg_waiting);
 
@@ -998,6 +1586,13 @@ void s3_wifi_osi_init(void)
     /* ---- 杂项 ---- */
     OSI_SET(_env_is_chip,   osi_env_is_chip);
     OSI_SET(_read_mac,      osi_read_mac);
+    /* §687: ETS 定时器槽位 —— 之前全是 glue_ret0（空转），库的 scan/channel
+     * dwell 计时器永远不触发。 */
+    OSI_SET(_timer_arm,     osi_timer_arm_ms);
+    OSI_SET(_timer_disarm,  osi_timer_disarm);
+    OSI_SET(_timer_done,    osi_timer_done);
+    OSI_SET(_timer_setfn,   osi_timer_setfn);
+    OSI_SET(_timer_arm_us,  osi_timer_arm_us);
     OSI_SET(_log_write,     osi_log_write);
     OSI_SET(_log_writev,    osi_log_writev);
     OSI_SET(_log_timestamp, osi_log_timestamp);
@@ -1009,7 +1604,36 @@ void s3_wifi_osi_init(void)
     OSI_SET(_slowclk_cal_get, osi_slowclk_cal_get);
     OSI_SET(_spin_lock_create, osi_mutex_create);
     OSI_SET(_spin_lock_delete, osi_mutex_delete);
-    OSI_SET(_is_from_isr,   glue_ret0);
+    OSI_SET(_is_from_isr,   osi_is_from_isr);
+    /* 中断相关：记账 + 空实现（§216，判断库到底用不用） */
+    OSI_SET(_set_intr,        osi_set_intr);
+    OSI_SET(_clear_intr,      osi_clear_intr);
+    OSI_SET(_set_isr,         osi_set_isr);
+    OSI_SET(_ints_on,         osi_ints_on);
+    OSI_SET(_ints_off,        osi_ints_off);
+    OSI_SET(_wifi_int_disable, osi_wifi_int_disable);
+    OSI_SET(_wifi_int_restore, osi_wifi_int_restore);
+    OSI_SET(_event_post,      osi_event_post);
+    OSI_SET(_task_delay,      osi_task_delay);
+    OSI_SET(_phy_enable,      osi_phy_enable);
+    OSI_SET(_phy_disable,     osi_phy_disable);
+    OSI_SET(_wifi_reset_mac,  osi_wifi_reset_mac);
+    OSI_SET(_wifi_rtc_enable_iso,  osi_wifi_rtc_enable_iso);
+    OSI_SET(_wifi_rtc_disable_iso, osi_wifi_rtc_disable_iso);
+
+    /* ---- NVS：必须返回错误码，别让库把未初始化内存当有效数据（见上面的说明）---- */
+    OSI_SET(_nvs_open,        osi_nvs_open);
+    OSI_SET(_nvs_close,       osi_nvs_close);
+    OSI_SET(_nvs_commit,      osi_nvs_commit);
+    OSI_SET(_nvs_erase_key,   osi_nvs_erase_key);
+    OSI_SET(_nvs_set_i8,      osi_nvs_set_i8);
+    OSI_SET(_nvs_get_i8,      osi_nvs_get_i8);
+    OSI_SET(_nvs_set_u8,      osi_nvs_set_u8);
+    OSI_SET(_nvs_get_u8,      osi_nvs_get_u8);
+    OSI_SET(_nvs_set_u16,     osi_nvs_set_u16);
+    OSI_SET(_nvs_get_u16,     osi_nvs_get_u16);
+    OSI_SET(_nvs_set_blob,    osi_nvs_set_blob);
+    OSI_SET(_nvs_get_blob,    osi_nvs_get_blob);
 }
 
 /* WiFi 初始化配置块：放在 BSS 里，由 .c6 侧经桥取地址后填写。
@@ -1030,14 +1654,868 @@ static void wcfg(u32 off, u32 v)
     *(volatile u32 *)((u8 *)g_wifi_cfg_blob + off) = v;
 }
 
+/* ---- 事件环：库通过 _event_post 上报的 WiFi/IP 事件（§216 记的账）-------
+ * 打印 RTC 慢存 0x50000B90 起的 16 项（event_base, event_id）。
+ * 常用 event_id（IDF 的 esp_wifi_types）：
+ *   1=SCAN_DONE 2=STA_START 4=STA_CONNECTED 5=STA_DISCONNECTED 6=AUTHMODE_CHANGE
+ * 有了这一行，关联卡在哪一步就一目了然（比"关联超时"四个字强多了）。 */
+extern const char *WIFI_EVENT;      /* 定义在文件后面（"WIFI_EVENT" 的指针） */
+
+void s3_wifi_dump_events(const char *tag)
+{
+    volatile u32 *p = (volatile u32 *)0x50000B90u;
+    u32 n = p[32];
+    u32 i = 0u;
+    u32 show = (n > 8u) ? 8u : n;
+
+    s3_ets_printf("[evt] %s: 共 %u 条", tag, (unsigned)n);
+    for (i = 0u; i < show; i++) {
+        u32 base = p[i * 2u];
+        u32 id = p[i * 2u + 1u];
+        const char *kind = "?";
+
+        if (base == (u32)(void *)WIFI_EVENT) {
+            kind = "wifi";
+        } else if (base != 0u) {
+            kind = "ip/other";
+        }
+        s3_ets_printf(" [%s:%u]", kind, (unsigned)id);
+    }
+    s3_ets_printf("\n");
+}
+
+/* ---- OSI 调用统计：每个阶段结束打一遍，方便判断"库到底走到哪一步" --------
+ * g_osi_calls[i] 是第 i 个 OSI 槽位被调用的次数。板子上没有断点，靠这个就能看出
+ * 例如 "_semphr_create 有、_queue_recv 没有" 这种早期失败（§223）。 */
+void s3_wifi_dump_osi(const char *tag)
+{
+    volatile u32 *c = (volatile u32 *)g_osi_calls;
+    u32 i = 0u;
+    u32 printed = 0u;
+
+    s3_ets_printf("[osi] %s:", tag);
+    for (i = 0u; i < 128u; i++) {
+        if (c[i] != 0u) {
+            s3_ets_printf(" %u=%u", (unsigned)i, (unsigned)c[i]);
+            printed = printed + 1u;
+            if (printed >= 16u) {
+                break;              /* 一行最多 16 项，别把串口刷爆 */
+            }
+        }
+    }
+    if (printed == 0u) {
+        s3_ets_printf(" (还没有任何回调)");
+    }
+    s3_ets_printf("\n");
+}
+
+/* ---- 剩下几个"库会调但我们还没实现"的槽位（§225）----------------------
+ *
+ * 逐个说明（对照 tools/osislots.py 的静态统计）：
+ *   _task_delay            IDF 映射到 vTaskDelay —— 必须真延迟，否则库里的
+ *                          "等一会儿再重试"变成空转（我们的调度是抢占的，所以
+ *                          不会彻底卡死，但时序完全不对）。
+ *   _wifi_rtc_enable_iso / _disable_iso
+ *                          IDF 就是置/清 RTC_CNTL_DIG_ISO 的 WIFI_FORCE_ISO(bit28)，
+ *                          照抄即可（我们已关省电，但库在 hw_start/hw_stop 会调）。
+ *   其余（_phy_*、_timer_*、_wifi_clock_*、_coex_*、apb80m、dport_stall）
+ *                          静态统计显示闭源库**从不直接调用**；coex 那几个即使被
+ *                          调用，返回 0 也表示"没有 BT 活动/无共存需求"，是正确
+ *                          答案（我们的 BT 是关的）。所以继续保持空实现。
+ */
+/* ---- 关联（associate）：init 之后把 STA 真正连上 AP ---------------------
+ *
+ * 之前只做了 esp_wifi_init_internal()，**没有** set_mode/set_config/start/connect，
+ * 所以就算 PHY 起来了也永远不会关联。这里按 IDF 的顺序补齐：
+ *   esp_wifi_set_storage(RAM)   —— 先关掉 NVS 存储（我们没接 NVS 子系统）
+ *   esp_wifi_set_mode(STA)
+ *   esp_wifi_set_config(STA, cfg) —— cfg 是 192 字节全零缓冲，只填 ssid/password
+ *                                   （wifi_sta_config_t 的这两个字段在最前面，
+ *                                     偏移 0 / 32，跨 IDF 版本都稳定）
+ *   esp_wifi_start()
+ *   esp_wifi_connect_internal()
+ *
+ * 事件系统我们没接（OSI 的 _event_post 是空实现），所以"连上没有"靠轮询
+ * esp_wifi_sta_get_ap_info()，"拿到 IP 没有"靠轮询 lwIP 的 netif（见
+ * c6_lwip_port.c 的 c6_lwip_wait_ip）。
+ */
+/* wpa_crypto.c 总是会链进来（wifi 构建和基线构建都有），不受 S3_WITH_WIFI 影响 */
+extern void c6_wpa_crypto_init(void);
+extern const void *c6_wpa_crypto_table(void);
+
+#ifdef S3_WITH_WIFI
+extern int esp_wifi_set_storage(int storage);
+extern int esp_wifi_set_mode(int mode);
+extern int esp_wifi_set_config(int iface, void *conf);
+extern int esp_wifi_start(void);
+extern int esp_wifi_connect_internal(void);
+extern int esp_wifi_sta_get_ap_info(void *conf);
+extern int esp_wifi_set_ps(int type);
+extern int esp_wifi_scan_start(const void *cfg, int block);
+extern int esp_wifi_scan_get_ap_num(unsigned short *num);
+extern int esp_wifi_scan_get_ap_records(unsigned short *num, void *records);
+extern int esp_wifi_set_country(const void *country);
+int s3_wifi_scan(void);         /* 定义在下面（先扫一遍做射频体检） */
+#endif
+
+#ifdef S3_WITH_WIFI
+u32 s3_wifi_associate(const char *ssid, const char *pass)
+{
+    /* 320 字节全零：wifi_sta_config_t 现在约 184 字节，但不同 IDF 版本会变长。
+     * 库是按**它自己编译时的 sizeof** 读这块内存的，缓冲给窄了它就会读到我们
+     * 后面的 bss 垃圾（比如 bssid_set 变成 1、channel 变成随便一个值），
+     * 表现就是"配置明明对却连不上"。多给一些零是最便宜的保险（§221）。 */
+    static u32 cfg[80];
+    u32 i = 0u;
+    int r1 = 0;
+    int r2 = 0;
+    int r3 = 0;
+    int r4 = 0;
+    int r5 = 0;
+    int n = 0;
+
+    for (i = 0u; i < 80u; i++) { cfg[i] = 0u; }
+    if (ssid == 0 || ssid[0] == 0) {
+        /* 没给账号：仍然把接口拉起来扫一遍，至少验证射频与收发链路 */
+        s3_ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
+        (void)esp_wifi_set_storage(1);
+        (void)esp_wifi_set_mode(1);
+        s3_ets_printf("[wifi] start=%d\n", esp_wifi_start());
+        (void)s3_wifi_scan();
+        return 0xFFFFFFFFu;
+    }
+    while (ssid[n] != 0 && n < 32) { ((u8 *)cfg)[n] = (u8)ssid[n]; n++; }
+    if (pass != 0) {
+        n = 0;
+        while (pass[n] != 0 && n < 64) { ((u8 *)cfg)[32 + n] = (u8)pass[n]; n++; }
+    }
+#ifdef S3_STA_CHANNEL6
+    /* §818: connect 内部 scan 日志 "first chan=0"（§690 我们自己的 scan 也有过
+     * 这个病，靠 cfg[8]=6 修好）。这里给 STA config 的 channel 字段（偏移 107）
+     * 写 6，让 connect 的内部 scan 从 ch6 起扫，而不是空信道表。
+     * wifi_sta_config_t: ssid@0,pass@32,scan_method@96,bssid_set@100,
+     * bssid@101,channel@107。bssid_set 保持 0。 */
+    ((u8 *)cfg)[96] = 0u;   /* scan_method = WIFI_FAST_SCAN */
+    ((u8 *)cfg)[100] = 0u;  /* bssid_set = 0 */
+    ((u8 *)cfg)[107] = 6u;  /* channel = 6 */
+#endif
+#ifdef S3_BSSID_DIRECT2
+    /* §816: bssid_set=1 + 目标 BSSID + ch6。这次配合 S3_FORCE_SYNC_CONNECT
+     * （上次 §814 缺这个，connect 走异步没读到 config）。字段偏移按
+     * IDF 6.0.1 wifi_sta_config_t: bssid_set@100, bssid@101, channel@107。 */
+    ((u8 *)cfg)[96] = 0u;                        /* scan_method = WIFI_FAST_SCAN */
+    ((u8 *)cfg)[100] = 1u;                       /* bssid_set */
+    ((u8 *)cfg)[101] = 0xdcu; ((u8 *)cfg)[102] = 0xd8u;
+    ((u8 *)cfg)[103] = 0x7cu; ((u8 *)cfg)[104] = 0x5au;
+    ((u8 *)cfg)[105] = 0x7au; ((u8 *)cfg)[106] = 0x46u;
+    ((u8 *)cfg)[107] = 6u;                       /* channel */
+#endif
+    s3_ets_printf("[wifi] associate ssid=%s\n", ssid);
+    /* wifi_storage_t: 0 = WIFI_STORAGE_FLASH, 1 = WIFI_STORAGE_RAM */
+    r1 = esp_wifi_set_storage(1);
+    s3_ets_printf("[wifi] set_storage(RAM)=%d\n", r1);
+    /* wifi_mode_t: 1 = WIFI_MODE_STA */
+    r2 = esp_wifi_set_mode(1);
+    s3_ets_printf("[wifi] set_mode(STA)=%d\n", r2);
+    /* wifi_interface_t: 0 = WIFI_IF_STA */
+    r3 = esp_wifi_set_config(0, (void *)cfg);
+    s3_ets_printf("[wifi] set_config=%d\n", r3);
+    r4 = esp_wifi_start();
+    s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_HOME_EARLY
+    /* §857: esp_wifi_start 后 chm 已建好但 home 默认 0；立即设 home=current=6，
+     * 从源头避免 mgmt_output 的 chm_is_at_home_channel() 假 → AUTH 帧入延迟队列。
+     * g_chm=*(0x3fcef850)，home@+80、current@+82（u8）。 */
+    {
+        u32 chm0 = *(volatile u32 *)0x3fcef850u;
+        if (chm0 != 0u) {
+            *(volatile u8 *)(chm0 + 80u) = 6u;
+            *(volatile u8 *)(chm0 + 82u) = 6u;
+        }
+    }
+#endif
+#ifdef S3_WDEV_DATA_INIT
+    /* §822: JTAG 实测 wDevCtrl_ptr@0x3fcef93c=NULL（应为 0x3fcbb548），
+     * 而 wdev_data_init()@42022908 就是把它和 pTxRx/lmacConfMib/... 一堆
+     * ROM 全局指针初始化的函数。正常由 wdev_funcs_init() 调用，但我们的
+     * init 路径似乎没走到 → 数据帧 RX 走 wdevProcessRxSucDataAll 时
+     * NULL 解引用 TRAP，EAPOL/4-way handshake 永远收不到。
+     * 这里显式补调一次（幂等：只是把全局指针指向静态结构）。 */
+    {
+        extern void wdev_data_init(void);
+        wdev_data_init();
+    }
+#endif
+#ifdef S3_RXCB_EARLY
+    /* §821: IDF 参考在 esp_wifi_connect 之前就通过 esp_netif 注册好 rxcb；
+     * c6LOS 之前推迟到关联成功后（c6_lwip_start_dhcp），导致 connect 期间
+     * 收到数据帧时 wdevProcessRxSucDataAll 经 ppq=25 走 sta_rxcb=NULL →
+     * TRAP(vaddr=0)。这里在 start 之后、connect 之前提前注册 windowed 的
+     * c6_lwip_rx，避免 NULL 解引用。 */
+    {
+        extern int esp_wifi_internal_reg_rxcb(int iface, void *cb);
+        extern int c6_lwip_rx(void *buffer, unsigned short len, void *eb);
+        (void)esp_wifi_internal_reg_rxcb(0, (void *)&c6_lwip_rx);
+    }
+#endif
+    /* §598: 与 IDF 参考 app 的 hs("after-wifi-start") 完全相同的寄存器快照，
+     * 用来定位两边从"after-wifi-init 都是 d14=0 ca0=0"之后在哪里分叉。 */
+#ifndef S3_NO_HS_PRINT
+    s3_ets_printf("[hs] d14=%x ca0=%x PWC=%x CLK=%x\n",
+        *(volatile u32 *)0x60033d14u, *(volatile u32 *)0x60033ca0u,
+        *(volatile u32 *)0x60008090u, *(volatile u32 *)0x60026014u);
+#endif
+    /* 关掉省电：modem sleep 需要 OSI 的 `_wifi_rtc_enable/disable_iso` 和定时器
+     * （我们那两个是空实现），睡眠一开 RX 就可能收不到包。取一个页面不需要省电，
+     * 所以显式 WIFI_PS_NONE(0)（§221）。 */
+    s3_ets_printf("[wifi] set_ps(NONE)=%d\n", esp_wifi_set_ps(0));
+#ifdef S3_CNX_DIRECT
+    /* §817: arm connect FSM（清 AP 列表+起 re-scan 卡住），然后用我们
+     * 能用的 forced-sync scan 重新灌满 AP 列表，最后直接调
+     * cnx_connect_next_ap() 从列表里挑 weforpay.com 发起关联，
+     * 绕开 connect 内部那个永远完不成的 re-scan。 */
+    {
+        extern void cnx_connect_next_ap(void);
+        volatile u32 *wth_c = (volatile u32 *)0x3fcd633cu;
+        u32 saved_c = *wth_c;
+        *wth_c = (u32)s3_w2c_current_task();
+        r5 = esp_wifi_connect_internal();
+        *wth_c = saved_c;
+        s3_ets_printf("[wifi] connect=%d\n", r5);
+        (void)s3_wifi_scan();
+        cnx_connect_next_ap();
+    }
+#elif defined(S3_CONNECT_FIRST)
+    /* §813: 先 arm connect FSM（它内部 cancel+pp_post(0,0) 起 re-scan，
+     * 异步不会完成），再用 forced-sync scan 把 AP 列表灌进去，
+     * 让 connect 的 scan-done 回调能拿到我们找到的 weforpay.com。 */
+    {
+        volatile u32 *wth_c = (volatile u32 *)0x3fcd633cu;
+        u32 saved_c = *wth_c;
+        *wth_c = (u32)s3_w2c_current_task();
+        r5 = esp_wifi_connect_internal();
+        *wth_c = saved_c;
+    }
+    s3_ets_printf("[wifi] connect=%d\n", r5);
+    (void)s3_wifi_scan();
+#else
+    (void)s3_wifi_scan();
+#ifdef S3_SET_HOME_CH
+    /* §853: JTAG 实测 g_chm home=0 但 current=6 → chm_is_at_home_channel()
+     * 返回假 → mgmt_output 把 AUTH 帧塞进 g_ic+0x1a8 延迟队列永不发送
+     * （g_s3_diag[5]=1 只有 scan probe；g_lwip_stage[3]=1 表示 auth 尝试过）。
+     * 正常 connect 由 wifi_set_channel_process 设 home；我们的 RC-seed handoff
+     * 绕过了它。这里显式把 home channel 设成 6（=current），让 AUTH 帧直接发出。 */
+    {
+        extern void chm_set_home_channel(void *chan);
+        u8 hc[2];
+        hc[0] = 6u; hc[1] = 0u;
+        chm_set_home_channel((void *)hc);
+    }
+#endif
+#ifdef S3_RC_DRIVE
+    /* §832: scan 返回后 g_ic+116 已清 0，用 S3_RC_SEED 灌的 RC 驱动 FSM 到 auth。 */
+    {
+#ifdef S3_SET_HOME_CH
+        /* §855: AUTH 帧在 handoff 里构造，必须在那之前让 home==current。
+         * 直接写 g_chm->home(+80)=6，避开 chm_set_home_channel 的状态检查。 */
+        {
+            u32 chmp1 = *(volatile u32 *)0x3fcef850u;
+            if (chmp1 != 0u) { *(volatile u8 *)(chmp1 + 80u) = 6u; }
+        }
+#endif
+#ifdef S3_RC_HANDOFF
+        /* §834: cnx_connect_next_ap 的 timer gate 不通；直接 handoff，
+         * 传 slot+4(0x3fcd6b4c，全零 BSSID) 让 cnx_rc_search 命中 seed 槽。
+         * seed 已把 slot+0 设成自指针，避免 420470ad 的 *(bss+0) NULL 解引用。 */
+        extern void cnx_do_handoff_internal(void *bssid);
+        cnx_do_handoff_internal((void *)0x3fcd6b4cu);
+#else
+        extern void cnx_connect_next_ap(void);
+        cnx_connect_next_ap();
+#endif
+    }
+#endif
+#ifdef S3_RC_DIAG
+    /* §829: scan 之后立刻读 RC count，看 scan_parse_beacon 是否真灌了 RC list。
+     * 复用现有 "B2 cfg@.." 格式串，避免新增字符串触发 BSS collision。 */
+    s3_ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
+                  *(volatile u32 *)(0x3fcd72d8u),
+                  (u32)*(volatile u8 *)(0x3fcd72eeu),
+                  *(volatile u32 *)(0x3fcd560cu));
+#endif
+#ifdef S3_NO_CONNECT
+    /* §825: 诊断 —— 完全不调 connect，只看 forced-sync scan 是否
+     * 通过 scan_parse_beacon→cnx_add_rc 灌满 cnx RC list。
+     * 之后 JTAG 读 g_cnxMgr+0xf00+62 的 RC count。 */
+    r5 = 0;
+#elif defined(S3_FORCE_SYNC_CONNECT) || defined(S3_NVS_CH6)
+    /* §811: connect 内部会 cancel+重启 scan(pp_post 0,0)，异步派发不通。
+     * 只在 connect 期间让 current_task_is_wifi_task 返回真，走同步路径。 */
+    {
+#ifdef S3_NVS_CH6
+        /* §826: ieee80211_sta_connect 从 g_wifi_nvs->data[144] 读 channel，
+         * 现在是 0xff → 校验失败 → 传 0 给 cnx_sta_connect_cmd（全信道扫描，
+         * 需要 timer 驱动的 dwell，而我们没有）。强制成 6，让 connect 的
+         * 内部 scan 锁在目标信道，单信道即可完成，不必切信道。 */
+        extern u32 g_wifi_nvs;
+        u32 nv = *(volatile u32 *)&g_wifi_nvs;
+        *(volatile u8 *)(nv + 144u) = 6u;
+#endif
+        volatile u32 *wth_c = (volatile u32 *)0x3fcd633cu;
+        u32 saved_c = *wth_c;
+        *wth_c = (u32)s3_w2c_current_task();
+        r5 = esp_wifi_connect_internal();
+        *wth_c = saved_c;
+    }
+#else
+    r5 = esp_wifi_connect_internal();
+#endif
+#ifndef S3_NO_CONNECT
+    s3_ets_printf("[wifi] connect=%d\n", r5);
+#endif
+#ifdef S3_DRAIN_AFTER_CONNECT
+    /* §869: connect 之后用 s3_wifi_scan 里那套已验证的 windowed ISR+timer
+     * 驱动序列，在 associate 本函数（已证扫描能收帧的上下文）里把 AUTH response
+     * 从 MAC drain 进 802.11 层。wait_connected 里做同样的事会 TRAP，这里试同上下文。 */
+    {
+        extern volatile u32 g_wifi_isr_pending;
+        extern void s3_wifi_isr_dispatch(void);
+        int k;
+        for (k = 0; k < 40; k++) {
+            u32 ie = 0u;
+            g_wifi_isr_pending = 0u;
+            s3_wifi_isr_dispatch();
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
+            ie |= 1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
+            s3_ets_timer_dispatch();
+            s3_w2c_task_delay(100u);
+        }
+    }
+#endif
+#endif
+#ifdef S3_SCAN_AFTER_CONNECT
+    /* §817: connect 内部清掉 AP 列表并起自己的 re-scan（pp_post 0,0，
+     * 异步永远完不成）。connect 返回后再跑一次我们能用的 forced-sync scan，
+     * 靠它的 ISR+timer 轮询循环把 AP 列表重新灌满，让 cnx FSM 的 scan-done
+     * 回调拿得到 weforpay.com。 */
+    (void)s3_wifi_scan();
+#endif
+#ifdef S3_HANDOFF_DIRECT
+    /* §823: connect 自己的 scan 永远不发 scan-done，cnx FSM 卡在 scan 态。
+     * 我们已用 forced-sync scan 找到 weforpay.com，AP 记录已在库里。
+     * 直接调 scan-done 回调 cnx_start_handoff_cb(0) 模拟"扫描成功"，
+     * 让它经 cnx_remove_rc 挑 AP、推进到 auth。a2=0 = 扫描成功。 */
+    {
+        extern void cnx_start_handoff_cb(void *arg);
+#ifdef S3_SCAN_CANCEL_RESCAN
+        /* §824: connect 留下一个卡住的 scan（第二次 scan_start=12294），
+         * cnx RC list 空。先 scan_cancel 清掉它，再跑一次 forced-sync scan
+         * 重新解析 beacon 灌满 RC list，最后才 fire scan-done。 */
+        extern void scan_cancel(void *ic);
+        extern void *g_ic;
+        scan_cancel(g_ic);
+        (void)s3_wifi_scan();
+#endif
+        cnx_start_handoff_cb((void *)0);
+    }
+#endif
+    return (u32)r5;
+}
+
+/* 扫描：这一步是**不需要 WiFi 密码**就能做的射频体检 ——
+ * 只要扫到 AP，就证明 PHY + MAC + 收发链路都活着（§215）。
+ * 返回扫到的 AP 数；<0 表示失败。只打印第一个 AP 的 SSID/信道/RSSI
+ * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
+int s3_wifi_scan(void)
+{
+    /* wifi_scan_config_t 约 20~24 字节，给 64 字节零缓冲（同样避免库读到 bss 垃圾） */
+    u8 cfg[64];
+    u8 rec[256];                /* 只放一个 wifi_ap_record_t，足够大 */
+    unsigned short num = 0;
+    unsigned short one = 1;
+    int r = 0;
+    int i = 0;
+#ifdef S3_MESH_ROOT_HACK
+    /* §831: scan_parse_beacon 里 cnx_add_rc 被 gate 跳过（a2!=0,
+     * mesh_is_root==0, [bss+84]==0）。强制 mesh_is_root=1 让 gate 走
+     * cnx_add_rc，用库自己造的完整 bss_info（+0 指针等字段都正确）。 */
+    *(volatile u8 *)0x3fcbbc9cu = 1u;
+#endif
+
+    for (i = 0; i < 64; i++) { cfg[i] = 0; }
+    for (i = 0; i < 256; i++) { rec[i] = 0; }
+#ifdef S3_SSID_SCAN
+    /* §845: 定向扫描只找目标 SSID，让 rec[0] 天然就是 weforpay.com，
+     * 库的 BSS list 也一致（§844 硬编码 BSSID 被库校验拒绝）。
+     * wifi_scan_config_t.ssid @0 是指针，指向 flash 里的 "weforpay.com"。 */
+    *(u32 *)cfg = 0x42079458u;
+#endif
+#ifdef S3_SET_COUNTRY
+    /* §685: 空 NVS 桩下 regulatory domain 可能无效（[v4]wifi|first chan=0）。
+     * 显式设置中国国家码（1..13 信道，MANUAL 策略），排除"空信道表"假设。
+     * wifi_country_t: cc[3]="CN", schan=1, nchan=13, max_tx_power=0, policy=1(MANUAL) */
+    {
+        u8 ctry[16];
+        for (i = 0; i < 16; i++) { ctry[i] = 0; }
+        ctry[0] = 'C'; ctry[1] = 'N'; ctry[2] = 0;
+        ctry[3] = 1;    /* schan */
+        ctry[4] = 13;   /* nchan */
+        ctry[5] = 0;    /* max_tx_power */
+        /* ctry[8..11] = policy (enum, 4 bytes) = 1 = MANUAL */
+        ctry[8] = 1;
+        s3_ets_printf("[country] set=%d\n", esp_wifi_set_country((const void *)ctry));
+    }
+#endif
+#ifdef S3_SCAN_CHAN39
+    /* §690 根因修正：cfg[39] 其实是 wifi_scan_config_t.ghz_5_channels 的
+     * 第 4 字节（channel_bitmap@32: ghz_2 u16@32, ghz_5 u32@36）。
+     * 写 cfg[39]=6 把 5G bitmap 变成 0x06000000，而 2G bitmap 仍为 0，
+     * 于是 cnx_sta_scan_cmd 调到 scan_bitmap_to_channel_list(0, 0x06000000)
+     * → "2G channel bitmap is 0 in 2G band" → 返回 -1，扫描被拒。
+     * 正确做法：channel 字段在偏移 8（l8ui a2,8 → scan_set_desChan）。
+     * 这里显式锁信道 6；cfg[32..39] 全部保持 0。 */
+    cfg[8] = 6;
+#endif
+#ifdef S3_PM_WAKE
+    /* §691: ppProcessTxQ (40380963) 在发 probe 前调 pm_is_waked(ROM 4003c364)，
+     * 它读 g_pm_ptr(0x3fcef8e4) 指向结构的 byte1：byte1==0 → 返回 1（awake），
+     * 非 0 → 返回 0（sleeping）→ ppProcessTxQ 直接 return -1，probe 永远不发。
+     * 这里打印并强制 byte1=0，验证"PM 睡眠导致零 AP"假设。 */
+    {
+        volatile u32 *pmp = (volatile u32 *)0x3fcef8e4u;
+        u32 pm = *pmp;
+        s3_ets_printf("[pm] ptr=%x b1=%u\n", pm,
+                      pm != 0u ? (u32)*(volatile u8 *)(pm + 1u) : 0xffu);
+        if (pm != 0u) { *(volatile u8 *)(pm + 1u) = 0u; }
+        s3_ets_printf("[pm] forced b1=%u\n",
+                      pm != 0u ? (u32)*(volatile u8 *)(pm + 1u) : 0xffu);
+    }
+#endif
+#ifdef S3_CHM_RESET
+    /* §693: 根因！chm_start_op(4202d45c) 要求 g_chm->op_state(+4)==0xff，
+     * 否则 movi a9,3 直接返回 3，channel-enter 回调 4204abe0 永不执行，
+     * probe 帧根本不生成 → ppProcessTxQ 返回 -2、零 AP。
+     * JTAG 实测 g_chm[4]=0x1（残留的旧 op）。扫描前强制复位为 0xff。 */
+    {
+        volatile u32 *chmp = (volatile u32 *)0x3fcef850u;
+        u32 chm = *chmp;
+        s3_ets_printf("[chm] ptr=%x st=%u\n", chm,
+                      chm != 0u ? (u32)*(volatile u8 *)(chm + 4u) : 0xffu);
+        if (chm != 0u) { *(volatile u8 *)(chm + 4u) = 0xffu; }
+        s3_ets_printf("[chm] forced st=%u\n",
+                      chm != 0u ? (u32)*(volatile u8 *)(chm + 4u) : 0xffu);
+    }
+#endif
+    /* §511 诊断：阻塞 scan 一直 12300 超时，改成异步 + 轮询结果，
+     * 区分"射频没扫到 AP"和"scan-done 事件没送到等待者"。 */
+    s3_ets_printf("[wifi] scan start（异步）\n");
+#ifdef S3_FORCE_SYNC_SCAN
+    /* §809: 让 current_task_is_wifi_task() 对本次调用返回真，强制
+     * ieee80211_ioctl 走同步路径 (4203f620 -> ieee80211_ioctl_process -> b1)。
+     * s_wifi_task_hdl=2(ppTask)，我们当前 slot=1，临时改成 1 后调用，再还原。 */
+    {
+        volatile u32 *wth = (volatile u32 *)0x3fcd633cu;
+        u32 saved = *wth;
+        u32 cur = (u32)s3_w2c_current_task();
+        *wth = cur;
+        r = esp_wifi_scan_start((const void *)cfg, 0);
+        *wth = saved;
+    }
+#else
+    r = esp_wifi_scan_start((const void *)cfg, 0);
+#endif
+    s3_ets_printf("[wifi] scan_start=%d\n", r);
+#ifdef S3_DIRECT_SCAN_CALL
+    /* §675: init 时 patch 的 g_timer_func 被库覆盖回真函数；扫描前再 patch 一次，
+     * 判定 pp_post(0,0) 是否真的驱动 ieee80211_timer_do_process。 */
+    {
+        extern int s3_wrap_timer_func(void *);
+        *(volatile u32 *)0x3fcef8b8u = (u32)(void *)&s3_wrap_timer_func;
+    }
+    /* §629 判别实验：绕过 ppTask/队列，直接调用 scan 处理函数。
+     * 消息布局照 esp_wifi_scan_start 的反汇编：b0=5(type), b4=回调,
+     * b8=0, b10=0, b12=0, b20..=cfg(44 字节)。 */
+    {
+        u8 msg[80];
+        int k;
+        for (k = 0; k < 80; k++) { msg[k] = 0; }
+        msg[0] = 5;                       /* ioctl type: scan */
+        /* 回调指针填真函数地址；这里只用真实处理函数，不依赖 wrap */
+        {
+            extern int __real_wifi_scan_start_process(void *);
+            *(u32 *)(void *)(msg + 4) = (u32)(void *)&__real_wifi_scan_start_process;
+        }
+        /* b8..b12 留 0（见反汇编 4203e5bb） */
+        for (k = 0; k < 44; k++) { msg[20 + k] = cfg[k]; }
+        {
+            extern int __real_wifi_scan_start_process(void *);
+            extern u32 g_s3_real_scan_msg;
+            u32 sm = g_s3_real_scan_msg ? g_s3_real_scan_msg : (u32)msg;
+            int rr;
+            /* §674: 优先用库造的 scan-start 消息（b0=0x305、m[4]=cfg 指针），
+             * §629 手工 msg 布局不对导致 FSM 立刻 cancel/end。 */
+            s3_ets_printf("[dirscan] msg=%x\n", sm);
+            rr = __real_wifi_scan_start_process((void *)sm);
+            s3_ets_printf("[dirscan] r=%d\n", rr);
+        }
+    }
+#endif
+    if (r != 0) {
+#ifdef S3_DRIVE_BUSY_SCAN
+        /* §817: connect 已经起了一个 scan 卡在 vIf 状态里（本函数第二次
+         * 调用会拿到 12294=ESP_ERR_WIFI_STATE），此时不能 early-return，
+         * 要继续跑下面的 ISR+timer 轮询循环替 connect 把那个 scan 跑完。 */
+        if (r != 12294) { return -1; }
+#else
+        return -1;
+#endif
+    }
+    for (i = 0; i < 60; i++) {
+        /* §705: WiFi MAC 中断在 call0 的 ISR 里只置标志；窗口化的库 ISR
+         * 必须在本任务（windowed）上下文调用 —— ISR 里 call8 会在任意
+         * WINDOWBASE 上旋转窗口，retw 与 CALLINC 不匹配，真板实测 a0 被
+         * 写成垃圾掉进 _vec_default。本文件是 windowed 编译，直接 call8
+         * 进 s3_wifi_isr_dispatch() ABI 正确。 */
+        {
+            extern volatile u32 g_wifi_isr_pending;
+            {
+                extern void s3_wifi_isr_dispatch(void);
+                u32 ie = 0;
+                g_wifi_isr_pending = 0u;
+                s3_wifi_isr_dispatch();
+                /* §708: wDev_ProcessFiq 已清掉 MAC/PWR 事件寄存器，
+                 * 现在重新使能 intenable 的 WiFi 位，否则中断永久关闭。 */
+                __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
+                ie |= 1u;
+                __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
+            }
+        }
+#ifdef S3_ETS_TIMER_DISPATCH
+        /* §687: 驱动 ETS 软件定时器 —— scan 的 channel-dwell 回调靠它推进 */
+        s3_ets_timer_dispatch();
+#endif
+#ifdef S3_POLL_FIQ
+        /* §635: 库注册的 wDev_ProcessFiq 被我们的空 set_isr 吞掉了。
+         * 这里从 windowed 上下文直接周期调用它，手动 drain MAC 事件。 */
+        {
+            /* §678: 无日志版本，省 IRAM */
+            extern void wDev_ProcessFiq(void *arg);
+            wDev_ProcessFiq(0);
+        }
+#endif
+        s3_w2c_task_delay(100u);
+#ifdef S3_POLL_SCANH
+        /* §684: pm_offchan_ready_or_defer 返回 0（deferred），它把 scan_start_handler
+         * 存进 g_scan 等待 PM 稍后回调；我们的 PM stub 不会触发，所以真射频扫描
+         * 从没启动。直接从轮询循环调用 scan_start_handler，驱动信道扫描。 */
+        {
+            extern void scan_start_handler(void *arg);
+            if (i < 40u) { scan_start_handler(0); }
+        }
+#endif
+#ifdef S3_POLL_TXQ
+        /* §682: ppTask 没处理 pp_post(0,0) 的消息；jump-table[0] 的 handler
+         * 是 ppProcessTxQ(4)，它才真正把 probe request 发出去。手动驱动它。
+         * §692: 打印返回值 —— -1=lmacIsIdle/pm_is_waked 拒绝, -2=TX 队列无帧,
+         * 0=真的处理了。一次分清"probe 没入队"与"MAC 没放行"。 */
+        {
+            extern int ppProcessTxQ(int arg);
+            if (i < 40u) {
+                int txr = ppProcessTxQ(4);
+                if (i < 3u) {
+                    typedef int (*fn0)(void);
+                    typedef int (*fn1)(int);
+                    fn0 pmw = (fn0)0x4000549cu;      /* ROM pm_is_waked thunk */
+                    fn1 lid = (fn1)0x40005334u;      /* ROM lmacIsIdle thunk */
+                    s3_ets_printf("[txq] i=%d r=%d pmw=%d idle=%d\n",
+                                  i, txr, pmw(), lid(4));
+                }
+            }
+        }
+#endif
+#ifdef S3_POLL_TIMER
+        /* §677: pp_post(0,0) 没能把 scan 状态机推进；直接从轮询循环调
+         * ieee80211_timer_do_process，看扫描是否会往下走（真射频扫描）。 */
+        {
+            extern int s3_wrap_timer_func(void *);
+            if (i < 40u) { (void)s3_wrap_timer_func(0); }
+        }
+#endif
+        r = esp_wifi_scan_get_ap_num(&num);
+        if (i % 10u == 0u) {
+            {
+                volatile u32 *bd = (volatile u32 *)0x50000370u;
+                volatile u32 *rc = (volatile u32 *)0x50000800u;
+                {
+                    extern volatile u32 g_s3_txret, g_s3_txarg;
+                    s3_ets_printf("[scand] i=%d r=%d num=%u yld=%u pm=%u txr=%u txa=%x\n",
+                                  i, r, (unsigned)num, *(volatile u32 *)0x50001008u,
+                                  *(volatile u32 *)0x3fcef8e4u != 0u ?
+                                  (u32)*(volatile u8 *)(*(volatile u32 *)0x3fcef8e4u + 1u) : 0xffu,
+                                  g_s3_txret, g_s3_txarg);
+                }
+                s3_ets_printf("[recv] n=%u t0=%u q0=%x tk0=%x t1=%u q1=%x tk1=%x phyq=%x\n",
+                              rc[24], rc[0], rc[1], rc[2], rc[3], rc[4], rc[5],
+                              *(volatile u32 *)0x3fcef904u);
+                {
+                    /* §654: 用已知 ABI 查 ppTask(id=2) 的阻塞状态 */
+                    extern u32 s3_w2c_task_probe(u32 id, u32 what);
+                    s3_ets_printf("[tsk2] st=%u wk=%u wo=%x wr=%d\n",
+                                  s3_w2c_task_probe(2u, 0u), s3_w2c_task_probe(2u, 1u),
+                                  s3_w2c_task_probe(2u, 2u), (int)s3_w2c_task_probe(2u, 3u));
+                }
+            }
+        }
+        if (r == 0 && num != 0u) {
+#ifdef S3_CONNECT_IN_LOOP
+            /* §818: connect 内部 re-scan 需要 ISR+timer 驱动才能完成；
+             * 我们自己的 scan 靠本循环驱动才成功。一旦扫到 AP，就在本循环
+             * 还活着时调 connect，然后**不 break**，继续驱动若干轮让 connect
+             * 的 re-scan/auth 也能被同样的 ISR+timer 推进。 */
+            {
+                extern int esp_wifi_connect_internal(void);
+                static int conn_done = 0;
+                if (!conn_done) {
+                    conn_done = 1;
+                    (void)esp_wifi_connect_internal();
+                }
+                if (i >= 40u) { break; }   /* 再驱动 ~40 轮 */
+            }
+#else
+            break;
+#endif
+        }
+    }
+#ifndef S3_NO_SCAN_NUM
+#ifndef S3_NO_SCAN_NUM
+    s3_ets_printf("[wifi] scan_get_ap_num=%d num=%u\n", r, (unsigned)num);
+#endif
+#endif
+#ifdef S3_RC_DIAG
+    /* §829: 在 get_ap_records 清空 BSS 链表之前读 RC count + BSS head。 */
+    s3_ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
+                  *(volatile u32 *)(0x3fcd72d8u),
+                  (u32)*(volatile u8 *)(0x3fcd72eeu),
+                  *(volatile u32 *)(0x3fcd560cu));
+#endif
+    if (r != 0 || num == 0) {
+        return (int)num;
+    }
+    r = esp_wifi_scan_get_ap_records(&one, (void *)rec);
+    if (r == 0) {
+        /* 偏移按 IDF 6.0.1 wifi_ap_record_t：bssid[6]@0, ssid[33]@6,
+         * primary(u8)@39, second(enum/s32)@40, rssi(int8)@44（反汇编
+         * wifi_get_ap_info_process 4203cb99 s8i a2,a3,44 确认）。 */
+        s3_ets_printf("[wifi] AP0 ssid=%s ch=%u rssi=%d\n",
+                   (const char *)(rec + 6), (unsigned)rec[39], (int)(signed char)rec[44]);
+    }
+#ifdef S3_RC_SEED
+    /* §830: cnx_add_rc 从没被调用 → RC list 空 → cnx FSM 无候选 AP。
+     * 手工用 scan 到的 AP 造一个 cnx bss_info（0x3c8 字节，放静态池 slot），
+     * 灌进 RC list，再调 cnx_connect_next_ap 看 FSM 是否会推进到 auth。
+     * rec[] 是 wifi_ap_record_t: bssid@0, ssid@6, ch@39, rssi@44。 */
+    if (r == 0) {
+        extern void cnx_add_rc(void *bss);
+        u8 *slot = (u8 *)0x3fcd6b48u;   /* g_cnxMgr+8 + 2*0x3c8 静态池 slot */
+        u32 *w = (u32 *)slot;
+        u32 k;
+        for (k = 0; k < 0x3c8u / 4u; k++) { w[k] = 0; }
+        /* §835: 420470bc 的 fatal 检查要求 *(bss+0) == *(g_ic+16)（当前 cnx node 指针）。
+         * 之前填自指针导致不等 → 落入 420470e4 无限循环（卡死无 auth TX）。 */
+        *(u32 *)slot = *(volatile u32 *)0x3fcd54ecu;
+        *(u32 *)(slot + 4) = *(u32 *)rec;                          /* BSSID[0..3] */
+        cnx_add_rc(slot);
+    }
+#endif
+    return (int)num;
+}
+
+/* 轮询"连上 AP 了吗"：返回 1 = 已关联。ap_info 至少 64 字节（我们只用前几个字节）。 */
+/* §851: 挪到 flash 腾出 IRAM，让 S3_CONNECT_DRIVE2 的 ISR 驱动块能链接进 IRAM。
+ * 调用方在 win_island 主流程（非 ISR），scan 在它之前已完成，挪 flash 不影响扫描时序。 */
+__attribute__((section(".flash.text")))
+int s3_wifi_wait_connected(int ms)
+{
+    u8 ap[96];
+    int waited = 0;
+    int i = 0;
+    int r = 0;
+
+    while (waited < ms) {
+        for (i = 0; i < 96; i++) { ap[i] = 0; }
+#ifdef S3_DRIVE_TOP
+        /* §865: 早退判定之前先驱 ISR+timer。之前驱动块在 early-return 之后，
+         * sta_get_ap_info 假阳性首轮就 return 1，驱动永远不执行（diag[8]=2）。
+         * AUTH 请求已修好发出（§864），现在需要驱动把 AP 的 response 帧收进来。 */
+        {
+            extern volatile u32 g_wifi_isr_pending;
+            extern void s3_wifi_isr_dispatch(void);
+            u32 ie0 = 0u;
+#ifdef S3_NOOP_DATA_RX
+            /* §868: ppTask 的 idx25 数据帧 RX 处理 wdevProcessRxSucDataAll 在
+             * call0 内核下 TRAP。直接改 ppTask thunk 的字面量 0x40382338
+             * （=0x40005928）指向 no-op，让数据帧 RX 被丢弃而不 TRAP。 */
+            *(volatile u32 *)0x40382334u = (u32)(void *)&s3_noop_data_rx;
+#endif
+#ifdef S3_RESTORE_WDECTRL
+            *(volatile u32 *)0x3fcef93cu = 0x3fcbb548u;
+#endif
+            g_wifi_isr_pending = 0u;
+            s3_wifi_isr_dispatch();
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie0));
+            ie0 |= 1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie0));
+            s3_ets_timer_dispatch();
+        }
+#endif
+#ifdef S3_SET_HOME_CH
+        /* §854: 在早退判定之前就设 home=current=6。ROM chm_is_at_home_channel
+         * 只比较 g_chm->home(+80) 与 current(+82)；之前把它放在驱动块里，
+         * 但 sta_get_ap_info 的假阳性首轮就 return 1 了，根本没走到。 */
+        {
+            u32 chmp0 = *(volatile u32 *)0x3fcef850u;
+            if (chmp0 != 0u) { *(volatile u8 *)(chmp0 + 80u) = 6u; }
+        }
+#endif
+#ifdef S3_CONN_DIAG
+        /* §816: 检查库到底有没有真连上 —— "Haven't to connect" 只是我们
+         * 自己 sta_get_ap_info 的打印，可能 sta_get_ap_info 坏了但已关联。
+         * 用 RTC 写避免新增 printf 字符串触发 BSS/stack collision。 */
+        {
+            extern int ieee80211_sta_is_connected(void);
+            extern u8 g_sta_connected_flag;
+            volatile u32 *cd = (volatile u32 *)0x50001700u;
+            cd[0] = (u32)g_sta_connected_flag;
+            cd[1] = (u32)ieee80211_sta_is_connected();
+            cd[2]++;
+        }
+#endif
+        r = esp_wifi_sta_get_ap_info((void *)ap);
+#ifdef S3_REAL_ASSOC_GATE
+        /* §856: sta_get_ap_info()==0 只是 ioctl 入队成功的假阳性。只有库自己的
+         * g_sta_connected_flag==1 才是真关联。真关联前继续跑 ISR+timer 驱动，
+         * 让延迟在 g_ic+0x1a8 的 AUTH 帧有机会被冲出去。 */
+        {
+            extern u8 g_sta_connected_flag;
+            if (r == 0 && g_sta_connected_flag == 1u) {
+                s3_ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
+                           (const char *)(ap + 6), (unsigned)ap[39]);
+                return 1;
+            }
+        }
+#else
+        if (r == 0) {
+            s3_ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
+                       (const char *)(ap + 6), (unsigned)ap[39]);
+            return 1;
+        }
+#endif
+#ifdef S3_CONNECT_DRIVE
+        /* §812/§815: connect 内部 re-scan 靠 ISR+timer+TxQ 推进，但从
+         * wait_connected 里调 s3_wifi_isr_dispatch()/ppProcessTxQ() 会在
+         * ROM pc=400414a3 TRAP（call0/windowed 混调）。仅 timer 驱动无效。
+         * 本宏保留为文档占位，实验结论见 §815。 */
+        s3_ets_timer_dispatch();
+#endif
+#ifdef S3_CONNECT_DRIVE2
+        /* §828: 用 s3_wifi_scan 里那套**经过验证的** ISR+timer 驱动序列
+         * （含 §708 的 intenable 重新使能）来推进 connect 卡住的内部 re-scan。
+         * §815 的 TRAP 是裸调 ISR、没有重开 intenable 也没有清 pending；
+         * 这里严格复刻 scan 循环的每个动作。 */
+        {
+            extern volatile u32 g_wifi_isr_pending;
+            extern void s3_wifi_isr_dispatch(void);
+            u32 ie2 = 0u;
+#ifdef S3_SET_HOME_CH
+            /* §853: associate 里设的 home 被 esp_wifi_connect 重置；这里在
+             * connect 之后的 wait 循环里每轮重设 home=current=6，让
+             * chm_is_at_home_channel() 返回真 → AUTH 帧不再被延迟入队。
+             * g_chm=*(0x3fcef850)，home channel 在 struct+80（u8）。 */
+            {
+                u32 chmp = *(volatile u32 *)0x3fcef850u;
+                if (chmp != 0u) { *(volatile u8 *)(chmp + 80u) = 6u; }
+            }
+#endif
+            g_wifi_isr_pending = 0u;
+            s3_wifi_isr_dispatch();
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie2));
+            ie2 |= 1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie2));
+            s3_ets_timer_dispatch();
+        }
+#endif
+        s3_w2c_task_delay(100u);
+        waited = waited + 10;
+    }
+#ifdef S3_CONN_DIAG2
+    /* §817: 复用已有 printf 调用点（只加一个 %d 参数，不新增栈帧/字符串），
+     * 打印库自己的 is_connected()，判定"Haven't to connect"是否只是
+     * sta_get_ap_info 误报、真板其实已经关联。 */
+    {
+        extern int ieee80211_sta_is_connected(void);
+        s3_ets_printf("[wifi] timeout(%d) apinfo=%d isconn=%d\n",
+                      ms, r, ieee80211_sta_is_connected());
+    }
+#else
+    s3_ets_printf("[wifi] 关联超时（%d ms），sta_get_ap_info=%d\n", ms, r);
+#endif
+    return 0;
+}
+#else
+u32 s3_wifi_associate(const char *ssid, const char *pass)
+{
+    (void)ssid; (void)pass;
+    return 0xFFFFFFFFu;         /* 没链 WiFi 库：跳过关联 */
+}
+
+int s3_wifi_wait_connected(int ms)
+{
+    (void)ms;
+    return 0;
+}
+#endif
+
+#ifdef S3_WIFI_ASSOC_GATE
+/* 调试闸门（docs/wifi-plan.md §265）（docs/wifi-plan.md §265）。为什么需要它：
+ * 这块板子的 USB-Serial-JTAG 和串口是同一个 USB —— esptool 一复位，OpenOCD 的
+ * 连接就断，所以"先下断点再复位"走不通；而 OpenOCD 自己的 reset 起不来我们的
+ * app（只到 port_idle）。唯一可行的是：esptool 真复位 → 立刻起 OpenOCD →
+ * halt → 写 ibreaka0/ibreakenable → resume。但 OpenOCD 起来要 3~4 秒，等我们
+ * 架好断点，app 早就跑过 associate 崩掉了。
+ * 所以加一个**只在调试构建里存在**的闸门：app 在这里自旋等 JTAG 把
+ * g_s3_dbg_gate 写 1。默认不编译（没有 S3_WIFI_ASSOC_GATE 时这段完全不存在，
+ * 不会影响时序 —— 要知道这条路径对时序极其敏感，见 §259）。 */
+volatile u32 g_s3_dbg_gate = 0u;
+#endif
+
 u32 s3_wifi_bringup(void)
 {
     u32 i = 0u;
+#ifdef S3_WIFI_ASSOC_GATE
+    { extern volatile u32 g_s3_dbg_gate; while (g_s3_dbg_gate == 0u) { } }
+#endif
     /* 库的 wifi_log 先看它自己的 g_log_level，默认级别会把错误信息过滤掉，
      * 调高之后 init 失败的原因才会通过 _log_writev 送到串口。 */
     { extern int g_log_level; g_log_level = 4; }
+    /* §425 ★ 清 ROM 变量 `s_wifi_queue`（`rom/esp32s3.rom.ld` 里的**绝对
+     * 地址**定义：0x3fcef918）。
+     *
+     * 这个地址不在 link.ld 的 DRAM 区域里（上界 0x3FCEF000），也**不在
+     * `.bss`**，所以复位后**保留上一轮的值**。真板实测：复位后它还是上一轮
+     * 的堆指针 0x3fcc45b0 ⇒ libpp 打出
+     *   `create wifi task: queue not null`
+     * 然后拿这个**已失效**的指针去 delete/复用 ⇒
+     *   `TRAP cause=0x1c(StoreProhibited) vaddr=0x18 a4=0`
+     * 清成 0 之后库会走"创建新队列"的正常路径。
+     *
+     * 注意：**不能一次性清整片 0x3FCEF800..0x3FCF0000**（试过，直接退化成
+     * `TRAP pc=0x4004eabc`，ROM 自己的状态也在那 2KB 里）。只能一个一个来，
+     * 只清我们确认需要的。 */
+    { extern void *s_wifi_queue; s_wifi_queue = 0; }
 
-    ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
+    s3_ets_printf("B0 osi0=%08x osi@%08x calls@%08x\n",
                (u32)g_osi_calls[0], (u32)(void *)g_wifi_osi_funcs._version,
                (u32)(void *)&g_osi_calls[0]);
     while (i < 40u) { *(volatile u32 *)((u8 *)g_wifi_cfg_blob + i * 4u) = 0u; i = i + 1u; }
@@ -1052,8 +2530,24 @@ u32 s3_wifi_bringup(void)
     /* wpa_crypto_funcs @4..47：官方实现在
      * wpa_supplicant/src/crypto/crypto_ops.c 的 g_wifi_default_wpa_crypto_funcs，
      * 依赖 mbedtls；等接 TLS 时一起补。init 阶段库只校验 size/version。 */
-    wcfg(4u,   44u);            /* wpa_crypto_funcs.size    = sizeof(...) */
-    wcfg(8u,   1u);             /* wpa_crypto_funcs.version = ESP_WIFI_CRYPTO_VERSION */
+    /* wpa_crypto_funcs：44 字节的**函数指针表**（§218）。以前这里只填了
+     * size/version，九个指针全是 NULL —— WPA2-PSK 关联时要靠它做
+     * "口令 → PSK"（PBKDF2-SHA1）和 MIC 计算，NULL 就是直接跑飞。
+     * 表由 port/s3/wpa_crypto.c 提供（里面 PBKDF2-SHA1/SHA256/HMAC-SHA256
+     * 是真实现，AES 那几项先记账+返回 -1）。 */
+    c6_wpa_crypto_init();
+    {
+        const u32 *tab = (const u32 *)c6_wpa_crypto_table();
+        u32 k = 0u;
+
+        for (k = 0u; k < 11u; k++) {
+            /* wcfg 收的是**字节偏移**，所以每项要 +4（之前写成 4u+k，把整张表
+             * 挤进了 4..14 这 11 个字节里，库读到 size=0/version=0，
+             * 直接返回 ESP_ERR_INVALID_ARG(258) —— 真板日志：
+             *   wpa crypto funcs expected size=0 version=0, actual size=0 version=0 */
+            wcfg(4u + k * 4u, tab[k]);
+        }
+    }
     wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
     wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
     wcfg(56u,  1u);             /* tx_buf_type            default 1 = dynamic */
@@ -1066,7 +2560,7 @@ u32 s3_wifi_bringup(void)
     wcfg(84u,  1u);             /* ampdu_rx_enable        default y           */
     wcfg(88u,  1u);             /* ampdu_tx_enable        default y           */
     wcfg(92u,  0u);             /* amsdu_tx_enable        default n           */
-    wcfg(96u,  0u);             /* nvs_enable             官方默认 y，但需要 NVS 子系统，先关 */
+    wcfg(96u,  1u);             /* §589: nvs_enable 打开（NVS 槽位已改成空分区语义） */
     wcfg(100u, 0u);             /* nano_enable            default n           */
     wcfg(104u, 6u);             /* rx_ba_win              default 6           */
     wcfg(108u, 0u);             /* wifi_task_core_id      单核跑，用 0 号核    */
@@ -1080,31 +2574,64 @@ u32 s3_wifi_bringup(void)
     wcfg(140u, 0u);             /* dump_hesigb_enable     default n           */
     wcfg(144u, 0x1F2F3F4Fu);    /* magic = WIFI_INIT_CONFIG_MAGIC             */
 
+    /* §441：**这里必须保持 0**。
+     *
+     * 原来打开（§229 为了看同步点）。但 `osi_mutex_lock/unlock` /
+     * `osi_semphr_take/give` 每次打 1~3 行，而库在 `esp_wifi_init_internal`
+     * 内部要做**上千次**同步操作。115200 波特率下每行约 3.5ms，光打印就要
+     * 好几分钟 —— 真板看起来就是"卡在 WSTAGE 0x1005 不动"，
+     * 实际上库每推进一步都在等串口。
+     *
+     * §254 当初的注释说"关掉它反而走得更短"，正是因为打印改变了时序；
+     * 现在 §438 把抢占切换关掉之后，时序依赖的前提已经不成立，
+     * 关掉打印只会让 init 跑得更快。 */
+    g_dbg_sync = 0u;
     s3_wifi_osi_init();
-    ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
+    s3_ets_printf("B1 slot13=%08x slot18=%08x magic=%08x ver=%08x\n",
                (u32)(void *)g_wifi_osi_funcs._semphr_create,
                (u32)(void *)g_wifi_osi_funcs._mutex_create,
                (u32)(void *)g_wifi_osi_funcs._magic,
                (u32)(void *)g_wifi_osi_funcs._version);
     g_init_task = s3_w2c_current_task();
     *(volatile u32 *)0x50001400u = g_init_task;
-    ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
+    s3_ets_printf("B2 cfg@%08x osi=%08x magic@144=%08x\n",
                (u32)(void *)g_wifi_cfg_blob,
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 0u),
                *(volatile u32 *)((u8 *)g_wifi_cfg_blob + 144u));
-    return (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+    {
+        u32 irc;
+        /* §421 诊断：库的 init 状态机就在 `g_wifi_osi_funcs_md5 + 4`
+         * （镜像初值 1 = 未初始化，2 = 正在初始化，3/4 = 其它）。
+         * 如果进来时不是 1，说明之前有一次 init 没走完就返回了 ——
+         * 那样这次必然拿到 0x3013。用符号而不是硬编码地址：加一行打印
+         * 就会让 .data 布局整体挪位（§421 第一次就是踩了这个）。 */
+        extern unsigned char g_wifi_osi_funcs_md5[];
+        volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+        s3_ets_printf("[wifi] init 前的库状态 @%08x = %u\n",
+                   (unsigned)(u32)(void *)wst, (unsigned)*wst);
+        /* §421 实验：我们手动做了 PHY enable，库的状态机残留成 2
+         * （"正在初始化"），于是 init 直接返回 0x3013。复位成 1 再进去。 */
+        if (*wst != 1u) { *wst = 1u; }
+        irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+        s3_ets_printf("[wifi] init 后的库状态 @%08x = %u\n",
+                   (unsigned)(u32)(void *)wst, (unsigned)*wst);
+
+        s3_ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
+        g_dbg_sync = 0u;
+        return irc;
+    }
 }
 void *s3_wifi_calls_ptr(void) { return (void *)g_osi_calls; }
 
 /* 诊断：把关键 OSI 函数的调用计数打到串口（供 .c6 侧经桥调用） */
 static void pnm(const char *n, u32 v)
 {
-    ets_printf("%s=%08x ", n, v);
+    s3_ets_printf("%s=%08x ", n, v);
 }
 
 void s3_osi_dump(void)
 {
-    ets_printf("\n[osi] ");
+    s3_ets_printf("\n[osi] ");
     pnm("mutex",    g_osi_calls[18]);
     pnm("lock",     g_osi_calls[21]);
     pnm("qcreat",   g_osi_calls[23]);
@@ -1113,7 +2640,7 @@ void s3_osi_dump(void)
     pnm("evt",      g_osi_calls[31]);
     pnm("wmalloc",  g_osi_calls[90]);
     pnm("log",      g_osi_calls[83]);
-    ets_printf("\n");
+    s3_ets_printf("\n");
 }
 
 /* 给 .c6 侧拿表地址用（c6 里不能直接取全局地址） */
@@ -1267,10 +2794,38 @@ int __wrap_ic_create_wifi_task(void)
 }
 
 extern int __real_ieee80211_ioctl_init(void);
+int s3_wrap_timer_func(void *arg);   /* §664 forward */
+
 int __wrap_ieee80211_ioctl_init(void)
 {
+    int r;
     s3_wrap_bump(3u);
-    return __real_ieee80211_ioctl_init();
+    r = __real_ieee80211_ioctl_init();
+#ifdef S3_TRACE_IOCTL
+    /* §655: 库把 g_config_func 设成内部 callx8 固定地址，--wrap 抓不到。
+     * 这里直接把指针换成带日志的 wrapper，判定 ppTask 是否真的走到 ioctl 分发。 */
+    extern int __wrap_ieee80211_ioctl_process(void *msg);
+    *(volatile u32 *)0x3fcef8c0u = (u32)(void *)&__wrap_ieee80211_ioctl_process;
+    s3_ets_printf("[ioctlinit] r=%d gcfg patched to %x\n", r,
+                  *(volatile u32 *)0x3fcef8c0u);
+#endif
+#ifdef S3_TRACE_SCANMSG
+    /* §664: 同样 patch g_timer_func，追踪扫描通道驻留定时器是否触发。
+     * ieee80211_timer_do_process @0x42016de0，直接 callx8 到真函数。 */
+    *(volatile u32 *)0x3fcef8b8u = (u32)(void *)&s3_wrap_timer_func;
+    s3_ets_printf("[timerinit] gtimer patched\n");
+#endif
+    return r;
+}
+
+/* §664: g_timer_func 的日志 wrapper。签名按 ppTask 调用方式 (a10 = msg data)，
+ * 直接 callx8 到库真函数 0x42016de0（windowed, a10 传入）。 */
+int s3_wrap_timer_func(void *arg)
+{
+    typedef int (*fn_t)(void *);
+    fn_t real = (fn_t)0x42016de0u;
+    s3_ets_printf("[tmr] a=%x\n", (u32)arg);
+    return real(arg);
 }
 
 extern int __real_pp_create_task(void);
@@ -1284,7 +2839,135 @@ extern int __real_pp_post(unsigned int ppq, unsigned int data);
 int __wrap_pp_post(unsigned int ppq, unsigned int data)
 {
     s3_wrap_bump(7u);
-    return __real_pp_post(ppq, data);
+    s3_ets_printf("[pppost] ppq=%u data=%x\n", ppq, data);
+#ifdef S3_TRACE_SCANMSG
+    /* §656: 扫描消息由库内部 callx8 建好，--wrap 抓不到回调。
+     * 在 pp_post 边界把消息头打出来，并确认 b1 是否 = wifi_scan_start_process。 */
+    if (ppq == 6u && data != 0u) {
+        volatile u32 *m = (volatile u32 *)data;
+        s3_ets_printf("[scanmsg] %x: %08x %08x %08x %08x %08x %08x\n",
+                      data, m[0], m[1], m[2], m[3], m[4], m[5]);
+        /* §674: b0=0x305 是 scan-start；记下库构造的真消息指针 */
+        if (m[0] == 0x305u) { g_s3_real_scan_msg = data; }
+        /* §669: 只做裸内存读取，不调用 call0 内核函数（windowed ABI 会 TRAP）。
+         * OsQueue: buf0 size4 cap8 head12 tail16 count20 magic24 wg28 wp32 */
+        {
+            volatile u32 *qp = (volatile u32 *)*(volatile u32 *)0x3fcef904u;
+            if (qp != 0u) {
+                s3_ets_printf("[pq] q=%x cnt=%u wg=%u hd=%u tl=%u\n",
+                              (u32)qp, qp[5], qp[7], qp[3], qp[4]);
+            }
+        }
+    }
+#endif
+    {
+#ifdef S3_SIGFIX
+        /* §697: pp_sig_cnt[ppq] 卡在 1 时，pp_post 对 ppq=0 根本不入 xphyQueue
+         * （0x4201df8b 分支只调 OSI slot 11 就 ret），TX-kick 全部丢失。
+         * 强制清零，让每次 post 都真正投递。 */
+        if (ppq < 18u) { ((volatile u8 *)0x3fcbbd50u)[ppq] = 0u; }
+#endif
+        int rr = __real_pp_post(ppq, data);
+#ifdef S3_TRACE_SCANMSG
+        /* §671: 第 6 条消息投递后，用 windowed 包装读 ppTask 状态 + 队列计数。
+         * os_task_probe 是 call0，直接从 windowed 的 wifi_glue.c 调会 TRAP，
+         * s3_w2c_task_probe 才是正确的 windowed 入口。 */
+        if (ppq == 6u || ppq == 0u) {   /* §679: 也看 scan timer 的 pp_post(0,0) */
+            extern u32 s3_w2c_task_probe(u32 id, u32 what);
+            volatile u32 *qp = (volatile u32 *)*(volatile u32 *)0x3fcef904u;
+            s3_ets_printf("[w6] q=%u r=%d st=%u wk=%u wo=%x cnt=%u\n",
+                          ppq,
+                          rr, s3_w2c_task_probe(2u, 0u), s3_w2c_task_probe(2u, 1u),
+                          s3_w2c_task_probe(2u, 2u), qp != 0u ? qp[5] : 0u);
+        }
+#endif
+        return rr;
+    }
+}
+
+extern int __real_wifi_scan_start_process(void *msg);
+/* §651: 追踪 ppTask 的 jump-table[6] -> g_config_func 派发是否到达。 */
+extern int __real_ieee80211_ioctl_process(void *msg);
+int __wrap_ieee80211_ioctl_process(void *msg)
+{
+    int r;
+    s3_ets_printf("[ioctlp] enter msg=%x b0=%x b1=%x\n", (u32)msg,
+                  *(volatile u32 *)msg, *(volatile u32 *)((u8 *)msg + 4));
+    r = __real_ieee80211_ioctl_process(msg);
+    s3_ets_printf("[ioctlp] leave r=%d\n", r);
+    return r;
+}
+
+int __wrap_wifi_scan_start_process(void *msg)
+{
+    int r;
+    s3_ets_printf("[scanp] enter msg=%x b0=%x b1=%x\n", (u32)msg,
+                  *(volatile u32 *)msg, *(volatile u32 *)((u8 *)msg + 4));
+    r = __real_wifi_scan_start_process(msg);
+    s3_ets_printf("[scanp] leave r=%d\n", r);
+    return r;
+}
+
+extern int __real_ieee80211_sta_scan(void *arg);
+int __wrap_ieee80211_sta_scan(void *arg)
+{
+    int r;
+    s3_ets_printf("[stascan] enter arg=%x\n", (u32)arg);
+    r = __real_ieee80211_sta_scan(arg);
+    s3_ets_printf("[stascan] leave r=%d\n", r);
+    return r;
+}
+
+/* §640: 追踪 scan_start 里两个可能把扫描挡掉的函数 */
+extern int __real_pm_offchan_ready_or_defer(void *a, void *b);
+int __wrap_pm_offchan_ready_or_defer(void *a, void *b)
+{
+    int r = __real_pm_offchan_ready_or_defer(a, b);
+    s3_ets_printf("[pmoff] a=%x b=%x r=%d\n", (u32)a, (u32)b, r);
+    return r;
+}
+
+extern int __real_chm_acquire_lock(void *a);
+int __wrap_chm_acquire_lock(void *a)
+{
+    int r = __real_chm_acquire_lock(a);
+    s3_ets_printf("[chmlk] a=%x r=%d\n", (u32)a, r);
+    return r;
+}
+
+/* §694: 零 printf 计数器（JTAG 直接读 g_s3_diag[]），判定 probe 发送链在哪一环断掉。 */
+volatile u32 g_s3_diag[12];
+#define S3_PROBE_N (g_s3_diag[0])
+#define S3_CHM_N   (g_s3_diag[1])
+#define S3_CHM_R   (g_s3_diag[2])
+#define S3_RGD_N   (g_s3_diag[3])
+#define S3_RGD_R   (g_s3_diag[4])
+extern void __real_ieee80211_send_probereq(u32, u32, u32, u32, u32, u32, u32, u32);
+__attribute__((section(".flash.text")))
+void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
+                                    u32 a5, u32 a6, u32 a7, u32 a8)
+{
+    S3_PROBE_N++;
+    __real_ieee80211_send_probereq(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+extern u32 __real_ic_tx_pkt(u32);
+volatile u32 g_s3_txret = 0u;      /* §715: ppTxPkt 返回值（非 0 = TX 被拒） */
+volatile u32 g_s3_txarg = 0u;
+__attribute__((section(".flash.text")))
+void __wrap_ic_tx_pkt(u32 a)
+{
+    g_s3_diag[5]++;
+    g_s3_txarg = a;
+    g_s3_txret = __real_ic_tx_pkt(a);
+}
+extern int __real_ieee80211_regdomain_is_active_scan(u32);
+__attribute__((section(".flash.text")))
+int __wrap_ieee80211_regdomain_is_active_scan(u32 ch)
+{
+    S3_RGD_N++;
+    int r = __real_ieee80211_regdomain_is_active_scan(ch);
+    S3_RGD_R = (u32)r;
+    return r;
 }
 
 extern int __real_wifi_init_in_caller_task(void);
@@ -1304,10 +2987,10 @@ int __wrap_wifi_init_in_caller_task(void)
  * 并且**真的打出来**（§192 的 `_log_write=0` 说明库自己的日志通道不走 OSI，
  * 这条 printf 才是唯一能看到库内部诊断的路）。
  *
- * 输出走 ROM 的 ets_printf（windowed，本文件也是 windowed，ABI 一致）。
+ * 输出走 ROM 的 s3_ets_printf（windowed，本文件也是 windowed，ABI 一致）。
  * 只需要支持很小一部分格式：%s %d %u %x %c %% 和宽度。够读 md5/自检失败。 */
 
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf(const char *fmt, ...);
 extern void s3_win_log(const char *s);
 
 static char *wp_utoa(char *end, u32 v, u32 base)
@@ -1403,7 +3086,7 @@ static int lib_printf_line(const char *tag, const char *fmt, va_list ap)
         buf[n] = '\0';
     }
     if (n > 0) {
-        ets_printf("[%s] %s\n", tag, buf);
+        s3_ets_printf("[%s] %s\n", tag, buf);
     }
     return n;
 }
@@ -1434,6 +3117,111 @@ LIB_PRINTF(wapi_printf, "wapi")
 void free(void *p)
 {
     osi_free(p);
+}
+
+/* ---- 闭源库 + lwIP 需要的几个裸 libc 符号（§210）----------------------
+ * lwIP 用 MEM_LIBC_MALLOC/MEMP_MEM_MALLOC，会直接引用 malloc/calloc/realloc；
+ * netif.c 用 atoi()；ip4_addr.c 的 inet_aton 用 isdigit()（= 查 _ctype_ 表）。
+ * 这些都必须在**同一个堆**上：free() 已经落回 osi_free，所以 malloc 也必须是
+ * osi_malloc，否则"谁分配、谁释放"就对不上了。 */
+void *malloc(u32 n)
+{
+    return osi_malloc(n);
+}
+
+void *calloc(u32 n, u32 sz)
+{
+    void *p = 0;
+
+    if (n == 0u || sz == 0u) {
+        return 0;
+    }
+    if (n > 0x00FFFFFFu / (sz == 0u ? 1u : sz)) {
+        return 0;                    /* 溢出保护：库可能给离谱的值 */
+    }
+    p = osi_malloc(n * sz);
+    if (p != 0) {
+        (void)memset(p, 0, n * sz);
+    }
+    return p;
+}
+
+void *realloc(void *p, u32 n)
+{
+    return osi_realloc(p, n);
+}
+
+int atoi(const char *s)
+{
+    int v = 0;
+    int neg = 0;
+
+    if (s == 0) {
+        return 0;
+    }
+    while (*s == ' ' || *s == '\t') {
+        s++;
+    }
+    if (*s == '-') {
+        neg = 1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (int)(*s - '0');
+        s++;
+    }
+    return neg ? -v : v;
+}
+
+/* newlib 布局：_ctype_[0] 对应 EOF，字符 c 的属性在 _ctype_[c+1]。
+ * 位定义：_U 01 _L 02 _N 04 _S 08 _P 10 _C 20 _X 40 _B 80 */
+const char _ctype_[257] = {
+    0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x08, 0x08,
+    0x08, 0x08, 0x08, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x08, 0x10, 0x10,
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    0x10, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x10,
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x10, 0x10, 0x10, 0x10,
+    0x10, 0x10, 0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x02, 0x02, 0x02, 0x02,
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+    0x02, 0x02, 0x02, 0x02, 0x10, 0x10, 0x10, 0x10, 0x20, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+/* errno：lwIP 的 sockets.c 会引用它（lwip/errno.h 里是 extern int errno）。
+ * freestanding 镜像里没有 libc 提供这个变量，只能自己给一个（windowed 侧）。 */
+int errno;
+
+/* printf：windowed 侧的实现（§214；snprintf 本文件里早就有）。
+ * TLS 客户端（net/*.c6 编成 windowed 对象）和我们自己的板级用例都要打日志，
+ * 而 freestanding 镜像里没有 libc 的 printf；这里用现有的 wp_vfmt() 顶。 */
+int printf(const char *fmt, ...)
+{
+    char buf[256] = { 0 };
+    va_list ap;
+    int n = 0;
+
+    va_start(ap, fmt);
+    n = wp_vfmt(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        s3_win_log(buf);
+    }
+    return n;
 }
 
 int puts(const char *s)

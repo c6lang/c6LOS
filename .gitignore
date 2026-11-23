@@ -9,3 +9,4 @@ build/
 *.d
 __pycache__/
 .cache/
+port/s3/wifi_creds_local.h

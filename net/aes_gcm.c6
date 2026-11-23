@@ -1,0 +1,245 @@
+/* aes_gcm：AES-GCM（NIST SP 800-38D），TLS 1.2 记录层要用（RFC 5288）
+ *
+ * 为什么自己写（docs/wifi-plan.md §211）：
+ *   `std/encoding/aes.c6` 只有 ECB 块加解密和 CTR 模式，**没有 GHASH**，
+ *   而 qq.com 协商出来的套件正是 `ECDHE-RSA-AES128-GCM-SHA256`（只谈 TLS 1.2），
+ *   所以 GCM 的认证部分必须补。
+ *
+ * 用法：
+ *
+ *     AesGcm g = { { { 0 } }, { 0 }, 0 };
+ *     g.init(key16, 16);                       // 只在密钥确定后做一次
+ *     g.seal(iv12, aad, aadlen, in, n, out, tag16);   // 加密 + 出 tag
+ *     int ok = g.open(iv12, aad, aadlen, in, n, out, tag16);   // 解密并验 tag
+ *
+ * 实现要点：
+ *   - H = AES_K(0^128)；tag = GHASH(H, A || C || len(A)*8 || len(C)*8) ^ AES_K(J0)；
+ *   - J0 = IV(12 字节) || 00 00 00 01（TLS 的 12 字节 IV，不需要通用长度的 GHASH 派生）；
+ *   - 计数器从 J0+1 开始（只递增低 32 位，和 SP 800-38D 的 inc32 一致）；
+ *   - GHASH 的 GF(2^128) 乘法用最朴素的逐位右移 + 0xE1 归约：TLS 记录最多 2KB
+ *     （128 个块），128×128 次移位在 ESP32-S3 上是几十微秒量级，够用且不容易写错；
+ *   - `open()` 用**常数时间**比较 tag，避免把认证失败变成时序侧信道。
+ */
+#include <string.h>
+
+module net.aes_gcm;
+import std.core.types;
+import std.encoding.aes;
+
+struct AesGcm {
+    Aes aes;
+    u8  h[16];      /* GHASH 的子密钥 H = AES_K(0^128) */
+    int valid;
+};
+
+/* GF(2^128) 上乘 H：x = x * H（按 SP 800-38D 的位序，MSB 在前） */
+static void gcm_mul(u8 *x, const u8 *h)
+{
+    u8 z[16] = { 0 };
+    u8 v[16] = { 0 };
+    int i = 0;
+    int j = 0;
+
+    memcpy(v, h, 16);
+    for (i = 0; i < 128; i++) {
+        if ((x[i >> 3] & (u8)(0x80u >> (i & 7))) != 0u) {
+            for (j = 0; j < 16; j++) {
+                z[j] = (u8)(z[j] ^ v[j]);
+            }
+        }
+        {
+            int lsb = (int)(v[15] & 1u);
+
+            for (j = 15; j > 0; j--) {
+                v[j] = (u8)((v[j] >> 1) | ((v[j - 1] & 1u) << 7));
+            }
+            v[0] = (u8)(v[0] >> 1);
+            if (lsb != 0) {
+                v[0] = (u8)(v[0] ^ 0xe1u);
+            }
+        }
+    }
+    memcpy(x, z, 16);
+}
+
+/* y ^= block，然后 y = y*H */
+static void gcm_absorb(u8 *y, const u8 *block, const u8 *h)
+{
+    int j = 0;
+
+    for (j = 0; j < 16; j++) {
+        y[j] = (u8)(y[j] ^ block[j]);
+    }
+    gcm_mul(y, h);
+}
+
+/* J0 = iv12 || 00 00 00 01 */
+static void gcm_j0(const u8 *iv12, u8 *j0)
+{
+    memcpy(j0, iv12, 12);
+    j0[12] = 0;
+    j0[13] = 0;
+    j0[14] = 0;
+    j0[15] = 1;
+}
+
+int init(AesGcm *self, const void *key, usize klen)
+{
+    u8 zero[16] = { 0 };
+
+    if (self == 0) {
+        return 0;
+    }
+    self->aes = aes_key(key, klen);
+    if (!self->aes.ok()) {
+        self->valid = 0;
+        return 0;
+    }
+    self->aes.encrypt_block(zero, self->h);
+    self->valid = 1;
+    return 1;
+}
+
+int is_ready(AesGcm *self) { return self != 0 && self->valid != 0; }
+
+/* 内部：算 tag。aad/data 长度用 int（TLS 记录远小于 2GB） */
+static void gcm_tag(AesGcm *self, const u8 *j0, const u8 *aad, int aadlen,
+                    const u8 *data, int datalen, u8 *tag16)
+{
+    u8 y[16] = { 0 };
+    u8 blk[16] = { 0 };
+    u8 lenblk[16] = { 0 };
+    u8 ej0[16] = { 0 };
+    int i = 0;
+
+    /* GHASH 的两个输入段 */
+    {
+        int left = aadlen;
+        const u8 *p = aad;
+
+        while (left > 0) {
+            int n = left < 16 ? left : 16;
+
+            memset(blk, 0, 16);
+            memcpy(blk, p, (usize)n);
+            gcm_absorb(y, blk, self->h);
+            p = p + n;
+            left = left - n;
+        }
+    }
+    {
+        int left = datalen;
+        const u8 *p = data;
+
+        while (left > 0) {
+            int n = left < 16 ? left : 16;
+
+            memset(blk, 0, 16);
+            memcpy(blk, p, (usize)n);
+            gcm_absorb(y, blk, self->h);
+            p = p + n;
+            left = left - n;
+        }
+    }
+    /* 长度块：AAD 位数（64 位大端）|| 数据位数（64 位大端）。
+     * 注意必须用 u64 来移：对 32 位值移 >=32 位在 c6/tcc 里是按 &31 取模的
+     * （本轮实测踩到：tag 一直不对，就是这里把低字节重复写进了高位）。 */
+    {
+        u64 abits = (u64)aadlen * 8ull;
+        u64 dbits = (u64)datalen * 8ull;
+
+        for (i = 0; i < 8; i++) {
+            lenblk[7 - i] = (u8)(abits >> (8 * i));
+            lenblk[15 - i] = (u8)(dbits >> (8 * i));
+        }
+    }
+    gcm_absorb(y, lenblk, self->h);
+    /* tag = GHASH ^ AES_K(J0) */
+    self->aes.encrypt_block(j0, ej0);
+    for (i = 0; i < 16; i++) {
+        tag16[i] = (u8)(y[i] ^ ej0[i]);
+    }
+}
+
+/* CTR 加密（对称：同一函数用于加/解密），计数器从 J0+1 起 */
+static void gcm_ctr(AesGcm *self, const u8 *iv12, const u8 *in, int n, u8 *out)
+{
+    u8 j0[16] = { 0 };
+    u8 ctr[16] = { 0 };
+    u8 ks[16] = { 0 };
+    int i = 0;
+    int off = 0;
+
+    gcm_j0(iv12, j0);
+    memcpy(ctr, j0, 16);
+    /* inc32 */
+    ctr[15] = (u8)(ctr[15] + 1u);
+    if (ctr[15] == 0u) {
+        ctr[14] = (u8)(ctr[14] + 1u);
+        if (ctr[14] == 0u) {
+            ctr[13] = (u8)(ctr[13] + 1u);
+            if (ctr[13] == 0u) {
+                ctr[12] = (u8)(ctr[12] + 1u);
+            }
+        }
+    }
+    while (off < n) {
+        int m = n - off < 16 ? n - off : 16;
+
+        self->aes.encrypt_block(ctr, ks);
+        for (i = 0; i < m; i++) {
+            out[off + i] = (u8)(in[off + i] ^ ks[i]);
+        }
+        off = off + m;
+        /* inc32 */
+        ctr[15] = (u8)(ctr[15] + 1u);
+        if (ctr[15] == 0u) {
+            ctr[14] = (u8)(ctr[14] + 1u);
+            if (ctr[14] == 0u) {
+                ctr[13] = (u8)(ctr[13] + 1u);
+                if (ctr[13] == 0u) {
+                    ctr[12] = (u8)(ctr[12] + 1u);
+                }
+            }
+        }
+    }
+}
+
+/* 加密：out 可与 in 相同 */
+int seal(AesGcm *self, const u8 *iv12, const u8 *aad, int aadlen,
+         const u8 *in, int n, u8 *out, u8 *tag16)
+{
+    u8 j0[16] = { 0 };
+
+    if (!is_ready(self) || n < 0 || aadlen < 0) {
+        return 0;
+    }
+    gcm_ctr(self, iv12, in, n, out);
+    gcm_j0(iv12, j0);
+    gcm_tag(self, j0, aad, aadlen, out, n, tag16);
+    return 1;
+}
+
+/* 解密：先按密文算 tag，常数时间比较，通过后再解 */
+int open(AesGcm *self, const u8 *iv12, const u8 *aad, int aadlen,
+         const u8 *in, int n, const u8 *tag16, u8 *out)
+{
+    u8 j0[16] = { 0 };
+    u8 want[16] = { 0 };
+    u8 diff = 0;
+    int i = 0;
+
+    if (!is_ready(self) || n < 0 || aadlen < 0) {
+        return 0;
+    }
+    gcm_j0(iv12, j0);
+    gcm_tag(self, j0, aad, aadlen, in, n, want);
+    for (i = 0; i < 16; i++) {
+        diff = (u8)(diff | (want[i] ^ tag16[i]));
+    }
+    if (diff != 0u) {
+        return 0;       /* 认证失败：**不**输出明文 */
+    }
+    gcm_ctr(self, iv12, in, n, out);
+    return 1;
+}

@@ -4,6 +4,14 @@
  */
 #include "c6os/types.h"
 #include "c6os/flash.h"
+#include "wifi_creds.h"
+#include "idf_cal.h"        /* §653: IDF 真板 cal_data 注入实验 */
+
+/* os_wdt_feed/os_wdt_start 是 call0 的 C 函数，windowed 岛里要经 w2c 壳调（§228） */
+extern void s3_w2c_wdt_feed(void);
+extern unsigned int s3_w2c_sp_probe(void);
+extern unsigned int s3_w2c_task_delay(unsigned int ticks);
+extern void s3_w2c_wdt_start(unsigned int secs);
 
 /* 内核原语（call0 侧，经 port/s3/w2c.S 的壳调用） */
 extern u32 s3_w2c_current_task(void);
@@ -130,11 +138,11 @@ u32 s3_win_deep(u32 n)
 }
 
 /* ---- ROM 控制台转发 ---------------------------------------------------
- * ROM 里的 ets_printf 按 ROM 自己的配置输出（USB-Serial/JTAG 或 UART0），
+ * ROM 里的 s3_ets_printf 按 ROM 自己的配置输出（USB-Serial/JTAG 或 UART0），
  * 不依赖我们 port_init 里的 USB 初始化 —— 串口"坏掉"时这是最可靠的通道。
  * 注意 ROM 是 windowed ABI，必须从孤岛（windowed）里调，call0 直接调会跑飞。
  */
-int ets_printf(const char *fmt, ...);
+int s3_ets_printf(const char *fmt, ...);
 /* ROM：0x40005c58，填 g_phyFuns 函数表（见 esp32s3.rom.ld） */
 /* ROM 0x40005c58：返回 PHY 的函数表指针（调用者负责存进 g_phyFuns）；
  * 注意 ROM 是 windowed，返回值在 a10，本文件也是 windowed 编译，直接收就对。 */
@@ -147,10 +155,11 @@ void phy_get_romfunc_addr(void);
 /* IDF 用它让 PHY 初始化时**不要抢走内部 USB PHY**（否则 USB-CDC 立刻掉枚举，
  * 串口和 esptool 一起失联，什么都看不到）。必须在 register_chipv7_phy 之前调用。 */
 void phy_bbpll_en_usb(u32 enable);
+void phy_wakeup_init(void);
 
 void s3_win_log(const char *s)
 {
-    ets_printf("%s", s);
+    s3_ets_printf("%s", s);
 }
 
 void s3_win_trace(const char *s);
@@ -179,13 +188,26 @@ static phy_cal_data_t g_phy_cal;
  * S3 上就是往 SYSCON_WIFI_CLK_EN(0x60026014) 塞两组位：
  *   WIFI_BT_COMMON = 0x78078F   （WiFi/BLE 共用时钟）
  *   PHY_EN         = 0x400000   （PHY 校准模块时钟）
- * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。 */
+ *   CLK_320M_OEN   = 0x40       （320MHz 时钟输出使能，见 §608/§610）
+ * 没有这些时钟，库里的轮询会永远等下去 —— 实测就是"卡死"。
+ *
+ * §610 关键修复：IDF 运行时 WIFI_CLK_EN=0xff87d850，bit6(0x40) 是置位的；
+ * 我们此前只 OR 了 0x78078F|0x400000，得到 0xfffce7bf —— bit6 始终是 0。
+ * JTAG 在 hal_init 处二分证明：只要补上 bit6（0xfffce7ff），hal_init 写的
+ * d14 kick 就立刻被硬件应答（d14=1）；缺 bit6 时整块 0x60033xxx MAC 寄存器
+ * 写入被静默丢弃，扫描 0 AP、关联超时。这个 320M 时钟正是 MAC 硬件的门控。 */
 static void s3_win_phy_clock_enable(void)
 {
     volatile u32 *clk = (volatile u32 *)0x60026014u;
 
+#ifdef S3_SKIP_WIFI_CLK_INIT
+    /* §527：经 IDF 二级 bootloader 启动时，WIFI_CLK_EN 已被配成
+     * 0xff87d850；我们原来的 OR 会把它改成 0xfffce7bf，可能破坏 RF 状态。 */
+    return;
+#endif
     *clk = *clk | 0x78078Fu;
     *clk = *clk | 0x400000u;
+    *clk = *clk | 0x40u;              /* §610: SYSCON_CLK_320M_OEN */
 }
 
 /* PHY 初始化会动内部 USB PHY（IDF 里由 phy_bbpll_en_usb 之类处理），
@@ -207,7 +229,6 @@ static void s3_win_usb_reclaim(void)
  * 返回：0 成功；否则是失败的步骤号。
  * 另外把 g_phyFuns 的内容也暴露出去（step 2 用它确认 ROM 真的填了表）。 */
 extern volatile u32 g_phyFuns;
-int register_chipv7_phy_init_param(const void *init_data, void *cal_data, int mode);
 
 u32 s3_win_phy_funcs_word(void)
 {
@@ -287,9 +308,29 @@ static void s3_win_phy_power_on(void)
     *pwc = *pwc & ~(1u << 17);              /* 解除 WiFi 掉电 */
     while (k < 400u) { k = k + 1u; }        /* ~10us @40MHz */
     s3_win_phy_clock_enable();              /* 打开 modem 时钟 */
-    *rst = *rst | 0x2A1Fu;                  /* modem 复位：assert */
-    *rst = *rst & ~0x2A1Fu;                 /* modem 复位：release */
+    /* §703: IDF 的 esp_phy_enable() 只在 phy_get_modem_flag()==0（首次 enable）
+     * 时做模块上电/复位，后续 enable 只调 phy_wakeup_init()+phy_track_pll()。
+     * 我们以前每次 _phy_enable 回调都重发这次 modem 复位脉冲 —— 真板日志里
+     * hal_init 之后（line 130 setintr / line 142 d14=1）又来两次回调
+     * （line 148、164，后者正是 scan start），每次都 assert SYSCON_WIFI_RST_EN，
+     * 把 hal_init 刚写好的 MAC 寄存器全部清零（JTAG 实测 d14=1→0、
+     * 0x60033120=0x23006→0），于是扫描收不到任何 AP、关联超时。
+     * 复位脉冲只发一次，与 IDF 语义一致。 */
+    {
+        static u32 s_modem_reset_done = 0u;
+        if (s_modem_reset_done == 0u) {
+            *rst = *rst | 0x2A1Fu;          /* modem 复位：assert */
+            *rst = *rst & ~0x2A1Fu;         /* modem 复位：release */
+            s_modem_reset_done = 1u;
+        }
+    }
     *iso = *iso & ~(1u << 28);              /* 解除隔离 */
+    /* §288：BBPLL 上电。IDF 的二级 bootloader 在 rtc_clk_init() 里会调
+     * clk_ll_bbpll_enable()，把 RTC_CNTL_OPTIONS0 的三个 FORCE_PD 清掉：
+     *   BB_I2C_FORCE_PD = BIT(6)、BBPLL_I2C_FORCE_PD = BIT(8)、BBPLL_FORCE_PD = BIT(10)
+     * 我们镜像没有二级 bootloader，这个一直没人做 —— 而 WiFi MAC/BB 的时钟就是
+     * 从 BBPLL 分出来的（正是 §285 里恒 0 的那个计数器）。 */
+    *(volatile u32 *)0x60008000u &= ~((1u << 6) | (1u << 8) | (1u << 10));
     k = 0;
     while (k < 400u) { k = k + 1u; }
 }
@@ -321,15 +362,51 @@ int s3_win_phy_step(int step)
     if (step <= 3) {
         return 0;
     }
-    (void)register_chipv7_phy_init_param(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
     if (step <= 4) {
         return 0;
     }
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }
 
+/* 给 OSI 的 `_phy_enable` 槽位（slot 53）用：IDF 的 esp_adapter.c 里就是
+ * `._phy_enable = esp_phy_enable_wrapper`（→ esp_phy_enable(PHY_MODEM_WIFI)），
+ * 也就是说**PHY 使能是 WiFi 库自己在合适的时机回调我们的**，而不是我们提前手动做。
+ * 详见 docs/wifi-plan.md §228。 */
+int s3_win_phy_enable(void);     /* 定义在下面 */
+
+int s3_win_phy_enable_hook(void)
+{
+    s3_ets_printf("[phy] OSI _phy_enable 回调进入\n");
+    return s3_win_phy_enable();
+}
+
+/* 正常路径：**必须**和 bisect_run() 的子步骤顺序完全一致。
+ *
+ * 这里曾经和诊断路径不一致（少了 power_on、少了 phy_bbpll_en_usb、函数表用的是
+ * 另一个入口、而且那个入口并不会写 g_phyFuns），结果就是 §202 末尾那个
+ * "W0 phy start 之后整片从 USB 上消失" —— 现在把原因找到了（§205）：
+ *
+ * 反汇编 libphy 的 `i2c_bbpll_set()`（我们镜像里 0x42056658）可以看到：
+ *     ...
+ *     a3 = phy_param;  s8i .a10, a3, 209 / 210     ; 存 I2C 读回值
+ *     a3 = phy_param + 0x200
+ *     a11 = phy_param[0x2A6]                        ; ← 就是 phy_bbpll_en_usb() 写的那个 byte
+ *     bnez a11, 跳过
+ *     i2c write(reg 102, sub 5, val 7)              ; ← 这一段是"把内部 USB PHY 关掉"
+ *
+ * 也就是 IDF Kconfig `ESP_PHY_ENABLE_USB` 那句话的机器码版本：
+ * **不显式 phy_bbpll_en_usb(1)，register_chipv7_phy() 就会顺手关掉 USB PHY**，
+ * USB-Serial-JTAG 连 `303a:` 都不再出现。我们原来的 s3_win_phy_enable 恰好没调它。
+ */
 int s3_win_phy_enable(void)
 {
+    int rc;
+    /* §522：IDF 的 esp_phy_enable() 用 s_is_phy_calibrated 保证
+     * register_chipv7_phy() 全程只跑一次；之后每次 enable 只调
+     * phy_wakeup_init()。我们以前每次回调都重新做完整校准（真板上两次），
+     * 可能把已经调好的 RF 状态冲掉。照 IDF 改成一次性校准。 */
+    static u32 s_phy_calibrated = 0u;
+
     /* IDF 在调 register_chipv7_phy 之前会把 efuse 里的 MAC 填进 cal_data.mac
      * （见 esp_phy/src/phy_init.c）。这里先写死成这块板自己的 MAC
      * cc:8d:a2:ec:99:c4；以后改成从 efuse 读。 */
@@ -339,30 +416,207 @@ int s3_win_phy_enable(void)
     g_phy_cal.v[7] = 0xecu;
     g_phy_cal.v[8] = 0x99u;
     g_phy_cal.v[9] = 0xc4u;
-    s3_win_phy_clock_enable();
-    /* **关键**：register_chipv7_phy() 一上来就用全局函数表 g_phyFuns
-     * （反汇编：l32i a5, g_phyFuns; l32i a5, a5, 0x204; callx8 a5）。
-     * 这个表由 ROM 的 phy_get_romfuncs()（0x40005c58）填；IDF 在
-     * esp_phy_enable() 里会先调它。我们之前没调 -> 表是空的 -> 解引用空指针，
-     * 表现就是"卡死在里面"。
-     * ROM 是 windowed，所以必须从孤岛里调。 */
-    phy_get_romfuncs();
-    {
-        int rc = register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 
-        s3_win_usb_reclaim();      /* 把 USB PHY 抢回来，否则串口/esptool 都失联 */
-        return rc;
+#ifdef S3_INJECT_IDF_CAL
+    /* §653: 注入从真板 NVS 提取的 IDF cal_data 非零段（136 段/469 字节），
+     * 验证 §611 的"g_phy_cal 全零导致扫描 0 AP"假设。
+     * 版本 0x2c7、MAC 与上面一致，结构完全对齐。 */
+    {
+        const u8 *p = s3_idf_payload;
+        unsigned k;
+        for (k = 0u; k < sizeof(s3_idf_runs) / sizeof(s3_idf_runs[0]); k++) {
+            win_memcpy(g_phy_cal.v + s3_idf_runs[k].off, p, s3_idf_runs[k].n);
+            p += s3_idf_runs[k].n;
+        }
+        s3_ets_printf("[phy] injected IDF cal (%u runs)\n",
+                      (unsigned)(sizeof(s3_idf_runs) / sizeof(s3_idf_runs[0])));
     }
+#endif
+
+    /* ① 解除 WiFi 掉电 + 开 modem/PHY 时钟 + 复位脉冲 + 解隔离
+     *    （= IDF 的 wifi_bt_common_module_enable + phy_module_enable） */
+    s3_win_phy_power_on();
+
+    /* ② 告诉 PHY：USB PHY 要留着（否则 i2c_bbpll_set 会把 USB 关掉，见上面） */
+    phy_bbpll_en_usb(1u);
+
+    /* ③ 填 g_phyFuns：register_chipv7_phy() 一上来就 `l32i a5, g_phyFuns;
+     *    l32i a5, a5, 0x204; callx8 a5`，表是空的就直接跳 0 号地址。
+     *    主入口是 libphy 的 phy_get_romfunc_addr()；ROM 的 phy_get_romfuncs()
+     *    作为双保险再补一次（两者填的不是同一张表，都调不会有害）。 */
+    phy_get_romfunc_addr();
+    if (g_phyFuns == 0u) {
+        phy_get_romfuncs();
+    }
+    s3_ets_printf("[phy] g_phyFuns=0x%08x\n", (unsigned)g_phyFuns);
+
+    /* §292 实验：参照工程运行时 SYSCON_WIFI_RST_EN(0x60026018) = 0x3e08，
+     * 我们一直是 0。按参照值写一次，看 MAC 块（0x6001c000 段）会不会活过来。 */
+    s3_ets_printf("[phy] MAC 0x6001c08c=%08x OPTIONS0=%08x PWC=%08x ISO=%08x CLK=%08x RST=%08x\n",
+               (unsigned)*(volatile u32 *)0x6001c08cu,
+               (unsigned)*(volatile u32 *)0x60008000u,
+               (unsigned)*(volatile u32 *)0x60008090u,
+               (unsigned)*(volatile u32 *)0x60008094u,
+               (unsigned)*(volatile u32 *)0x60026014u,
+               (unsigned)*(volatile u32 *)0x60026018u);
+    s3_ets_printf("[phy] calling register_chipv7_phy(mode=%d)\n", (int)S3_PHY_CAL_MODE);
+    /* ④ 主入口（IDF 的 esp_phy_load_cal_and_init 里就直接是这一句；
+     *    register_chipv7_phy_init_param() 只在 esp32c2 的 ROM ld 里出现过，
+     *    IDF 的 S3 流程从不调它，我们也不调 —— 少一个"自己发明的调用"。 */
+    /* §514：IDF 在返回 ESP_CAL_DATA_CHECK_FAIL(1) 时会保存新校准数据并重试，
+     * 我们以前直接把 rc=1 带回去 —— 于是 hal_init()（在库回调之前跑）看到的
+     * 是**还没初始化好的 RF**，它的 0x60033d14 bit0 握手就永远不完成。
+     * 现在先重试两次，让 PHY 在 esp_wifi_init_internal 之前就真的 ready。 */
+    if (s_phy_calibrated != 0u) {
+        s3_ets_printf("[phy] phy_wakeup_init（已校准，跳过重复标定）\n");
+        phy_wakeup_init();
+        rc = 0;
+    } else {
+        rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+        s3_ets_printf("[phy] register_chipv7_phy rc=%d\n", rc);
+        if (rc == 1) {
+            rc = (int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+            s3_ets_printf("[phy] register_chipv7_phy retry rc=%d\n", rc);
+        }
+        if (rc == 0) {
+            s_phy_calibrated = 1u;
+        }
+    }
+
+    /* §700: IDF 的 esp_phy_enable() 在 register_chipv7_phy() 之后立刻调
+     * phy_track_pll() → phy_param_track_tot(wifi=true, ble=false)，做 RF PLL
+     * 校准。我们一直没调，怀疑是"MAC 有帧、RF 却发不出去"的根因。 */
+    {
+        extern void phy_param_track_tot(int en_wifi, int en_ble_154);
+        phy_param_track_tot(1, 0);
+    }
+
+    /* ⑥ 把 USB PHY 抢回来（即使 ② 生效也补一次，代价极小） */
+    s3_win_usb_reclaim();
+    return rc;
 }
 
 u32 s3_win_phy_cal_word(u32 i)
 {
     return ((const u32 *)(const void *)g_phy_cal.v)[i & 0x1FFu];
 }
+
+/* ---- §204 跨复位自动二分 -------------------------------------------------
+ *
+ * 现象：一进 PHY 初始化，整块板子从 USB 上彻底消失（lsusb 里连 303a 都没了），
+ * 只能人工断电。一次实验 = 一次盲刷 + 一次拔插电源，效率极低。
+ *
+ * 办法：把 PHY 前置动作切成 N 个**累积**子步骤，每轮复位只跑 prefix[0..k]，
+ * 跑完**故意不喂狗** → RWDT(8s) 复位整片 → 下一轮 k+1。RTC 慢存跨复位不清，
+ * 所以用两个 bitmask 记：
+ *   BISECT_HUNG：进了这一步、但活到复位都没把标记清掉（= 挂死在这一步），
+ *                并且这个 bit 同时当"以后跳过它"的标记（否则会永远卡同一处）；
+ *   BISECT_OK  ：这一步活着跑完了（返回了）。
+ * 最后一轮把两个 mask 打到串口，一次上电就得到完整故障图。
+ *
+ * 局限（写在这里免得以后误读）：如果某一步只是**把 USB 掐了**而 CPU 还活着，
+ * 它会被记成 OK —— 那种情况只能靠主机端串口日志辨认：
+ * 最后一条 `[bisect] step N enter` 后面没有 `ok`，就是它。
+ */
+#define BISECT_N     6u
+#define BISECT_CUR   0x50000A20u
+#define BISECT_HUNG  0x50000A24u
+#define BISECT_OK    0x50000A28u
+#define BISECT_DONE  0x50000A2Cu
+#define BISECT_MAGIC 0x600DD0E0u
+/* 上电后 RTC 慢存是**随机值**（只有掉电才清）。没有这个校验字，BISECT_CUR
+ * 可能一上来就是 0x7fffffff，于是第一轮直接打印"done"把整个二分跳过去。 */
+#define BISECT_INIT  0x50000A30u
+#define BISECT_INIT_MAGIC 0x600DD0E1u
+
+static u32 bisect_get(u32 addr) { return *(volatile u32 *)addr; }
+static void bisect_set(u32 addr, u32 v) { *(volatile u32 *)addr = v; }
+static void bisect_or(u32 addr, u32 bits) { *(volatile u32 *)addr = *(volatile u32 *)addr | bits; }
+static void bisect_andn(u32 addr, u32 bits) { *(volatile u32 *)addr = *(volatile u32 *)addr & ~bits; }
+
+/* 执行"第 k 个子步骤"本身（k>=1）。返回非 0 表示这一步自己报告失败。
+ * 顺序和 IDF esp_phy_enable() 一致：common clock → phy_module_enable
+ * → phy_bbpll_en_usb → (cal data) → register_chipv7_phy。 */
+static u32 bisect_run(u32 k)
+{
+    if (k == 1u) {
+        s3_win_phy_clock_enable();                       /* WIFI_CLK_EN */
+        return 0u;
+    }
+    if (k == 2u) {
+        s3_win_phy_power_on();                           /* PWC/ISO/RST pulse */
+        return 0u;
+    }
+    if (k == 3u) {
+        phy_bbpll_en_usb(1u);                            /* 别把 USB PHY 关掉 */
+        return 0u;
+    }
+    if (k == 4u) {
+        phy_get_romfunc_addr();                          /* 填 g_phyFuns */
+        return (g_phyFuns == 0u) ? 1u : 0u;
+    }
+    if (k == 5u) {
+        return (u32)(int)register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
+    }
+    return 0u;
+}
+
+/* 返回 1 = 二分已经全部完成（正常流程可以继续）；0 = 本轮试到某一步为止，
+ * 调用者应该停下来（不喂狗），让 RWDT 复位后继续下一轮。 */
+u32 s3_win_phy_bisect(void)
+{
+    u32 k;
+    u32 s = 1u;
+
+    if (bisect_get(BISECT_INIT) != BISECT_INIT_MAGIC) {
+        /* 刚上电（或上一次是人手动断电）：账本清零 */
+        bisect_set(BISECT_CUR, 0u);
+        bisect_set(BISECT_HUNG, 0u);
+        bisect_set(BISECT_OK, 0u);
+        bisect_set(BISECT_DONE, 0u);
+        bisect_set(BISECT_INIT, BISECT_INIT_MAGIC);
+    }
+    if (bisect_get(BISECT_DONE) == BISECT_MAGIC) {
+        return 1u;
+    }
+    k = bisect_get(BISECT_CUR);
+    if (k >= BISECT_N) {
+        s3_ets_printf("[bisect] done hung=0x%08x ok=0x%08x\n",
+                   (unsigned)bisect_get(BISECT_HUNG), (unsigned)bisect_get(BISECT_OK));
+        bisect_set(BISECT_DONE, BISECT_MAGIC);
+        return 1u;
+    }
+    s3_ets_printf("[bisect] round k=%u\n", (unsigned)k);
+    while (s <= k) {
+        if ((bisect_get(BISECT_HUNG) & (1u << s)) != 0u) {
+            s3_ets_printf("[bisect]   step %u SKIP(以前挂死过)\n", (unsigned)s);
+            s = s + 1u;
+            continue;
+        }
+        s3_w2c_wdt_feed();                         /* 每步都从满 8s 开始计时 */
+        bisect_or(BISECT_HUNG, 1u << s);       /* 先进"挂死候选"，跑完再清 */
+        s3_ets_printf("[bisect]   step %u enter\n", (unsigned)s);
+        {
+            u32 rc = bisect_run(s);
+
+            s3_ets_printf("[bisect]   step %u ok rc=%u\n", (unsigned)s, (unsigned)rc);
+        }
+        bisect_andn(BISECT_HUNG, 1u << s);
+        bisect_or(BISECT_OK, 1u << s);
+        s = s + 1u;
+    }
+    bisect_set(BISECT_CUR, k + 1u);
+    return 0u;
+}
 #else
 int s3_win_phy_enable(void)
 {
     return -1;      /* 没链 libphy */
+}
+
+u32 s3_win_phy_bisect(void)
+{
+    return 1u;      /* 没链 libphy：直接当二分完成 */
 }
 
 u32 s3_win_phy_step(u32 step)
@@ -539,21 +793,150 @@ u32 s3_win_wifi_main(void)
     u32 rc = 0;
 
     /* 报一下自己的任务 id：诊断输出里 taskN 的身份要靠这个对上号 */
-    ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
+    s3_ets_printf("[wifimain] id=%u tick=%u\n", (unsigned)s3_w2c_current_task(),
                (unsigned)s3_w2c_tick_get());
-    WSTAGE(0x1001u); os_wdt_feed();
+    /* §421 诊断：钉住库的 wifi init 状态机是从哪一步开始变成 2 的。 */
+    {
+        extern unsigned char g_wifi_osi_funcs_md5[];
+        extern int s3_ets_printf(const char *fmt, ...);
+        volatile u32 *wst = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+        s3_ets_printf("[wst] entry=%u\n", (unsigned)*wst);
+    }
+#ifdef S3_PHY_BISECT
+    /* §204：跨复位自动二分。没跑完就停在这儿**不喂狗**，让 RWDT(8s) 复位，
+     * 下一轮继续；跑完了（或没开这个开关）才走正常流程。 */
+    if (s3_win_phy_bisect() == 0u) {
+        for (;;) { }
+    }
+    s3_ets_printf("[wifimain] bisect passed, normal flow\n");
+#endif
+    WSTAGE(0x1001u); s3_w2c_wdt_feed();
     s3_win_log("W0 phy start\n");
-    WSTAGE(0x1002u); os_wdt_feed();
+    WSTAGE(0x1002u); s3_w2c_wdt_feed();
     (void)s3_win_phy_cal();
-    WSTAGE(0x1003u); os_wdt_feed();
+    { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+      s3_ets_printf("[wst] after phy_cal=%u\n", (unsigned)*w); }
+    WSTAGE(0x1003u); s3_w2c_wdt_feed();
+#ifndef S3_PHY_VIA_OSI
     (void)s3_win_phy_enable();
-    WSTAGE(0x1004u); os_wdt_feed();
+#else
+    s3_ets_printf("[phy] 跳过手动初始化：交给 OSI _phy_enable 回调\n");
+#endif
+    { extern unsigned char g_wifi_osi_funcs_md5[]; volatile u32 *w = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+      s3_ets_printf("[wst] after phy_enable=%u\n", (unsigned)*w); }
+    WSTAGE(0x1004u); s3_w2c_wdt_feed();
     s3_win_log("W1 bringup\n");
-    WSTAGE(0x1005u); os_wdt_feed();
+    WSTAGE(0x1005u); s3_w2c_wdt_feed();
     rc = s3_wifi_bringup();
-    WSTAGE(0x1006u); os_wdt_feed();
+    WSTAGE(0x1006u); s3_w2c_wdt_feed();
+    s3_ets_printf("[wifi] bringup rc=%u\n", (unsigned)rc);
     s3_win_log("W2 bringup returned\n");
+#ifdef S3_WITH_LWIP
+    /* §210/§215：bringup 成功就把 IP 栈接上（lwIP + DHCP + RX 回调），
+     * 然后关联 AP、等 DHCP 拿到地址，最后取 https://qq.com。
+     * 这一段是"关联之后"的路径，只有 -DS3_WITH_LWIP 的镜像才有。 */
+    if (rc == 0u) {
+        extern int  c6_lwip_start(const unsigned char *mac);
+        extern void c6_lwip_poll(void);
+        extern u32  s3_w2c_task_delay(u32 ticks);
+        static const unsigned char lwip_mac[6] = { 0xccu, 0x8du, 0xa2u, 0xecu, 0x99u, 0xc4u };
+        int irc = c6_lwip_start(lwip_mac);
+        u32 n = 0u;
+
+        s3_ets_printf("[lwip] start rc=%d\n", irc);
+        {
+            extern void s3_wifi_dump_osi(const char *tag);
+
+            s3_wifi_dump_osi("init 之后");
+        }
+        WSTAGE(0x1010u);
+        /* 关联 + 等 IP（阶段信标：0x1021 关联中、0x1022 关联成功、0x1023 拿到 IP） */
+        {
+            /* §279：闭源库的 `sta_is_wpa3_enabled()` 会解引用 `g_cnxMgr+0x1b4`
+             * （IDF 里由 wpa_supplicant 调 `esp_wifi_register_wpa_cb_internal()`
+             * 填的 WPA 回调表）。我们没有 supplicant → NULL → cause=0x1c。
+             * 这里注册一个全零表：`*(cb+0x48)==0` ⇒ 它返回"非 WPA3"，正是我们要的。
+             * **故意放在这个 TU（windowed 岛）里**：wifi_glue.c 的 .text/.bss
+             * 一点不动，避免 §271 那种"改几十字节就换分支"的坑。 */
+            extern int esp_wifi_register_wpa_cb_internal(void *cb);
+            /* 每个槽都填"返回 0"的窗口化桩（否则库里 callx8 到 NULL，§279），
+             * 只有 +0x48（word 18）留 0 —— 那一格是被当布尔量读的。 */
+            extern int s3_wpa_cb_stub(void);
+            static u32 s_wpa_cb_zero[24];
+            {
+                u32 k = 0u;
+
+                for (k = 0u; k < 24u; k++) { s_wpa_cb_zero[k] = (u32)(void *)s3_wpa_cb_stub; }
+                s_wpa_cb_zero[18] = 0u;
+            }
+            s3_ets_printf("[wifi] register_wpa_cb=%d\n",
+                       esp_wifi_register_wpa_cb_internal((void *)s_wpa_cb_zero));
+            extern u32 s3_wifi_associate(const char *ssid, const char *pass);
+            extern int s3_wifi_wait_connected(int ms);
+            extern int c6_lwip_wait_ip(int ms);
+            extern void c6_lwip_print_ip(void);
+            const char *ssid = (const char *)S3_WIFI_SSID;
+            const char *pass = (const char *)S3_WIFI_PASS;
+
+            extern void s3_wifi_dump_osi(const char *tag);
+            extern void s3_wifi_dump_events(const char *tag);
+
+            WSTAGE(0x1021u);
+            (void)s3_wifi_associate(ssid, pass);
+            s3_wifi_dump_osi("start+scan 之后");
+            s3_wifi_dump_events("start+scan 之后");
+            if (s3_wifi_wait_connected(15000) != 0) {
+                extern int c6_lwip_start_dhcp(void);
+
+                WSTAGE(0x1022u);
+                (void)c6_lwip_start_dhcp();
+                s3_wifi_dump_osi("关联成功");
+                s3_wifi_dump_events("关联成功");
+                if (c6_lwip_wait_ip(20000) != 0) {
+                    WSTAGE(0x1023u);
+                    c6_lwip_print_ip();
+                } else {
+                    s3_ets_printf("[lwip] DHCP 超时\n");
+                }
+            }
+        }
+        while (n < 2000u) {          /* 先跑一段，让 DHCP/DNS 有机会动起来 */
+            c6_lwip_poll();
+            s3_w2c_task_delay(1u);
+            n = n + 1u;
+        }
+        WSTAGE(0x1011u);
+        s3_ets_printf("[lwip] polled %u\n", (unsigned)n);
+#ifdef S3_WITH_HTTPS
+        {
+            extern int c6_https_demo(void);
+            int hrc = c6_https_demo();
+
+            s3_ets_printf("[https] demo rc=%d\n", hrc);
+            WSTAGE(0x1020u);
+        }
+#endif
+    }
+#endif
     return rc;
+}
+
+/* 最小 windowed 任务（§239）：只打印 + 让出 CPU，用来单独验证
+ * "新建 windowed 任务的第一次进入"这条路。 */
+__attribute__((section(".flash.text")))
+void s3_win_hello_task(void *arg)
+{
+    u32 n = 0u;
+
+    s3_ets_printf("[w%u] hello, windowed task (sp=%08x)\n",
+               (unsigned)(u32)arg, (unsigned)s3_w2c_sp_probe());
+    for (;;) {
+        s3_w2c_task_delay(20u);
+        n = n + 1u;
+        if ((n & 0x3u) == 0u) {
+            s3_ets_printf("[w%u] tick %u\n", (unsigned)(u32)arg, (unsigned)n);
+        }
+    }
 }
 
 void s3_win_wifi_main_task(void *arg)
@@ -596,21 +979,88 @@ u32 s3_win_stress(u32 depth, u32 rounds)
 __attribute__((section(".flash.text")))
 void s3_win_stress_task(void *arg)
 {
-    volatile u32 *d = (volatile u32 *)0x50001300u;
-    u32 n = 0u;
+    extern int s3_wifi_test_recv(u32 rounds);
+    volatile u32 *d = (volatile u32 *)0x50000A40u;
 
     (void)arg;
-    d[0] = 0xC0DE1234u;               /* 已进入 windowed 任务 */
-    /* 先做一次"库调 _queue_recv"路径的最小复现（d[3] 写结果） */
     {
-        extern int s3_wifi_test_recv(u32 rounds);
-
-        d[3] = (u32)s3_wifi_test_recv(1u);
-        d[4] = 0xC0DE5678u;           /* 走到这里说明那条路径没崩 */
+        /* §383：**必须显式打开祖先窗口 spill**。
+         * `g_s3_win_spill_en` 只在 `s3_wifi_osi_init()` 里被置 1，而这条
+         * 隔离测试用例根本不走那条路径 ⇒ 一直是 0 ⇒ W2C 壳里的 WIN_SPILL
+         * 被跳过 ⇒ "深递归帧还活着的窗口" 在被切走时**没有被存到栈上**，
+         * 切回来就再也找不回来了（阶段 3c 在 dep=1 就卡死，而 3a/3b 通过，
+         * 正是因为它们切换时窗口已经弹空/还没压深）。 */
+        extern u32 g_s3_win_spill_en;
+        g_s3_win_spill_en = 1u;
     }
+    d[0] = 0xC0DE1234u;              /* 已进入 windowed 任务 */
+    d[3] = (u32)s3_wifi_test_recv(1u);   /* 库→_queue_recv 最小复现 */
+    d[4] = 0xC0DE5678u;              /* 那条路径没崩 */
+
+    /* 阶段 1：只 delay（浅 windowed 链 + 真的切走再回来） */
+    {
+        u32 i;
+        for (i = 0u; i < 3u; i++) {
+            s3_w2c_task_delay(1u);
+            d[5] = d[5] + 1u;
+        }
+    }
+    d[8] = 0xAAAA0001u;
+
+    /* 阶段 2：只跑递归深链（不切换，纯窗口溢出/欠载） */
+    {
+        u32 v = s3_win_deep12_entry(8u);   /* 期望 74 */
+        u32 w = s3_win_deep(16u);          /* 期望 17 */
+
+        d[6] = v * 1000u + w;
+    }
+    d[8] = 0xAAAA0002u;
+
+    /* 阶段 3：递归深链 + 切换。逐级加深度，d[9] 记下最后一次尝试的深度，
+     * 卡住时读 d[9] 就知道多深的链 + 切换会坏。 */
+    {
+        u32 dep;
+
+        /* §382：把阶段 3 拆成三个隔离项，一次上板就能定位：
+         *   d[10] = 3a：深递归**之后**才 delay（递归已经返回、栈已弹空）
+         *   d[11] = 3b：delay **之后**再做深递归
+         *   d[12] = 3c：递归里 delay（原来的 s3_win_stress 形态）
+         * 每一步都写自己的槽，卡在哪一步一眼可见。 */
+        d[10] = 0u;
+        d[11] = 0u;
+        d[12] = 0u;
+        for (dep = 1u; dep < 6u; dep++) {
+            d[9] = dep;
+            d[10] = dep;
+            d[7] = d[7] + s3_win_deep12_entry(8u) + s3_win_deep(16u);
+            s3_w2c_task_delay(1u);           /* 3a：递归完再切 */
+            d[10] = 0x100u + dep;
+
+            d[11] = dep;
+            s3_w2c_task_delay(1u);           /* 3b：先切再递归 */
+            d[7] = d[7] + s3_win_deep12_entry(8u) + s3_win_deep(16u);
+            d[11] = 0x200u + dep;
+
+            d[12] = dep;
+            /* §394：先试**不递归、只切**（等同 s3_win_stress 的最内层），
+             * 用来区分"切换本身坏"与"深链 + 切换交互坏"。 */
+            d[13] = 0x500u + dep;
+            d[7] = d[7] + s3_win_deep12_entry(8u);
+            s3_w2c_task_delay(1u);
+            d[7] = d[7] + s3_win_deep(16u);
+            d[13] = 0x600u + dep;
+            /* 真正的交互形态 */
+            d[7] = d[7] + s3_win_stress(dep, dep);
+            d[12] = 0x300u + dep;
+
+            d[9] = 0x400u + dep;
+        }
+    }
+    d[8] = 0xAAAA0003u;
+
     for (;;) {
-        n = s3_win_stress(3u, n);
-        d[1] = n;                     /* 完成的轮数 */
+        d[1] = d[1] + 1u;
+        s3_w2c_task_delay(1u);
     }
 }
 

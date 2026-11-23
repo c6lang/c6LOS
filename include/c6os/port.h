@@ -20,6 +20,7 @@ void port_mark(u32 v);
 void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size);
 void port_task_ctx_free(void *ctx);
 void port_task_switch(void *ctx);
+void port_task_ctx_check(void *ctx);
 void port_enter_task(void);
 void port_leave_task(void);
 void port_task_yield(void);

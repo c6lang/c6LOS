@@ -58,18 +58,38 @@ _start:
     and     a3, a3, a4
     s32i    a3, a2, 0
 
-#ifndef __XTENSA_CALL0_ABI__
-    /* windowed ABI：windowstart 只标当前窗口有效；PS.WOE=1 让 call8/12 能正常
-     * 分配新窗口（否则每次调用都会走窗口溢出向量，功能上能跑但慢很多）。 */
-    movi    a3, 1
-    wsr     a3, windowstart
+    /* ★ PS.WOE=1 **无条件**设置（§238）。
+     *
+     * 原来只在 windowed 构建里设。但我们这套内核是 call0、却又会调 windowed 的
+     * 闭源库（PHY/WiFi/lwIP）—— WOE=0 时 `call8`/`entry`/`retw`/`rotw` 全都不能
+     * 正常轮转窗口（官方注释：WOE=0 时这些指令"becomes a silent noop"），
+     * windowed 代码的返回地址/帧指针全错，真板表现就是 TRAP 到地址 0、
+     * windowbase=13 / windowstart=0x2a80 这种乱值。
+     * call0 代码不受 WOE 影响（它不做窗口轮转），所以无条件置 1 是安全的。 */
     rsr     a2, ps
     movi    a3, 1
     slli    a3, a3, 18              /* PS.WOE */
     or      a2, a2, a3
     wsr     a2, ps
     rsync
-#endif
+
+    /* ★ §290：屏蔽 WiFi/BT 的 MAC 级中断源（源 1 = WIFI_MAC_NMI，源 4..7 = BT/RWBT）。
+     *
+     * 走 IDF 二级 bootloader 引导时（§289）这几个源是**挂起**状态
+     * （实测 INTR_STATUS_0(0x60010000) = 0x000000f2，正好 bit1/4/5/6/7），
+     * 矩阵里它们被使能成 level-6：一进任务就来中断，落进 _vec_lvl6 的闪灯死循环，
+     * 再被 ROM 里的代码二次异常打成 double exception（§290 现场：PS.INTLEVEL=6、
+     * EXCM=1、EPC1 在 ROM、RTC 0x50000124 标记 0x0F = double exception 向量）。
+     * 我们还没有任何 WiFi/BT 中断服务程序，先全局屏蔽；将来闭源库要用时
+     * 它会自己把这些源重新打开。 */
+    /* §515：JTAG 实测 INTR_STATUS_0=0xf2（源 1/4..7 一直挂起），
+     * 但 intenable=0x40 —— ROM 只开了定时器。§510 的"不屏蔽"只是保留原状，
+     * 没有真正打开 WiFi MAC(NMI, 源 1)。显式 OR 进 bit1，让 MAC 中断能进向量表。 */
+    rsr     a2, intenable
+    movi    a3, 2
+    or      a2, a2, a3
+    wsr     a2, intenable
+    rsync
 
     /* ★ 无条件做一遍窗口状态归一（call0 构建也要做！§202）。
      *
@@ -92,6 +112,65 @@ _start:
     and     a2, a2, a3
     wsr     a2, ps
     rsync
+
+    /* §472：清掉 `s3_trap` 的"只写一次"魔数（`port/s3/irq.c` 写
+     * `0x50000140 + 44` = `t[11]`）。RTC 内存复位后不清零，不清的话
+     * 上一次启动留下的魔数会一直挡着新记录，读到的还是旧现场。 */
+    movi    a2, 0x50000140
+    movi    a3, 0
+    s32i    a3, a2, 44
+
+    /* ★ 窗口"预热"：把 4 个窗口的 a1 都变成**合法栈指针**（§236）。
+     *
+     * 为什么必须做：Xtensa 只有 4 个窗口，寄存器文件里可能残留 ROM/bootloader
+     * 阶段的窗口内容（真板实测有窗口的 a1 = 0x40043ca4，一个 ROM 地址）。
+     * 我们的 w2c 壳用 `rotw` 转一整圈来强制 spill 全部窗口（和
+     * xthal_window_spill 一样），转到一个 a1 是垃圾的窗口时，硬件溢出向量就会
+     * 按那个垃圾地址写 → LoadStoreError（真板实测 cause=3, excvaddr=0x40043ca4）。
+     *
+     * 办法：在进 C 代码之前先用 4 层嵌套 call8 把每个窗口都"占"一遍
+     * （每层 entry 都会给该窗口一个真实帧），于是所有窗口的 a1 都是本栈上的
+     * 合法地址；之后不管谁用 rotw spill，写到的都是我们的栈，不会炸。 */
+    rsr     a2, ps
+    movi    a3, -32                /* 清 INTLEVEL + EXCM */
+    and     a2, a2, a3
+    movi    a3, 1
+    slli    a3, a3, 18             /* PS.WOE=1：让 rotw 真正轮转 */
+    or      a2, a2, a3
+    wsr     a2, ps
+    rsync
+#ifdef __XTENSA_CALL0_ABI__
+    /* §873: 4 层 call8 预热只服务于 call0 内核里 w2c 壳的 rotw spill；
+     * 全 windowed 构建没有 w2c 壳，这段 call8 反而让 WB 转到 0xf、WS=0xa800，
+     * 紧接着 port_init 里 retw.n cause=0。故仅在 call0 构建保留。 */
+    l32r    a1, .Lsp
+    call8   .Lprime1
+    j       .Lprime_done
+.align 4
+.align 4
+.Lprime1:
+    entry   a1, 32
+    call8   .Lprime2
+    retw
+.align 4
+.align 4
+.Lprime2:
+    entry   a1, 32
+    call8   .Lprime3
+    retw
+.align 4
+.align 4
+.Lprime3:
+    entry   a1, 32
+    call8   .Lprime4
+    retw
+.align 4
+.align 4
+.Lprime4:
+    entry   a1, 32
+    retw
+.Lprime_done:
+#endif /* __XTENSA_CALL0_ABI__ */
 
     /* 自己的向量表（必须在 IRAM，1KB 对齐） */
     movi    a2, _vecbase
@@ -169,6 +248,18 @@ _start:
     l32r    a2, .Lmarks
     l32r    a3, .Lm1
     s32i    a3, a2, 0            /* DRAM 标记 [0] = 0xA1：清 bss 完成（可靠） */
+    /* §340：清掉 RTC 里的诊断环（0x50000200..0x500007FF）。RTC 慢速内存在
+     * 复位后**不会丢**，不清的话上一轮留下的记录会和这一轮混在一起 —— 已经
+     * 踩过一次（把上一轮的 switch 记录当成这一轮的，误判成"RESTORE_FRAME
+     * 没跑"）。0x50000000..0x500000FF 留给 start.S/console.c 的开机标记。 */
+    movi    a2, 0x50000200
+    movi    a3, 0x50000800
+    movi    a4, 0
+.Lrtcclr1:
+    s32i    a4, a2, 0
+    addi    a2, a2, 4
+    bltu    a2, a3, .Lrtcclr1
+
 #ifdef __XTENSA_CALL0_ABI__
     call0   port_init
     call0   os_main
@@ -176,7 +267,22 @@ _start:
     /* windowed ABI：C 函数入口是 `entry sp,N`、出口是 `retw`，必须用 call8 进去
      * （窗口 base += 8），否则它 retw 时会退回到错误的窗口直接跑飞。
      * 之前就是这里用 call0 调 port_init：banner 打完一返回就炸。 */
+    /* ★ §967：`call8` 之前**必须自己把 a9 设成 sp**。
+     *
+     * Xtensa 的 call8 只是把 a0 写成带 CALLINC 的返回地址、并把 WINDOWSTART
+     * 推进一格；被调者拿到的 a1 来自**调用者的 a9**（`entry` 才会把
+     * a9 = a1 设好）。`_start` 是裸 call0 汇编、没有 entry，所以到这里
+     * a9 还是 ROM 留下来的垃圾。
+     *
+     * 后果不是"进去就崩"，而是更阴的：`_start` 那个窗口的 a9 是垃圾，
+     * 后面任何一次窗口溢出（`_WindowOverflow8`）都会拿**调用者的 a9** 当
+     * spill 基址往 `[a9-16]`/`[a9-32]` 写 —— 写到 0x90119ac0 这种地址就是
+     * StoreProhibited（cause=0x1d）。真板取证见 §965/§966：a1 正好等于
+     * `_stack_top`，说明出事的正是最外层这一发。
+     * `s3_task_tramp` 早就按 §890 这么修过了，启动这份漏了。 */
+    mov     a9, a1
     call8   port_init
+    mov     a9, a1
     call8   os_main
 #endif
 3:

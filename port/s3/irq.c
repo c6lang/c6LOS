@@ -141,6 +141,60 @@ void s3_trap(u32 frame_sp)
     __asm__ __volatile__("rsr %0, ps" : "=r"(ps));
     (void)f;
     s3_mark(7u, 0xDEAD0000u | (cause & 0xFFFFu));
+    /* §308：**打印之前**先把第一次异常的现场落进 RTC 0x50000140。
+     * 因为我们的打印路径（port_puts / trap_hex）自己在 EXCM=1 的上下文里
+     * 也可能触发窗口异常，导致"看到的 pc=0x40048c6e"其实是打印过程里
+     * 二次异常的现场（§306 实测 PS=0x00060f10，INTLEVEL=15、EXCM=1）。 */
+    {
+        volatile u32 *t = (volatile u32 *)0x50000140u;
+        u32 va = 0;
+        __asm__ __volatile__("rsr %0, excvaddr" : "=r"(va));
+        /* §472 ★★ 只写一次 —— 否则记下的仍然是二次异常的现场。
+         *
+         * 上面 §308 描述的现象，这轮把机制确认了：
+         * 崩在 `0x40048c6e`，那条指令是 **`retw.n`**，而当时
+         * `ps = 0x00060010` ⇒ **EXCM=1**。`retw` 在 EXCM=1 时是非法指令
+         * （EXCCAUSE 0），于是打印路径（`port_puts`/`trap_hex` 都走
+         * windowed 函数、结尾 `retw`）自己再炸一次，把这里刚写好的
+         * **第一次**现场覆盖成二次异常的现场 —— 等于白记。
+         *
+         * 加 `t[11]` 魔数做闸门：只有第一次进来才写。
+         * 对应地 `port/s3/start.S` 在启动时清掉这个魔数
+         * （RTC 内存复位后不清零，不清就会一直挡着新记录）。 */
+        if (t[11] != 0x54524150u) {             /* "TRAP" */
+            t[0] = cause;
+            t[1] = va;
+            t[2] = pc;
+            t[3] = ps;
+            t[4] = frame_sp;
+            t[5] = f[0];
+            t[6] = f[1];
+            t[7] = f[15];
+            t[8] = f[16];
+            t[9] = f[17];
+            t[10] = f[18];
+            /* §485：把**故障点的通用寄存器**也记下来。
+             * 帧布局（irq.S `12:` 段）：0=a0 4=a2 8=a3 12=a4 16=a5 20=a6
+             * 24=a7 28=a8 32=a9 36=a10 40=a11 44=a12 48=a13 52=a14 56=a15。
+             * §484 的现场是 `0x42057083 l32i a6,a6,0x154` 且 EXCVADDR=0x154，
+             * 唯一可疑的是 a3（= &g_phyFuns）到底有没有被换掉 —— 只有把 a3/a6
+             * 都记下来才能分清"a3 被窗口机制搞丢"还是"g_phyFuns 真是 0"。 */
+            t[12] = f[2];       /* a3 */
+            t[13] = f[5];       /* a6 */
+            t[14] = f[4];       /* a5 */
+            t[15] = f[9];       /* a10 */
+            t[11] = 0x54524150u;
+            /* §486：再把**整份 16 个通用寄存器**落到 0x500001A0（0x40 字节）。
+             * 只看 a0/a3/a6/a10 几个已经不够了 —— 要判"到底哪个寄存器成了
+             * 跳转目标"必须全看。这段区域没人用（start.S 只清 0x50000200 起）。 */
+            {
+                volatile u32 *r = (volatile u32 *)0x500001A0u;
+                u32 i = 0;
+
+                while (i < 16u) { r[i] = f[i]; i++; }
+            }
+        }
+    }
 
     port_puts("*** TRAP sp=");
     trap_hex(frame_sp);
@@ -155,8 +209,12 @@ void s3_trap(u32 frame_sp)
         __asm__ __volatile__("rsr %0, excvaddr" : "=r"(va));
         port_puts(" vaddr=");
         trap_hex(va);
-        port_puts(" ws=");
-        trap_hex((ps >> 16) & 0xFu);
+        /* 注意：这里原来是 " ws="，但 (ps>>16)&0xF 打的是 **PS.CALLINC**，
+         * 不是 WINDOWSTART（而且 rsr ps 拿到的是异常处理器的 PS，EXCM=1、
+         * CALLINC 恒为 0），之前把这个 0 当成"WINDOWSTART 被清零"误判过。
+         * 真正要看窗口状态请用 JTAG 读 WINDOWSTART。 */
+        port_puts(" callinc=");
+        trap_hex((ps >> 16) & 0x3u);
         port_puts(" a0=");
         trap_hex(((u32 *)frame_sp)[0]);
     }
@@ -216,34 +274,84 @@ static void s3_isr_mark(u32 i)
     }
 }
 
+extern void os_wdt_start(u32 secs);
+extern void os_wdt_feed(void);
+
+extern volatile u32 g_s3_diag[12];   /* §699: 定义在 wifi_glue.c */
+
+/* §705: WiFi level-1 中断在 ISR 里只置这个标志；真正的窗口化库 ISR 由
+ * 任务上下文（s3_wifi_scan 轮询循环）调用，避免在任意 WINDOWBASE 上 call8。 */
+volatile u32 g_wifi_isr_pending = 0u;
 void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
+    g_s3_diag[9]++;   /* §699: 定时器 ISR 实际进入次数 */
 
-    /* 记下被打断的主流程 PC（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
-     * 就知道主流程停在哪条指令上。 */
+    /* §370：**自愈看门狗**。板子一旦"CPU 死转 + USB 从总线上消失"，就只能
+     * 人工断电重插（这轮就吃了一次）。这里在定时器中断里挂上 RTC 看门狗：
+     * 中断还在跑就每 10ms 喂一次；一旦真的卡死（中断停了/死循环），8 秒后
+     * 整片复位，串口重新枚举 —— 而 RTC 慢存不清，死之前的信标还能读出来。 */
+#ifdef S3_AUTO_WDT
+    {
+        static u32 wdt_armed;
+        if (wdt_armed == 0u) { wdt_armed = 1u; os_wdt_start(8u); }
+        os_wdt_feed();
+    }
+#endif
+
+    /* §633: 记录 Xtensa INTERRUPT SR —— 哪个 CPU 中断在挂起（WiFi=bit?）*/
+    {
+        u32 ipend = 0;
+        volatile u32 *pd = (volatile u32 *)0x50000A00u;
+        __asm__ __volatile__("rsr %0, interrupt" : "=r"(ipend));
+        pd[0] = ipend;
+        pd[1] = pd[1] + 1u;
+        /* §642: 把 WiFi MAC/PWR 的 level-1 中断分派给库注册的 ISR。
+         * 库用 src=0/2 → intr=0，ints_on(mask=1)，所以看 bit0。
+         * 只在 MAC 事件位有效时调，避免定时器中断误入。 */
+        if (ipend & 1u) {
+            u32 ie = 0;
+            g_s3_diag[10]++;   /* §699: WiFi 中断挂起次数 */
+            /* §705: 不能在 call0 的 ISR 里直接 call8 进 windowed 库 ISR ——
+             * 中断可能在任意 WINDOWBASE 上打断，call8 旋转窗口后 retw 与
+             * 调用者的 CALLINC 不配套，真板实测 a0 被写成垃圾、掉进
+             * _vec_default。只在这里置位，由任务上下文（s3_wifi_scan 轮询
+             * 循环）调用 s3_wifi_isr_dispatch()。
+             * §708: 但 MAC 中断是电平触发的 —— 不 ack 就会在 rte 之后立刻
+             * 再次进入，真板实测 ~42M 次 ISR、任务永远拿不到 CPU（epc1 卡在
+             * port_idle）。这里先屏蔽 intenable 的 WiFi 位止住风暴；等任务
+             * 上下文跑完 wDev_ProcessFiq（它会清 MAC/PWR 事件寄存器）后再
+             * 由 s3_wifi_scan 重新使能。 */
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
+            ie &= ~1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
+            g_wifi_isr_pending = 1u;
+            pd[2] = pd[2] + 1u;
+        }
+    }
+    /* 记下被打断的主流程 ccount（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
+     * 就知道主流程停在哪条指令上。§715: PC 采样块已删（腾 IRAM 给 PWR 诊断）。 */
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
     g_isr_cc = cc;
-    {
-        /* 诊断：把被打断的主流程 PC 采样进 RTC 0x50000780（每 256 次刷新一次）。
-         * 卡死时读它就知道主流程停在哪条指令上。 */
-        static u32 pc_n;
-        static u32 pc_last;
-        u32 ipc = 0;
-        volatile u32 *pd = (volatile u32 *)0x50000780u;
-
-        __asm__ __volatile__("rsr %0, epc1" : "=r"(ipc));
-        pc_n = pc_n + 1u;
-        if (ipc != pc_last) {
-            pc_last = ipc;
-            pd[0] = ipc;
-            pd[1] = pd[1] + 1u;      /* PC 变化次数 */
-        }
-        if ((pc_n & 0xFFu) == 0u) { pd[2] = pc_n; }
-    }
+    /* §708: 删掉旧的"WINDOWBASE 首违例记录"块（§344）——它早已完成使命，
+     * 这里腾出的 IRAM 给中断屏蔽/恢复用。 */
     jitter_sample(cc);
     s3_timer_rearm();
     s3_wdt_kick();
+#ifdef S3_TICK_DEFER
+    /* §964：tick 只在这里计数 —— 纯内存 +1，**不做任何窗口轮转**。
+     * 真正的 os_sched_tick() 交给调度主循环在任务上下文里调
+     * （port_virtual_tick()，见 console.c）。
+     * 原因（真板取证）：ISR 里 s3_timer_irq→s3_win_tramp→os_sched_tick
+     * 是这条链上的第 3~4 次窗口旋转，到 os_sched_tick 的
+     * `entry a1, 144` 时真板抛 cause=0 IllegalInstruction，
+     * EPC1 正好等于 os_sched_tick 入口，PS=0x00060031（EXCM=1、WOE=0）。 */
+    {
+        volatile u32 *tp = (volatile u32 *)0x50001580u;
+
+        *tp = *tp + 1u;
+    }
+#endif
     {
         static u32 isr_n;
         volatile u32 *ic = (volatile u32 *)0x50000700u;
@@ -254,6 +362,7 @@ void *s3_timer_irq(u32 frame_sp)
             ic[1] = ic[1] + 1u;
         }
     }
+#ifndef S3_MINIMAL_ISR
     if (port_cur_ctx() != 0) {
         s3_isr_mark(1u);
         port_irq_fill(frame_sp);
@@ -261,6 +370,9 @@ void *s3_timer_irq(u32 frame_sp)
     } else {
         s3_isr_mark(3u);
     }
+#else
+    (void)frame_sp;
+#endif
     port_isr_enter();
     s3_isr_mark(4u);
     {
@@ -271,12 +383,44 @@ void *s3_timer_irq(u32 frame_sp)
         st_n = st_n + 1u;
         if ((st_n & 0xFFu) == 0u) { ic[0] = st_n; }
     }
+#ifndef S3_TICK_DEFER
+#ifdef S3_ONE_ABI
+    /* §891 全 windowed ABI：本 ISR 在 IRAM(0x40379xxx)，os_sched_tick 在
+     * flash(0x420189a4)，GCC 的 -mlongcalls 生成 `l32r a8; callx8 a8`。
+     * 真板证据：epc1=os_sched_tick 入口，a1=0，excvaddr=0 —— 进 os_sched_tick
+     * 时窗口没有轮转（callx8 只置 CALLINC、不推进 WINDOWSTART），
+     * 于是 `entry a1,144` 拿到错的 a1。
+     * 和任务入口一样，改用近处(0x40379858，call8 范围内)的 s3_win_tramp：
+     * 它先由硬件 call8 轮转好窗口，再 callx8 远端真正入口。 */
+    __asm__ __volatile__(
+        "mov    a12, %0\n\t"
+        "call8  s3_win_tramp\n\t"
+        :
+        : "r"(os_sched_tick)
+        : "a12", "a0", "memory");
+#else
     os_sched_tick();
+#endif
+#endif /* S3_TICK_DEFER */
     s3_isr_mark(5u);
     if (g_hook != 0) {
         g_hook();
     }
     port_isr_exit();
+#ifdef S3_NO_PREEMPT
+    /* 关掉"定时器抢占切换"（§235）。
+     *
+     * 原因：Xtensa 只有 4 个窗口，windowed 调用链在深度 ≤3 时祖先窗口还活在
+     * 寄存器文件里；在中断里直接切走 = 让另一个任务去轮转窗口文件 ⇒ 回来时
+     * 祖先窗口已被覆盖，`retw` 用错 a0（真板上表现为 cause=0/29、a0 垃圾、
+     * a1 变成 0x3fcb95f2 这种值）。
+     *
+     * 关掉抢占后，所有切换都只发生在**显式阻塞点**（sem/queue pend、delay），
+     * 而那些调用都经过 port/s3/w2c.S 的壳 —— 壳在进内核前会把祖先窗口
+     * spill 到任务自己的栈上（WIN_SPILL），所以寄存器文件在切换那一刻是干净的。
+     * 代价：任务是协作式的（不会时间片轮转），我们的任务都会阻塞，够用。 */
+    return 0;
+#else
     {
         void *cur = port_cur_ctx();
         void *next = 0;
@@ -293,4 +437,5 @@ void *s3_timer_irq(u32 frame_sp)
         port_set_cur_ctx(next);
         return next;
     }
+#endif
 }

@@ -29,7 +29,9 @@ u32 s3_reg(u32 addr)
     return *(volatile u32 *)addr;
 }
 
-u32 s3_mark_get(u32 idx)
+void s3_mark2(u32 idx, u32 v) { s3_mark(idx, v); }
+
+ u32 s3_mark_get(u32 idx)
 {
     return *(volatile u32 *)(0x50000000u + idx * 4u);
 }
@@ -201,7 +203,7 @@ void s3_wdt_kick(void)
     *(volatile u32 *)(S3_TIMG0_BASE + 0x64u) = 0u;
 }
 
-extern int ets_printf(const char *fmt, ...);
+extern int s3_ets_printf_call0(const char *fmt, ...);
 
 /* 诊断快照：在空闲循环里周期性地把关键计数/记录一次性打到串口。
  * 这样得到的是**同一次启动**的完整快照 —— esptool read-mem 每次都会复位，
@@ -219,6 +221,12 @@ __attribute__((section(".flash.text"))) void port_switch_trace(u32 tag, u32 id, 
     t[k_ * 4u + 1u] = id;
     t[k_ * 4u + 2u] = ctx;
     t[k_ * 4u + 3u] = n_;
+#ifdef S3_ONE_ABI
+    /* §892: 全 windowed ABI 下本函数若连续 callx8 到 port_putc 30 次，
+     * callx8 不轮转窗口、port_putc 的 entry 反复压同一帧 → 只打印出第一个
+     * 'S' 就崩。改成**只写 RTC 环形区、完全不打印**（RTC 可由 JTAG 读）。 */
+    (void)tag; (void)id; (void)ctx;
+#endif
 }
 
 __attribute__((section(".flash.text"))) void port_snapshot(void)
@@ -257,13 +265,13 @@ __attribute__((section(".flash.text"))) void port_diag_dump(void)
     volatile u32 *b  = (volatile u32 *)0x50000C00u;
     volatile u32 *st = (volatile u32 *)0x50000A00u;
 
-    ets_printf("D1 starts=%u switch=%u yield=%u ylctx=%08x ylsp=%08x ylcaller=%08x\n",
+    s3_ets_printf_call0("D1 starts=%u switch=%u yield=%u ylctx=%08x ylsp=%08x ylcaller=%08x\n",
                (unsigned)st[0], (unsigned)*(volatile u32 *)0x50001000u,
                (unsigned)y[7], (unsigned)y[4], (unsigned)y[5], (unsigned)y[8]);
-    ets_printf("D2 blk0=%08x/%u/%08x blk1=%08x/%u/%08x\n",
+    s3_ets_printf_call0("D2 blk0=%08x/%u/%08x blk1=%08x/%u/%08x\n",
                (unsigned)b[0], (unsigned)b[1], (unsigned)b[2],
                (unsigned)b[4], (unsigned)b[5], (unsigned)b[6]);
-    ets_printf("D3 blk2=%08x/%u/%08x blk3=%08x/%u/%08x\n",
+    s3_ets_printf_call0("D3 blk2=%08x/%u/%08x blk3=%08x/%u/%08x\n",
                (unsigned)b[8], (unsigned)b[9], (unsigned)b[10],
                (unsigned)b[12], (unsigned)b[13], (unsigned)b[14]);
 }
@@ -292,7 +300,24 @@ u32 s3_prid_raw(void)
 /* ctx.S 里直接拿它做比较：切换路径上不能调用 C 函数——本工具的 C 是 windowed
  * ABI，`callx0` 进 C 函数不会转窗口，会把 a12-a15 冲掉（曾导致切换时 a4 变成
  * 脏指针、L32I 触发 LoadStoreAlignment）。 */
-u32 g_prid_base[C6OS_MAX_CORES] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+/* §442：**初值必须是这颗芯片真实的 PRID，不能是 0xFFFFFFFF**。
+ *
+ * `port/s3/ctx.S` 里 `port_task_switch` / `port_task_yield` 判断核心号的
+ * 汇编是：
+ *
+ *     rsr  a5, prid ; l32r a3, .Lprid_base ; l32i a6, a3, 0
+ *     movi a11, 0   ; beq  a5, a6, 2f      ; movi a11, 1
+ *
+ * —— **只比较 [0]，不相等就直接用索引 1**，没有 C 版 `port_core_id()`
+ * 那个"还没登记就返回 0"的兜底。
+ *
+ * 而 ESP32-S3 的 `prid` 是脏值（实测 **0x0000cdcd**）。于是初值 0xFFFFFFFF
+ * 永远不相等 ⇒ 所有 yield/switch 都去操作 `g_s3_cur[1]`，那里是 0 ⇒
+ * `beqz a4, 1f` 直接跳过保存 ⇒ **任务帧一次都存不下来**，
+ * `ctx[0].sp` 永远停在 `port_task_ctx_create` 造的那个 tramp 帧上。
+ *
+ * 用实测值做初值，单核场景下比较必然相等 ⇒ 索引 0 ⇒ 正确。 */
+u32 g_prid_base[C6OS_MAX_CORES] = {0x0000CDCDu, 0xFFFFFFFFu};
 
 void port_core_bind_self(void)
 {
@@ -337,7 +362,9 @@ void port_init(void)
 
     /* 如果镜像里有 flash 段（IROM），在这里把 MMU 映射建好、打开 I-cache ——
      * 没有二级 bootloader 时 ROM 不会做这件事，不建映射 flash 里的代码就取指失败。 */
+#ifndef S3_SKIP_FLASH_INIT
     os_flash_init();
+#endif
 
     /* 先确认 TIMG0 时钟，再关看门狗；否则启动约 300ms 就会被 TG0WDT 复位。 */
     S3_SYS_CLK_EN0 |= (1u << 13);
@@ -431,10 +458,26 @@ void port_qemu_exit(void)
 {
     port_panic_halt();
 }
+/* §964：延时 tick 的待处理计数。定时器 ISR 每次 +1（纯内存操作），
+ * 调度主循环在这里消费，然后**在任务上下文里**调 os_sched_tick()。
+ *
+ * 为什么不在 ISR 里直接调：真板实测 ISR 里
+ * s3_timer_irq → s3_win_tramp → os_sched_tick 是第 3~4 次窗口旋转，
+ * 到 os_sched_tick 的 `entry a1,144` 就抛 cause=0 IllegalInstruction
+ * （EPC1 = 入口，PS=0x00060031：EXCM=1、WOE=0）。放到任务上下文里，
+ * 窗口深度归零，这条链就没有问题了。
+ *
+ * 用 RTC 慢速内存而不是 .bss：当前布局下 _stack_limit 只比 _stack_top
+ * 低 10 字节，一个 u32 都塞不进去。0x50001580 这段没别的用处。 */
+#define S3_TICK_PEND (*(volatile u32 *)0x50001580u)
 
 u32 port_virtual_tick(void)
 {
-    return 0u;
+    if (S3_TICK_PEND == 0u) {
+        return 0u;
+    }
+    S3_TICK_PEND = S3_TICK_PEND - 1u;
+    return 1u;
 }
 
 /* ---- 诊断输出：纯 call0，不经过 windowed 岛 ------------------------------

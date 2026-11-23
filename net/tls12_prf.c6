@@ -1,0 +1,109 @@
+/* tls12_prf：TLS 1.2 的伪随机函数 PRF（RFC 5246 §5，基于 P_SHA256）
+ *
+ * 为什么需要（docs/wifi-plan.md §211）：qq.com 只谈 TLS 1.2，而 c6 标准库里的
+ * `std/net/tlskdf.c6` 是 **TLS 1.3** 的密钥调度（HKDF 那一套），两者完全不同：
+ *
+ *     master_secret = PRF(pre_master_secret, "master secret",
+ *                         client_random + server_random)[0..47]
+ *     key_block     = PRF(master_secret, "key expansion",
+ *                         server_random + client_random)
+ *     verify_data   = PRF(master_secret, "client finished"/"server finished",
+ *                         handshake_messages)[0..11]
+ *
+ *     PRF(secret, label, seed) = P_SHA256(secret, label + seed)
+ *     P_SHA256: A(0) = seed; A(i) = HMAC(secret, A(i-1));
+ *               out   = HMAC(secret, A(1)+seed) + HMAC(secret, A(2)+seed) + ...
+ *
+ * 用法：
+ *
+ *     u8 ms[48] = { 0 };
+ *     tls12_prf_secret(pms, 32, "master secret", cr, 32, sr, 32, ms, 48);
+ *
+ *     或者自己拼 label+seed，用底层的 tls12_prf()。
+ */
+#include <string.h>
+
+module net.tls12_prf;
+import std.core.types;
+import std.encoding.sha256;
+
+#define TLS12_PRF_MAX_SEED 512
+
+/* P_SHA256(secret, seed) -> out[outlen] */
+int tls12_prf(const void *secret, int slen, const void *seed, int seedlen,
+              void *out, int outlen)
+{
+    const u8 *s = (const u8 *)secret;
+    const u8 *sd = (const u8 *)seed;
+    u8 *o = (u8 *)out;
+    u8 a[32] = { 0 };               /* A(i) */
+    u8 blk[32 + TLS12_PRF_MAX_SEED] = { 0 };
+    u8 one[32] = { 0 };             /* HMAC 输出总是 32 字节，最后一块只拷 n 个 */
+    int off = 0;
+
+    if (slen < 0 || seedlen < 0 || seedlen > TLS12_PRF_MAX_SEED || outlen < 0) {
+        return 0;
+    }
+    if (seedlen > 0 && sd == 0) {
+        return 0;
+    }
+    /* A(1) = HMAC(secret, seed) */
+    hmac_sha256(s, (usize)slen, sd, (usize)seedlen, a);
+    while (off < outlen) {
+        int n = outlen - off;
+
+        if (n > 32) {
+            n = 32;
+        }
+        /* blk = A(i) || seed，然后 HMAC(secret, blk) */
+        memcpy(blk, a, 32);
+        if (seedlen > 0) {
+            memcpy(blk + 32, sd, (usize)seedlen);
+        }
+        /* **不能**直接写 o+off：HMAC 总是吐 32 字节，而最后一块可能只要几个字节，
+         * 直接写会越过调用方的缓冲区（本轮实测踩到：把调用方栈上的其它局部量写坏了）。 */
+        hmac_sha256(s, (usize)slen, blk, (usize)(32 + seedlen), one);
+        memcpy(o + off, one, (usize)n);
+        off = off + n;
+        /* A(i+1) = HMAC(secret, A(i)) */
+        hmac_sha256(s, (usize)slen, a, 32, a);
+    }
+    return 1;
+}
+
+/* PRF(secret, label, seed)：把 label 和 seed 拼起来算 —— label 是 ASCII 常量 */
+int tls12_prf_label(const void *secret, int slen, const char *label,
+                    const void *seed, int seedlen, void *out, int outlen)
+{
+    u8 buf[TLS12_PRF_MAX_SEED + 64] = { 0 };
+    int ll = (int)strlen(label);
+
+    if (ll < 0 || ll + seedlen > TLS12_PRF_MAX_SEED) {
+        return 0;
+    }
+    if (ll > 0) {
+        memcpy(buf, label, (usize)ll);
+    }
+    if (seedlen > 0) {
+        if (seed == 0) {
+            return 0;
+        }
+        memcpy(buf + ll, seed, (usize)seedlen);
+    }
+    return tls12_prf(secret, slen, buf, ll + seedlen, out, outlen);
+}
+
+/* 便捷：master secret = PRF(pms, "master secret", client_random + server_random)[0..47] */
+int tls12_prf_secret(const void *pms, int pmslen, const char *label,
+                     const void *cr, int crlen, const void *sr, int srlen,
+                     void *out, int outlen)
+{
+    u8 seed[128] = { 0 };
+
+    if (crlen + srlen > (int)sizeof(seed)) {
+        return 0;
+    }
+    memcpy(seed, cr, (usize)crlen);
+    memcpy(seed + crlen, sr, (usize)srlen);
+    return tls12_prf_label(pms, pmslen, label, seed, crlen + srlen, out, outlen);
+}

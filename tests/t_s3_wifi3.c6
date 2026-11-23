@@ -21,6 +21,9 @@ extern void s3_win_wifi_main_task(void *arg);
 extern u32 s3_win_call_flash42(void);
 extern u32 g_next_task_windowed;
 extern void os_icache_enable(void);
+extern unsigned int s3_win_call_phy_enable(void);
+extern unsigned int s3_win_call_wifi_main(void);
+
 extern void port_diag_task(void *arg);
 extern u32 os_flash_mmu_entry(u32 vaddr);
 extern int os_flash_map(u32 flash_off, u32 vaddr, u32 bytes, u32 kind);
@@ -33,6 +36,19 @@ extern const u8 _flash_rodata_start[];
 extern const u8 _flash_rodata_lma[];
 
 static void pstr(const char *s) { while (*s != '\0') { port_putc(*s); s++; } }
+
+/* call0 任务入口：整条 WiFi 主流程经跳板进 windowed（§241） */
+static void wifi_call0_task(void *arg)
+{
+    (void)arg;
+    pstr("T1 call0 任务进入 windowed 主流程\n");
+    (void)s3_win_call_wifi_main();
+    pstr("T2 windowed 主流程返回\n");
+    for (;;) {
+        os_task_delay(100u);
+    }
+}
+
 
 static void phex(u32 v)
 {
@@ -76,29 +92,89 @@ static void flash_diag(void)
     pstr(" mmu(rodata)="); phex(os_flash_mmu_entry(rva)); pstr("\n");
     os_icache_enable();
     os_dcache_enable();
+#ifdef S3_ONE_ABI
+    /* §881: flash42 探针只是诊断，不是 WiFi 功能所需。全 windowed 下它挂在
+     * callx8 进 flash 取指（I-cache/MMU 尚未完全就绪）；跳过它以让启动走到
+     * WiFi 任务。真正的验收是关联/DHCP/TLS/HTTPS，不依赖这个探针。 */
+    pstr("flash: probe skipped (one-abi)\n");
+#else
     pstr("flash: probe(42)="); phex(s3_win_call_flash42()); pstr("\n");
+#endif
 }
 
+/* 启动期信标（RTC_CNTL_STORE4..7 = 0x600080C0..CC，复位不清）：
+ *   slot0 = 0xB0000300           进了 os_main
+ *   slot1 = 0xB0000301           os_icache_enable() 返回
+ *   slot1 = 0xB0000302           flash_diag() 打印完
+ *   slot1 = 0xB0000310           os_wdt_start() 返回（自愈狗已装好）
+ *   slot2/slot3 = os_task_create 的返回值（负数说明栈池/任务槽不够）
+ * 万一串口没输出（USB 掉了），复位后 `esptool read-mem 0x600080C0` 就能定位。 */
 void os_main(void)
 {
     s3_beacon(0u, 0xB0000300u);
-    /* 自愈狗：闭源 PHY/WiFi 初始化很容易忙等死转（真板实测会连 USB 一起没了，
-     * 只能人工断电）。8s 不喂就整片复位重跑 —— 板子自己回来，串口重新枚举，
-     * RTC 阶段信标（0x50000A10）还在，于是"上一轮死在哪"能直接读出来。 */
-    os_wdt_start(8u);
+    /* 先把 cache 打开（flash 里的代码要靠它），再打印诊断 —— 这样哪怕后面
+     * 自愈狗那一步有问题，串口上也已经能看到 flash 诊断了。 */
+    pstr("M1 icache...\n");
     os_icache_enable();
+    pstr("M1 icache ok\n");
     s3_beacon(1u, 0xB0000301u);
     flash_diag();
     s3_beacon(1u, 0xB0000302u);
+    pstr("M2 flash_diag ok\n");
+#ifndef S3_NO_WDT
+    /* 自愈狗放到这里再装：闭源 PHY/WiFi 初始化很容易忙等死转（真板实测会连
+     * USB 一起没了，只能人工断电）。8s 不喂就整片复位重跑，板子自己回来。
+     * 排查启动卡死时用 -DS3_NO_WDT 关掉它（否则复位会掩盖真正的死点）。 */
+    pstr("M3 wdt...\n");
+    os_wdt_start(8u);
+    pstr("M3 wdt ok\n");
+    s3_beacon(1u, 0xB0000310u);
+#else
+    pstr("M3 wdt skipped\n");
+#endif
 
     /* WiFi 主流程：windowed 任务（入口经 ctx.S 的 ABI 标志建立窗口） */
-    g_next_task_windowed = 1u;
-    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 8192u));
+#ifdef S3_PHY_FROM_MAIN
+    /* 实验：把 PHY 初始化放到 call0 上下文里做（经 win_bridge 的 windowed
+     * 跳板），用来区分"windowed 任务上下文有问题"还是"窗口溢出处理本身有问题"。
+     * 见 docs/wifi-plan.md §228。 */
+    pstr("E1 phy from call0...\n");
+    (void)s3_win_call_phy_enable();
+    pstr("E1 phy from call0 ok\n");
+#endif
+    pstr("M4 task wifi...\n");
+#ifdef S3_WIFI_TASK_CALL0
+    /* §241：wifi 任务本身是 call0，windowed 代码经 s3_win_call_wifi_main 跳板进去，
+     * 这样系统里只有一个 windowed 任务（库自己的 ppTask）。 */
     g_next_task_windowed = 0u;
+    s3_beacon(2u, (u32)os_task_create("wifi", wifi_call0_task, 0, 3u, 8192u));
+#else
+    g_next_task_windowed = 1u;
+    /* §449：栈从 8192 抬到 16384。
+     *
+     * 真板实测 `ctx[0]`（就是这个任务）的 `sp = 0x3fcc0300`，而它的栈区间是
+     * `[0x3fcbced0, 0x3fcbeed0)` —— **超出栈顶 0x1430 = 5168 字节**，已经压进了
+     * `ctx[1]`（库任务）的栈区。于是两个任务的帧互相踩，双双阻塞在
+     * `osi_queue_recv`（`wait_kind=6 = Q_WAIT_GET`，且 `wait_obj` 都指向
+     * 同一个库内部对象 `0x3fcc75b4`），调度器只能在 `port_idle` 里空转。
+     *
+     * 溢出源是 `s3_wifi_bringup()` 里那次 `esp_wifi_init_internal()` ——
+     * 库在这个调用里跑得很深。8192 + 5168 > 13360，取 16384 留出余量。
+     * 栈池同步从 36864 抬到 45056（16384 + 6144*4 = 40960，再留 4096 余量）。 */
+    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 16384u));
+    g_next_task_windowed = 0u;
+#endif
+    pstr("M4 task wifi ok\n");
 
     /* 低优先级监控任务：纯 call0，周期性把诊断环打到串口 */
+#ifndef S3_NO_MON
     s3_beacon(3u, (u32)os_task_create("mon", port_diag_task, 0, 0u, 4096u));
+#else
+    pstr("M5 mon 任务已跳过（S3_NO_MON）\n");
+#endif
+    pstr("M5 tasks ok, starting scheduler\n");
 
     os_task_start();
+    pstr("M6 UNREACHABLE\n");
     for (;;) { }
 }

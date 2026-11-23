@@ -1,0 +1,187 @@
+/* tests/t_tls12_live.c6 —— 真连 qq.com:443 跑完 TLS 1.2 握手 + HTTP GET（含跟随 302）
+ *
+ * 跑法（宿主上就能跑，不需要板子）：
+ *
+ *     ./tools/tls12_live.sh          # 或 make tls12live
+ *
+ * 意义：这是"取 https://qq.com 页面"这条路的**协议层**验证。板子上要做的只是把
+ * socket 换成 lwIP（§210 已经链进镜像），TLS 1.2 + HTTP 这一层一行都不用改。
+ *
+ * 流程：qq.com:443 GET / → 拿到 302（Location: https://www.qq.com/）→ 解析出
+ * host/path 再连一次 → 打印真正的首页内容开头。
+ */
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+import std.core.types;
+import std.core.rand;
+import std.encoding.sha256;
+import std.net.x25519;
+import std.net.tcp;
+import std.data.x509;
+import net.aes_gcm;
+import net.tls12_prf;
+import net.rsa_verify;
+import net.tls12_hs;
+
+#ifndef TLS_HOST
+#define TLS_HOST "qq.com"
+#endif
+#ifndef TLS_PORT
+#define TLS_PORT 443
+#endif
+
+/* TLS 客户端要的缓冲（宿主上静态给；板子上的 c6_https_demo.c 从堆里要） */
+static u8 tls_rec[8192] = { 0 };
+static u8 tls_enc[2048] = { 0 };
+static u8 tls_out[1024] = { 0 };
+static u8 tls_hs[8192] = { 0 };
+
+/* 一次完整的 HTTPS GET：连上、握手、发请求、把响应读到 out 里。
+ * 返回读到的字节数，失败返回 -1。 */
+static int fetch(const char *host, const char *path, char *out, int cap, int verbose)
+{
+    Tcp c = { -1 };
+    Tls12 t = { 0 };
+    char req[256] = { 0 };
+    u8 buf[8192] = { 0 };          /* 一条记录可能接近 8KB（TLS_REC_MAX）*/
+    u64 seed = 0x1122334455667788ull;
+    int total = 0;
+    int n = 0;
+    int rounds = 0;
+
+    if (verbose) {
+        printf("== 连接 %s:%d，请求 %s\n", host, TLS_PORT, path);
+    }
+    c = tcp_connect(host, TLS_PORT, 8000);
+    if (!c.ok()) {
+        printf("   连接失败\n");
+        return -1;
+    }
+    /* 每条连接换一个 seed，避免两条连接撞同一个 client_random */
+    seed = seed ^ (u64)(unsigned int)path[0];
+    (void)tls12_set_buffers(tls_rec, (int)sizeof tls_rec, tls_enc, (int)sizeof tls_enc,
+                            tls_out, (int)sizeof tls_out, tls_hs, (int)sizeof tls_hs);
+    if (!tls12_start(&t, c.fd, host, seed)) {
+        printf("   ClientHello 发送失败\n");
+        return -1;
+    }
+    if (!tls12_handshake(&t)) {
+        printf("   握手失败，阶段 = %d\n", tls12_stage(&t));
+        return -1;
+    }
+    if (verbose) {
+        printf("== 握手完成（阶段 %d，套件 0x%04x）\n", tls12_stage(&t), t.cipher);
+    }
+    snprintf(req, sizeof req,
+             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: c6los/1.0\r\n"
+             "Accept: */*\r\nConnection: close\r\n\r\n", path, host);
+    if (tls12_write_app(&t, req, (int)strlen(req)) <= 0) {
+        printf("   发送请求失败\n");
+        return -1;
+    }
+    for (rounds = 0; rounds < 64; rounds++) {
+        n = tls12_read_app(&t, buf, (int)sizeof buf);
+        if (n == -2) {
+            break;                  /* close_notify */
+        }
+        if (n < 0) {
+            break;
+        }
+        if (n == 0) {
+            continue;
+        }
+        if (total + n <= cap) {
+            memcpy(out + total, buf, (usize)n);
+        }
+        total = total + n;
+        if (total >= cap) {
+            break;
+        }
+    }
+    c.close_socket();
+    return total;
+}
+
+/* 从响应里取状态码 */
+static int http_status(const char *r)
+{
+    if (strlen(r) < 12) { return -1; }
+    if (memcmp(r, "HTTP/1.", 7) != 0) { return -1; }
+    return (r[9] - '0') * 100 + (r[10] - '0') * 10 + (r[11] - '0');
+}
+
+/* 从响应的 Location 头里拆出 host 和 path */
+static int parse_location(const char *r, char *host, int hcap, char *path, int pcap)
+{
+    const char *p = strstr(r, "\r\nLocation: ");
+    const char *s = 0;
+    int hl = 0;
+    int pl = 0;
+
+    if (p == 0) { return 0; }
+    s = p + 12;
+    if (memcmp(s, "https://", 8) == 0) {
+        s = s + 8;
+    } else if (memcmp(s, "http://", 7) == 0) {
+        s = s + 7;
+    }
+    while (s[hl] != 0 && s[hl] != '/' && s[hl] != '\r' && hl < hcap - 1) {
+        host[hl] = s[hl];
+        hl = hl + 1;
+    }
+    host[hl] = 0;
+    if (s[hl] == '/') {
+        while (s[hl + pl] != 0 && s[hl + pl] != '\r' && pl < pcap - 1) {
+            path[pl] = s[hl + pl];
+            pl = pl + 1;
+        }
+    }
+    if (pl == 0) {
+        path[0] = '/';
+        pl = 1;
+    }
+    path[pl] = 0;
+    return (hl > 0) ? 1 : 0;
+}
+
+int main(void)
+{
+    char page[6144] = { 0 };
+
+    tls12_trace = 1;            /* 宿主上调试用；板子上关掉 */
+    char host[128] = { 0 };
+    char path[128] = { 0 };
+    int n = 0;
+    int st = 0;
+
+    n = fetch(TLS_HOST, "/", page, (int)sizeof page - 1, 1);
+    if (n <= 0) {
+        printf("第一跳失败\n");
+        return 1;
+    }
+    page[n < (int)sizeof page - 1 ? n : (int)sizeof page - 1] = 0;
+    st = http_status(page);
+    printf("---- 第一跳 HTTP 状态 %d，共 %d 字节 ----\n", st, n);
+    if (st >= 300 && st < 400 && parse_location(page, host, (int)sizeof host,
+                                               path, (int)sizeof path)) {
+        printf("---- 跟随重定向到 %s%s ----\n", host, path);
+        memset(page, 0, sizeof page);
+        n = fetch(host, path, page, (int)sizeof page - 1, 1);
+        if (n <= 0) {
+            printf("第二跳失败\n");
+            return 1;
+        }
+        page[n < (int)sizeof page - 1 ? n : (int)sizeof page - 1] = 0;
+        st = http_status(page);
+        printf("---- 第二跳 HTTP 状态 %d，共 %d 字节 ----\n", st, n);
+    }
+    printf("---- 页面开头 ----\n");
+    fwrite(page, 1, (usize)(n > 700 ? 700 : n), stdout);
+    printf("\n---- 页面结尾 ----\n");
+    if (strstr(page, "<title>") != 0) {
+        printf("[证据] 响应里含 <title>，即拿到了 HTML 页面内容\n");
+    }
+    return 0;
+}

@@ -3,7 +3,7 @@
  * 两个任务互相让出：
  *   wstr —— windowed 任务，3 层递归后 delay(1)（会产生真实的 call8 链 + 切换）
  *   cstr —— call0 任务，只 delay(1)
- * 结果写到 RTC 0x50001300： d[0]=magic  d[1]=windowed 完成轮数  d[2]=call0 轮数
+ * 结果写到 RTC 0x50000A40： d[0]=magic  d[1]=windowed 完成轮数  d[2]=call0 轮数
  */
 #include "c6os/types.h"
 #include "c6os/port.h"
@@ -16,7 +16,7 @@ extern void os_icache_enable(void);
 
 static void cstr_main(void *arg)
 {
-    volatile u32 *d = (volatile u32 *)0x50001300u;
+    volatile u32 *d = (volatile u32 *)0x50000A40u;
     u32 k = 0u;
 
     (void)arg;

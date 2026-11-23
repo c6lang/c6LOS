@@ -22,6 +22,10 @@ MEMORY
 
 SECTIONS
 {
+  /* §289：__app_base=0 表示"镜像当二级 bootloader 用、直接放 flash 0x0"；
+     传 0x20000 表示"应用镜像、由 IDF 的二级 bootloader 从 0x20000 加载"。
+     只影响 flash 段的 LMA，VMA 一律不动。 */
+  PROVIDE(__app_base = 0);
   /* IDF 闭源库的代码放 flash（IROM 0x42000000，LMA 在 flash 0x20000）。
      只在真的链接了这些库时才非空，普通构建里是空段、不产生 flash 段。
      注意字面量池必须跟代码一起搬：l32r 是 PC 相对（往低地址 ±256KB），
@@ -32,7 +36,7 @@ SECTIONS
      （那个段会让 ROM 往地址 0 写数据，直接挂）。 */
   /* 先是 DROM（0x3C000000），开头必须是 256 字节的 esp_app_desc_t；
      LMA 从 0x20 开始（镜像头之后）。 */
-  .flash.rodata 0x3C000020 : AT (0x20)
+  .flash.rodata 0x3C000020 : AT (0x20 + __app_base)
   {
     _flash_rodata_lma = LOADADDR(.flash.rodata);
     _flash_rodata_start = .;
@@ -55,7 +59,7 @@ SECTIONS
    * "从 flash 执行必炸 / IllegalInstruction / 跳到地址 1"。
    * 另外 VMA/LMA 必须 mod 0x10000 同余（MMU 页 64KB）。
    * 用 tools/chkimg.py 在构建后校验这条不变量。 */
-  .flash.text 0x42010000 : AT (0x10000)
+  .flash.text 0x42010000 : AT (0x10000 + __app_base)
   {
     _flash_text_lma = LOADADDR(.flash.text);
     _flash_text_start = .;
@@ -88,6 +92,20 @@ SECTIONS
     *libmesh.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libespnow.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
     *libidfwifi.a:*(.literal .literal.* .text .text.* .iram1* .iram.*)
+    /* lwIP（IP 栈，§210）：71KB 代码必须进 flash。IRAM 预算只剩几 KB，
+     * 让它掉进 .text 会直接把 IRAM 撑爆。三个粘合目标文件也一起进来，
+     * 免得它们单独落进 IRAM。 */
+    *liblwip.a:*(.literal .literal.* .text .text.*)
+    /* TLS 1.2 客户端（.c6 编成的 windowed 静态库，§214）：同样必须进 flash，
+     * 否则 20KB+ 的代码会把 IRAM 撑爆（实测溢出 22048 字节）。 */
+    *libtls.a:*(.literal .literal.* .text .text.*)
+    *c6_https_demo.o(.literal .literal.* .text .text.*)
+    /* WPA 加密回调（AES-128/CBC/CMAC/GMAC 的 C 实现，§222）：纯软件、不在中断
+     * 路径上，放 flash 省 IRAM（不放会 IRAM 溢出）。 */
+    *wpa_crypto.o(.literal .literal.* .text .text.*)
+    *c6_lwip_port.o(.literal .literal.* .text .text.*)
+    *c6_lwip_posix.o(.literal .literal.* .text .text.*)
+    *sys_arch.o(.literal .literal.* .text .text.*)
     *(.flashend.test)
 
     /* IDF 闭源 WiFi 库的代码也放 flash（与 .flash.text 连续，bootloader 才会一起映射） */
