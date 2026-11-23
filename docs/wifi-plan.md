@@ -29196,3 +29196,35 @@ int s3_w2c_queue_recv(void *qh, void *item, u32 ticks)
 例如 `__attribute__((aligned(16))) volatile u32 pad[32];` 放在函数入口，
 或者用 `entry a1, 128` 的手写壳但**只做一次 `call8`**（不做 spill、不做 `callx8`，
 把目标函数的地址直接放进 `call8` 的立即数范围）。
+
+## §1156 直接 defsym 去掉薄壳（实验，已回退）
+
+把五个阻塞回调用链接器 `--defsym` 直接绑到 windowed 内核函数
+（`s3_w2c_sem_pend=os_sem_pend` 等），`W2C_SPILL` 宏置空。
+
+真板结果：**78 行、输出乱码**（`b`、`Wu1bb`），与 §1155 的 C 包装一致。
+
+**⇒ 结论确定：`entry a1,128` 预留的 128 字节自由栈是任务切换的硬性要求**
+（`port_task_switch_c0` 要把祖先窗口 spill 到这块自由栈上），
+任何"更薄"的替代方案都会让调用者的窗口被写飞。
+
+## §1157 本轮总结（round 136）
+
+**已确证的事实链（全部有真板取证）：**
+
+1. 库全局初始化全部成功：`xphyQueue`、`s_pp_task_create_sem`、`pp_task_hdl`、
+   `g_osi_funcs_p`、`s_wifi_queue` 都非 0；**只有 `g_ic` 为 0**。
+2. `ppTask` 确实启动过（`s3_task_tramp` 计数=2）。
+3. `esp_wifi_start()` 返回 0 只是"消息投递成功"，真正建 `g_ic` 的
+   `wifi_start_process` 跑在 ppTask 里，它**从未执行**。
+4. 超时机制确实工作过（`0x50001600` 超时到期计数=1），但随后
+   `s3_w2c_queue_recv` 薄壳抛 `exccause=0`（IllegalInstruction）。
+5. 薄壳不可省（128 字节自由栈必需），也不可高频调用（窗口账目崩）。
+
+**四项验收全部未取得**：AP 关联（`[wifi] 已关联，ssid= channel=0` 是空值）、
+DHCP（无）、TLS（无）、qq.com body（无）。
+
+**下一步（留给后续轮次）**：把 `s3_win_spill` 换成"只在 `windowbase >= 8` 时才调"，
+即用 `rsr a9, windowbase; bgeui a9, 8, skip` 把 spill 变成按需触发——
+这样浅窗口时完全不做那次整圈轮转，深窗口时才 spill，两头都不失控。
+这是目前唯一还没试过、且理论上能同时满足两个约束的方案。
