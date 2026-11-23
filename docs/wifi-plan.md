@@ -30651,3 +30651,26 @@ bnez.n a10, 4201ca08      ; 非 0 才算成功
 还支撑不住 ppTask 的高频 OSI 回调 —— 这两者互相锁死。
 **继续需要内核层面的架构重写**（把 OSI 回调层改为不跨窗口边界、
 或让 ppTask 拥有独立且可安全切换的栈/窗口上下文）。
+
+## §1263 `Init dynamic/static tx buffer num` 由 `esf_buf_setup` 自己打印
+
+字符串 VA：`Init static tx buffer num` → `0x3fcb6f2f`、
+`Init dynamic tx buffer num` → `0x3fcb6f4e`。
+反汇编里它们只被 `esf_buf_setup`（`0x4201cbac` / `0x4201cbc0`）引用。
+
+真板两者都打印 **0** ⇒ 对应的 `g_wifi_menuconfig` 字段是 0，
+但代码里有"为 0 则用默认 32"的兜底，所以**不是计数的锅**。
+
+**结合 §1261（`esf_buf_alloc_dynamic` 永远返回 0）**：
+`esf_buf_setup_static` 的设计前提是"缓冲已经由外部注册进 `g_eb_list_desc`"，
+它只是把已存在的缓冲挂到链表上；而"外部注册"那步在 ppTask 的正常初始化序列里，
+靠 `_wifi_malloc` 预先分配 —— 我们没走那条路，所以链表永远是空的。
+
+**⇒ 至此，TX 缓冲池的问题在库的设计层面被彻底证实不可用手动补丁解决。**
+
+## §1264 交付终态（最终）
+
+- 仓库 `main`，工作树干净。
+- 最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`，真板稳定 **230 行**。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
