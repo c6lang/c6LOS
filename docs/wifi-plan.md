@@ -28509,3 +28509,61 @@ boot ✓ → osi 表 ✓ → PHY ✓
 它属于库内部时序，不再是我们的 ABI 问题。**
 
 镜像 `1c8f57be`。
+
+## §1099 最终定位：卡点在 `pp_create_task`（库内），`ic_create_wifi_task` 只是个转发壳
+
+### 反汇编证据
+
+```asm
+4201a430 <ic_create_wifi_task>:
+    entry   a1, 32
+    l32r    a8, (4037e320 <__wrap_pp_create_task>)   ; ← 我们的包装器
+    callx8  a8
+    mov.n   a2, a10
+    retw.n
+```
+
+我们的包装器：
+
+```c
+int __wrap_pp_create_task(void)
+{
+    s3_wrap_bump(4u);
+    return __real_pp_create_task();   /* ← 卡在这里面 */
+}
+```
+
+**⇒ `ic_create_wifi_task` 本身只有 4 条指令，它只是转发到
+`pp_create_task`。卡点就是闭源库的 `pp_create_task`。**
+
+### 它为什么卡住（最可能的机制）
+
+`pp_create_task` 的标准流程是：
+
+1. `_queue_create` 建 ppTask 的队列 ⇒ `xphyQueue`（我们实测建出了 0x3fcc8074）
+2. `_semphr_create` 建 `s_pp_task_create_sem`
+3. `_task_create` 建 ppTask
+4. **等 ppTask take 那个信号量**（ppTask 的第一条语句就是
+   `_semphr_take(s_pp_task_create_sem)`，见 §1097）⇒ 确认任务已跑起来
+
+**⇒ 第 4 步是一次**跨任务的握手**：`pp_create_task` 等 ppTask 把信号量拿走，
+ppTask 起来后第一件事就是拿它。**
+
+**⇒ 我们的 `_semphr_take` 语义是对的（成功返回 1、失败返回 0，
+见 `wifi_glue.c:333`），但如果 `_semphr_create` 返回的句柄在库那边
+没被正确保存（或 magic 校验失败走了 `return 0` 分支），ppTask 就永远
+"拿不到"，`pp_create_task` 也就永远等下去。**
+
+### 下一步（最具体的一步）
+
+在 `_semphr_create` / `_semphr_take` 里把**句柄值**记到 RTC
+（`0x50000310` 那一带还有空位），上板后对比：
+- `pp_create_task` 建出来的 sem 句柄是多少；
+- ppTask 调 `_semphr_take` 时传进来的句柄是不是同一个。
+
+若不一致 ⇒ 就是句柄传递/保存的问题（很可能是库把一个 u32 当指针存，
+而我们的 `_semphr_create` 返回的是指针，宽度/语义对不上）。
+若一致但仍不返回 ⇒ 查 `s3_w2c_sem_pend` 是否在 ppTask 上下文里
+因为 `g_cur` 为空而直接返回失败（那样 take 永远失败，握手永远不成）。
+
+镜像 `1c8f57be`。
