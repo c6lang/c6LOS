@@ -1571,6 +1571,10 @@ void s3_ets_timer_dispatch(void)
     }
 }
 
+/* §§1132：通用安全桩——不做任何事，返回 0（成功）。 */
+__attribute__((section(".flash.text")))
+int osi_stub_ok(void) { return 0; }
+
 /* ---- 表装配：用 __builtin_offsetof，彻底避免手数下标 ---- */
 #define OSI_SET(slot, fn) \
     (((void **)(void *)&g_wifi_osi_funcs)[__builtin_offsetof(wifi_osi_funcs_t, slot) / 4u] \
@@ -1677,6 +1681,45 @@ void s3_wifi_osi_init(void)
     { extern int s3_w2c_queue_recv(void *qh, void *item, u32 ticks);
       OSI_SET(_queue_recv, s3_w2c_queue_recv); }
     OSI_SET(_queue_msg_waiting, osi_queue_msg_waiting);
+    /* §§1132 ★★★：补上之前漏登记的回调。
+     *
+     * 库里 `wifi_start_process`（真正建 `g_ic` 的那个函数）会调
+     * `_wifi_clock_enable` / `_wifi_clock_disable` 来开关 WiFi 外设时钟，
+     * 还会调 `_phy_update_country_info` 和一堆 `_coex_*`。
+     * 我们只注册了 91/120 个槽位，这 30 个是 **NULL**——
+     * 一旦被调就是跳到 0 或者把栈指针弄坏。真板现场正是
+     * `wifi_start_process` 首次执行时 `a1=8` / `exccause=0x1d` 崩掉。
+     * 这里全部装成"空操作但返回成功"的安全桩。 */
+    OSI_SET(_wifi_clock_enable,        osi_stub_ok);
+    OSI_SET(_wifi_clock_disable,       osi_stub_ok);
+    OSI_SET(_phy_update_country_info,  osi_stub_ok);
+    OSI_SET(_coex_init,                osi_stub_ok);
+    OSI_SET(_coex_deinit,              osi_stub_ok);
+    OSI_SET(_coex_enable,              osi_stub_ok);
+    OSI_SET(_coex_disable,             osi_stub_ok);
+    OSI_SET(_coex_status_get,          osi_stub_ok);
+    OSI_SET(_coex_condition_set,       osi_stub_ok);
+    OSI_SET(_coex_wifi_request,        osi_stub_ok);
+    OSI_SET(_coex_wifi_release,        osi_stub_ok);
+    OSI_SET(_coex_wifi_channel_set,    osi_stub_ok);
+    OSI_SET(_coex_event_duration_get,  osi_stub_ok);
+    OSI_SET(_coex_pti_get,             osi_stub_ok);
+    OSI_SET(_coex_schm_status_bit_clear, osi_stub_ok);
+    OSI_SET(_coex_schm_status_bit_set,   osi_stub_ok);
+    OSI_SET(_coex_schm_interval_set,     osi_stub_ok);
+    OSI_SET(_coex_schm_interval_get,     osi_stub_ok);
+    OSI_SET(_coex_schm_curr_period_get,  osi_stub_ok);
+    OSI_SET(_coex_schm_curr_phase_get,   osi_stub_ok);
+    OSI_SET(_coex_schm_process_restart,  osi_stub_ok);
+    OSI_SET(_coex_schm_register_cb,      osi_stub_ok);
+    OSI_SET(_coex_register_start_cb,     osi_stub_ok);
+    OSI_SET(_coex_schm_flexible_period_set, osi_stub_ok);
+    OSI_SET(_coex_schm_flexible_period_get, osi_stub_ok);
+    OSI_SET(_coex_schm_get_phase_by_idx, osi_stub_ok);
+    OSI_SET(_dport_access_stall_other_cpu_start_wrap, osi_stub_ok);
+    OSI_SET(_dport_access_stall_other_cpu_end_wrap,   osi_stub_ok);
+    OSI_SET(_wifi_apb80m_request,      osi_stub_ok);
+    OSI_SET(_wifi_apb80m_release,      osi_stub_ok);
 
     /* ---- 信号量 / 互斥量 ---- */
     OSI_SET(_semphr_create,     osi_semphr_create);
