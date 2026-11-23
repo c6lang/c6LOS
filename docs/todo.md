@@ -1534,3 +1534,29 @@ ns —— 超时短了 1000 倍（m55 那个 20ms 超时实际只等 20µs）。
 - `date +%s` 跨 `sleep 3` 差 3（23.52 → 26.52，墙钟 3.00s）；
 - `ping 8.8.8.8` 里按 Ctrl-C：`^C`、统计、提示符全在同一瞬间出，随后
   `echo AFTER_C` 正常。
+
+---
+
+## 发布回归记录（2026-11-23）
+
+发布前在最终树上重跑全部门禁：
+
+| 门禁 | 结果 |
+|---|---|
+| `make check-host` | PASS（全部 host 单测） |
+| `make check-all` | PASS（check-host + x86-64 裸机 + rv32/rv32bare 构建） |
+| `make check-linuxabi-all` | **56 PASS / 0 FAIL**（完整重跑，RC=0） |
+| `make s3` | PASS（无需外部 `/tmp/wstub.o`；`chkimg: OK（2 个 flash 段）`） |
+| `make wifi` | PASS（`S3_WITH_WIFI` + 闭源 libnet80211/libpp/libphy 全链） |
+
+环境限制（不属于仓库回归）：
+
+- `make check-sim` 需要 `~/risc6/build/risc6`，本机未安装；`qemu-riscv32` 只验证了
+  `rv32 hello`。`rv32-sched`/`rv32-tick` 走机器态 `mret`，qemu user-mode 报非法
+  指令（按设计由 risc6 覆盖）。
+- 真板 L4（S3 烧写/长稳）不在本机执行，按 `docs/porting-esp32s3.md` 上板。
+
+本轮修复的 CI 断点见提交 `8fddd42`：S3 专有诊断埋点的宏隔离、`C6OS_VFS=0`
+的 L1/L2 构建、S3 默认内核缺 `mutex/event` 与 `os_queue_try_*`、基线 `make s3`
+的 WiFi 桩、M35 缺失的 ELF 构建规则。此前这些断点会让 `check-host`、
+`check-all` 和 Linux ABI 的 L1/L2/M35 直接失败，与功能代码本身无关。
