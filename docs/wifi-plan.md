@@ -30341,3 +30341,34 @@ scan/assoc/DHCP/TLS/HTTPS 才有机会。
 **这三者形成闭环，需要一次架构级重写才能打破**：
 把内核的 OSI 回调层改为"不跨窗口边界的实现"（例如让 ppTask 用独立栈、
 或把整个 OSI 回调层放进一个不切换任务的轮询上下文）。
+
+## §1238 `-DS3_WIFI_NOBLOCK`（非阻塞 recv）在 g_ic 已修好的前提下重试
+
+真板 **226 行**，与常规配置（228 行）基本持平，
+扫描仍在 `[w1]wifi|` 之后停住、PC 仍在 `ieee80211_send_setup` 的断言循环。
+⇒ ppTask 是否阻塞不是关键，**TX 缓冲池**才是。
+
+## §1239 交付说明（最终）
+
+**目标未完成。四项验收全部未取得。**
+- AP 关联：0（`esp_wifi_connect` 从未成功）
+- DHCP：0
+- TLS：0
+- qq.com body：0
+
+**仓库状态**：`main` 分支，工作树干净，最佳构建
+`md5=e76a3f1cb984db10873d861a999687bc`，真板稳定复现 **228 行**。
+
+**本会话（含 resume）累计把真板从 79 行推进到 228 行，取得五个结构性进展**：
+1. 修 `W2C_SPILL` 五壳共用 RTC 槽（§1114）—— 消除大量 trap。
+2. 库任务优先级降级（§1126）—— 让 `wifi_init_in_caller_task` 全程跑通。
+3. `g_ic` 分配 + 直调 `wifi_init_process`/`wifi_start_process`（§1164/§1165）
+   —— WiFi **首次进入 STARTED**、MAC 使能、`scan_start=0`。
+4. `osi_wifi_int_disable/restore` 空操作（§1169）—— 消除 `__real_pp_post` 时序窗口。
+5. 补 `g_ic+16` + 直调 `pp_attach`/`esf_buf_setup`（§1182/§1210）
+   —— 扫描真正进入 `perform scan` 并实际发 probe request。
+
+**闭环卡点（已彻底查清，见 §1237）**：
+TX 缓冲池建不好 ← 绕过了 ppTask 的正常初始化序列 ← 绕过的原因是
+`W2C_SPILL` 手写薄壳在 windowed ABI 下高频调用必崩（`retw` 窗口用尽）。
+要打破它需要架构级重写，而不是单点补丁。
