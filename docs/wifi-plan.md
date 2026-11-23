@@ -28730,3 +28730,46 @@ PHY/RF 的同步等待）。
    永不执行、`g_ic` 恒为 NULL。
 
 **基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 累计 1100+ 节。
+
+## §1104 用包装器计数取代断点：`pp_create_task` 确实被调用，卡在它内部
+
+**断点在 flash 代码上不可靠（§1103 的"不命中"是假象）。改用我们自己
+`--wrap` 包装器的计数（RTC `0x50000E00`，每个包装器进去就 +1）：**
+
+```
+0x50000E00  wifi_menuconfig_init    = 1   ✓ 走到了
+0x50000E04  misc_nvs_init           = 1   ✓ 走到了
+0x50000E08  ic_create_wifi_task     = 1   ✓ 走到了
+0x50000E0C  pp_create_task          = 1   ✓ 进去了
+```
+
+**⇒ 四个包装器全部被调用，`pp_create_task` 确实进去了。**
+
+而串口始终没有 `[wifi] init 后的库状态`（`pp_create_task` 返回后才会打印），
+**⇒ `pp_create_task` 进去后不返回。**
+
+**⇒ 卡点确认在 `pp_create_task`（0x4201b8ac ~ 0x4201ba85）内部。**
+
+它的第一个调用是 `osi_funcs[42] = _task_get_max_priority`（我们的实现是
+`return 31u;`，不可能卡住），后续还有 `_queue_create`/`_semphr_create`/
+`_task_create`/`_semphr_delete` 等。
+
+**下一步（用同样的计数法，最可靠）**：在 `pp_create_task` 里每一处
+`callx8` 的前后各插一个 RTC 计数（或把 `HIT_OF` 临时启用），
+一次上板就能看出是哪一个 OSI 实现不返回。这比 flash 断点可靠得多。
+
+### 会话最终交付
+
+- **c6LOS 全量 windowed ABI 迁移已完成**：内核/中断/上下文切换/全部 C 代码
+  统一 `-mabi=windowed`，编译链接通过并真板稳定运行。
+- **修复的真 bug**：§1056/§1084 五个阻塞 OSI 函数 spill 薄壳、
+  §1083 `RESTORE_FRAME` 的 WS 并集泄漏、§1088 `callx8` 轮转窗口导致
+  库任务参数没传到、§1094 `S3_TICK_DEFER`（ISR 里不再 `call8 os_sched_tick`）、
+  §1090 `intenable` 收敛到定时器位、§1089 `_set_isr` 不装向量表的查明。
+- **系统状态**：GDB `bt` 干净（`s3_w2c_queue_recv ← ppTask ← s3_task_tramp`），
+  ISR 24064 次、TICK_PEND 持续增长、任务正常切换、队列正常收发。
+- **未完成**：AP 关联 / DHCP / TLS / qq.com body 四项验收。
+  卡点：闭源库 `pp_create_task` 内部不返回 ⇒ `wifi_init_process`/`ic_init`
+  永不执行 ⇒ `g_ic` 恒为 NULL。
+
+**基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 至 §1104。
