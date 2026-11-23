@@ -29466,3 +29466,36 @@ if (r == 0 && g_s3_real_scan_msg != 0u) {
 **下一步建议**：把 ppTask 单独放到一个"协作式"调度里，
 即 `s3_w2c_queue_recv` 的薄壳在**返回前主动让出**给初始化任务一次
 （而不是靠 `os_task_yield` 的优先级选择）。
+
+## §1174 调度组合重试（在 §1165/§1169 之后）
+
+有了 §1165（`g_ic` 已初始化、WiFi STARTED）和 §1169（时序窗口消除），
+重新尝试 §1150 的调度组合：
+- `sched_pick()` 改成轮转（当前任务不能是唯一候选）
+- ppTask 优先级恢复 `31-prio`（= 2）
+- `osi_queue_recv_body` 里每 8 次 `os_task_yield()`
+
+**真板结果：79 行，又卡在 `[delay] ticks=1`。**
+⇒ 即使 `g_ic` 和时序问题都修好了，**"ppTask 高优先级 + 初始化任务阻塞" 仍然
+会让初始化任务饿死**（ppTask 拿到 CPU 后不再让出）。
+
+**⇒ 结论：这个问题不是靠调优先级或加 yield 能解决的，需要真正的抢占
+（`S3_NO_PREEMPT` 去掉）或一个协作式调度器。**
+
+## §1175 会话阶段总结（round 142）
+
+**本阶段（round 131→142）从 79 行推进到 196 行，实现两个结构性突破：**
+
+1. **§1164/§1165**：让 `g_ic` 真正被分配和初始化 —— `wifi_init_process`
+   因 `msg->[12]==0` 早返回；补上后**直接调用** `wifi_init_process()` +
+   `wifi_start_process()`，WiFi **首次进入 STARTED（state=2）**、MAC 使能
+   （`d14=1`）、`scan_start=0` 首次成功。
+2. **§1169**：`osi_wifi_int_disable/restore` 改空操作，**消除了
+   `__real_pp_post` 的极窄时序窗口**（此前任何代码布局变化都会让真板
+   从 195 行掉到 90 行卡 `[pq]`）。
+
+**仍未解决**：ppTask 拿不到 CPU ⇒ `wifi_set_mode_process` /
+`wifi_scan_start_process` / `wifi_connect_process` 这些**会阻塞**的
+消息处理函数无法执行。内联同步（§1171）会让它们卡死。
+
+**四项验收仍未取得。目标未完成。**
