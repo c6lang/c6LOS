@@ -46,6 +46,13 @@ static char   g_cwd_root[FS_NAME];
 static char  *g_cwd = g_cwd_root;
 
 
+/* 目录 fd 不经过 LOS_FsOpen（ramfs 不让 open 目录），只记路径；
+ * node 落在 LX_VDIR_BASE.. 这一段，和真实 VFS fd（0..31）不会撞。
+ * 这两个常量是 LxFile.node 的布局约定，C6OS_VFS=0 的构建（l2/elf 等不带
+ * VFS 的目标）也要看得见 —— 放到 #if 外面。 */
+#define LX_VDIR_BASE 0x100ull
+#define LX_MAX_VDIR  8u
+
 #if C6OS_VFS
 #include "los/los_fs.h"
 #include "c6os/vfs.h"
@@ -54,11 +61,6 @@ static char  *g_cwd = g_cwd_root;
  * g_vpath 按 **VFS fd** 索引 —— VFS fd 全局唯一，所以多个进程同时列
  * 各自 /tmp 子目录也不会串。 */
 static char g_vpath[OS_MAX_FILES][LOS_FS_PATH_MAX];
-
-/* 目录 fd 不经过 LOS_FsOpen（ramfs 不让 open 目录），只记路径；
- * node 落在 LX_VDIR_BASE.. 这一段，和真实 VFS fd（0..31）不会撞。 */
-#define LX_VDIR_BASE 0x100ull
-#define LX_MAX_VDIR  8u
 
 static char g_dpath[LX_MAX_VDIR][LOS_FS_PATH_MAX];
 
@@ -2000,9 +2002,11 @@ void lx_fs_ref_ent(const LxFile *f)
     if (f == (const LxFile *)0 || f->kind != LX_FD_VFS) {
         return;
     }
+#if C6OS_VFS
     if (f->node < LX_VDIR_BASE) {
         os_vfs_file_dup((int)f->node);
     }
+#endif
 }
 
 /* fork 之后给新表里每个 VFS fd 加引用（子进程退出时只放自己那一份）。 */

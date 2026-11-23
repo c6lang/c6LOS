@@ -74,7 +74,8 @@ LIBPHY_SRC ?= /media/winger/inst_26/esp/esp-idf/components/esp_phy/lib/esp32s3/l
 LIBPHY_WIN := $(BUILD)/libphy_win.a
 OBJCOPY    := $(dir $(XTGCC))xtensa-esp32s3-elf-objcopy
 S3_C6FLAGS ?=
-S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 kernel/heap.c6
+S3_EXTRA_C6 ?= kernel/task.c6 kernel/tick.c6 kernel/timer.c6 kernel/timeout.c6 \
+               kernel/mutex.c6 kernel/event.c6 kernel/heap.c6
 S3_SKIP_C6 := kernel/heap.c6 kernel/sem.c6 kernel/queue.c6
 S3_C6   := $(S3_MAIN) kernel/panic.c6 kernel/log.c6 $(filter-out $(S3_SKIP_C6),$(S3_EXTRA_C6))
 S3_NAMES := $(notdir $(S3_C6))
@@ -99,7 +100,7 @@ S3_OBJ_FULL := $(BUILD)/obj/shell.o $(BUILD)/obj/cobs.o \
 S3_OBJ_WIFI := $(BUILD)/obj/idf_shim.o \
            $(BUILD)/obj/win_island.o $(BUILD)/obj/win_bridge.o \
            $(BUILD)/obj/irampad.o $(BUILD)/obj/phy_init_data.o \
-           $(BUILD)/obj/wifi_glue.o
+           $(BUILD)/obj/wifi_glue.o $(BUILD)/obj/wifi_stub.o
 
 # 真正链闭源 WiFi 库（libnet80211/libpp）时才需要监管域数据表
 ifneq ($(findstring -DS3_WITH_WIFI,$(S3_CDEFS)),)
@@ -125,7 +126,7 @@ S3_HDRS := $(wildcard include/c6os/*.h include/los/*.h)
 define S3_C_RULE
 $(BUILD)/c99/$(notdir $(1:.c6=.c)): $(1) $(S3_HDRS)
 	@mkdir -p $(BUILD)/c99
-	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -c -o $(BUILD)/c99/ $(1)
+	$(C6CC) -B $(C6_ROOT)/tcc -Iinclude -I$(C6_ROOT) $(S3_C6FLAGS) -DC6OS_S3_DIAG -c -o $(BUILD)/c99/ $(1)
 endef
 $(foreach src,$(S3_C6),$(eval $(call S3_C_RULE,$(src))))
 
@@ -252,6 +253,10 @@ $(BUILD)/obj/win_island.o: port/s3/win_island.c $(S3_HDRS)
 $(BUILD)/obj/win_bridge.o: port/s3/win_bridge.S
 	@mkdir -p $(BUILD)/obj
 	$(XTGCC) -mabi=call0 -Wa,--no-transform -mtext-section-literals -c $< -o $@
+
+$(BUILD)/obj/wifi_stub.o: port/s3/wifi_stub.c $(S3_HDRS)
+	@mkdir -p $(BUILD)/obj
+	$(XTGCC) -mabi=$(S3_SHIM_ABI) $(S3_CDEFS) -Os -ffreestanding -fno-builtin -fno-common -mlongcalls -mtext-section-literals -Iinclude -c $< -o $@
 
 $(BUILD)/obj/irq.o: port/s3/irq.c
 	@mkdir -p $(BUILD)/obj
@@ -1451,7 +1456,12 @@ $(M27_ELF): $(M27_SRC)
 	@mkdir -p $(dir $@)
 	gcc -Os -s -o $@ $<
 
-M35_ELF := tests/linux/m35fifo.elf
+M35_SRC := tests/linux/m35fifo.c
+M35_ELF := $(X86)/m35fifo.elf
+$(M35_ELF): $(M35_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
 $(X86)/m35-disk.img: $(M35_ELF) x86-dyn
 	cp $(X86)/dyn-disk.img $@
 	dd if=$(M35_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none

@@ -181,6 +181,42 @@ void *os_queue_get(OsQueue *q, u32 timeout) {
     return os_queue_get_item(q, (void *)&item, timeout) == 0 ? item : 0;
 }
 
+/* 非阻塞读写（timeout==0 在 IDF 语义里是"立刻返回"，和我们"永久等待"相反，
+ * 所以单独两个入口）。w2c.S 的 windowed 薄壳引用它们，缺了会让 S3 链接失败。 */
+int os_queue_try_get_item(OsQueue *q, void *out) {
+    u32 st;
+    int r = -1;
+    if (q == 0 || out == 0) return -1;
+    st = fl_lock();
+    if (q->magic == QUEUE_MAGIC && q->cap != 0u && q->count != 0u) {
+        q_read(q, q->head, out);
+        q->head++;
+        if (q->head == q->cap) q->head = 0;
+        q->count--;
+        if (q->waiters_put != 0u) (void)os_task_wake_first(q, Q_WAIT_PUT, 0);
+        r = 0;
+    }
+    fl_unlock(st);
+    return r;
+}
+
+int os_queue_try_put_item(OsQueue *q, const void *item) {
+    u32 st;
+    int r = -1;
+    if (q == 0 || item == 0) return -1;
+    st = fl_lock();
+    if (q->magic == QUEUE_MAGIC && q->cap != 0u && q->count != q->cap) {
+        q_write(q, q->tail, item);
+        q->tail++;
+        if (q->tail == q->cap) q->tail = 0;
+        q->count++;
+        if (q->waiters_get != 0u) (void)os_task_wake_first(q, Q_WAIT_GET, 0);
+        r = 0;
+    }
+    fl_unlock(st);
+    return r;
+}
+
 u32 os_queue_count(OsQueue *q) { return q == 0 ? 0u : q->count; }
 
 /* ---- heap: 16B 块头、8B 对齐、first-fit、相邻块一次合并 ---- */

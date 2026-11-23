@@ -64,7 +64,7 @@ make check-host
 ## 4. L2 qemu-riscv32（ILP32）
 
 ```sh
-make check-rv32
+make run-rv32          # = make rv32 && qemu-riscv32 build/rv32/hello
 ```
 
 - `c6 --emit-llvm` → `clang --target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei -mabi=ilp32`
@@ -72,6 +72,8 @@ make check-rv32
 - 端口提供 `_start`、`ecall` 退出、`mret`/`mtvec` 最小陷阱（只验证 ABI，不验证抢占）。
 - 覆盖：`abi32.c6` + 逻辑用例；输出与 L1 相同断言集。
 - 已验证基线：`rv32: c6 kernel core says hello`，rc=0。
+- 注意：qemu user-mode 不实现机器态 `mret`，`rv32-sched`/`rv32-tick` 这类
+  走上下文切换的用例在 qemu 上会报非法指令，抢占验证要用 §4.1 的 risc6。
 
 ### 4.1 换用 risc6 跑同一批 ELF
 
@@ -95,7 +97,8 @@ make run-rv32-emu-sched
 ## 5. L3 x86-64 裸机（真抢占）
 
 ```sh
-make check-bare
+make check-all         # 构建 L1/L2/L3 全部产物
+make run-x86           # x86-64 裸机：真抢占/中断/上下文切换
 ```
 
 - `examples/boot/` 的 512B 引导器 → 长模式 → payload@0x400000；PIT 100Hz；

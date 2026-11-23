@@ -16,8 +16,11 @@
 
 ## 状态
 
-**实现阶段**：M0–M5 核心与 M6 Hwi/ISR 安全、M8-5 上板手册已完成；
-M7 屏/仪表盘进行中。施工前先读：
+**实现阶段**：M0–M8 板级 bring-up 已完成；M9–M65 的 Linux ABI（x86-64 裸机
+personality）从 ring3/int 0x80 推进到 Alpine 用户态可用（VFS/FAT、SAL 网络、
+musl libc-test、Alpine busybox 全量 applet 矩阵、curl/ping/wget）。
+当前回归门禁：`make check-all`（L1/L2/L3）与 `make check-linuxabi-all`
+（56 项 Linux ABI + Alpine 回归，见 docs/testing.md）。施工前先读：
 
 | 文档 | 内容 |
 |---|---|
@@ -26,7 +29,7 @@ M7 屏/仪表盘进行中。施工前先读：
 | [docs/api.md](docs/api.md) | 原生 `os_*` 与兼容 `LOS_*` 的签名、返回值、错误码映射 |
 | [docs/porting-esp32s3.md](docs/porting-esp32s3.md) | S3 启动/镜像/控制台/时钟/中断/双核/屏、上板阶梯 |
 | [docs/testing.md](docs/testing.md) | 四层验证矩阵、确定性测试、验收门禁 |
-| [docs/todo.md](docs/todo.md) | 任务板（M0–M8、依赖、验收、状态） |
+| [docs/todo.md](docs/todo.md) | 任务板（M0–M65、依赖、验收、状态） |
 | [docs/board-s3.md](docs/board-s3.md) | 真板烧写/串口/中断/故障排查（实测流程） |
 | [docs/vfs-net-design.md](docs/vfs-net-design.md) | M9/M10 设计与施工记录：VFS/romfs/ramfs/FAT、SAL/ARP/IPv4/UDP/TCP/e1000 |
 | [docs/m11-docker-iso-design.md](docs/m11-docker-iso-design.md) | M11：docker 镜像 → 可引导 ISO → 虚拟机运行（可读写数据盘、LiteOS 接口优先） |
@@ -42,7 +45,7 @@ Flash:     16 MB, quad, 3.3 V (ef 4018)
 Crystal:   40 MHz
 USB:       303a:1001 USB JTAG/serial debug unit → /dev/ttyACM0
 MAC:       cc:8d:a2:ec:99:c4
-Screen:    1.85″（SPI；面板 IC/引脚待核对）
+Screen:    1.85″ ST7789 240×240（SPI：SDA=10/SCL=9/DC=8/CS=14/RES=18/BL=13）
 ```
 
 > 上板前必须先把原厂 16MB flash 完整备份（`esptool read-flash`），见 porting 文档。
@@ -51,8 +54,9 @@ Screen:    1.85″（SPI；面板 IC/引脚待核对）
 
 ```sh
 make toolchain-info     # C6_ROOT / 编译器提交 / xtensa-esp-elf-gcc / esptool 检测
-make check-host         # host 单测（38 项，虚拟时钟/异步抢占）
+make check-host         # host 单测（虚拟时钟/异步抢占）
 make check-all          # check-host + x86-64 裸机 + qemu-riscv32 构建
+make check-linuxabi-all # Linux ABI 全量回归（56 项，含 Alpine/网络/busybox 矩阵）
 make s3                 # ESP32-S3 镜像（build/s3/c6os.bin）
 make flash              # esptool 烧写（要求已有原厂备份）
 make backup-flash       # 烧写前备份 16MB flash（原厂备份已丢失，需重下官方固件）
@@ -69,16 +73,18 @@ include/los/    LiteOS-M 兼容头
 kernel/         c6 内核：task/sched/tick/swtmr/sem/mux/event/queue/membox/mem/hwi
 compat/         LOS_* 薄壳（C 符号，无 module 前缀）
 rt/             目标侧自研运行库（mem*、软除法、err 状态、pthread 8 入口）
-port/           port.h + sim / x86_64 / rv32 / s3 四个移植层
-boards/         板级 profile（xiaozhi-s3-spi / …）
-app/            shell / demo / screen
-tests/          test 块用例（四层共用）
-tools/          c6cc.sh / mkrt.sh / espimg.py / lint-*.sh / install-xtensa.sh
+port/           port.h + sim / x86_64 / rv32 / rv32bare / s3 五个移植层
+linux/          x86-64 Linux ABI personality：syscall、进程/信号/线程、VFS、网络
+tests/          四层共用测试 + Linux ABI/Alpine 回归用例
+tools/          构建/镜像/烧写/回归脚本（含 check-linuxabi-all.sh）
+docs/           设计、移植、验收与里程碑记录
 ```
 
 ## 非目标
 
-LiteOS-A 的进程/MMU/POSIX、文件系统、动态加载、网络中间件；内核内的 `@T` GC、
+本仓库的 **LiteOS-M 语义核心**不实现 LiteOS-A 的进程/MMU/POSIX、动态加载、
+网络中间件；这些能力由独立的 **x86-64 Linux ABI personality**（`linux/` +
+`port/x86_64`）提供，和内核侧的非目标不冲突。内核内仍禁用 `@T` GC、
 `async/co`、闭包、`f".."`。
 
 ## 许可证

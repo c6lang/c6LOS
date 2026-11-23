@@ -97,7 +97,9 @@ int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
         }
         if (q->count != q->cap) {
             g_put_try = g_put_try + 1u;
+#if defined(C6OS_S3_DIAG)
             *(volatile u32 *)0x5000120Cu = g_put_try;
+#endif
             slot_write(q, q->tail, item);
             q->tail = q->tail + 1u;
             if (q->tail == q->cap) {
@@ -105,7 +107,9 @@ int os_queue_put_item(OsQueue *q, const void *item, u32 timeout) {
             }
             q->count = q->count + 1u;
             g_put_ok = g_put_ok + 1u;
+#if defined(C6OS_S3_DIAG)
             *(volatile u32 *)0x50001208u = g_put_ok;
+#endif
             (void)os_task_wake_first(q, Q_WAIT_GET, 0);
             os_obj_unlock(st);
             return 0;
