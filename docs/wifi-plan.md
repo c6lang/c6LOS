@@ -31100,3 +31100,47 @@ TX 分配链是 `ieee80211_send_probereq` → `ieee80211_getmgtframe` →
 1. 让 ppTask 能正常调度（真正的抢占，或 ISR 侧完整超时扫描 + 正确的窗口保存）；
 2. 或换一个把 dynamic TX 缓冲编译进去、且不依赖 ROM `ic_ebuf_alloc` 的 WiFi 库；
 3. 或参考 NuttX/Rust esp-wifi 的做法，把 OSI 回调层做成**不跨窗口边界**的轮询模型。
+
+## §1301 找到 ROM 里的真正调用链（用 ROM ELF 反汇编）
+
+IDF 提供了 ROM ELF：`~/.espressif/tools/esp-rom-elfs/20240305/esp32s3_rev0_rom.elf`。
+反汇编 `0x40005ad8`（我们的 `ic_ebuf_alloc` 符号）发现它只是 thunk：
+```
+__call_ic_ebuf_alloc:
+    l32r a9, <ic_ebuf_alloc>   ; 0x400398a4
+    jx   a9
+```
+真正的 `ic_ebuf_alloc`（`0x400398a4`）：
+```
+entry a1, 32
+l32r  a8, pp_wdev_funcs      ; 0x3fcef944（**可写全局**）
+mov   a12, a4
+l32i.n a8, a8, 0
+mov   a11, a3
+l32i  a8, a8, 0x188          ; ★ pp_wdev_funcs->[0x188]
+mov   a10, a2
+callx8 a8
+mov   a2, a10
+retw
+```
+
+而 `wdev_funcs_init`（`0x42021306`）：
+```
+l32r a2, esf_buf_alloc      ; 0x40388300
+s32i a2, a10, 0x188
+l32r a2, esf_buf_alloc_dynamic
+s32i a2, a10, 0x18c
+```
+⇒ **`pp_wdev_funcs[0x188]` 就是 `esf_buf_alloc`**，
+`pp_wdev_funcs` 在 `0x3fcef944` 是**可写指针** ⇒
+理论上可以在运行时把 `[0x188]` 换成我们自己的分配器。
+
+**但即使换成自己的，返回的缓冲仍要满足 ROM 侧后续的字段校验**（§1293/§1296），
+所以这条也不能单独解决问题。
+
+## §1302 交付终态（最终，round 191）
+
+- 仓库 `main`，工作树干净，构建 `md5=ef9f49823099dbfad1cd1d430be5fb75`。
+- **真板 233 行**（本会话最高；起点 79 行，**+154**）。
+- **四项验收全部未取得**。
+- **目标未完成。**
