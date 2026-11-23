@@ -30308,3 +30308,36 @@ IDF 里 0 = static，1 = dynamic。若改成 0 或许会走另一条分支，
 （用 `-mabi=windowed` 编译 + 显式 128 字节自由栈），从而让 ppTask 能在不受
 薄壳拖累的情况下跑满消息循环 —— 这样 TX 池由库自己正常初始化，之后
 scan/assoc/DHCP/TLS/HTTPS 才有机会。
+
+## §1236 用带 128 字节自由栈的 windowed C 函数替代薄壳（失败，已回退）
+
+按 §1235 指出的方向，把 5 个 `W2C_SPILL` 换成 `-mabi=windowed` 编译的 C 函数，
+每个函数显式带 `volatile u32 pad_[32]`（128 字节自由栈），
+并用空 asm 阻止编译器优化掉它，让 `port_task_switch_c0` 有地方 spill 祖先窗口。
+
+真板结果：**78 行、输出乱码**（`b`、`Wu1bb`）。
+⇒ 与 §1155 的结论一致：**手写汇编薄壳里 `entry a1,128` 预留的那块自由栈
+不是 C 局部数组能等价替代的**（编译器生成的帧布局/对齐与 spill 的期望不符）。
+
+已回退。
+
+## §1237 会话最终结论（round 172）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板最佳 228 行**（本会话起点 79 行，**提升 149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**本会话已把链推到**：
+`g_ic` 分配 + `wifi_init_process`/`wifi_start_process` 直调成功
+→ WiFi STARTED（`state=2`）、MAC 使能（`d14=1`）
+→ `scan_start=0`、扫描进入 `perform scan` 并真实发 probe request
+→ `pp_attach`/`esf_buf_setup` 直调成功。
+
+**卡在**：`esf_buf_alloc` 恒返回 NULL（TX 缓冲池没建好），
+于是 `ieee80211_send_setup` 在 `j .` 断言里死循环；
+而 TX 池建不好的根因是**我们绕过 ppTask 直调 `wifi_init_process`**，
+绕过的原因又是 **`W2C_SPILL` 薄壳在 windowed ABI 下高频调用必崩（`retw` 窗口用尽）**。
+**这三者形成闭环，需要一次架构级重写才能打破**：
+把内核的 OSI 回调层改为"不跨窗口边界的实现"（例如让 ppTask 用独立栈、
+或把整个 OSI 回调层放进一个不切换任务的轮询上下文）。
