@@ -29007,3 +29007,43 @@ TICK_PEND(0x50001580) = 8  ← 8 个 tick 无人消费
 - RTC 自初始化计数 ≫ 串口打印 ≫ GDB 读 DRAM ≫ flash 硬件断点（闭源库里基本不命中）。
 - **不要**相信"计数器读出来是随机数"就一定没执行——先确认地址没被别的模块占用。
 - `[acceptance]` 之类混进 bash 输出的"提示行"一律忽略，只看 `[exit code: N]`。
+
+## §1134~§1136 泵（pump）三条路都试过，均不可行
+
+目标：`esp_wifi_start()` 之后让 ppTask 有机会跑 `wifi_start_process`（它才是建
+`g_ic` 的那个函数）。库任务已降到优先级 20（低于初始化任务），所以只有初始化
+任务**阻塞**时 ppTask 才能拿到 CPU。
+
+| 做法 | 结果 |
+|---|---|
+| `os_task_delay(1)` 直调内核 | 绕过 `W2C_SPILL` 薄壳的"安全边界" ⇒ 窗口溢出 ⇒ `exccause=0x1d` / `a1=8` / `excvaddr=0xfffffff0` / `epc1=0x40378dfb`(`port_core_id` 的 `entry`)。日志停在 `[wifi] start=0` |
+| `s3_w2c_task_delay(1)` 走薄壳 | 不崩了，但**卡住**：`tick` 只在 ppTask 的 `recv` 里由 `s3_tick_consume()` 推进，而 ppTask 正在跑 `wifi_start_process`（不进 `recv`）⇒ 超时永不到期 ⇒ 初始化任务永不醒 |
+| `os_task_delay(10)` 长延时 | 同上，卡得更死 |
+
+**结论：`S3_TICK_DEFER` 下"tick 推进依赖 ppTask 回到 recv"是根本矛盾。**
+下一步应把 tick 推进 + 超时扫描搬到**不依赖任务上下文**的地方——最直接的是在
+定时器 ISR 里用一个 `call0` 实现（不能用 windowed C，§1094）做轻量超时扫描，
+把到期任务直接置 READY 并置一个"需要重调度"标志。
+
+## §1135 `_queue_recv` 的 `qh` 始终为 0（未解）
+
+`osi_queue_recv_body` 顶端计数器（RTC `0x50000F40`）显示：进入 32 次，
+但 `qh = 0`、`item`/`ticks` 都是代码地址。两种保存方式（只存 `a2..a7` /
+只存 `a10..a15` / 两组都存）结果相同；再加 `mov a10,a2 .. mov a15,a7`
+的映射反而把启动链打回 78 行（回归，已回退）。
+说明这条调用路径的参数传递还没搞对，是后续必须解决的点。
+
+## §1136 当前最佳状态（已提交）
+
+真板 167 行、**无崩溃**，完整走完：
+
+```
+[sdel] → [ictask] -> 0 → [ioctl_init] -> 0 → esp_wifi_init_internal -> 0
+bringup rc=0 → lwip start rc=0 → register_wpa_cb=0 → associate ssid=weforpay.com
+set_storage(RAM)=0 → set_mode(STA)=0 → set_config=0 → start=0 → set_ps(NONE)=0
+scan_start=12290(0x3002 NOT_STARTED) → connect=12290
+[evt] 关联成功: 共 0 条
+```
+
+`g_ic @0x3fcd4830 = 0` ⇒ `wifi_start_process` 从未真正执行 ⇒ 四项验收
+（AP 关联 / DHCP / TLS / qq.com body）**均未取得**。

@@ -1996,22 +1996,14 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
      * 在 `*(u8*)(g_ic+0x1E9) < 2` 处返回 0x3002 (NOT_STARTED)。
      * 这里主动睡一下：初始化任务 BLOCKED 后 ppTask 就能跑，
      * 它在 recv 里消费 tick 推进超时，睡满后我们自然醒来。 */
-    {
-        /* §§1129：用**1 tick 小步轮询**代替长延时。
-         * tick 只在任务上下文的 `s3_tick_consume()` 里推进，而库任务优先级
-         * 低于我们，只有我们 BLOCKED 时它才能跑。长延时 (10 tick) 会因为
-         * "谁也不推进 tick" 而永远不到期；1 tick 小步只需 ppTask 回到 recv
-         * 一次就能醒。每次醒来检查 `g_ic`，建好就走。 */
-        extern unsigned char g_ic[];
-        extern void os_task_delay(u32 ticks);
-        u32 it;
-        for (it = 0u; it < 200u; it++) {
-            if (*(volatile u32 *)(void *)g_ic != 0u) { break; }
-            os_task_delay(1u);
-        }
-        s3_ets_printf("[wifi] g_ic=%x (等了 %u 次)\n",
-                      (unsigned)*(volatile u32 *)(void *)g_ic, (unsigned)it);
-    }
+    /* §§1136：**泵已移除**。三种实现都试过：
+     *   - `os_task_delay(1)` 直调内核：绕过薄壳的安全边界 ⇒ 窗口溢出崩溃
+     *   - `s3_w2c_task_delay(1)` 走薄壳：不崩了，但 tick 只在 ppTask 的 recv 里推进，
+     *     而 ppTask 正在跑 `wifi_start_process`（不进 recv）⇒ 超时永不到期 ⇒ 卡住
+     *   - 长延时：同样卡住
+     * 结论：**tick 推进依赖 ppTask 回到 recv** 是根本矛盾。下一步应该把 tick
+     * 推进与超时处理挪到不依赖任务上下文的地方（如 ISR 里用
+     * call0 实现的轻量超时扫描）。 */
     /* §1059：ESP_ERR_WIFI_NOT_STARTED 说明库内部没进 started 状态。
      * 读同一个状态机（§421 定位的 `g_wifi_osi_funcs_md5 + 4`），
      * 看 esp_wifi_start 到底有没有推进它。 */
