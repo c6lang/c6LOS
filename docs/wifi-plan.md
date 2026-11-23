@@ -30521,3 +30521,28 @@ windowed ABI 移植还支撑不住 ppTask 的高频 OSI 回调。
 - 仓库 `main`，工作树干净，最新提交 `461e26b`。
 - 最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`，真板稳定 **227~228 行**。
 - **四项验收全部未取得。目标未完成，不应标记 complete。**
+
+## §1254 绕过 `config_is_cache_tx_buf_enabled()` 直调 static setup（失败，已回退）
+
+`esf_buf_setup` 的 dynamic 分支里，只有当 ROM 函数
+`config_is_cache_tx_buf_enabled()` 返回非 0，才会调
+`esf_buf_setup_static(9, menuconfig+20, 0x640 - list_desc[192])`。
+真板上它很可能返回 0 ⇒ 整段被跳过。
+
+直接绕过条件调用：
+```
+[esfstatic] idx9 cnt=32 sz=1564 r=257    ← 仍 0x101
+[esfalloc] -> 0
+[wifi] scan_start=12290                  ← 反而退回 NOT_STARTED
+```
+⇒ `esf_buf_setup_static` 里仍然要 `esf_buf_alloc_dynamic`，
+而那需要一块 **1564 字节**的缓冲 —— 库的 `eb_space` 只有 192 字节，
+池子必须由 `_wifi_malloc` 提供，而它**零调用**（§1246）。
+**鸡生蛋闭环第二次被证实，无法用手动补丁绕开。**
+
+## §1255 交付终态（最终）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板稳定 227~228 行**（本会话起点 79 行，**提升 148~149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
