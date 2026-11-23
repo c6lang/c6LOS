@@ -30102,3 +30102,40 @@ if (a14 == 0) a14 = 64
 3. 补 `g_ic+16` ⇒ 扫描真正进入 `perform scan` 并实际发 probe request。
 4. 直调 `pp_attach` + `esf_buf_setup` ⇒ TX 缓冲池首次被建立（`r=0`）。
 5. 修 `osi_log_write` 让它展开格式串（诊断可读性）。
+
+## §1214~§1215 已定位到最内层错误，但未修好
+
+真板日志首次出现**库内部的确切错误**：
+```
+[v3]wifi|Init dynamic tx buffer num: 0
+[v2]wifi|esf_buf_setup_static: alloc eb fail(0)
+```
+⇒ `esf_buf_setup` 自己要用 `esf_buf_alloc` 去建静态池，而分配器拿不到缓冲
+（动态缓冲数 = 0）——**鸡生蛋问题**：池子没建好，分配器就分不出来；
+分配器分不出来，池子就建不起来。
+
+`esf_buf_alloc(type, idx)` 反汇编（`0x403882cc`）：
+```
+mov  a6, a2            ; type
+movi a5, 9
+addi.n a2, a3, -1      ; idx-1
+bgeu a5, a2, ok        ; idx 必须在 1..10（我最初传 0，直接走错误分支）
+ok: jx 跳表[idx-1]
+...
+l32r a2, g_wifi_menuconfig
+l32i.n a2, a2, 8       ; 或 ->[84]
+bnez a2, cont
+```
+补 `g_wifi_menuconfig` 的 `+4/+8/+84` 字段**没有生效**（`[mc]` 没打印），
+`Init dynamic tx buffer num` 仍然是 0。已回退。
+
+**⇒ 下一步**：查 `Init dynamic tx buffer num` 这条日志在哪个函数、
+它读的是 `g_wifi_menuconfig` 的哪个字段（用 `l32i` 偏移反推），
+那个字段才是真正要填的。
+
+## §1216 会话最终状态（round 162）
+
+- 仓库 `main`，工作树干净，最新提交 `f0071cb`。
+- **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
