@@ -29947,3 +29947,51 @@ retw.n
 - **真板最佳 209~210 行**（会话起点 79 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成。**
+
+## §1205 给下一次接续的简明索引
+
+**当前状态一句话**：WiFi 已 STARTED（`g_ic` 已分配 + `wifi_init_process`/
+`wifi_start_process` 已直调成功），扫描进入 `perform scan` 并在真实发送
+probe request；卡在 **TX 缓冲池未初始化**（`esf_buf_alloc` 走
+`return NULL` 的默认 handler）导致 `ieee80211_send_setup` 的 `j .` 死循环。
+四项验收（AP 关联 / DHCP / TLS / qq.com body）全部未取得。
+
+**复现步骤（三步）**：
+```bash
+cd /home/winger/rtos-c6
+export LD_LIBRARY_PATH=/home/winger/c6/tcc:$LD_LIBRARY_PATH
+
+# 1) 构建
+make C6_ROOT=/home/winger/c6 S3_ABI=windowed S3_APP_BASE=0x20000 S3_NO_PREEMPT=1 \
+  S3_TARGET_BSSID=1 \
+  S3_CDEFS="-DS3_INJECT_IDF_CAL -DS3_TRACE_IOCTL -DS3_TRACE_SCANMSG -DS3_SCAN_CHAN39 \
+    -DS3_FORCE_SYNC_SCAN -DS3_RC_SEED -DS3_RC_DRIVE -DS3_RC_HANDOFF -DS3_ONE_ABI \
+    -DS3_SKIP_FLASH_INIT -DS3_STA_CHANNEL6 -DS3_TICK_DEFER -DS3_HOME_EARLY" \
+  S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_ONE_ABI -DS3_SKIP_FLASH_INIT -DS3_TICK_DEFER" https
+
+# 2) 刷写（正常复位，不要用 JTAG reset）
+pkill -x openocd 2>/dev/null
+esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset \
+  --after hard-reset write-flash 0x20000 build/wifi/c6os.bin
+
+# 3) 抓串口
+timeout 140 python3 tools/cap.py -t 130 > /tmp/run.txt 2>&1
+wc -l /tmp/run.txt      # 期望 ~209-210 行
+```
+
+**关键文件与位置**：
+- `port/s3/wifi_glue.c`
+  - `s3_wifi_bringup()` 里的"直调 `wifi_init_process`/`wifi_start_process`"（§1165）
+  - `__wrap_pp_post()` 里的 IC 分配 + `msg->[12]` 补丁（§1164）
+  - `s3_fix_ic16()` —— 补 `g_ic+16`（§1182，必须在 `.flash.text`）
+  - `osi_wifi_int_disable/restore` —— 空操作，消除时序窗口（§1169）
+  - `s3_wifi_scan()` 里的扫描直调块（§1178/§1182）
+- `port/s3/w2c.S` 的 `W2C_SPILL` 五壳（§1114：必须每壳独立 RTC 槽）
+- `kernel/task.c6`、`kernel/tick.c6`、`port/s3/irq.c`
+
+**最值得先做的三件事**：
+1. 查 `esf_buf` 的分配器指针（`esf_buf_alloc` 里间接调用的那个全局）在真板上的值——
+   若仍是 `0x4201c8e4`（`return NULL`），说明 `hal_init`/`pp_attach` 没生效。
+2. 顺着 `pp_attach` → `esf_buf_setup` 找到真正的装载点，并确认它为什么没跑
+   （很可能因为我们是"直调 `wifi_init_process`"绕过了 ppTask 的正常序列）。
+3. 一旦 TX 通了、扫描能收到 AP，再往 `esp_wifi_connect` → DHCP → TLS → HTTPS 推进。
