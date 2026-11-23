@@ -147,6 +147,10 @@ INT32 LOS_FsClose(INT32 fd)
     if (f == (OsFile *)0) {
         return 0 - OS_E_BADF;
     }
+    if (f->refs > 1u) {
+        f->refs--;                         /* 还有 dup2/fork 出来的引用 */
+        return 0;
+    }
     rc = close_(&g_os_mounts[f->mnt], f->fh);
     os_vfs_file_free((int)fd);
     return (INT32)rc;

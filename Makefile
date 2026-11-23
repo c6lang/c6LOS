@@ -2233,6 +2233,41 @@ check-alpine-apps: x86-alpine-apps
 	  || { echo "FAIL: alpine apps（脚本没跑完）"; tail -40 /tmp/check-alpine-apps.log; exit 1; }
 	@echo "PASS: alpine apps（cat/tar + /data FAT 读写 + 句柄回收）"
 
+# ---- 全量 busybox applet 矩阵：真实 Alpine busybox 3.20 的 304 个 applet ----
+# 扫描脚本 tests/alpine/busybox-sweep.sh 拷进 initramfs 的 /etc/，由
+# t_iso_alpine.c6 的 C6OS_ALPINE_BUSYBOX 分支用 `sh` 跑：
+#   A 段 304 个 applet × 两种派发形式（argv[1] / argv[0] 符号链接）
+#   F 段在 /data 上逐条验证真实输出（文本/文件/进程/压缩/网络/错误路径）
+# 期望值 tests/alpine/busybox-baseline.tsv 是宿主上同一份 minirootfs 的结果，
+# 差异即本内核的 Linux ABI 缺口；豁免清单与汇总在 tools/busybox-matrix.py。
+# 独立 ISO 名，并在本目标里显式重打 cpio（其它 alpine 目标不感知这个文件）。
+ALPINE_BX_SH  := $(ALPINE_ROOT)/etc/busybox-sweep.sh
+ALPINE_BX_ISO := $(ALPINE_DIR)/busybox.iso
+
+x86-alpine-busybox: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@mkdir -p $(ALPINE_ROOT)/etc
+	cp tests/alpine/busybox-sweep.sh $(ALPINE_BX_SH)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 C6_DEFS=-DC6OS_ALPINE_BUSYBOX \
+		$(ISO_KER)
+	python3 tools/mk-initramfs.py $(ALPINE_CPIO) $(ALPINE_ROOT)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_BX_ISO)
+
+# 总预算 1800s：F 段 140 多次 + A 段 608 次 fork + 动态装载，全程确定（无网络
+# 等待），但单次 fork+exec 在本内核上约 1 秒，整轮 15 分钟左右。
+# 引导/串口看门狗和重试逻辑在 tools/run-alpine-sweep.sh：串口日志必须直接重
+# 定向到文件（`| tr | tee` 这条管道会在大约 4KB 处整体停住，客户机卡在串口
+# 轮询里）；90s 没看到 alive 标记就杀掉重试，最多 3 次。
+check-alpine-busybox: x86-alpine-busybox
+	sh tools/run-alpine-sweep.sh $(ALPINE_BX_ISO) $(ALPINE_DATA) \
+		/tmp/check-alpine-busybox.log bx-sweep-alive bx-sweep-done 1800 \
+	  || { echo "FAIL: alpine busybox（扫描没跑完）"; tail -40 /tmp/check-alpine-busybox.log; exit 1; }
+	python3 tools/busybox-matrix.py /tmp/check-alpine-busybox.log \
+		tests/alpine/busybox-baseline.tsv
+
 check-alpine:
 	@rm -f $(ALPINE_DATA)
 	@$(MAKE) x86-alpine

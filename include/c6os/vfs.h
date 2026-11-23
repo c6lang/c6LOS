@@ -56,6 +56,7 @@ int os_vfs_umount(const char *path);
 int os_vfs_file_alloc(u32 mnt, u32 flags, void *fh);
 OsFile *os_vfs_file_get(int fd);
 void os_vfs_file_free(int fd);
+void os_vfs_file_dup(int fd);          /* dup2/fork 共享：引用计数 +1 */
 
 /* romfs.c6：newc cpio 只读后端 */
 int romfs_mount(OsMount *m, void *data);

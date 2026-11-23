@@ -93,6 +93,16 @@ static const char kScript[] =
      * 因此漏掉了这个 bug）。 */
     "curl -sS https://qq.com && echo curl-tty-ok; "
     "echo curl-done";
+#elif defined(C6OS_ALPINE_BUSYBOX)
+/* 全量 busybox applet 矩阵：脚本在 initramfs 的 /etc/busybox-sweep.sh（由
+ * Makefile 的 x86-alpine-busybox 拷进去），A 段把 304 个 applet 各跑两种派发
+ * 形式（argv[1] / argv[0]）一次，F 段在 /data 上做功能性验证。脚本只打结果行
+ * （XA|applet|rc、XB|applet|rc、OK|name、NO|name|rc），两个总标记由这里打，
+ * 这样脚本没跑到底时 check 目标一眼能看出来。 */
+static const char kScript[] =
+    "echo bx-sweep-alive; "
+    "sh /etc/busybox-sweep.sh; "
+    "echo bx-sweep-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
  * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。

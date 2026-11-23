@@ -41,6 +41,7 @@ check-udp
 check-tcp
 check-alpine
 check-alpine-apps
+check-alpine-busybox
 check-linuxabi-m35
 check-linuxabi-m38
 check-linuxabi-m39

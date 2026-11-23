@@ -62,6 +62,7 @@ static char g_vpath[OS_MAX_FILES][LOS_FS_PATH_MAX];
 
 static char g_dpath[LX_MAX_VDIR][LOS_FS_PATH_MAX];
 
+
 static u64 vfs_dir_slot_(const char *abspath)
 {
     u32 i = 0u;
@@ -1992,6 +1993,60 @@ void lx_fs_set_cwd(char *p)
     g_cwd = (p != (char *)0) ? p : g_cwd_root;
 }
 
+/* 复制一个 fd 槽的“文件描述符引用”：dup2/fork 共享同一个后端句柄，
+ * 每个副本各持一份引用，最后一个 close 才真正关。 */
+void lx_fs_ref_ent(const LxFile *f)
+{
+    if (f == (const LxFile *)0 || f->kind != LX_FD_VFS) {
+        return;
+    }
+    if (f->node < LX_VDIR_BASE) {
+        os_vfs_file_dup((int)f->node);
+    }
+}
+
+/* fork 之后给新表里每个 VFS fd 加引用（子进程退出时只放自己那一份）。 */
+void lx_fs_ref_fdtab(LxFdTab *t)
+{
+    u32 i;
+
+    if (t == (LxFdTab *)0) {
+        return;
+    }
+    for (i = 0u; i < t->cap; i++) {
+        lx_fs_ref_ent(&t->ent[i]);
+    }
+}
+
+/* VFS 文件的释放，按 **fd 槽** 而不是 fd 号：进程退出时 fd 表整个销毁
+ * （linux/fdt.c 的 free hook 拿到的就是槽），没有"当前进程的 fd 号"可用。
+ * close / dup2 覆盖 / 进程退出三条路径共用这一份回收逻辑，FAT_MAX_FILES
+ * 句柄才不会随子进程退出泄漏（F 段跑到几十条就 "Out of memory"）。 */
+void lx_fs_release_vfs(LxFile *f)
+{
+    if (f == (LxFile *)0 || f->kind != LX_FD_VFS) {
+        return;
+    }
+#if C6OS_VFS
+    if (f->node >= LX_VDIR_BASE) {
+        u32 sl = (u32)(f->node - LX_VDIR_BASE);
+
+        if (sl < (u32)LX_MAX_VDIR) {
+            g_dpath[sl][0] = '\0';
+        }
+    } else {
+        (void)LOS_FsClose((INT32)f->node);
+        if (f->node < (u64)OS_MAX_FILES) {
+            g_vpath[(u32)f->node][0] = '\0';
+        }
+    }
+#endif
+    f->node = LX_FD_NONE;
+    f->pos = 0ull;
+    f->is_dir = 0u;
+    f->kind = LX_FD_FILE;
+}
+
 u64 lx_fs_close(u64 fd)
 {
     LxFile *f = fd_get(fd);
@@ -1999,22 +2054,10 @@ u64 lx_fs_close(u64 fd)
     if (f == 0 || fd <= 2ull) {
         return (u64)0 - LX_EBADF;
     }
-#if C6OS_VFS
     if (f->kind == LX_FD_VFS) {
-        if (f->node >= LX_VDIR_BASE) {
-            u32 sl = (u32)(f->node - LX_VDIR_BASE);
-
-            if (sl < (u32)LX_MAX_VDIR) {
-                g_dpath[sl][0] = '\0';
-            }
-        } else {
-            (void)LOS_FsClose((INT32)f->node);
-            if (f->node < (u64)OS_MAX_FILES) {
-                g_vpath[(u32)f->node][0] = '\0';
-            }
-        }
+        lx_fs_release_vfs(f);
+        return 0ull;
     }
-#endif
     f->node = LX_FD_NONE;
     f->pos = 0ull;
     f->is_dir = 0u;

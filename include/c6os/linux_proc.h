@@ -365,6 +365,9 @@ u64  lx_console_write(u64 fd, u64 ubuf, u64 len);
 u64  lx_console_put(u64 ubuf, u64 len);             /* 按 node 判定后直写控制台 */
 void lx_fs_set_fdtab(LxFdTab *t);                  /* linux/fs.c */
 LxFdTab *lx_fs_get_fdtab(void);                    /* 登记进程时接管兜底表 */
+void lx_fs_release_vfs(LxFile *f);                 /* 按 fd 槽回收 VFS 句柄 */
+void lx_fs_ref_ent(const LxFile *f);               /* dup2：加一份句柄引用 */
+void lx_fs_ref_fdtab(LxFdTab *t);                  /* fork：新表逐槽加引用 */
 /* M15：写类/属性类 syscall（linux/fs.c；sys.c 只做分派） */
 u64  lx_fs_mkdirat(u64 dirfd, u64 upath, u64 mode);
 u64  lx_fs_rmdir(u64 upath);
