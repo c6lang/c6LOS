@@ -655,6 +655,17 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         rr[(k_ & 3u) * 3u + 1u] = (u32)qh;
         rr[(k_ & 3u) * 3u + 2u] = ticks;
     }
+    /* ★★★ §1086：qh 为 NULL 时直接返回失败。
+     *
+     * §1085 真板实测：ppTask 首次被切进去时，库传给 `_queue_recv` 的
+     * 队列句柄就是 **NULL**（崩在 `l32i.n a9, a7, 40`，a7=0、EXCVADDR=0x28）。
+     * 让 body 去解引用空指针只会把整个系统打死；按"没收到"返回，
+     * 库自己会重试或走别的路径。 */
+    if (qh == 0) { return 0; }
+    /* §1087：库有时会传进来一个**垃圾小值**（真板实测 qh=0x05，
+     * EXCVADDR=0x2d = 5+40，崩在 wq_resolve 的 l32i a8,a2,40）。
+     * DRAM/flash 上的合法指针都 ≥ 0x3f000000，小值一律当"没收到"处理。 */
+    if ((u32)qh < 0x3f000000u) { return 0; }
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_recv);
