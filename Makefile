@@ -3303,6 +3303,7 @@ WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
              -Wl,--wrap=wifi_init_in_caller_task \
              -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
              -Wl,--wrap=pm_offchan_ready_or_defer -Wl,--wrap=chm_acquire_lock \
+             -Wl,--wrap=config_is_cache_tx_buf_enabled \
              -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan \
              -Wl,--wrap=ic_tx_pkt
 # §846: S3_TARGET_BSSID 时在 flash 侧 wrap get_ap_records，把扫描结果的 BSSID

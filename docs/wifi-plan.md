@@ -30546,3 +30546,25 @@ windowed ABI 移植还支撑不住 ppTask 的高频 OSI 回调。
 - **真板稳定 227~228 行**（本会话起点 79 行，**提升 148~149 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1256 `config_is_cache_tx_buf_enabled` 强制返回 1（真板 230 行，新最佳）
+
+`esf_buf_setup` 的 dynamic 分支里，只有这个 ROM 函数返回非 0 才会去建 TX 池。
+用 `-Wl,--wrap=config_is_cache_tx_buf_enabled` + 返回 1 的 wrapper，
+反汇编确认 `4201cbd7: call8 4201158c <__wrap_...>` **确实生效**。
+
+真板 **230 行**（此前 228，会话新高）。
+但 `esfalloc -> 0` 仍为 NULL、`Init static tx FG buffer num: 0`，
+PC 仍在 `ieee80211_send_setup+36` 的断言循环。
+⇒ 说明"是否走这条路"已经解决，但**池子本身还是建不出来**
+（`esf_buf_setup_static` 内部仍要 `esf_buf_alloc_dynamic`，
+而它依赖从 `_wifi_malloc` 来的缓冲，那个调用零次）。
+
+**试过 count=32 ⇒ 153 行（越界损坏）**，已回退为无参调用。
+
+## §1257 交付终态（round 176）
+
+- 仓库 `main`，工作树干净，最佳构建见本轮提交。
+- **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**

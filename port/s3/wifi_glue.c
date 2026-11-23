@@ -3179,6 +3179,17 @@ void s3_fix_ic16(void)
     }
 }
 
+/* §§1256 ★★★★ `esf_buf_setup` 的 static 分支被 ROM 函数
+ * `config_is_cache_tx_buf_enabled()` 门控：返回 0 就不去建 TX 缓冲池。
+ * 真板上它很可能返回 0，于是 `_wifi_malloc` 零调用、
+ * `esf_buf_alloc` 恒 NULL、`ieee80211_send_setup` 断言死循环。
+ * 这里强制让它返回 1。 */
+__attribute__((section(".flash.text")))
+int __wrap_config_is_cache_tx_buf_enabled(void)
+{
+    return 1;
+}
+
 int __wrap_pp_post(unsigned int ppq, unsigned int data)
 {
     s3_wrap_bump(7u);
