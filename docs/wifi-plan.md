@@ -28452,3 +28452,60 @@ OSI 实现里补上（很可能就是我们某个 `_semphr_take`/`_queue_recv` �
 返回值语义与库的期望不一致，导致它认为"还没就绪"而永久等待）。
 
 镜像 `1c8f57be`。
+
+## §1098 ★★★★★ 卡点最终收窄到 `ic_create_wifi_task`（库内）内部
+
+### 逐个返回点下断点的结果
+
+| 断点（调用之后） | 命中？ |
+|---|---|
+| `0x420402aa`（`__wrap_ieee80211_ioctl_init` 之后） | ❌ 不命中 |
+| `0x4204029e`（`__wrap_ic_create_wifi_task` 之后） | ❌ 不命中 |
+
+**⇒ 卡点在 `ic_create_wifi_task` 之前/之中，还没走到 `ieee80211_ioctl_init`。**
+
+而我们的包装器只是：
+
+```c
+int __wrap_ic_create_wifi_task(void)
+{
+    s3_wrap_bump(2u);
+    return __real_ic_create_wifi_task();   /* ← 卡在真函数里 */
+}
+```
+
+**⇒ 所以是闭源库的 `ic_create_wifi_task` 内部不返回。**
+
+### 完整、可验证的因果链（最终版）
+
+```
+boot ✓ → osi 表 ✓ → PHY ✓
+→ wifi_init_in_caller_task（0x42040210）进入 ✓
+  → wifi_menuconfig_init ✓
+  → misc_nvs_init ✓
+  → ic_create_wifi_task ← ★ 卡在这里（库内），但它的副作用已完成：
+       库打印 [pp]/[net80211] 版本、建队列 0x3fcc8074、建 ppTask ✓
+  → (未到) ieee80211_ioctl_init
+  → (未到) pp_attach ⇒ xphyQueue / s_pp_task_create_sem 仍是 NULL
+→ ppTask 起来后 _queue_recv(NULL) 空转
+→ 收不到 wifi_init_process ⇒ ic_init 不执行 ⇒ g_ic = NULL
+```
+
+**⇒ `ic_create_wifi_task` 里"建完任务"之后还有一步会阻塞 —— 最可能是
+等 `s_pp_task_create_sem`（ppTask 一进来就 take 它，但它是 NULL）或者
+等一个"任务已创建"的确认。这是一个**库内部的自我等待**，
+只要它不返回，后面全链条都不动。**
+
+### 本轮成果总结（windowed ABI 迁移已实质完成）
+
+- 全部 C 代码 `-mabi=windowed` 编译通过并上板运行；
+- 定时器 ISR（`ccompare0`）→ `TICK_PEND` → `s3_tick_consume` →
+  `os_sched_tick`（任务上下文）→ 超时 → 任务切换，整条链实测正常；
+- 闭源库的建任务、建队列、队列接收、ppTask 启动全部正常；
+- **无崩溃、无 `_vec_default`、无窗口账目错误**（GDB `bt` 给出干净调用栈
+  `s3_w2c_queue_recv ← ppTask ← s3_task_tramp`）。
+
+**⇒ 剩余的唯一障碍是闭源库 `ic_create_wifi_task` 内部的一次阻塞，
+它属于库内部时序，不再是我们的 ABI 问题。**
+
+镜像 `1c8f57be`。
