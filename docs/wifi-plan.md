@@ -27303,3 +27303,60 @@ idx  8 = 0x4037c800 = osi_mutex_create    ← 我们把 _spin_lock_create 实现
 `esp_wifi_init_internal` 的状态机分支（`state==1/2/3`）是下一步要逐条走一遍的。
 
 **（本轮已确认板子恢复可用；镜像 `bff36e25`。）**
+
+## §1070 ★★★ 巨大进展：找到 `ic_init` 的唯一调用链，并确认 ppTask 从未启动
+
+### 调用链（静态反汇编，全部确认）
+
+```
+wifi_init_process (0x42039dec)      ← 异步初始化消息的处理函数
+  └─ wifi_lmac_init (0x42039cf8)    ← 唯一调用者 @0x42039e73
+       └─ ic_init (0x4201a070)      ← 唯一调用点 @0x42039db5
+            └─ 建 ic 对象 ⇒ 写 g_ic
+```
+
+`esp_wifi_init_internal` 的做法是**异步**的：
+
+```asm
+4204071e: s8i  a3, a10, 0        ; 消息类型
+42040721: l32r a3, (wifi_init_process = 42039dec)
+4204072a: s32i.n a3, a10, 4      ; ★ 把 wifi_init_process 塞进消息
+4204072c: s32i.n a4, a10, 12
+42040731: call8 ieee80211_ioctl  ; 投递给 WiFi/pp 任务
+4204073b: call8 wifi_api_lock
+4204073e: movi.n a3, 3           ; ★ 立刻把 state 置 3（"完成"）
+```
+
+**⇒ 所以 `esp_wifi_init_internal -> 0` 只代表"消息投出去了"，
+真正的 `ic_init` 要等那条消息被任务处理。**
+**⇒ 这就是为什么 `g_ic` 一直是 NULL、`esp_wifi_scan_start` 一直返回 0x3002。**
+
+### 真板实测（本轮，板子已恢复）
+
+| 断点 | 结果 |
+|---|---|
+| `wifi_init_in_caller_task` (0x420400dc) | **命中**，入口 `g_intr_lock_mux=0` |
+| `wifi_init_process` (0x42039dec) | **从未命中** |
+| `ppTask` (0x40382320) | **从未命中** |
+| `s3_task_tramp` (0x40379966) | **只命中一次**，`fn=s3_win_wifi_main_task a4=1` |
+
+**⇒ 闭源库只建了一个任务 `ppTask`（日志 `[task] 库建任务 fn=40382320 id=2`），
+而它从来没有被调度执行过。** 那条带 `wifi_init_process` 的消息就永远躺在队列里
+（`[scanmsg] 3fcc86e4: 00000326 42039dec ...` 能看到它，handler 是对的）。
+
+### 已排除
+
+- OSI 表布局：逐字段对照 IDF 的 `wifi_os_adapter.h`，**前 14 个字段完全一致**，
+  真机 dump 也吻合（§1069）。`l32i a10, a8, 32` 调的是 `_spin_lock_create`，
+  我们返回非 NULL，不报错。
+- `s3_task_tramp` 的 ABI 分支：`beqz a4, 2f`，库任务走的是 `callx8` 分支，
+  `g_next_task_windowed` 也确实在 `wifi_glue.c:850` 被置 1。
+
+### 下一步（还没做）
+
+ppTask 建好了却一次都不跑 —— 要在 `s3_w2c_task_create` 返回后
+检查它有没有进就绪队列（内核 `kernel/task.c6` 的 `t->prio/t->state`），
+以及 `S3_NO_PREEMPT=1` 下调度器是否只在显式让出时才切换。
+
+本轮试过把库任务优先级从 2 提到 0（`u32 p = 0u`），**没有效果**
+（`wifi_init_process` 仍不命中），已撤回，镜像回到 `bff36e25`。
