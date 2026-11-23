@@ -2036,6 +2036,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 int rp = pp_attach();
                 s3_ets_printf("[ppattach] r=%d\n", rp);
             }
+            /* §§1210 ★★★：`pp_attach` 只能执行一次（真板返回 0x101），
+             * 而它里面的 `esf_buf_setup`（建 TX 缓冲池）那次没成功。
+             * 真板证据：`eb_txdesc_space @0x3fcbbf00` 全 0 ⇒ 池子没建。
+             * 直接再调一次 `esf_buf_setup()`。 */
+            {
+                extern int esf_buf_setup(void);
+                int rb = esf_buf_setup();
+                s3_ets_printf("[esfsetup] r=%d\n", rb);
+            }
         }
         rs = wifi_start_process();
         s3_ets_printf("[direct] init=%d start=%d state=%u\n",

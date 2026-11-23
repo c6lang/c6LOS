@@ -30043,3 +30043,29 @@ if (a14 == 0) a14 = 64
 - **真板最佳 216 行**（会话起点 79 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1210 直调 `esf_buf_setup()`（真板 222 行，会话最佳）
+
+`pp_attach` 只能执行一次（真板返回 `0x101 = ALREADY_INIT`），
+而它里面那次 `esf_buf_setup` 没成功（`eb_txdesc_space` 全 0）。
+所以在 `pp_attach()` 之后**再直接调一次 `esf_buf_setup()`**：
+
+```
+[ppattach]  r=257
+[esfsetup]  r=0        ← 成功
+[direct] init=0 start=0 state=2
+[wifi] scan_start=0
+```
+
+真板 **222 行**（会话最佳，起点 79 行）。
+`eb_txdesc_space` 那段现在有非零内容（`0x00030000`），说明池子建了一部分。
+
+**但 PC 仍停在 `ieee80211_send_setup+36`（同一个 `j .` 断言循环）**
+⇒ `esf_buf_alloc` 仍然拿不到缓冲。池子的链表头/计数可能还需要更多字段。
+
+## §1211 会话最终状态（round 159）
+
+- 仓库 `main`，工作树干净。
+- **真板最佳 222 行**（会话起点 79 行，提升 143 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
