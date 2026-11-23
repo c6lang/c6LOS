@@ -96,7 +96,9 @@ static void s3_timer_rearm(void)
 
     __asm__ __volatile__("rsr %0, ccount" : "=r"(cc));
     cc = cc + (S3_XTAL_HZ / S3_IRQ_HZ);
-    __asm__ __volatile__("wsr %0, ccompare0" : : "r"(cc));
+    /* §1079：写 CCOMPARE 之后必须 rsync，否则比较值可能不生效（真板实测
+     * ccount 已越过 ccompare0 却没有触发定时器中断）。 */
+    __asm__ __volatile__("wsr %0, ccompare0; rsync" : : "r"(cc));
 }
 
 void s3_irq_init(void)
@@ -105,7 +107,7 @@ void s3_irq_init(void)
     u32 old = 0;
     s3_timer_rearm();
     __asm__ __volatile__("rsr %0, intenable" : "=r"(old));
-    __asm__ __volatile__("wsr %0, intenable" : : "r"(old | mask));
+    __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(old | mask));
 #ifndef S3_IRQ_HOLD_OFF
     /* 排查用开关：定义 S3_IRQ_HOLD_OFF 时先不开中断（验证非中断路径） */
     __asm__ __volatile__("rsil a2, 0" : : : "a2");

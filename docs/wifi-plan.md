@@ -27625,3 +27625,44 @@ PS = 0x60225（INTLEVEL=5）
 避免在最高屏蔽级别下空转。
 
 （本轮无代码改动，仅诊断。镜像 `8bbb84ad`。）
+
+## §1079 补 rsync 仍未让定时器持续触发；但把整条链的"最后一环"钉死在中断使能上
+
+### 本轮新增的硬数据
+
+在 `os_task_delay` 真入口（`0x42016820` ← 壳里 `callx8` 的目标，
+**之前用的 0x42016754 是上一版构建的旧地址，测了个寂寞**）断点采样：
+
+```
+delay#1  a2=1  PS=0x60200 (INTLEVEL=0)  intenable=0x42 (bit6=定时器 开)
+delay#2  a2=1  PS=0x60404 (INTLEVEL=4)
+ccount   = 63,984,318   ccompare0 = 64,129,817   diff = +145,499  ← 比较值在前
+（一次 delay 之后）
+ccount   = 66,023,229   ccompare0 = 64,129,817   diff = -1,893,412 ← 已越过却没进中断
+```
+
+**⇒ INTLEVEL=0、intenable bit6 开、ccompare0 确实被越过 —— 定时器中断依然没有
+触发，而且 `ccompare0` 没有被重装。** 这是本轮最硬的矛盾点。
+
+`PEND` 从 12 掉到 4 说明**消费端 `s3_tick_consume` 在工作**，
+但 `g_s3_diag[9]`（`s3_timer_irq` 进入次数）**本轮为 0** ⇒ ISR 一次没进，
+被消费掉的 12 个是**上一次启动残留在 RTC 里的值**。
+
+### 本轮改动（保留）
+
+`port/s3/irq.c`：`wsr ccompare0` 与 `wsr intenable` 之后补 `; rsync`
+（Xtensa 写特殊寄存器后需要同步）。构建通过（`6dc85213`），
+但真板复测 `ISR` 仍为 0 ⇒ **不是 rsync 的问题**。
+
+### 结论 / 下一步
+
+定时器中断"该来却没来"，而 CPU 侧三个条件（INTLEVEL、intenable、
+ccompare 越过）都满足。剩下只有两种可能：
+
+1. **`XCHAL_TIMER0_INTERRUPT` 不是 6**（工具链里 `core-isa.h` 没定义这一项，
+   本轮的取值来自旧注释，需要用 `xtensa-config.h` 或真板实测确认）；
+2. 向量表 `.org 0x300`（level-1）没被正确安装，或 `_vec_level1` 里
+   `exccause == 4` 的判断在这个芯片上不成立。
+
+**验证办法（一轮够）**：把 `intenable` 的**每一位**逐个打开并观察
+`g_s3_diag[9]`，或者直接在 `_vec_level1` 入口下断点看它到底有没有进。
