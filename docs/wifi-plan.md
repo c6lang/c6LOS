@@ -28630,3 +28630,57 @@ PHY/RF 的同步等待）。
   就会读到非法地址 ⇒ 卡住/异常。**
 
 镜像 `1c8f57be`。
+
+## §1102 修正 §1101：`osi_funcs[95]` 没被调，卡点在 `pp_create_task` 前半段
+
+### 反汇编最后一段（看清了）
+
+```asm
+4201b9ec: l32r    a4, (s_pp_task_create_sem)
+4201b9ef: l32i.n  a10, a4, 0        ; a10 = s_pp_task_create_sem
+4201b9f1: beqz.n  a10, 4201b9fa     ; 为 0 就跳到结尾
+4201b9f3: l32i.n  a2, a2, 0
+4201b9f5: l32i.n  a2, a2, 56        ; osi_funcs[14] = _semphr_delete
+4201b9f7: callx8  a2                ; 删信号量（不是 take！）
+4201b9fa: movi.n  a2, 0
+4201b9fc: s32i.n  a2, a3, 0
+4201b9fe: movi    a2, 0x101         ; 返回 0x101
+4201ba01: retw.n
+```
+
+**真板验证：**
+- `osi_wifi_delete_queue`（`0x42010c38`）断点**不命中** ⇒ `osi_funcs[95]`
+  那次调用被 `beqz` 跳过了（那个全局是 0）；
+- `0x4201b9fc` 断点**也不命中** ⇒ 连函数结尾都没走到。
+
+**⇒ 所以卡点在 `pp_create_task` 的**前半段**（`0x4201b8ac` ~ `0x4201b9dc`）。
+那一段里的调用依次是：**
+
+```
+4201b8bd callx8   (osi_funcs[?])
+4201b8e1 callx8
+4201b901 callx8
+4201b90e callx8
+4201b99f callx8
+4201b9a9 callx8
+4201b9b6 call8   config_get_wifi_task_stack_size
+4201b9d1 call8   wifi_log
+4201b9e5 callx8  osi_funcs[95] = _wifi_delete_queue（被跳过）
+```
+
+**⇒ 下一步只需在这 8 个点各下一个断点（或用 `si` 逐条走），
+第一个"只进不出"的就是最终答案。**
+
+### 本次会话交付状态
+
+- 仓库：`main` 最新 commit，工作树干净；基线镜像 `1c8f57be`。
+- **windowed ABI 全量迁移已完成并通过真板验证**：
+  - 所有 C 代码 `-mabi=windowed` 编译、链接、上板运行；
+  - 定时器 ISR（`ccompare0`）→ `S3_TICK_PEND` → `s3_tick_consume` →
+    `os_sched_tick`（任务上下文）→ 超时 → 任务切换，全链实测正常；
+  - 闭源库建任务、建队列、队列接收、ppTask 启动全部正常；
+  - **无崩溃、无 `_vec_default`、无窗口账目错误**
+    （GDB `bt` 给出干净调用栈 `s3_w2c_queue_recv ← ppTask ← s3_task_tramp`）。
+- **未完成**：AP 关联 / DHCP / TLS / qq.com body 四项验收。
+  卡点是闭源库 `pp_create_task` 前半段的一次调用不返回，
+  导致 `wifi_init_process`/`ic_init` 永不执行、`g_ic` 恒为 NULL。
