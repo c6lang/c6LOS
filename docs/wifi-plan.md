@@ -31066,3 +31066,37 @@ beqz.n a10, <失败返回 NULL>
 - **真板 233 行**（本会话最高；起点 79 行，**+154**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1300 会话终结说明（round 191）
+
+**目标未完成。四项验收全部未取得。**
+
+**仓库状态**：`main` 分支 @ `bce8941`，工作树干净，
+构建 `md5=ef9f49823099dbfad1cd1d430be5fb75`，真板稳定 **233 行**
+（本会话起点 79 行，**提升 154 行**）。
+
+**本会话（含 resume）的 9 个结构性进展，全部有真板取证：**
+1. `W2C_SPILL` 五壳独立 RTC 槽（§1114）
+2. 库任务优先级降级让 `wifi_init_in_caller_task` 全程跑通（§1126）
+3. `g_ic` 分配 + 直调 `wifi_init_process`/`wifi_start_process`
+   ⇒ **WiFi 首次 STARTED（state=2）**（§1164/§1165）
+4. `osi_wifi_int_disable/restore` 空操作，消除 `__real_pp_post` 时序窗口（§1169）
+5. 补 `g_ic+16` ⇒ 扫描进入 `perform scan` 并真实发 probe request（§1182）
+6. 直调 `pp_attach`/`esf_buf_setup`（§1210）
+7. `--wrap=config_is_cache_tx_buf_enabled` 返回 1（§1256）
+8. 播种改到扫描前（消除时序竞态）（§1288）
+9. 用真实的 `(type=0, idx=7/8)` + 完整 `esf_buf` 构造（§1289/§1296）
+
+**唯一剩余卡点（已定性到最后层）**：
+TX 分配链是 `ieee80211_send_probereq` → `ieee80211_getmgtframe` →
+**ROM 的 `ic_ebuf_alloc`（`0x40005ad8`）** → `esf_buf_alloc` → 空闲链表。
+真正的 `esf_buf` 结构由 ROM 里的 `ic_ebuf_alloc` 与库内部共同维护，
+**手工构造的缓冲（哪怕补齐 `buf+4` 数据区）也无法通过它后续的字段校验**。
+⇒ 必须让库自己的完整初始化序列跑起来（ppTask 里 `_wifi_malloc` 预分配 TX 池），
+而那受限于 c6LOS 当前的 `S3_NO_PREEMPT` 调度 + `W2C_SPILL` 薄壳在 windowed ABI 下
+的窗口约束。**这需要内核层面的架构重写，不是单点补丁能解决的。**
+
+**下一步建议（按优先级）**：
+1. 让 ppTask 能正常调度（真正的抢占，或 ISR 侧完整超时扫描 + 正确的窗口保存）；
+2. 或换一个把 dynamic TX 缓冲编译进去、且不依赖 ROM `ic_ebuf_alloc` 的 WiFi 库；
+3. 或参考 NuttX/Rust esp-wifi 的做法，把 OSI 回调层做成**不跨窗口边界**的轮询模型。
