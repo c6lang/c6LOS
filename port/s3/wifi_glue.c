@@ -3182,7 +3182,7 @@ void s3_seed_tx_buffers(void)
     extern unsigned char g_wifi_menuconfig[];
     extern void *osi_malloc(u32 n);
     extern int s3_ets_printf(const char *, ...);
-    u32 ids[2];
+    u32 ids[3];
     u32 t;
 
     /* §§1288 ★★★★ 播种改到**扫描前**（库初始化完成之后），
@@ -3213,9 +3213,16 @@ void s3_seed_tx_buffers(void)
      *   `4038692d: movi a11, 8;  movi a10, 0`  ⇒ (0, 8)
      * 之前播 idx 2/4 + type 1 是错的。
      * 一次播 6 块 × 3 个 = 18 × 1600B = 28.8KB，在 48KB 堆内。 */
-    ids[0] = 7u;
-    ids[1] = 8u;
-    for (t = 0u; t < 2u; t++) {
+    /* §§1312 ★★★★★ **`ieee80211_getmgtframe` 按帧长选的是 idx 2/3/4，不是 7！**
+     *
+     * 反汇编：`movi a11, 4` → 若 len<=0x100 则 `movi a11, 2`，
+     * 若 len<=64 则 `movi a11, 3`。所以 idx ∈ {2,3,4}。
+     * 真板也印证了这点：播种在 idx=7 的链表一直没被消费。
+     * §1286 的探针也只有 idx 2 / 4 能分到缓冲 —— 完全对得上。 */
+    ids[0] = 2u;
+    ids[1] = 3u;
+    ids[2] = 4u;
+    for (t = 0u; t < 3u; t++) {
         u32 k = ids[t];
         /* §§1309 ★★★★★ **真正的列表基址在 `g_eb_list_desc_ptr`（`0x3fcef92c`）里！**
          *
