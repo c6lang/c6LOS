@@ -14,6 +14,7 @@
 wifi_osi_funcs_t g_wifi_osi_funcs;
 
 void s3_fix_ic16(void);
+void s3_fix_menuconfig(void);
 void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
@@ -2027,8 +2028,14 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
          * 但 `ic_init` 返回 0x101（已初始化）⇒ 它那次没把 pp 部分做成。 */
         {
             extern int pp_attach(void);
-            int rp = pp_attach();
-            s3_ets_printf("[ppattach] r=%d\n", rp);
+            /* §§1208 ★★★：`esf_buf_setup` 会读 `g_wifi_menuconfig + 4`
+             * 当作缓冲个数，但真板上 `g_wifi_menuconfig @0x3fcd5660`
+             * **是 NULL** ⇒ 它读地址 4 ⇒ 必崩。这里先把它补上。 */
+            s3_fix_menuconfig();
+            {
+                int rp = pp_attach();
+                s3_ets_printf("[ppattach] r=%d\n", rp);
+            }
         }
         rs = wifi_start_process();
         s3_ets_printf("[direct] init=%d start=%d state=%u\n",
@@ -3127,6 +3134,23 @@ extern int __real_pp_post(unsigned int ppq, unsigned int data);
 /* §§1182：`ieee80211_sta_scan` 要求 `*(u32*)(g_ic+16)` 非 0，否则直接 return -1。
  * 真板实测它是 0；而 `*(u32*)g_ic` 就是 `g_cnxMgr`（0x3fcd5730）。先把它补进去试。
  * 放在 `.flash.text`，避免 IRAM 溢出。 */
+/* §§1208：`esf_buf_setup` 会读 `g_wifi_menuconfig + 4` 当缓冲个数，
+ * 但真板上 `g_wifi_menuconfig @0x3fcd5660` 是 NULL ⇒ 它读地址 4 ⇒ 必崩。
+ * 这里先把它补上（放 flash，避 IRAM 溢出）。 */
+__attribute__((section(".flash.text")))
+void s3_fix_menuconfig(void)
+{
+    extern unsigned char g_wifi_menuconfig[];
+    static u32 s_mc[16];
+
+    if (*(volatile u32 *)(void *)g_wifi_menuconfig == 0u) {
+        s_mc[1] = 64u;
+        *(volatile u32 *)(void *)g_wifi_menuconfig = (u32)(void *)s_mc;
+        { extern int s3_ets_printf(const char *, ...);
+          s3_ets_printf("[mc] set %x\n", (unsigned)(void *)s_mc); }
+    }
+}
+
 __attribute__((section(".flash.text")))
 void s3_fix_ic16(void)
 {

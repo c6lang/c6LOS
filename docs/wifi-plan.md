@@ -30021,3 +30021,25 @@ wc -l /tmp/run.txt      # 期望 ~209-210 行
 - **真板最佳 216 行**（会话起点 79 行）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1208 `g_wifi_menuconfig` 是 NULL —— 已排除
+
+`esf_buf_setup`（`0x4201ca60`）开头：
+```
+memset(eb_txdesc_space, 0, 144)
+memset(eb_space, 0, 192)
+l32r a4, g_wifi_menuconfig
+l16ui a14, a4, 4          ; a4 为 NULL 时读地址 4
+if (a14 == 0) a14 = 64
+```
+真板 `g_wifi_menuconfig @0x3fcd5660 = 0`（NULL）。
+已加 `s3_fix_menuconfig()`（flash）在 `pp_attach()` 之前补上它。
+真板仍 216 行、扫描仍卡 `[w1]wifi|`，且 `[mc]` 没打印
+⇒ 执行到那一步时 `g_wifi_menuconfig` 已非 NULL。**此假设排除。**
+
+## §1209 会话最终状态（round 158）
+
+- 仓库 `main`，工作树干净。
+- **真板最佳 216 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
