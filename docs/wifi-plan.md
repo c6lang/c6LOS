@@ -30598,3 +30598,17 @@ PC 仍在 `ieee80211_send_setup+36` 的断言循环。
 **闭环终点**：TX 缓冲池本体要靠 `_wifi_malloc` 分配（零调用），
 而它只在 ppTask 的完整初始化序列里被调；ppTask 又跑不起来。
 **需要内核层面的架构重写才能继续。**
+
+## §1260 最终上板验证（round 177）
+
+干净重建的固件刷入真板，稳定复现 **230 行**：
+```
+[esfalloc]  -> 0                    ← TX 缓冲仍拿不到
+[direct]    init=0 start=0 state=2   ← IC 初始化成功、WiFi STARTED
+[hs]        d14=1 ca0=4000 PWC=0 CLK=fffce7ff   ← MAC 已使能
+[wifi]      scan_start=0             ← 扫描成功发起
+```
+四项验收：AP=0 / DHCP=0 / TLS=0 / body=0 —— **全部未取得**。
+
+仓库 `main` @ `b23b3c5`，工作树干净。
+**目标未完成，不应标记 complete。**
