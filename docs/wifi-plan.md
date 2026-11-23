@@ -29335,3 +29335,44 @@ call8  wifi_nvs_init / wifi_lmac_init / wifi_hmac_init / wifi_crypto_init
 - 四项验收：**AP 关联未取得**（`[wifi] 已关联，ssid= channel=0` 是空值）、
   **DHCP 未取得**、**TLS 未取得**、**qq.com body 未取得**。
 - 目标**未完成**，不应标记 complete。
+
+## §1164~§1165 ★★★★★ 突破：直接调用 wifi_init_process / wifi_start_process
+
+**两个关键修复：**
+
+**§1164**：`wifi_init_process`（`0x4203a59c`）第一句是
+`l32i.n a5, a2, 12; bnez.n a5` —— 要求 `msg->[12]` 非 0，否则返回 `0x102`。
+真板 `[scanmsg]` 抓到 b12 恒为 0（`esp_wifi_init_internal` 里 `mov a4,a2` 之后
+又调了一次 `callx8`，`a4` 是 caller-saved 被破坏）。
+在 `__wrap_pp_post` 里给 `ppq==6` 的消息补 `msg->[12]`，并把 `g_ic` 指向
+**从 OSI 堆分配**的 0x2b4 字节 IC 缓冲区。
+**注意：不能用 `static` 数组** —— 692 字节的 `.bss` 会撞到硬编码的栈界
+（`_stack_limit` 只比 `_stack_top` 低 10 字节），真板立刻退回 90 行卡 `[pq]`。
+用 `osi_malloc(0x2b4)` 后正常。
+→ 真板 `g_ic @0x3fcd482c = 0x3fcc8934`（**非 0**）。
+
+**§1165（决定性）**：`g_ic` 分配了但内容全 0，因为 `wifi_init_process` 是
+ppTask 的消息处理函数，而 ppTask 拿不到 CPU。
+**这两个函数本身不依赖任务上下文**（只读参数 + 操作 `g_ic`），
+所以直接在初始化任务里调用：
+
+```c
+u32 m[8] = {0};
+m[3] = *(volatile u32 *)g_ic;          /* msg->[12] = IC 指针 */
+ri = wifi_init_process((void *)m);     /* → 0 */
+rs = wifi_start_process();             /* → 0 */
+```
+
+**真板结果（195 行，此前 167 行）：**
+```
+[direct] init=0 start=0 state=2      ← IC 初始化成功，WiFi 状态 = 2 (STARTED)
+[wifi] start=0
+[wifi] start 后的库状态 = 3
+[hs] d14=1 ca0=0 PWC=0 CLK=fffce7ff  ← MAC 已使能（此前 d14=0）
+[wifi] set_ps(NONE)=0
+[wifi] scan start（异步）
+[wifi] scan_start=0                   ← 扫描成功启动（此前恒为 12290/0x3002）
+```
+
+**这是本次迁移第一次让 WiFi 真正进入 STARTED 状态并成功发起扫描。**
+剩下的是让 ppTask 处理 `wifi_scan_start_process` 等后续消息（仍受调度限制）。

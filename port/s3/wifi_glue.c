@@ -1986,6 +1986,27 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     /* wifi_interface_t: 0 = WIFI_IF_STA */
     r3 = esp_wifi_set_config(0, (void *)cfg);
     s3_ets_printf("[wifi] set_config=%d\n", r3);
+    /* §§1165 ★★★★ **直接调用** `wifi_init_process` / `wifi_start_process`，
+     * 绕开 ppTask。真板已证实 `g_ic` 已分配（非 0）但内容全 0——
+     * 因为 `wifi_init_process` 是 ppTask 的消息处理函数，而 ppTask 拿不到 CPU。
+     * 这两个函数本身不依赖任务上下文（只读参数 + 操作 `g_ic`），
+     * 所以可以在初始化任务里直接调。 */
+    {
+        extern int wifi_init_process(void *msg);
+        extern int wifi_start_process(void);
+        extern unsigned char g_ic[];
+        u32 m[8];
+        u32 i2;
+        int ri;
+        int rs;
+        for (i2 = 0u; i2 < 8u; i2++) { m[i2] = 0u; }
+        m[3] = *(volatile u32 *)(void *)g_ic;      /* msg->[12] = IC 指针 */
+        ri = wifi_init_process((void *)m);
+        rs = wifi_start_process();
+        s3_ets_printf("[direct] init=%d start=%d state=%u\n",
+                      ri, rs,
+                      (unsigned)*(volatile unsigned char *)(void *)(g_ic + 0x1E9));
+    }
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
     /* §§1128 ★★★★：`esp_wifi_start()` 只是把 `wifi_start_process`
@@ -3052,6 +3073,21 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
 {
     s3_wrap_bump(7u);
     s3_ets_printf("[pppost] ppq=%u data=%x\n", ppq, data);
+    /* §§1164（无打印版）：`wifi_init_process` 需要 `msg->[12]` 非 0 且
+     * `g_ic` 指向 0x2b4 字节的 IC 结构（它一进来就 memset(g_ic,0,0x2b4)）。
+     * 不加任何打印，避免影响时序。 */
+    if (ppq == 6u && data != 0u) {
+        extern unsigned char g_ic[];
+        volatile u32 *m = (volatile u32 *)data;
+        if (m[3] == 0u) {
+            if (*(volatile u32 *)(void *)g_ic == 0u) {
+                /* 从 OSI 堆分配（不能用 static 数组：会把 .bss 撞到硬编码的栈界）。 */
+                extern void *osi_malloc(u32 n);
+                *(volatile u32 *)(void *)g_ic = (u32)osi_malloc(0x2b4u);
+            }
+            m[3] = *(volatile u32 *)(void *)g_ic;
+        }
+    }
 #ifdef S3_TRACE_SCANMSG
     /* §656: 扫描消息由库内部 callx8 建好，--wrap 抓不到回调。
      * 在 pp_post 边界把消息头打出来，并确认 b1 是否 = wifi_scan_start_process。 */
