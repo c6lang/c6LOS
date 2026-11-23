@@ -29582,3 +29582,48 @@ make C6_ROOT=/home/winger/c6 S3_ABI=windowed S3_APP_BASE=0x20000 S3_NO_PREEMPT=1
 ```
 
 **四项验收仍未取得。目标未完成。**
+
+## §1180 扫描失败的确切原因：`g_ic+16 == 0`
+
+`ieee80211_sta_scan`（`0x42039040`）反汇编：
+
+```
+entry a1, 32
+l32r  a8, g_ic
+mov   a10, a2              ; config
+l32i.n a9, a8, 16          ; a9 = *(u32*)(g_ic + 16)
+mov   a11, a3              ; ic
+movi  a2, -1               ; 默认返回值 = -1
+beqz.n a9, retw            ; ★ g_ic+16 == 0 就直接返回 -1
+l32r  a8, scannum
+s16i  a9=0, a8, 0          ; scannum = 0
+call8 cnx_sta_scan_cmd
+```
+
+**真板实测**（`g_ic @0x3fcd485c`）：
+```
+g_ic+0  = 0x3fcd5730   (g_cnxMgr)
+g_ic+4  = 0x3fcd4f5c
+g_ic+8  = 0
+g_ic+12 = 1
+g_ic+16 = 0x00000000   ← ★ 就是这里
+g_ic+20 = 0x3fcce5f4
+g_ic+24 = 0
+g_ic+28 = 0x00040000
+```
+
+⇒ **`g_ic+16` 是 0，所以 `ieee80211_sta_scan` 永远返回 -1，扫描永远起不来。**
+这个字段本应由 `_do_wifi_start` / `wifi_lmac_init` 之类填上，但当前没有。
+（全量反汇编扫描没找到直接 `s32i ..., g_ic_reg, 16` 的写入点，
+说明它是通过 `addmi`/`add.n` 算出地址后间接写的。）
+
+**下一步**：在 `ieee80211_sta_scan` 之前把 `g_ic+16` 补上（很可能是 STA vif
+指针，可试 `g_cnxMgr` = `*(u32*)g_ic`），或找出本该写它的初始化函数并调用。
+
+## §1181 会话最终状态
+
+- 仓库 `main`，工作树干净，最新提交记录了全部取证。
+- **真板最佳 199 行**：WiFi 已 STARTED（`state=2`）、MAC 使能（`d14=1`）、
+  `scan_start=0`、`[v4]wifi|Start wifi scan` 都能打出来。
+- **四项验收仍全部未取得**：AP 关联 0、DHCP 0、TLS 0、qq.com body 0。
+- **目标未完成。**
