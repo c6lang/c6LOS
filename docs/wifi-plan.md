@@ -27261,3 +27261,232 @@ static void *osi_semphr_create(u32 max, u32 init)
 状态分支。这一步做完，"ic 为什么没建"就彻底闭环了。
 
 **（真板 USB 仍未接回，无法验证。）**
+
+## §1069 更正 §1067/§1068：idx 8 是 `_spin_lock_create`，表布局**没有**错
+
+把 IDF 的 `esp_private/wifi_os_adapter.h` 与我们的 `include/c6os/wifi_osi.h`
+逐字段对照 —— **前 14 个字段完全一致**：
+
+```
+ 0 _version        5 _ints_on          10 _wifi_int_disable   13 _semphr_create
+ 1 _env_is_chip    6 _ints_off         11 _wifi_int_restore   14 _semphr_delete
+ 2 _set_intr       7 _is_from_isr      12 _task_yield_from_isr
+ 3 _clear_intr     8 _spin_lock_create
+ 4 _set_isr        9 _spin_lock_delete
+```
+
+真机 dump 运行时表（`0x3fcc76b8`，= `g_osi_funcs_p` 的值）：
+
+```
+idx 13 = 0x4037c968 = osi_semphr_create   ← 与头文件一致 ✓
+idx 18 = 0x4037c800 = osi_mutex_create    ← 与头文件一致 ✓
+idx  8 = 0x4037c800 = osi_mutex_create    ← 我们把 _spin_lock_create 实现成了 mutex
+```
+
+**⇒ 表布局是对的。** `wifi_init_in_caller_task` 的
+`l32i a10, a8, 32`（= idx 8）调的是 **`_spin_lock_create`**，
+我们返回非 NULL ✓，不会触发 `0x101`。
+
+**⇒ §1067 里"idx 19 不是 mutex"的修正是对的，
+但 §1068 里"`_semphr_create` 从未被调用所以有矛盾"的推论不成立**
+—— 那次调用本来就是 `_spin_lock_create`。
+
+### 当前仍然成立的事实
+
+- `g_ic`（`0x3fcd474c`）在 `esp_wifi_scan_start` 被调时仍是 **NULL**；
+- `ic_init`（0x4201a070）**没有**被调用（双断点测试第一次命中的是
+  `ic_create_wifi_task`）；
+- 所以 `*(u8*)(g_ic + 0x1E9) >= 2` 永不成立，`esp_wifi_scan_start`
+  恒返回 `0x3002`。
+
+**⇒ "谁该调用 `ic_init`、为什么没调"仍未定论。**
+`esp_wifi_init_internal` 的状态机分支（`state==1/2/3`）是下一步要逐条走一遍的。
+
+**（本轮已确认板子恢复可用；镜像 `bff36e25`。）**
+
+## §1070 ★★★ 巨大进展：找到 `ic_init` 的唯一调用链，并确认 ppTask 从未启动
+
+### 调用链（静态反汇编，全部确认）
+
+```
+wifi_init_process (0x42039dec)      ← 异步初始化消息的处理函数
+  └─ wifi_lmac_init (0x42039cf8)    ← 唯一调用者 @0x42039e73
+       └─ ic_init (0x4201a070)      ← 唯一调用点 @0x42039db5
+            └─ 建 ic 对象 ⇒ 写 g_ic
+```
+
+`esp_wifi_init_internal` 的做法是**异步**的：
+
+```asm
+4204071e: s8i  a3, a10, 0        ; 消息类型
+42040721: l32r a3, (wifi_init_process = 42039dec)
+4204072a: s32i.n a3, a10, 4      ; ★ 把 wifi_init_process 塞进消息
+4204072c: s32i.n a4, a10, 12
+42040731: call8 ieee80211_ioctl  ; 投递给 WiFi/pp 任务
+4204073b: call8 wifi_api_lock
+4204073e: movi.n a3, 3           ; ★ 立刻把 state 置 3（"完成"）
+```
+
+**⇒ 所以 `esp_wifi_init_internal -> 0` 只代表"消息投出去了"，
+真正的 `ic_init` 要等那条消息被任务处理。**
+**⇒ 这就是为什么 `g_ic` 一直是 NULL、`esp_wifi_scan_start` 一直返回 0x3002。**
+
+### 真板实测（本轮，板子已恢复）
+
+| 断点 | 结果 |
+|---|---|
+| `wifi_init_in_caller_task` (0x420400dc) | **命中**，入口 `g_intr_lock_mux=0` |
+| `wifi_init_process` (0x42039dec) | **从未命中** |
+| `ppTask` (0x40382320) | **从未命中** |
+| `s3_task_tramp` (0x40379966) | **只命中一次**，`fn=s3_win_wifi_main_task a4=1` |
+
+**⇒ 闭源库只建了一个任务 `ppTask`（日志 `[task] 库建任务 fn=40382320 id=2`），
+而它从来没有被调度执行过。** 那条带 `wifi_init_process` 的消息就永远躺在队列里
+（`[scanmsg] 3fcc86e4: 00000326 42039dec ...` 能看到它，handler 是对的）。
+
+### 已排除
+
+- OSI 表布局：逐字段对照 IDF 的 `wifi_os_adapter.h`，**前 14 个字段完全一致**，
+  真机 dump 也吻合（§1069）。`l32i a10, a8, 32` 调的是 `_spin_lock_create`，
+  我们返回非 NULL，不报错。
+- `s3_task_tramp` 的 ABI 分支：`beqz a4, 2f`，库任务走的是 `callx8` 分支，
+  `g_next_task_windowed` 也确实在 `wifi_glue.c:850` 被置 1。
+
+### 下一步（还没做）
+
+ppTask 建好了却一次都不跑 —— 要在 `s3_w2c_task_create` 返回后
+检查它有没有进就绪队列（内核 `kernel/task.c6` 的 `t->prio/t->state`），
+以及 `S3_NO_PREEMPT=1` 下调度器是否只在显式让出时才切换。
+
+本轮试过把库任务优先级从 2 提到 0（`u32 p = 0u`），**没有效果**
+（`wifi_init_process` 仍不命中），已撤回，镜像回到 `bff36e25`。
+
+## §1071 补充实测：创建了 3 个任务，ppTask(id=2) 从不被选中
+
+RTC 切换环 `0x50001500`（`port_switch_trace`，每项 tag/id/ctx/n）一次真实启动：
+
+```
+tag=7 id=1 ctx=3fcc6890 n=1    ← 创建任务 1（主任务）
+tag=1 id=1 ctx=3fcc6890 n=2    ← 有一次真正的切换（到任务 1）
+tag=7 id=2 ctx=3fcc68dc n=3    ← 创建任务 2（ppTask）
+tag=7 id=3 ctx=3fcc6928 n=4    ← 创建任务 3（tcpip）
+```
+
+**⇒ 三个任务都创建成功、ctx 都非空。** 栈池算账：
+16384（主）+ 16384（ppTask）+ 8192（tcpip）= 40960 = `S3_STACK_POOL`，正好用满；
+没有出现 `[ctx] 栈池不够` 的打印，说明分配都成功了。
+
+**⇒ 但 tag 只有"创建"和一次"切换"，ppTask / tcpip 一次都没被切到。**
+
+### 试过但无效的两条
+
+1. 把库任务优先级从 2 提到 0（`u32 p = 0u`）：`wifi_init_process` 仍不命中。
+2. 在 `sched_pick` 末尾把被选中的 `best->id` 写进 RTC `0x50001600`：
+   跑完读出来是**随机值**，一个都没写进去 ⇒ **`sched_pick` 被编译器完全内联**，
+   符号只留了一份没人调用的副本，补丁打在了死代码上。
+
+**⇒ 下一步必须改内联点**：直接给 `port_task_yield` / `port_task_switch`
+（port/s3/ctx.S / ctx.c）加同样的 RTC 记录，或者用 `-fno-inline` 单独编译
+`kernel/task.c6` 里的 `sched_pick`。
+
+两条实验均已撤回，镜像回到 `bff36e25`（构建通过、tree 干净）。
+
+## §1072 即使把库任务提到最高优先级 + 建完主动让出 20 tick，ppTask 仍不启动
+
+实验（已撤回）：`_task_create` 里把 `p` 直接设成 0，并在 `id >= 0` 后
+立刻 `s3_w2c_task_delay(20u)`，让主任务无条件交出 CPU。
+
+结果：`ppTask`（0x40382318）的硬件断点**仍然一次都没命中**，
+`scan_start` 依旧是 12290（0x3002）。
+
+**⇒ 说明 ppTask 不是"抢不到 CPU"，而是根本没有进入调度器的候选集合。**
+`os_task_create_on` 末尾明明写了 `t->state = OS_TASK_READY` 并返回了
+有效 id（日志 `[task] 库建任务 fn=40382320 id=2`），所以要么
+`sched_pick` 里 `(u32)c->core == core` 不成立，要么该槽位随后被别的东西
+改回了其它状态。下一步应当直接读 `g_tasks[2]` 的 `state/prio/core`
+（`OsTask` 偏移：ctx@0 entry@4 arg@8 id@12 prio@32 state@34 core@35，
+本构建实测 magic 落在 +28，说明实际打包与这个偏移表有出入，需先校准）。
+
+### 本轮其它已确认事实
+
+- `g_stack_pool` 里三块栈都在（trampoline 入口值出现在
+  `g_stack_pool+16316/+32700/+40892`），对应 16384/16384/8192，
+  与 `S3_STACK_POOL=40960` 正好吻合 ⇒ **栈都分配成功了**。
+- RTC `0x50000a00`（trampoline 启动计数）读到 98368 后**不再增长**，
+  而 `+4` 的 fn 值在同一时刻还会变 ⇒ 该区域被别的诊断复用过，**不可信**。
+- `port_switch_trace` 的 tag=1 只覆盖内核主循环的切换，**yield 路径不走它**，
+  所以不能用它判断 ppTask 有没有被切到。
+
+## §1073 ★★★ 拿到任务表实据：ppTask 是 READY / prio=0 / core=0，却仍不被调度
+
+用任务魔数 `0xC6A50001` 在 .bss 里定位到 `g_tasks`：
+魔数落在 `0x3fcb9ef8 / 0x3fcb9f68 / 0x3fcb9fd8`（间距 0x70）。
+
+把三个槽位 dump 出来（`+0x20` 那个字从低字节起依次是 prio/base/state/core）：
+
+| id | stack_size | prio | state | core |
+|---|---|---|---|---|
+| 1（主任务） | 16384 | 3 | **2 = RUNNING** | 0 |
+| 2（ppTask） | 16384 | **0** | **1 = READY** | 0 |
+| 3（tcpip） | 8192 | 2 | **1 = READY** | 0 |
+
+**⇒ ppTask 在任务表里状态完全正常、优先级最高、核号也对，
+却一次都没被切到**（`s3_task_tramp` 断点保留着也只命中主任务一次）。
+
+### 已排除的两个"看起来像根因"的东西
+
+1. **`g_prid_base[0]` 是占位值 `0xCDCD`**（`console.c:320` 的初值）。
+   按汇编推断，若 PRID ≠ 0xCDCD 就会去用 `g_s3_cur[1]`（NULL）而跳过保存。
+   **实测：`port_task_yield_c0` 的跳过分支 `0x4037991c` 一次都没命中**
+   ⇒ yield 走的是正常保存路径，不是这个原因。
+2. **任务入口地址**：任务表里 ppTask 的 entry 记作 `0x40382318`（nm 的 `ppTask`
+   在 `0x40382320`）。两个地址都下了断点，**都不命中**。
+
+### 结论与下一步
+
+任务建好了、栈分好了、状态 READY、优先级最高、yield 也确实在走保存路径，
+但它的入口一次都没被执行 ⇒ **问题在"选中之后把上下文恢复起来"这一段**，
+也就是 `port_task_switch_c0` / `RESTORE_FRAME` 恢复出来的 EPC 或栈，
+而不是调度器的候选集合。
+
+下一步：在 `port_task_switch_c0` 里把**恢复前的 `t->ctx`、以及帧里的 EPC**
+记到 RTC（`0x50001900` 一带没用过），跑一次就能看出恢复的目标是不是 ppTask。
+
+（本轮所有实验均已撤回，镜像 `bff36e25`，tree 干净。）
+
+## §1074 找到 tick 消费链的死角（修法试过，未产生效果，已撤回）
+
+真板实测（本轮，板子在线）：
+
+| 断点 | 结果 |
+|---|---|
+| `os_task_delay` (0x42016754) | **命中**，ticks=20 |
+| `port_task_yield_c0` 入口 (0x403796c7) | **从不命中** |
+| 它的 `rfe` 出口 (0x403798f2) | **从不命中** |
+| 它的跳过出口 (0x4037991c) | **从不命中** |
+| `port_task_switch` (0x403796c0) | 只命中一次（初始切到主任务） |
+| `os_timeout_pop_expired` (0x42013134) | **从不命中** |
+| `wifi_init_process` / `ppTask` | **从不命中** |
+
+`os_task_delay` 命中但 `port_task_yield_c0` 不命中 ⇒ 走的是
+```c
+if (os_timeout_add(g_cur->id, ticks) != 0) { g_cur->delay_left = 0; return; }
+```
+这条**提前返回**分支 ⇒ **一次都不让出 CPU**。
+`os_timeout_add` 只在 `g_count >= OS_TIMEOUT_MAX(128)` 时失败，而唯一的
+到期弹出点 `os_timeout_pop_expired` 又从不执行 ⇒ 表一旦填满就永久卡死。
+
+`os_timeout_pop_expired` 只由 `os_sched_tick()` 调用（`task.c6:593`），
+而 `os_sched_tick()` 在正常运行时**没有任何调用者**：
+- 主循环里那处（`task.c6:650`）被 `if (t == 0)` 挡住，而永远有就绪任务；
+- ISR 里那处按 §964 已改成只累加 `S3_TICK_PEND`（RTC 0x50001580），
+  等主循环消费 —— 可主循环根本不回来。
+
+**试过的修法（已撤回）**：在 `os_task_delay` 开头
+`while (port_virtual_tick()) os_sched_tick();`。
+构建通过、刷板后 `tramp` 仍只命中主任务一次、`scan_start` 仍是 12290，
+**没有改善** ⇒ 说明 `S3_TICK_PEND` 本身可能一直是 0（定时器 ISR 没在累加），
+或者 `os_sched_tick` 里还有别的阻塞点。下一步应先读 RTC `0x50001580`
+确认定时器 ISR 到底有没有在跑。
+
+（改动已撤回，镜像 `bff36e25`。）
