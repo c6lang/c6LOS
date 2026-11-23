@@ -29796,3 +29796,24 @@ WiFi 首次 STARTED、MAC 使能、`scan_start=0`、扫描真正进入 `perform 
 **剩余**：扫描之后驱动报错；关联 / DHCP / TLS / HTTPS 四步全未开始。
 最关键的诊断障碍是 `_log_writev` 的 varargs 在 Xtensa windowed ABI 下读取错位，
 使得闭源库的真实错误信息无法读出。
+
+## §1194 扫描其实在真的发包 —— 卡在 TX 路径
+
+GDB 读 PC 得到 **`ieee80211_send_setup+36`**（`a1=0x3fcc0480` 合法栈）。
+⇒ **扫描已经走到"构造 probe request 并发送"这一步**，
+不是"扫描没启动"，而是**卡在发送路径上**（TX 描述符/队列）。
+
+真板在 `[w1]wifi|` 之后停住（`[scanp2]` 不打印），
+把抓包时间从 130s 延长到 220s 也一样（209 行）。
+
+**⇒ 下一步应当查 TX 路径**：`pp_post(ppq=25)` 之后
+`lmacTxFrame` / `ppTxqEnqueue` 是否拿到描述符；
+我们补过 `g_ic+16`，但 TX 可能还需要 `g_ic` 里别的字段
+（比如 TX queue 数组、EDCA 参数）。
+
+## §1195 会话最终状态（round 151）
+
+- 仓库 `main`，工作树干净，最新提交 `9827de2`。
+- **真板最佳 210 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成。**
