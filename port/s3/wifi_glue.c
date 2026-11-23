@@ -311,7 +311,11 @@ static WSem *wsem_new(u32 max, u32 init)
 
 static void *osi_semphr_create(u32 max, u32 init)
 {
-    HIT_OF(_semphr_create);
+    /* ★★★ §1109：**去掉 HIT_OF**！
+     * 真板计数（用 RTC 自初始化计数器做的）：
+     * `_semphr_create` 被调 4 次，但 `wsem_new` 只进了 2 次 ——
+     * 另外两次卡在 `HIT_OF` 里（它写 `g_osi_calls[]` 和 RTC 0x50000204 的环）。
+     * 诊断代码不该主导故障（§243 已经因为同类原因把 sem_trace 停用过）。 */
     return (void *)wsem_new(max, init);
 }
 static void osi_semphr_delete(void *sem)
@@ -661,7 +665,16 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
      * 队列句柄就是 **NULL**（崩在 `l32i.n a9, a7, 40`，a7=0、EXCVADDR=0x28）。
      * 让 body 去解引用空指针只会把整个系统打死；按"没收到"返回，
      * 库自己会重试或走别的路径。 */
-    if (qh == 0) { return 0; }
+    if (qh == 0) {
+        /* §§§1110：**必须让出 CPU**！
+         * ppTask 的主循环是 `_semphr_take(sem,0)` → `_queue_recv(xphyQueue,&msg,-1)`。
+         * 库的 xphyQueue 全局是 0（§1095/§1096），所以 recv 永远走这条早返回。
+         * 在 S3_NO_PREEMPT=1 的内核里，ppTask 于是一个**不让出的空转**，
+         * 初始化任务永远回不来（切换环 0x50001500 明确显示：切到 id=2 之后再没切回）。
+         * 让出 CPU 后，init 任务可以继续把 s_pp_task_create_sem 等资源建好。 */
+        s3_w2c_task_yield();
+        return 0;
+    }
     /* §1087：库有时会传进来一个**垃圾小值**（真板实测 qh=0x05，
      * EXCVADDR=0x2d = 5+40，崩在 wq_resolve 的 l32i a8,a2,40）。
      * DRAM/flash 上的合法指针都 ≥ 0x3f000000，小值一律当"没收到"处理。 */

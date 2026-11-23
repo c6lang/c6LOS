@@ -28855,3 +28855,66 @@ GDB `bt` 给出干净调用栈 `s3_w2c_queue_recv ← ppTask ← s3_task_tramp`�
 打点，一次上板定位到具体是哪一个 OSI 实现不返回。
 
 **基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 至 §1106。
+
+## §1107~§1110 RTC 自初始化计数定位到 pp_create_task 的具体卡点
+
+**方法**：RTC 未清零，所以用"自初始化计数"（读到的值 >1000 就当垃圾重置为 0）：
+
+```c
+static void s3_cnt(u32 addr){ volatile u32 *p=(volatile u32*)addr; u32 v=*p; if(v>1000u)v=0u; *p=v+1u; }
+```
+
+这一招在本项目里是**唯一可靠的观测手段**（GDB 读 DRAM 会读到 0/垃圾，
+flash 断点在闭源库里基本不命中）。
+
+### 实测结果
+
+| 计数器 | 含义 | 值 |
+|---|---|---|
+| 0x50000E60 | `_task_get_max_priority` | 4~6 |
+| 0x50000E64 | `_semphr_create` | 3~4 |
+| 0x50000E70 | `_task_create` | 1~2 |
+| 0x50000E68 | `_semphr_delete` | **从未调用** |
+| 0x50000E6C | `_queue_create` | **从未调用** |
+| 0x50000E7C | `wsem_new` 成功 | 1 |
+
+**⇒ 库确实在用我们这张 OSI 表**（`_task_get_max_priority` 被调了 4~6 次）。
+**⇒ `pp_create_task` 建出了 ppTask（`_task_create`=1），但 `_semphr_delete` 从未执行。**
+
+### 反汇编给出确切的调用序列（`pp_create_task` 成功分支）
+
+```
+4201b972  callx8 a7            ; _task_create(...) -> 返回 1
+4201b977  beqi a10, 1, +0x16   ; 成功就跳到 4201b98d
+4201b98d  l32i.n a8, a2, 0     ; a8 = *g_osi_funcs_p
+4201b98f  l32i.n a10, a4, 0    ; a10 = s_pp_task_create_sem
+4201b991  l32i a8, a8, 60      ; osi[15] = _semphr_take
+4201b993  movi.n a11, -1       ; ticks = -1（无限等待）
+4201b995  callx8 a8            ; ★ _semphr_take(sem, -1)
+4201b99a  mov.n a10, a7        ; a10 = 任务句柄
+4201b99c  l32i a8, a8, 156     ; osi[39] = _task_delay
+4201b99f  callx8 a8            ; ★ _task_delay(handle)
+4201b9a6  l32i a2, a2, 56      ; osi[14] = _semphr_delete
+4201b9a9  callx8 a2            ; _semphr_delete(sem)
+```
+
+### 已做的两处修改（保留）
+
+1. **§1109 去掉 `_semphr_create` 里的 `HIT_OF`**：真板计数显示 `_semphr_create`
+   被调 4 次但 `wsem_new` 只进 2 次 ⇒ `HIT_OF`（写 `g_osi_calls[]` 和
+   RTC 0x50000204 的环）本身会阻塞。去掉后 `wsem_new` 入口计数从 1 涨到 2。
+2. **§1110 `osi_queue_recv_body` 的 `qh==0` 早返回前加 `s3_w2c_task_yield()`**：
+   ppTask 的主循环是 `_semphr_take(sem,0)` → `_queue_recv(xphyQueue=0,...)`，
+   在 `S3_NO_PREEMPT=1` 的内核里它是一个**不让出的空转**，初始化任务永远回不来
+   （切换环 `0x50001500` 明确显示：切到 `id=2` 之后再没切回）。
+
+**这两处都正确、都保留，但都没有解开死锁** —— 串口仍停在 67 行的
+`[task] 库建任务 ...` 之后。
+
+### 下一步（结论已经很清楚）
+
+`pp_create_task` 在 `_semphr_take(s_pp_task_create_sem, -1)` 上等 ppTask 回 give，
+而 ppTask 因为 `xphyQueue == 0` 在 recv 上空转 —— **这是一个真正的握手死锁**。
+唯一的出路是让 ppTask 的 `xphyQueue` 在 ppTask 第一次运行前就被初始化好，
+也就是把 `pp_attach` 挪到 `pp_create_task` 之前，或者给 ppTask 加一个
+"队列没建好就先阻塞在信号量上"的垫片。
