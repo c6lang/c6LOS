@@ -28684,3 +28684,49 @@ PHY/RF 的同步等待）。
 - **未完成**：AP 关联 / DHCP / TLS / qq.com body 四项验收。
   卡点是闭源库 `pp_create_task` 前半段的一次调用不返回，
   导致 `wifi_init_process`/`ic_init` 永不执行、`g_ic` 恒为 NULL。
+
+## §1103 断点全部不命中 ⇒ `pp_create_task` 可能根本没被调用
+
+### 事实
+
+在 `pp_create_task` 内部设的所有断点都不命中：
+
+| 地址 | 位置 | 命中？ |
+|---|---|---|
+| `0x4201b910` | 第 4 个调用之后 | ❌ |
+| `0x4201b8e6` | 第 2 个调用之后 | ❌ |
+| `0x4201b9fc` | 函数结尾 | ❌ |
+| `0x4204029e` | `ic_create_wifi_task` 之后 | ❌ |
+| `0x420402aa` | `ieee80211_ioctl_init` 之后 | ❌ |
+
+**⇒ 说明 `wifi_init_in_caller_task` 根本没走到这些调用 —— 它卡在**更早**的位置。**
+
+而 `pp_create_task` 的第一个调用是 `osi_funcs[42] = _task_get_max_priority`，
+我们的实现只有一句 `return 31u;`，不可能卡住。
+
+**⇒ 结论修正：卡点在 `wifi_init_in_caller_task` 更靠前的部分，
+在 `wifi_menuconfig_init` / `misc_nvs_init` / `ic_create_wifi_task` 之前。**
+
+### 最终交付说明
+
+**本次会话完成的工作（全部已提交、可复现）：**
+
+1. **c6LOS 全量 windowed ABI 迁移完成**：内核、中断、上下文切换、
+   全部 C 代码统一 `-mabi=windowed`，编译链接通过并**真板上跑起来**。
+2. **修复了一系列 windowed ABI 的真 bug**（都记录在 §1042~§1103）：
+   - §1056/§1084：五个阻塞 OSI 函数的"自由栈 + spill 祖先窗口"薄壳；
+   - §1083：`RESTORE_FRAME` 的 WINDOWSTART 并集泄漏；
+   - §1088：**`callx8` 轮转窗口导致库任务参数根本没传到**（a10 vs a2）；
+   - §1094：`S3_TICK_DEFER` —— ISR 里不再 `call8 os_sched_tick`
+     （那会在第 3~4 次窗口旋转时抛 cause=0）；
+   - §1090：`intenable` 收敛到只留定时器位；
+   - §1089：查明 `_set_isr` 从不装向量表、`_ints_on` 却真开硬件中断。
+3. **系统从"崩溃/死循环"推进到"稳定运行"**：
+   GDB `bt` 给出干净调用栈 `s3_w2c_queue_recv ← ppTask ← s3_task_tramp`，
+   ISR 计数 24064、TICK_PEND 持续增长、任务能正常切换。
+4. **未完成**：AP 关联 / DHCP / TLS / qq.com body 四项验收。
+   卡点在闭源库 `wifi_init_in_caller_task` 的前段（在它调
+   `ic_create_wifi_task` 之前），导致 `wifi_init_process`/`ic_init`
+   永不执行、`g_ic` 恒为 NULL。
+
+**基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 累计 1100+ 节。
