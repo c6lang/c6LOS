@@ -31287,3 +31287,40 @@ movi a11, 3
 - 仓库 `main`，工作树干净，构建 `md5=e13aebc9a119a05b66b705a4a28b0962`。
 - **真板 235 行**（会话最高；起点 79 行，**+156**）。
 - **四项验收全部未取得。目标未完成。**
+
+## §1317 `ieee80211_send_setup` 的失败条件与调用者
+
+`ieee80211_send_setup`（`0x420260b4`）入口：
+```
+entry a1, 32
+mov   a8, a4
+mov   a4, a6
+l32i.n a6, a3, 4
+l32i.n a6, a6, 4
+bnez.n a2, <正常路径>     ; a2 = arg1（缓冲指针）
+... wifi_log(1, ...)
+420260d8: j 420260d8      ; while(1)
+```
+
+`ieee80211_send_probereq`（`0x420288b4`）里：
+```
+call8 ieee80211_getmgtframe
+mov   a4, a10
+bnez  a10, <继续>          ; ★ 非 0 才继续
+... error log ...
+movi  a2, 1
+j     <返回 1>             ; ★ NULL 时直接返回，**不会**调 send_setup
+```
+⇒ **`send_probereq` 在 `getmgtframe` 返回 NULL 时提前返回，
+不会调 `ieee80211_send_setup`**。
+
+**而真板 PC 确实停在 `send_setup` 里 `a2 == 0` 的断言循环** ——
+说明**另一个调用者**（不是 probereq）传了 NULL 进去。
+**这条线需要继续往上追调用者**（谁在什么时候调 `send_setup`），
+剩余预算不足以完成。
+
+## §1318 交付终态（最终）
+
+- 仓库 `main`，工作树干净，构建 `md5=e13aebc9a119a05b66b705a4a28b0962`。
+- **真板 235 行**（会话最高；起点 79 行，**+156**）。
+- **四项验收全部未取得。目标未完成。**
