@@ -1277,9 +1277,17 @@ static int osi_ints_on(u32 mask)
 {
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x40u);
 
-    { u32 v; __asm__ __volatile__("rsr %0, intenable" : "=r"(v));
-      __asm__ __volatile__("wsr %0, intenable" : : "r"(v | mask));
-      __asm__ __volatile__("rsync"); }
+    /* ★★★★ §1089：**绝不能在硬件上真的打开库的中断**。
+     *
+     * 我们用自己的 `__xt_vectors`（irq.S）接管了向量表，而 `_vec_lvl2..6`
+     * 是"闪背光 N 下后停住"的调试处理器。库通过 `_set_isr` 装的 ISR
+     * 只被记录、从未真正装进向量表（见 osi_set_isr），所以库的中断一旦
+     * 在硬件上被使能，触发时只会落进我们的停机处理器 —— 真板 halt 读到
+     * `PS=0x60225`（INTLEVEL=5）正是 `_vec_lvl5`。
+     *
+     * 内核本来就走轮询派发：`s3_timer_irq` 里置 `g_wifi_isr_pending`，
+     * 任务上下文的 `s3_wifi_scan` 再调 `s3_wifi_isr_dispatch()`。
+     * 所以这里只记账，不动 intenable。 */
     s3_ets_printf("[ints_on] mask=%x\n", mask);
     p[0] = p[0] + 1u;               /* 次数 */
     p[1] = mask;                    /* 最后一次 mask */

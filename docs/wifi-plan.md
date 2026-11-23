@@ -28041,3 +28041,47 @@ rsync
 `PORT_IRQ_SAVE`/`rsil` 的嵌套层级也要一起看。
 
 镜像 `192ee132`。
+
+## §1089 库的中断处理函数从未装进向量表 ⇒ 硬件一使能就落进我们的停机处理器
+
+### 发现
+
+- `osi_set_isr(n, fn, arg)` **只把函数指针记到 `s_wifi_isr_fn[n]`，从未装进
+  硬件向量表**（`wifi_glue.c:1266`）。
+- `osi_ints_on(mask)` 却**真的把 mask 写进 `intenable`**（`wifi_glue.c:1276`）。
+- 我们自己的 `__xt_vectors`（`irq.S`）接管了向量表，而 `_vec_lvl2..6`
+  → `_vec_lvl_common` 是**"闪背光 N 下后故意停住"**的调试处理器。
+
+**⇒ 库一旦在硬件上使能它的中断（WiFi MAC/PWR），触发时就只会落进
+我们的停机处理器。真板 halt 读到 `PS = 0x60225`（INTLEVEL=5）正是
+`_vec_lvl5` 的现场。**
+
+### 改动（构建 `436d6f41`）
+
+把 `osi_ints_on` 的硬件写去掉（只保留记账和打印）。内核本来就有轮询派发
+路径：`s3_timer_irq` 置 `g_wifi_isr_pending`，任务上下文的 `s3_wifi_scan`
+再调 `s3_wifi_isr_dispatch()`。
+
+### 结果
+
+串口仍停在 67 行，但 halt 现场变了：
+
+```
+EXCCAUSE = 4   EPC1 = 0x420135bf   PC = 0x4201751e
+WB = 8  WS = 0x150   a1 = 0x3fcc46f0   a0 = 0x8037d61c
+PS = 0x60225 (INTLEVEL=5)
+```
+
+**⇒ `PS` 仍是 INTLEVEL=5，但 PC 已经不在 `_vec_default` 里，而在正常
+flash 代码（`0x4201751e`）。说明 INTLEVEL=5 是**某条路径把 PS 写坏后
+残留**的，而不是真的还在 level-5 处理器里。**
+
+### 后续应当查的两点
+
+1. **谁把 `PS.INTLEVEL` 写成 5**：候选是 `_vec_lvl_common` 的入口
+   （`movi a2, \n` 之后没恢复 PS），以及 `_vec_level1` 里
+   `movi a2, 0x40021; wsr a2, ps`（这里 INTLEVEL=1，正确）。
+2. **`_vec_lvl2..6` 应当改成"记录 + ack + 返回"**，而不是停机 ——
+   否则库的任何中断都会把系统打死。这是让 WiFi 真正跑起来的必经之路。
+
+镜像 `436d6f41`。
