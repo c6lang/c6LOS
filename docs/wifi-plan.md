@@ -28918,3 +28918,12 @@ flash 断点在闭源库里基本不命中）。
 唯一的出路是让 ppTask 的 `xphyQueue` 在 ppTask 第一次运行前就被初始化好，
 也就是把 `pp_attach` 挪到 `pp_create_task` 之前，或者给 ppTask 加一个
 "队列没建好就先阻塞在信号量上"的垫片。
+
+## §1112 最后一试：钳制 `_task_delay` 的参数（无效，已回退）
+
+`pp_create_task` 在 `_semphr_take(sem,-1)` 之后调 `_task_delay(handle)`，
+传进来的是**任务句柄**而不是 tick 数；试过把 >1000 的值钳到 1，
+真板仍然停在 67 行同一位置。**已 `git checkout` 回退，工作树干净。**
+
+**⇒ 确认死锁点在 `_semphr_take(s_pp_task_create_sem, -1)` 等 ppTask 回 give，
+而 ppTask 因为 `xphyQueue == 0` 在 `_queue_recv` 上空转。**
