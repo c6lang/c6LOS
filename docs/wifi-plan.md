@@ -30700,3 +30700,25 @@ bnez.n a10, 4201ca08      ; 非 0 才算成功
 - 最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`，真板稳定 **230 行**。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1268 补充：`our_wait_eb` 与 `g_lmac_cnt`
+
+`lmacSetTxFrame` 用 `our_wait_eb`（`0x3fcef94c`，DRAM 绝对符号）。
+真板读到 **0**（`0x3fcef950` 有非 0 指针）。它在 TX 循环里由 `lmacTxFrame`
+填，空闲时为 0 属正常，**不是**当前卡点（当前卡点在 `esf_buf_alloc` 恒 NULL）。
+`g_lmac_cnt`（`0x3fcd6d08`，0xc0 字节）是 TX 计数统计。
+
+## §1269 交付终态（最终，round 180）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`。
+- **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**整条链的最后一环已被反复取证到库的设计层面：**
+`esf_buf_alloc_dynamic`（`0x40383434`）全文只有一个 `retw`，
+返回前是 `movi a9,0; mov a2,a9` —— **永远返回 0**；
+而 `esf_buf_setup_static` 用 `bnez a10` 判成功。
+⇒ 这两者在我们"绕过 ppTask"的配置下**必然冲突**，
+库自己的正常路径（ppTask 里先 `_wifi_malloc` 预分配、再注册）才是正解。
+**继续需要内核层面的架构重写。**
