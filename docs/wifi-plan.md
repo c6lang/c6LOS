@@ -27453,3 +27453,40 @@ tag=7 id=3 ctx=3fcc6928 n=4    ← 创建任务 3（tcpip）
 记到 RTC（`0x50001900` 一带没用过），跑一次就能看出恢复的目标是不是 ppTask。
 
 （本轮所有实验均已撤回，镜像 `bff36e25`，tree 干净。）
+
+## §1074 找到 tick 消费链的死角（修法试过，未产生效果，已撤回）
+
+真板实测（本轮，板子在线）：
+
+| 断点 | 结果 |
+|---|---|
+| `os_task_delay` (0x42016754) | **命中**，ticks=20 |
+| `port_task_yield_c0` 入口 (0x403796c7) | **从不命中** |
+| 它的 `rfe` 出口 (0x403798f2) | **从不命中** |
+| 它的跳过出口 (0x4037991c) | **从不命中** |
+| `port_task_switch` (0x403796c0) | 只命中一次（初始切到主任务） |
+| `os_timeout_pop_expired` (0x42013134) | **从不命中** |
+| `wifi_init_process` / `ppTask` | **从不命中** |
+
+`os_task_delay` 命中但 `port_task_yield_c0` 不命中 ⇒ 走的是
+```c
+if (os_timeout_add(g_cur->id, ticks) != 0) { g_cur->delay_left = 0; return; }
+```
+这条**提前返回**分支 ⇒ **一次都不让出 CPU**。
+`os_timeout_add` 只在 `g_count >= OS_TIMEOUT_MAX(128)` 时失败，而唯一的
+到期弹出点 `os_timeout_pop_expired` 又从不执行 ⇒ 表一旦填满就永久卡死。
+
+`os_timeout_pop_expired` 只由 `os_sched_tick()` 调用（`task.c6:593`），
+而 `os_sched_tick()` 在正常运行时**没有任何调用者**：
+- 主循环里那处（`task.c6:650`）被 `if (t == 0)` 挡住，而永远有就绪任务；
+- ISR 里那处按 §964 已改成只累加 `S3_TICK_PEND`（RTC 0x50001580），
+  等主循环消费 —— 可主循环根本不回来。
+
+**试过的修法（已撤回）**：在 `os_task_delay` 开头
+`while (port_virtual_tick()) os_sched_tick();`。
+构建通过、刷板后 `tramp` 仍只命中主任务一次、`scan_start` 仍是 12290，
+**没有改善** ⇒ 说明 `S3_TICK_PEND` 本身可能一直是 0（定时器 ISR 没在累加），
+或者 `os_sched_tick` 里还有别的阻塞点。下一步应先读 RTC `0x50001580`
+确认定时器 ISR 到底有没有在跑。
+
+（改动已撤回，镜像 `bff36e25`。）
