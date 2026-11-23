@@ -29768,3 +29768,31 @@ start scan: type=0x3fcef940, priority=1070270765, cb=0x4037cca4, arg=0x44, ...
 
 **仍未解决**：`perform scan` 之后驱动报错；关联、DHCP、TLS、HTTPS 四步全未开始。
 受限于：日志参数错位导致无法定位真实错误；ppTask 调度问题未解。
+
+## §1192 `osi_log_write` 展开格式串（有效，真板 210 行）
+
+原来 `osi_log_write(level, tag, fmt, arg)` 直接 `s3_ets_printf("%s", fmt)`，
+把格式串**原样**打出来 —— 真板上只看到 `[w1]wifi|%s`、`[w1]wifi|%c (%d) %s:`，
+错误内容完全丢失。改成 `s3_ets_printf(fmt, arg)` 后：
+
+```
+[w1]wifi|E (1070205064) :
+[w1]wifi|
+```
+
+⇒ 格式串开始展开（`E (timestamp) tag:` 前缀出来了），
+但时间戳仍是垃圾、消息体为空 —— 说明这条错误走的是**另一条日志路径**
+（`_log_writev`），其 varargs 读取仍未修好（§1190）。
+
+**真板 210 行，行为与之前等价，但日志可读性提高。已提交。**
+
+## §1193 会话最终结论（round 150）
+
+**目标未完成，四项验收全部未取得。**
+
+**真板从 79 行推进到 210 行，共三个结构性突破（§1164/§1165、§1169、§1182）：
+WiFi 首次 STARTED、MAC 使能、`scan_start=0`、扫描真正进入 `perform scan`。**
+
+**剩余**：扫描之后驱动报错；关联 / DHCP / TLS / HTTPS 四步全未开始。
+最关键的诊断障碍是 `_log_writev` 的 varargs 在 Xtensa windowed ABI 下读取错位，
+使得闭源库的真实错误信息无法读出。

@@ -1139,12 +1139,23 @@ static void c6_log_fmt(const char *fmt, void *app)
     s3_ets_printf("%s", out);
 }
 
+__attribute__((section(".flash.text")))
 static void osi_log_write(u32 level, const char *tag, const char *fmt, const char *arg)
 {
     OSI_HIT(83);
+    /* §§1192 ★★★：**必须展开格式串**。
+     *
+     * 原来这里直接 `s3_ets_printf("%s", fmt)` 把格式串原样打出来，
+     * 真板上就只看到 `[w1]wifi|%s`、`[w1]wifi|%c (%d) %s:` 这种
+     * **根本看不出错误内容**的行——而扫描失败的真正
+     * 原因就藏在这些消息里。
+     * 库调 `_log_write(level, tag, fmt, arg)` 只带**一个**参数，
+     * 这里把它装成一个临时参数数组交给 `c6_log_fmt`。 */
     if (level < 2u) {
         s3_ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
-        if (c6_ok_str((u32)(void *)fmt)) { s3_ets_printf("%s", fmt); }
+        if (c6_ok_str((u32)(void *)fmt)) {
+            s3_ets_printf(fmt, arg);
+        }
         s3_ets_printf("\n");
     }
     (void)arg;
