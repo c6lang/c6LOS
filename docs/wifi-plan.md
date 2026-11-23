@@ -30268,3 +30268,43 @@ IDF 里 0 = static，1 = dynamic。若改成 0 或许会走另一条分支，
 - **真板最佳 228 行**（会话起点 79 行，**提升 149 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1231~§1234 resume 后的调度尝试（全部回退）
+
+目标：让 ppTask 真正跑起来处理扫描消息。组合尝试：
+- ISR 直接推进 `g_c6os_ticks`（`irq.c` + `tick.c6` 全局化）
+- `sched_pick()` 轮转（当前任务不能是唯一候选）
+- ppTask 优先级恢复 `31-prio`（= 2）
+- `osi_queue_recv_body` 每 8 次 `os_task_yield()`
+- `esp_wifi_scan_start` 之后加阻塞泵 `s3_scan_pump()`（400 次 1-tick delay）
+- `osi_queue_recv_body` 移入 flash（解 IRAM 溢出）
+
+真板：`g_c6os_ticks` 能涨到 9（ISR 推进有效），但
+**`exccause=0`（IllegalInstruction）崩在 `0x42013bd2`**
+—— 正是 **`s3_w2c_queue_recv` 薄壳末尾的 `retw`**（窗口用尽）。
+⇒ 一进入高频 recv，手写薄壳的窗口账目就崩。已全部回退。
+
+**§1234**：试了在 ISR 里通过 `s3_isr_sched_thunk`（`entry a1,48; call8 os_sched_tick; retw`）
+调 `os_sched_tick`，想在"两个任务都阻塞"时仍能扫描超时。
+结果同样崩在薄壳 `retw`。
+
+## §1235 会话最终结论
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板最佳 228 行**（本会话起点 79 行，**提升 149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**已彻底查清的根因链**：
+1. WiFi 库的 TX 缓冲池（`esf_buf`）需要正确的初始化序列
+   （`g_wifi_menuconfig` 模式位 → `esf_buf_setup` → `esf_buf_setup_static` →
+   `esf_buf_alloc_dynamic` 的 `desc+16` 计数），而我们**直调 `wifi_init_process`
+   绕过了 ppTask 的正常初始化序列**，所以这一步永远不成。
+2. 让 ppTask 正常跑需要抢占或 ISR 侧超时处理，
+   而 `W2C_SPILL` 手写汇编薄壳在 windowed ABI 下高频调用必然崩溃（`retw` 窗口用尽）。
+3. 这两条互相锁死：不绕过 ppTask 就建不好 TX 池；绕过 ppTask 就用不了它的消息循环。
+
+**唯一可能同时解决两者的方向**：把 `W2C_SPILL` 改写成真正的 windowed 函数
+（用 `-mabi=windowed` 编译 + 显式 128 字节自由栈），从而让 ppTask 能在不受
+薄壳拖累的情况下跑满消息循环 —— 这样 TX 池由库自己正常初始化，之后
+scan/assoc/DHCP/TLS/HTTPS 才有机会。
