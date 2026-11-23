@@ -28385,3 +28385,70 @@ init 等 ppTask 就绪，ppTask 等 init 给队列句柄。
 返回时**主动把句柄写进库的那个全局**（需要先用断点/内存扫描定位它）。
 
 镜像 `1c8f57be`。
+
+## §1097 ppTask 的源码级真相：它先等 `s_pp_task_create_sem`，再用 `xphyQueue`
+
+### 反汇编 ppTask（0x403823a4）开头
+
+```asm
+403823a4 <ppTask>:
+    entry   a1, 48
+    l32r    a2, (g_osi_funcs_p)          ; a2 = &g_osi_funcs_p
+    l32r    a4, (s_pp_task_create_sem)   ; a4 = &s_pp_task_create_sem
+    l32i.n  a3, a2, 0                    ; a3 = g_osi_funcs_p (OSI 表)
+    l32i    a10, a4, 0                   ; a10 = s_pp_task_create_sem
+    l32i    a3, a3, 64                   ; a3 = osi[16] = _semphr_take
+    movi.n  a4, 0
+    callx8  a3                           ; _semphr_take(sem, 0)
+    l32r    a3, (xphyQueue)
+    l32i.n  a5, a2, 0
+    l32i    a10, a3, 0                   ; a10 = xphyQueue  ← **队列句柄**
+    l32i    a5, a5, 116                  ; a5 = osi[29] = _queue_recv
+    movi    a12, -1
+    or      a11, a1, a1
+    callx8  a5                           ; _queue_recv(xphyQueue, &msg, -1)
+```
+
+**⇒ ppTask 的第一件事是 `_semphr_take(s_pp_task_create_sem)`，
+第二件事才是 `_queue_recv(xphyQueue, ...)`。**
+
+### 关键：这三个库全局都是 0
+
+```
+0x3fcef904  xphyQueue               = 0
+0x3fcef910  s_pp_task_create_sem    = 0
+0x3fcef940  g_osi_funcs_p           = 0
+```
+
+（地址已用 `nm` 核对，符号类型 `A`，位于我们栈顶 0x3fcd9500 之上的 DRAM 尾部。）
+
+**⇒ 这说明库的这三个全局**从未被初始化**。而 `wifi_init_in_caller_task`
+（§1096，永不返回）正是负责初始化它们的那个函数 —— 它在 `pp_attach`
+之前就卡住了，所以 ppTask 拿到的是 NULL 队列和 NULL 信号量。**
+
+**⇒ 这形成一个**完整的因果链**：**
+
+```
+wifi_init_in_caller_task 卡住
+  → 没执行到 pp_attach / 队列句柄赋值
+    → xphyQueue = NULL、s_pp_task_create_sem = NULL
+      → ppTask 起来后 _queue_recv(NULL) 空转
+        → 永远收不到 wifi_init_process
+          → ic_init 永不执行 → g_ic = NULL
+```
+
+### 下一步（唯一正确的方向）
+
+**必须让 `wifi_init_in_caller_task` 返回。** 它卡在内部某个 `callx8` 上
+（0x42040210 起有十几处间接调用）。最有效的做法：
+
+1. 在 `0x42040210` 下断点，命中后**逐条 `si` 并打印 PC**，走到哪一条
+   `callx8` 之后 PC 不再前进，就是那一处；
+2. 或者对每个 `callx8` 的 `l32r` 目标（反汇编里都标了符号名）逐个下断点，
+   看哪一个只进不出。
+
+拿到具体函数后，再判断它等的是哪个信号量/队列，并针对性地在我们的
+OSI 实现里补上（很可能就是我们某个 `_semphr_take`/`_queue_recv` 的
+返回值语义与库的期望不一致，导致它认为"还没就绪"而永久等待）。
+
+镜像 `1c8f57be`。
