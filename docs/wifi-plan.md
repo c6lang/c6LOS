@@ -27360,3 +27360,33 @@ ppTask 建好了却一次都不跑 —— 要在 `s3_w2c_task_create` 返回后
 
 本轮试过把库任务优先级从 2 提到 0（`u32 p = 0u`），**没有效果**
 （`wifi_init_process` 仍不命中），已撤回，镜像回到 `bff36e25`。
+
+## §1071 补充实测：创建了 3 个任务，ppTask(id=2) 从不被选中
+
+RTC 切换环 `0x50001500`（`port_switch_trace`，每项 tag/id/ctx/n）一次真实启动：
+
+```
+tag=7 id=1 ctx=3fcc6890 n=1    ← 创建任务 1（主任务）
+tag=1 id=1 ctx=3fcc6890 n=2    ← 有一次真正的切换（到任务 1）
+tag=7 id=2 ctx=3fcc68dc n=3    ← 创建任务 2（ppTask）
+tag=7 id=3 ctx=3fcc6928 n=4    ← 创建任务 3（tcpip）
+```
+
+**⇒ 三个任务都创建成功、ctx 都非空。** 栈池算账：
+16384（主）+ 16384（ppTask）+ 8192（tcpip）= 40960 = `S3_STACK_POOL`，正好用满；
+没有出现 `[ctx] 栈池不够` 的打印，说明分配都成功了。
+
+**⇒ 但 tag 只有"创建"和一次"切换"，ppTask / tcpip 一次都没被切到。**
+
+### 试过但无效的两条
+
+1. 把库任务优先级从 2 提到 0（`u32 p = 0u`）：`wifi_init_process` 仍不命中。
+2. 在 `sched_pick` 末尾把被选中的 `best->id` 写进 RTC `0x50001600`：
+   跑完读出来是**随机值**，一个都没写进去 ⇒ **`sched_pick` 被编译器完全内联**，
+   符号只留了一份没人调用的副本，补丁打在了死代码上。
+
+**⇒ 下一步必须改内联点**：直接给 `port_task_yield` / `port_task_switch`
+（port/s3/ctx.S / ctx.c）加同样的 RTC 记录，或者用 `-fno-inline` 单独编译
+`kernel/task.c6` 里的 `sched_pick`。
+
+两条实验均已撤回，镜像回到 `bff36e25`（构建通过、tree 干净）。
