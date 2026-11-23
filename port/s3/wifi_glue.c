@@ -12,6 +12,8 @@
 #include "c6os/wifi_osi.h"
 
 wifi_osi_funcs_t g_wifi_osi_funcs;
+
+void s3_fix_ic16(void);
 void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
 extern volatile u32 g_osi_calls[128];
@@ -2363,6 +2365,7 @@ int s3_wifi_scan(void)
                 u32 nv = *(volatile u32 *)(void *)g_wifi_nvs;
                 if (nv != 0u) { *(volatile unsigned char *)(void *)nv = 1u; }
             }
+            s3_fix_ic16();   /* §1182（实现在 flash，避 IRAM 溢出） */
             sr = __real_wifi_scan_start_process((void *)sm);
             s3_ets_printf("[scanp2] direct r=%d\n", sr);
         }
@@ -3098,6 +3101,22 @@ int __wrap_pp_create_task(void)
 }
 
 extern int __real_pp_post(unsigned int ppq, unsigned int data);
+/* §§1182：`ieee80211_sta_scan` 要求 `*(u32*)(g_ic+16)` 非 0，否则直接 return -1。
+ * 真板实测它是 0；而 `*(u32*)g_ic` 就是 `g_cnxMgr`（0x3fcd5730）。先把它补进去试。
+ * 放在 `.flash.text`，避免 IRAM 溢出。 */
+__attribute__((section(".flash.text")))
+void s3_fix_ic16(void)
+{
+    extern unsigned char g_ic[];
+    extern int s3_ets_printf(const char *, ...);
+    u32 *icp = (u32 *)(void *)g_ic;
+
+    if (icp[4] == 0u && icp[0] != 0u) {
+        icp[4] = icp[0];
+        s3_ets_printf("[ic16] set to %x\n", (unsigned)icp[4]);
+    }
+}
+
 int __wrap_pp_post(unsigned int ppq, unsigned int data)
 {
     s3_wrap_bump(7u);

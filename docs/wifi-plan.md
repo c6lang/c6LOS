@@ -29627,3 +29627,45 @@ g_ic+28 = 0x00040000
   `scan_start=0`、`[v4]wifi|Start wifi scan` 都能打出来。
 - **四项验收仍全部未取得**：AP 关联 0、DHCP 0、TLS 0、qq.com body 0。
 - **目标未完成。**
+
+## §1182 补 `g_ic+16` —— 扫描真正跑起来了（209 行）
+
+把 §1180 的发现落地：在扫描前把 `*(u32*)(g_ic+16)` 补成 `*(u32*)g_ic`（= `g_cnxMgr`）。
+实现放在 `.flash.text` 的 `s3_fix_ic16()`（直接内联会让 IRAM 溢出 72 字节）。
+
+**真板结果：209 行**（199 → 209）：
+```
+[ic16] set to 3fcd5740
+[v4]wifi|home_channel_dwell_time=0
+[chmlk] a=3 r=0
+[pmoff] a=42030168 b=0 r=0
+[v4]wifi|filter: set rx policy=0
+[v4]wifi|clear scan ap list
+[v4]wifi|start scan: ...
+[v4]wifi|perform scan: ss_state=0x0, chan<0,0>, dur<0,0>
+[w1]wifi|%c (%d) %s:
+[v1]wifi|? 0
+```
+
+⇒ **扫描流程真正进入了 `perform scan`**，但 `chan<0,0>, dur<0,0>` 说明
+扫描参数仍是空的（`ss_state=0x0`），随后驱动报错 `[v1]wifi|? 0`。
+`wifi_glue.c` 里 `cfg[8] = 6` 已经设了信道，说明问题在
+`ieee80211_sta_scan` 之后的 `cnx_sta_scan_cmd` 内部的 scan-state 初始化。
+
+**这是本会话最接近成功的一步**：从"扫描根本发不出去"推进到
+"扫描进入 perform 阶段、只差参数填充"。
+
+## §1183 会话最终结论（round 145）
+
+**目标未完成，四项验收全部未取得。**
+
+**本会话把真板从 79 行推进到 209 行，取得三个结构性突破：**
+
+1. **§1164/§1165**：`g_ic` 真正被分配并初始化 → WiFi 首次进入 STARTED（`state=2`）、
+   MAC 使能（`d14=1`）、`scan_start=0` 首次成功。
+2. **§1169**：`osi_wifi_int_disable/restore` 改空操作，消除 `__real_pp_post`
+   的极窄时序窗口（此前任何代码布局变化都会让真板从 195 行掉到 90 行）。
+3. **§1182**：补 `g_ic+16` 后**扫描真正进入 `perform scan`**（209 行）。
+
+**剩余卡点**：scan-state 参数未填充（`chan<0,0>, dur<0,0>`），
+需要继续追 `cnx_sta_scan_cmd` 内部；之后还有关联、DHCP、TLS、HTTPS 四大步。
