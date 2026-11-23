@@ -30419,3 +30419,32 @@ TX 缓冲池建不好 ← 绕过了 ppTask 的正常初始化序列 ← 绕过�
 - **真板稳定 227~228 行**（本会话起点 79 行，**提升 148~149 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1246 铁证：库从未调用 `_wifi_malloc`
+
+在 `osi_wifi_malloc` 里加 RTC 计数器（`0x50000F80`），真板读到全是**上电垃圾值**
+（`0xf49b4fb5` 等）⇒ **这个 OSI 回调从来没被调用过一次**。
+
+⇒ 也就是说：**闭源库自己都没有尝试去分配 dynamic TX 缓冲池**。
+它认为"还没到那一步"——因为正常流程里这一步在 ppTask 的
+`wifi_init_process` 内部完成，而我们**绕过了 ppTask**（直调那个函数只跑了
+`wifi_nvs_init`/`wifi_lmac_init`/`wifi_hmac_init`/`wifi_crypto_init`，
+它自己并不调 `ic_init`/`hal_init`/`esf_buf_setup`）。
+
+**⇒ 闭环最终确认：**
+```
+绕开 ppTask（因为 W2C_SPILL 薄壳高频调用必崩）
+  → 库的 TX 池分配流程从未执行（_wifi_malloc 零调用）
+    → esf_buf_alloc 恒 NULL
+      → ieee80211_send_setup 断言死循环
+        → 扫描/关联全部卡住
+```
+要打破它，必须**让 ppTask 真正按库期望的方式跑**，
+而这就需要先解决薄壳在 windowed ABI 下的窗口账目问题。
+
+## §1247 交付终态（round 177）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板稳定 227~228 行**（本会话起点 79 行，**提升 148~149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
