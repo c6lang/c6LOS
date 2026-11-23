@@ -29428,3 +29428,41 @@ if (r == 0 && g_s3_real_scan_msg != 0u) {
 
 **这是本轮第二个结构性进展**：把"任何代码改动都会卡 `[pq]`"这个障碍清掉了。
 后续可以直接处理 `ppq==6` 的所有消息（扫描/连接/认证），完全绕开 ppTask。
+
+## §1171~§1172 内联处理所有 ppq==6 消息（部分成功，已回退）
+
+有了 §1169 的时序修复，把 `__wrap_pp_post` 里的内联处理抽成
+`.flash.text` 的 `s3_pp_inline(ppq, data, rr)`（避免 IRAM 溢出 12 字节），
+对 `ppq==6 && rr==0` 的消息直接调用 `msg->[4]` 指向的处理函数，
+排除已在 §1165 直调过的 `wifi_init_process` / `wifi_start_process`。
+
+**§1172 关键坑**：递归守卫用 RTC `0x50001FD4`，判断写成 `*guard != 0u` ——
+**RTC 上电是垃圾值**（实测 `0x6EF0...`），于是每次都被误判成"正在递归"直接返回，
+`[inl]` 一次都不打印。改成 `*guard == 1u` 后才正常。
+
+**真板结果**：`[inl] h=4203a13c type=30a` —— 内联处理**确实跑起来了**
+（`0x4203a13c` 是 `wifi_set_mode_process`），但**行数从 196 掉到 109**：
+`set_mode_process` 内部要阻塞，在调用者上下文里直接跑会卡死。
+
+⇒ 内联同步处理**不能用于会阻塞的处理函数**。已回退。
+
+## §1173 当前最佳状态（commit b0fb418，md5 1414c97b）
+
+**真板 196 行**，WiFi 首次真正进入 STARTED：
+```
+[direct] init=0 start=0 state=2
+[hs] d14=1 ca0=0 PWC=0 CLK=fffce7ff   ← MAC 已使能
+[wifi] scan_start=0
+[scanp2] direct r=-1
+```
+
+**四项验收仍未取得**：AP 关联 0、DHCP 0、TLS 0、qq.com body 0。
+
+**剩余工作**：需要一个能跑 `wifi_set_mode_process` / `wifi_scan_start_process` /
+`wifi_connect_process` 等**会阻塞**的处理函数的执行环境。
+既然内联同步不可行，就必须让 ppTask 真正跑起来——而它需要
+"初始化任务阻塞时 ppTask 能跑、ppTask 阻塞时初始化任务能跑"的调度，
+这正是 §1150~§1158 反复卡住的地方。
+**下一步建议**：把 ppTask 单独放到一个"协作式"调度里，
+即 `s3_w2c_queue_recv` 的薄壳在**返回前主动让出**给初始化任务一次
+（而不是靠 `os_task_yield` 的优先级选择）。
