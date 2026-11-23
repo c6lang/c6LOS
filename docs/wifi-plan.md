@@ -29115,3 +29115,59 @@ retw                  ; 回到 +0
 真板 167 行、无崩溃、`md5=d37a73a829989c565b1a5cfe9d046d56`。
 完整走完 init/start/scan/connect 链，但 `g_ic=0`、`scan_start`/`connect`
 都返回 `0x3002 NOT_STARTED`，四项验收**全部未取得**。
+
+## §1150~§1152 决定性取证：ppTask 起来了，但薄壳在 windowed ABI 下必崩
+
+本轮把"卡在 `[delay] ticks=1`"这件事查到底，得到三条硬证据：
+
+**(1) ppTask 确实启动过**：`0x50000A00`（`s3_task_tramp` 诊断）= 计数 **2**，
+入口 `0x40382240`、sp `0x3fcc4930`。所以不是"任务没建起来"。
+
+**(2) 超时确实加进去了，但再也没有第二次 `os_sched_tick`**：
+在 `os_sched_tick()` 里加 RTC 诊断 `0x50000F60`：
+- `+0` 调用次数 = 20
+- `+4` 最后一次 `now` = 10
+- `+8` `os_timeout_pending()` = 0
+- `+12` 超时弹出次数 = 从未写过（垃圾值）
+
+⇒ 初始化任务把超时条目加进队列后就 BLOCKED，之后**没有任何任务再调用
+`os_sched_tick()`** ⇒ 队列永远不被扫描 ⇒ 永远不醒。
+
+**(3) 崩溃点固定在 `s3_w2c_queue_recv` 薄壳内**：
+- 保留 `call8 s3_win_spill`：`exccause=0x0`(IllegalInstruction)、`epc1=0x420136be`
+- 删掉 `call8 s3_win_spill`：`exccause=0x0`、`epc1=0x42013698`
+- 另一次（自旋版）：PC 停在 `_win_unf8`（窗口下溢）、`epc1=0x420136be`
+
+⇒ **薄壳的窗口账目在 windowed ABI 下不平衡**。`call8 s3_win_spill` 会把
+WINDOWBASE 推满一整圈（`s3_win_spill` 是 IDF 官方 `window_spill_function`，
+按 `a0` 的 CALLINC 递归 `call4/8/12`），之后 `callx8 target` + `retw` 的
+CALLINC 已经对不上。§1150 试过"保存 a0..a15 全部 16 个寄存器 + 不 spill"的
+重写，真板输出变成乱码（`b`、`Wu1bb`），说明还有别的问题。
+
+## §1153 试过但无效的组合（全部已回退）
+
+| 组合 | 结果 |
+|---|---|
+| ISR 推进 `g_c6os_ticks`（`g_c6os_ticks` 涨到 29210） | 时间推进正常，但无人扫描超时 |
+| `sched_pick()` 改成轮转（当前任务不能是唯一候选） | 仍 79 行 |
+| ppTask 优先级 2 + recv 每 8 次 `os_task_yield()` | 仍 79 行 |
+| 以上三者全开 | 仍 79 行，`exccause=0` 在薄壳内 |
+| `os_task_delay` 改自旋+让出 | 暴露 `_win_unf8` 窗口下溢 |
+| 初始化任务优先级改 0 / 改 20 | 启动更早失败（65 行） |
+
+## §1154 结论与下一步
+
+**四项验收（AP 关联 / DHCP / TLS / qq.com body）全部未取得。**
+`g_ic` 仍为 0，`scan_start`/`connect` 返回 `0x3002 NOT_STARTED`。
+
+根因链（已完全查清）：
+1. `esp_wifi_start()` 只投消息，真正建 `g_ic` 的是跑在 ppTask 里的 `wifi_start_process`；
+2. 内核无抢占 + 严格优先级 ⇒ 初始化任务和 ppTask 无法同时推进；
+3. 唯一能让两者交替的手段（`W2C_SPILL` 薄壳）在 windowed ABI 下窗口账目不平衡，
+   一进入高频调用就抛 `IllegalInstruction` / 窗口下溢。
+
+**下一步应当做的**（而不是继续在薄壳上打补丁）：
+把 `W2C_SPILL` 薄壳彻底重写成一个**真正的 windowed 函数**——用 `-mabi=windowed`
+编译一个 C 包装函数（例如 `int s3_win_wrap_queue_recv(void *qh, void *item, u32 ticks)
+{ return osi_queue_recv_body(qh, item, ticks); }`），让编译器自己生成正确的
+`entry`/`call8`/`retw` 序列，彻底删掉手写汇编薄壳。这样窗口账目由编译器保证。
