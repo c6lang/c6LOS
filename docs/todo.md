@@ -1539,7 +1539,7 @@ ns —— 超时短了 1000 倍（m55 那个 20ms 超时实际只等 20µs）。
 
 ## 发布回归记录（2026-11-23，v0.1.0）
 
-main 在发布准备期间前进了 300 个提交（windowed ABI 迁移、闭源 WiFi 库、lwIP、
+main 在发布准备期间前进了 300 余个提交（windowed ABI 迁移、闭源 WiFi 库、lwIP、
 TLS 1.2/HTTPS 客户端，见 docs/wifi-plan.md §1063 起）。发布分支已合并 main
 （`eb696c0`），以下门禁全部在合并后的树上重跑：
 
