@@ -30228,3 +30228,43 @@ IDF 里 0 = static，1 = dynamic。若改成 0 或许会走另一条分支，
 - **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1224~§1229 本轮（resume 后）的新取证与结论
+
+**§1224**：`g_wifi_menuconfig+8 == 1` 表示 **dynamic** TX 缓冲模式；
+`esf_buf_setup` 于是走 dynamic 路径（需要先从 OSI 堆分配池子，而那步没成），
+打出 `esf_buf_setup_static: alloc eb fail(0)`。
+把它改成 0 走 **static** 路径，并把一块 2048 字节缓冲传给 `esf_buf_setup`，
+`esfalloc` 的错误参数从 `0` 变成 `0x3fcc e6xx`（说明 static 路径确实进去了），
+但 `esf_buf_setup` 仍返回 `0x101`。
+
+**§1225**：`esf_buf_setup_static` 里 `a12 = 0x640 - list_desc[32]` ⇒ 需要约 1600 字节，
+而库里的 `eb_space` 只有 192 字节 ⇒ 传 2048 字节缓冲仍失败。
+
+**§1226**：`esf_buf_alloc_dynamic(desc, buf, type)` 先读 `desc+16`（u16）当计数，
+为 0 直接失败；而 `esf_buf_setup_static` 只写了 `desc+10`。
+手动补 `desc+16 = 32` ⇒ **真板掉回 78 行**（写错地址/破坏了别的结构）。已回退。
+
+**§1227**：把扫描改成**被动扫描**（`cfg[12] = WIFI_SCAN_TYPE_PASSIVE`、
+`cfg[14..15] = 120`），理论上不需要发 probe request、可绕开 TX。
+真板 **228 行**（新高），但 PC 仍在 `ieee80211_send_setup+36`。
+
+**§1228**：在调用点打印配置，确认我们的 `cfg` **完全正确**
+（`ch=6 type=1 pt=120`）；库日志里的 `channel=0/passive=0` 只是
+**日志参数错位的产物**（§1186），配置本身传进去了。
+
+**§1229（已回退）**：用 `--wrap=esf_buf_alloc` 接管分配器，真实分配失败时
+退回自建静态缓冲。`[esfsetup] r=0` 首次成功，但整体掉到 151 行（更差），已回退。
+
+**⇒ 结论：TX 缓冲池的初始化是一条很深的闭源库内部链**
+（`g_wifi_menuconfig` 模式位 → `esf_buf_setup` → `esf_buf_setup_static` →
+`esf_buf_alloc_dynamic` 的 `desc+16` 计数），
+而且我们**直调 `wifi_init_process` 绕过了 ppTask 的正常初始化序列**，
+这才是它没被正确初始化的根本原因。
+
+## §1230 会话最终状态
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=e76a3f1cb984db10873d861a999687bc`。
+- **真板最佳 228 行**（会话起点 79 行，**提升 149 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
