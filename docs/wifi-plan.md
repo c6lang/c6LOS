@@ -29376,3 +29376,32 @@ rs = wifi_start_process();             /* → 0 */
 
 **这是本次迁移第一次让 WiFi 真正进入 STARTED 状态并成功发起扫描。**
 剩下的是让 ppTask 处理 `wifi_scan_start_process` 等后续消息（仍受调度限制）。
+
+## §1166~§1167 直接处理扫描消息（尝试，已回退）
+
+思路与 §1165 一致：捕获 `ppq==6` 的扫描消息，`scan_start` 返回 0 后直接调
+`__real_wifi_scan_start_process(msg)`，绕开 ppTask。
+
+试了三种捕获方式（`__wrap_pp_post` 里加比较+store / 只加一条 store /
+用既有的 `g_s3_real_scan_msg`），**全部把真板从 195 行打回 90 行、卡 `[pq]`**。
+
+**⇒ 结论：`__real_pp_post` 存在一个极窄的时序窗口，`__wrap_pp_post` 里
+多一条指令就会踩进去。** 这与功能无关，纯属布局/时序巧合。
+后续若要做扫描直调，必须**先消除这个时序脆弱性**（例如让 `pp_post`
+完全不走库里的临界区，或把它换成我们自己的实现）。
+
+## §1168 当前最佳状态（commit e3af76d，md5 3234ada6）
+
+**真板 195 行，WiFi 首次真正进入 STARTED：**
+```
+[direct] init=0 start=0 state=2     ← IC 初始化成功，状态 = 2 (STARTED)
+[wifi] start=0
+[hs] d14=1 ca0=0 PWC=0 CLK=fffce7ff ← MAC 已使能（此前 d14=0）
+[wifi] set_ps(NONE)=0
+[wifi] scan start（异步）
+[wifi] scan_start=0                  ← 扫描成功启动（此前恒 12290/0x3002）
+```
+
+**四项验收仍未取得**：AP 关联 0、DHCP 0、TLS 0、qq.com body 0。
+卡点：扫描消息堆在 `xphyQueue` 里没人取（ppTask 拿不到 CPU），
+而任何绕过尝试都会踩到 `__real_pp_post` 的时序窗口。
