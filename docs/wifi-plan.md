@@ -29047,3 +29047,34 @@ scan_start=12290(0x3002 NOT_STARTED) → connect=12290
 
 `g_ic @0x3fcd4830 = 0` ⇒ `wifi_start_process` 从未真正执行 ⇒ 四项验收
 （AP 关联 / DHCP / TLS / qq.com body）**均未取得**。
+
+## §1141~§1144 tick 推进 / 优先级组合实验（全部回退）
+
+**§1141**：`g_ticks` 原是 `static u64`，只能由任务上下文的 `os_sched_tick()` 推进。
+改成全局 `g_c6os_ticks` 并**在定时器 ISR 里直接 +1**（`irq.c` 的 `s3_timer_irq()`，
+不是 console.c 的 `s3_tick_isr_tail`——那里根本没被调用）。
+真板验证：`g_c6os_ticks` 从 0 涨到 12，`TICK_PEND` 也在涨 ⇒ **时间推进成功解耦**。
+但**仅此不够**：超时扫描仍只在任务上下文的 `os_sched_tick()` 里跑，
+两个任务都阻塞时无人扫描 ⇒ 仍然死锁。
+
+**§1143**：ppTask 恢复 `31-prio`（=2），初始化任务在 `esp_wifi_start` 前
+`os_task_set_prio(me, 20)` 主动降级 + 泵里 `s3_tick_consume(); os_task_yield();`
+⇒ 回到 79 行（`[delay] ticks=1` 死锁），因为 ppTask 优先级更高、`os_task_yield`
+永远挑它，初始化任务饿死。
+
+**§1144**：反过来把初始化任务提到**优先级 0**（最高）+ recv 里每 16 次
+`os_task_yield()` ⇒ 启动更早失败（65 行，停在 `[wifi] init 前的库状态 = 1`）。
+
+**结论：无抢占 + 严格优先级下，"谁该让出"无解，除非在 ISR 里做超时扫描。**
+真正该做的是：把超时扫描写成 **call0** 实现（不能用 windowed C，§1094），
+在 `s3_timer_irq()` 里直接调用：读 `g_to[0].deadline` 与 `g_c6os_ticks` 比较，
+到期就把对应任务置 READY 并置"需重调度"标志。这是唯一能同时满足
+"时间推进"和"超时扫描"都不依赖任务上下文的方案。
+
+## §1145 当前最佳状态（commit 4aff018）
+
+真板 167 行、无崩溃。完整走完 init/start/scan/connect 链，但：
+- `g_ic @0x3fcd4830 = 0`（`ic_init` 没完成或 `g_ic` 赋值在更后面）
+- `scan_start`/`connect` 都返回 `12290 = 0x3002 NOT_STARTED`
+- `[wifi] 已关联，ssid= channel=0` 是**空值**，不是真关联
+- 四项验收（AP 关联 / DHCP / TLS / qq.com body）**全部未取得**
