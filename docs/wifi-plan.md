@@ -30612,3 +30612,42 @@ PC 仍在 `ieee80211_send_setup+36` 的断言循环。
 
 仓库 `main` @ `b23b3c5`，工作树干净。
 **目标未完成，不应标记 complete。**
+
+## §1261 决定性发现：`esf_buf_alloc_dynamic` 永远返回 0
+
+反汇编 `esf_buf_alloc_dynamic`（`0x40383400`，约 0x1d2 字节）：
+**全文只有一个 `retw`**，位于 `0x403835d0`，之前是
+```
+403835cc: movi a9, 0
+403835ce: mov  a2, a9
+403835d0: retw.n
+```
+⇒ **它永远返回 0**，作用是"更新统计计数 + 解锁"，**不是分配器**。
+
+而 `esf_buf_setup_static` 里：
+```
+callx8 esf_buf_alloc_dynamic
+bnez.n a10, 4201ca08      ; 非 0 才算成功
+... 0 就走 "alloc eb fail" 错误分支
+```
+⇒ **在我们的配置下这个检查必然失败**，所以 `alloc eb fail` 是**结构性的**，
+不是靠补 `desc+16` 计数能救的。
+
+**⇒ 真正的结论**：`esf_buf_setup` / `esf_buf_setup_static` 这两条路径
+**都不该在我们这种"绕过 ppTask"的配置下被调用**。
+库自己走的是另一套（在 ppTask 完整初始化序列里，由
+`_wifi_malloc` 预先分配好缓冲，然后走"注册已分配缓冲"的路径）。
+
+## §1262 交付终态（最终）
+
+- 仓库 `main`，工作树干净，最新提交 `730b044`。
+- 最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`，真板稳定 **230 行**。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**本会话把真板从 79 行推进到 230 行（+151），并彻底查清了唯一剩余的闭环：**
+库的 WiFi 初始化必须在 ppTask 里按它自己的顺序跑（TX 池、`_wifi_malloc`、
+`esf_buf` 注册都在那条链上），而 c6LOS 当前的 windowed ABI 移植
+还支撑不住 ppTask 的高频 OSI 回调 —— 这两者互相锁死。
+**继续需要内核层面的架构重写**（把 OSI 回调层改为不跨窗口边界、
+或让 ppTask 拥有独立且可安全切换的栈/窗口上下文）。
