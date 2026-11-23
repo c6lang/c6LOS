@@ -27261,3 +27261,45 @@ static void *osi_semphr_create(u32 max, u32 init)
 状态分支。这一步做完，"ic 为什么没建"就彻底闭环了。
 
 **（真板 USB 仍未接回，无法验证。）**
+
+## §1069 更正 §1067/§1068：idx 8 是 `_spin_lock_create`，表布局**没有**错
+
+把 IDF 的 `esp_private/wifi_os_adapter.h` 与我们的 `include/c6os/wifi_osi.h`
+逐字段对照 —— **前 14 个字段完全一致**：
+
+```
+ 0 _version        5 _ints_on          10 _wifi_int_disable   13 _semphr_create
+ 1 _env_is_chip    6 _ints_off         11 _wifi_int_restore   14 _semphr_delete
+ 2 _set_intr       7 _is_from_isr      12 _task_yield_from_isr
+ 3 _clear_intr     8 _spin_lock_create
+ 4 _set_isr        9 _spin_lock_delete
+```
+
+真机 dump 运行时表（`0x3fcc76b8`，= `g_osi_funcs_p` 的值）：
+
+```
+idx 13 = 0x4037c968 = osi_semphr_create   ← 与头文件一致 ✓
+idx 18 = 0x4037c800 = osi_mutex_create    ← 与头文件一致 ✓
+idx  8 = 0x4037c800 = osi_mutex_create    ← 我们把 _spin_lock_create 实现成了 mutex
+```
+
+**⇒ 表布局是对的。** `wifi_init_in_caller_task` 的
+`l32i a10, a8, 32`（= idx 8）调的是 **`_spin_lock_create`**，
+我们返回非 NULL ✓，不会触发 `0x101`。
+
+**⇒ §1067 里"idx 19 不是 mutex"的修正是对的，
+但 §1068 里"`_semphr_create` 从未被调用所以有矛盾"的推论不成立**
+—— 那次调用本来就是 `_spin_lock_create`。
+
+### 当前仍然成立的事实
+
+- `g_ic`（`0x3fcd474c`）在 `esp_wifi_scan_start` 被调时仍是 **NULL**；
+- `ic_init`（0x4201a070）**没有**被调用（双断点测试第一次命中的是
+  `ic_create_wifi_task`）；
+- 所以 `*(u8*)(g_ic + 0x1E9) >= 2` 永不成立，`esp_wifi_scan_start`
+  恒返回 `0x3002`。
+
+**⇒ "谁该调用 `ic_init`、为什么没调"仍未定论。**
+`esp_wifi_init_internal` 的状态机分支（`state==1/2/3`）是下一步要逐条走一遍的。
+
+**（本轮已确认板子恢复可用；镜像 `bff36e25`。）**
