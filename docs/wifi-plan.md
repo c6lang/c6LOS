@@ -28567,3 +28567,27 @@ ppTask 起来后第一件事就是拿它。**
 因为 `g_cur` 为空而直接返回失败（那样 take 永远失败，握手永远不成）。
 
 镜像 `1c8f57be`。
+
+## §1100 试过"无效句柄的 take 返回成功" —— 未奏效，已回退
+
+按 §1099 的互等假设，把 `osi_semphr_take` 对无效句柄的返回从 0 改成 1，
+想让 `pp_create_task` 那个"等 ppTask take 信号量"的等待立刻满足。
+
+**真板结果：串口仍停在 67 行，无变化。** 说明 `pp_create_task` 的阻塞
+**不是**在等这次 take。已 `git checkout` 回退。
+
+**⇒ 结论：`pp_create_task` 卡在别的地方**（很可能是它内部对
+`_queue_create` / `_semphr_create` 之后的某个初始化调用，或者对
+PHY/RF 的同步等待）。
+
+### 当前仓库状态（交付基线）
+
+- 镜像 `1c8f57be`，commit `4660bda`，工作树干净。
+- **windowed ABI 迁移主线已完成并上板验证**：全部 C 代码 `-mabi=windowed`，
+  定时器 ISR（`ccompare0`）→ `TICK_PEND` → `s3_tick_consume` →
+  `os_sched_tick`（任务上下文）→ 超时 → 任务切换，整条链实测正常；
+  闭源库的建任务、建队列、队列接收、ppTask 启动全部正常；
+  **无崩溃、无 `_vec_default`、无窗口账目错误**。
+- **唯一未完成项**：闭源库 `pp_create_task` 内部的阻塞，导致
+  `wifi_init_process`/`ic_init` 永不执行、`g_ic` 恒为 NULL，
+  因此 AP 关联 / DHCP / TLS / qq.com body 四项验收均未取得。
