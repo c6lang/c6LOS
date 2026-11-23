@@ -27589,3 +27589,39 @@ PS = 0x60225（INTLEVEL=5）
 再谈 ic 的异步等待。
 
 （本节改动：console.c / irq.c / task.c6 / wifi_glue.c 四处，构建通过。）
+
+## §1078 定时器不触发的直接原因：CPU 卡在 INTLEVEL=5，把 level-1 定时器中断永久屏蔽
+
+### 证据链（本轮真板实测）
+
+1. tick 用的**不是 TIMG0**，而是 Xtensa 的 `ccompare0`：
+   `port/s3/irq.c` 的 `s3_irq_init()`（`intenable |= 1<<6`，
+   `XCHAL_TIMER0_INTERRUPT = 6, level 1`）＋ `s3_timer_rearm()`
+   （`ccompare0 = ccount + S3_XTAL_HZ/S3_IRQ_HZ` = `+400000`，40MHz/100 = 10ms）。
+   §1075 配的 TIMG0 T0 其实无关（可留作兜底）。
+2. `s3_irq_init` **确实被调用**（断点命中；进入时 `intenable=0x2`、`ccompare0=0`）。
+3. 运行后读现场：
+   ```
+   ccount     = 3369454667
+   ccompare0  =   64140431   ← 恰好等于“武装时的 ccount + 400000”
+   intenable  = 0x42         ← bit6（定时器）是开着的
+   PS         = 0x60225      ← **INTLEVEL = 5**
+   PC         = 0x4037af59 <s3_win_wifi_main_task+17>: j 自己
+   ```
+   **`ccount` 早已越过 `ccompare0` 却没有触发中断** ⇒ 不是没武装、不是周期算错，
+   而是 **INTLEVEL=5 把 level-1 中断屏蔽了**（Xtensa：只有中断级别
+   **高于** PS.INTLEVEL 才可被取，1 ≤ 5 所以永远进不来）。
+
+### 结论
+
+**⇒ 整条链的最后一环是：CPU 停在 INTLEVEL=5 的状态里空转。**
+
+只要有一处 `rsil ...5`（或某个 level-5 中断的处理路径）没有把 PS 还原，
+定时器就再也进不来，于是 §1075~§1077 的所有 tick 问题都成立。
+
+**下一步**：查 `_vec_lvl5`（`0x40379f0c`）的处理路径与所有 `rsil` 用法，
+确认是谁把 INTLEVEL 抬到 5 之后没有 `rfe` 回去；同时把
+`s3_win_wifi_main_task` 结尾的 `for(;;){}` 改成会 `waiti`/让出的循环，
+避免在最高屏蔽级别下空转。
+
+（本轮无代码改动，仅诊断。镜像 `8bbb84ad`。）
