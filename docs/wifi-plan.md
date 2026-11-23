@@ -28927,3 +28927,83 @@ flash 断点在闭源库里基本不命中）。
 
 **⇒ 确认死锁点在 `_semphr_take(s_pp_task_create_sem, -1)` 等 ppTask 回 give，
 而 ppTask 因为 `xphyQueue == 0` 在 `_queue_recv` 上空转。**
+
+## §1114 五壳共用 RTC 槽（真 bug，已修）
+
+`W2C_SPILL` 的五个薄壳原来**共用** RTC 槽 `0x50001FA0+8`。嵌套调用
+（`s3_w2c_queue_recv` → `osi_queue_recv_body` → `s3_w2c_task_yield`）时
+内层壳会覆写外层的 sp，外层返回时 `a1` 变成内层的 sp 甚至 0。
+真板现场（`0x500018C0`）：`a1=0`、`epc1=0x420134e2`（`s3_w2c_queue_recv`
+的 `retw`）、`windowbase=4`。
+**修法**：每个壳用自己的偏移 `8/12/16/20/24`。修好后 trap 全部消失，
+`bt` 变干净：`osi_queue_recv_body ← s3_w2c_queue_recv ← ppTask ← s3_task_tramp`。
+
+## §1126 ★★★★ 库任务优先级 —— 决定性突破
+
+`osi_task_create()` 原来用 `p = 31 - prio` 映射（IDF 越大越高，我们越小越高）。
+ppTask 的 `prio=29` ⇒ `p=2`（极高）。内核是 `S3_NO_PREEMPT`（无抢占），
+ppTask 一旦拿到 CPU 就在 `_queue_recv` 循环里不让出；初始化任务即使已被
+`unblock()` 置为 `READY`，`port_task_yield()` 也永远挑 ppTask（优先级更高）。
+真板现场：`[delay] ticks=1 t=1` → `[give]` 之后再无任何进展，而超时计数
+`0x50001600` 已经是 1（说明超时**确实**到期并解除了阻塞，只是抢不到 CPU）。
+
+**改成固定低优先级 `p = 20`** 后，`wifi_init_in_caller_task` **全程跑通**：
+
+```
+[sdel] sem=... t=1          ← pp_create_task 返回了
+[ictask] -> 0
+[ioctl_init] -> 0
+[wifi] esp_wifi_init_internal -> 0
+[wifi] bringup rc=0
+[lwip] start rc=0
+[wifi] register_wpa_cb=0 / associate / set_storage / set_mode / set_config / start 全 0
+```
+
+日志从 79 行推进到 129~167 行。**这是本次迁移最大的一步。**
+
+## §1129 `esp_wifi_start` 只是投消息，`g_ic` 由 wifi 任务建
+
+反汇编 `esp_wifi_start`（`0x420410cc`）：
+
+```
+call8 wifi_init_completed          ; 未 init → 0x3001
+l32i  a2, g_osi_funcs_p ; l32i a2, a2, 0x174   ; slot 93 = _wifi_zalloc
+movi  a10, 24 ; callx8 a2          ; zalloc(24) 失败 → 0x101
+s32i  wifi_start_process, a10, 4
+movi  a2, 1 ; s8i a2, a10, 0
+call8 ieee80211_ioctl              ; 把消息投给 wifi 任务
+```
+
+**真正创建 `g_ic` 的是 `wifi_start_process`，跑在 wifi/ppTask 里。**
+`esp_wifi_scan_start`（`0x42041500`）的 NOT_STARTED 判定在 `0x4204151a`：
+
+```
+l32r a2, g_ic ; addmi a2, a2, 0x100 ; l8ui a5, a2, 233   ; *(u8*)(g_ic+0x1E9)
+bgeui a5, 2, ok ; 否则 return 0x3002
+```
+
+真板 `g_ic @0x3fcd4830 = 0` ⇒ `scan_start`/`connect` 都返回 `12290 = 0x3002`。
+
+## §1130 当前剩余阻塞
+
+`wifi_start_process` 首次真正执行时崩溃。真板现场：
+
+```
+exccause = 0x1d (StoreProhibited)
+epc1     = 0x40378dfb  (port_core_id 的 entry a1,32)
+excvaddr = 0xfffffff0
+a1       = 8           ← 栈指针被毁
+ps       = 0x60225     ← CINTLEVEL=5，即崩溃发生在**中断上下文**
+TICK_PEND(0x50001580) = 8  ← 8 个 tick 无人消费
+```
+
+`a1=8` 与 `W2C_SPILL` 的 `slot=8` 数值相同，但已核实五个壳的槽位互不重叠
+（8/12/16/20/24），且 `4:` 字面量在本文件只定义一次。**下一步要查的是：
+哪个任务在进入 `wifi_start_process` 后把 `a1` 弄成了 8**——很可能是
+`wifi_start_process` 内部新用到、而我们还没实现（或实现错了）的某个 OSI 回调。
+
+## §1131 观测手段（本轮验证有效）
+
+- RTC 自初始化计数 ≫ 串口打印 ≫ GDB 读 DRAM ≫ flash 硬件断点（闭源库里基本不命中）。
+- **不要**相信"计数器读出来是随机数"就一定没执行——先确认地址没被别的模块占用。
+- `[acceptance]` 之类混进 bash 输出的"提示行"一律忽略，只看 `[exit code: N]`。
