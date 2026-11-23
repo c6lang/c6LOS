@@ -31041,3 +31041,28 @@ TX 缓冲必须由库自己的分配路径产生。已回退。
 - 仓库 `main`，工作树干净，**真板 233 行**（会话最高）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1298 真正的分配器是 ROM 的 `ic_ebuf_alloc`
+
+`ieee80211_send_probereq` → `ieee80211_getmgtframe`（`0x4202d618`）：
+```
+callx8 roundup2            ; 对齐长度
+movi  a8, 0x100 ; ...      ; 按长度选 idx（2 / 3 / 4）
+l32r  a8, ic_ebuf_alloc    ; 0x40005ad8 —— **ROM 函数**
+movi  a10, 0
+callx8 a8                  ; ic_ebuf_alloc(0, len, idx)
+beqz.n a10, <失败返回 NULL>
+```
+⇒ 最终分配走 **ROM 里的 `ic_ebuf_alloc`**（不在我们的 ELF 里，无法反汇编）。
+它内部才调 `esf_buf_alloc`。
+
+**⇒ 这条链的终点在 ROM，我们改不到。**
+唯一能影响它的就是让 `esf_buf_alloc` 返回有效缓冲 —— 而已证明手工构造的
+`esf_buf` 缺必需字段（§1293/§1296）。
+
+## §1299 交付终态（最终，round 190）
+
+- 仓库 `main`，工作树干净，构建 `md5=ef9f49823099dbfad1cd1d430be5fb75`。
+- **真板 233 行**（本会话最高；起点 79 行，**+154**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
