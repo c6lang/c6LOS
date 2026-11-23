@@ -212,6 +212,9 @@ static void net_init(void)
 }
 #endif
 
+/* 标定出来的 TSC 频率（port/x86_64/irq.c；port_cycles 按它换算成 ns）。 */
+extern u64 port_tsc_hz(void);
+
 void os_main(void)
 {
     volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
@@ -231,6 +234,10 @@ void os_main(void)
     port_init();
     port_mmu_init();
     port_puts("c6os alpine M12: 从 ISO 起 Alpine（musl 动态链接）\n");
+    /* 时间口径一眼可查：port_cycles 已按标定值换算成 ns（失败则退回 1GHz）。 */
+    port_puts("  tsc: ");
+    put_u32((UINT32)(port_tsc_hz() / 1000000ull));
+    port_puts(" MHz（port_cycles 口径 = ns）\n");
 
     magic = bi[0];
     rpa = bi[5];

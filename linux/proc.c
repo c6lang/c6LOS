@@ -3106,7 +3106,10 @@ u64 lx_epoll_wait(u64 efd, u64 uevents, u64 maxevents, i64 timeout)
             return 0ull;
         }
         (void)lx_proc_wait_tick();     /* 串口 + 到点的闹钟/定时器（M60） */
-        if (lx_proc_wait_intr() != 0) {
+        /* 有信号待投递就先回用户态让它跑一次：handler 带 SA_RESTART 时
+         * lx_proc_wait_intr 会说"继续等"，但信号只在系统调用出口投递，
+         * 死等下去 handler 永远轮不到（见 lx_proc_sig_pending 的说明）。 */
+        if (lx_proc_wait_intr() != 0 || lx_proc_sig_pending() != 0) {
             return n_((u64)LX_EINTR);  /* 被信号打断：先回用户态投递信号 */
         }
         if (tty == 0u) {
@@ -3786,7 +3789,10 @@ i64 lx_proc_poll(u64 ufds, u64 nfds, i64 timeout)
         /* 轮询式串口 + 到点的闹钟/定时器：每一轮都是一次机会（M60 合并成
          * 一个节拍，自旋等待期间 SIGALRM 也能响、^C 也能进来）。 */
         (void)lx_proc_wait_tick();
-        if (lx_proc_wait_intr() != 0) {
+        /* 有信号待投递就先回用户态让它跑一次：handler 带 SA_RESTART 时
+         * lx_proc_wait_intr 会说"继续等"，但信号只在系统调用出口投递，
+         * 死等下去 handler 永远轮不到（见 lx_proc_sig_pending 的说明）。 */
+        if (lx_proc_wait_intr() != 0 || lx_proc_sig_pending() != 0) {
             return n_((u64)LX_EINTR);  /* 被信号打断：先回用户态投递信号 */
         }
         /* 终端：输入来自串口，没有哪个进程会来唤醒我们，就地继续泵。
@@ -3920,7 +3926,10 @@ i64 lx_proc_select(i32 nfds, u64 rset, u64 wset, u64 eset, i64 timeout)
             return cnt;
         }
         (void)lx_proc_wait_tick();     /* 串口 + 到点的闹钟/定时器（M60） */
-        if (lx_proc_wait_intr() != 0) {
+        /* 有信号待投递就先回用户态让它跑一次：handler 带 SA_RESTART 时
+         * lx_proc_wait_intr 会说"继续等"，但信号只在系统调用出口投递，
+         * 死等下去 handler 永远轮不到（见 lx_proc_sig_pending 的说明）。 */
+        if (lx_proc_wait_intr() != 0 || lx_proc_sig_pending() != 0) {
             u64 k;
 
             /* 被信号打断：不写就绪位，只把结果集清零（调用方会复用它们）。 */

@@ -85,6 +85,82 @@ static void pit_init(void)
     outb(0x40u, (u8)((div >> 8) & 0xFFu));
 }
 
+/* ---- TSC 频率标定：让 port_cycles() 的返回值真的是纳秒 ----------------
+ *
+ * 上层一律按"1 个 port_cycles 计数 = 1ns"在算（linux/proc.c 的 alarm/
+ * itimer/timerfd、clock_gettime、/proc/uptime，linux/socket.c 的自旋预算，
+ * linux/fs.c 的 mtime）。可 rdtsc 数的是 TSC，频率等于 CPU 基频 —— 这台
+ * Xeon 是 2.2GHz，不是 1GHz。直接交出去，所有时间都跑快 2.2 倍：
+ * ping -i 1 变成 0.45s 一发、sleep 1 只睡 0.45s、date 也是 2.2 倍速。
+ *
+ * 启动时用 PIT 通道 2 标定（通道 0 正跑着调度 tick，不能动）：通道 2 在
+ * gate 拉高后从 65535 递减，1193182/65535 ≈ 54.93ms 后 port 0x61 的 bit5
+ * （timer 2 OUT）拉高。量 4 段共 ~220ms 换算成 TSC 频率。标定失败或结果
+ * 离谱（有的虚拟机不实现通道 2）就退回 1GHz 的老口径，行为与以前一致。 */
+static u64 g_tsc_hz = 1000000000ull;
+static u64 g_ns_mul = 0ull;                /* ns = (rdtsc * g_ns_mul) >> 32 */
+
+static u64 rdtsc_(void)
+{
+    u32 lo = 0u;
+    u32 hi = 0u;
+
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((u64)hi << 32) | (u64)lo;
+}
+
+/* 量一段 65535/1193182 秒的 TSC 数；返回 0 表示通道 2 没有反应。 */
+static u64 pit2_window_(void)
+{
+    u64 t0;
+    u64 t1;
+    u8 v = (u8)(inb(0x61u) & 0xFCu);
+
+    outb(0x61u, v);                        /* gate2=0、喇叭数据位清掉 */
+    outb(0x43u, 0xB0u);                    /* 通道 2、模式 0（单次）、先低后高 */
+    outb(0x42u, 0xFFu);
+    outb(0x42u, 0xFFu);
+    outb(0x61u, (u8)(v | 0x01u));          /* gate2=1：开始递减 */
+    t0 = rdtsc_();
+    for (;;) {
+        t1 = rdtsc_();
+        if ((inb(0x61u) & 0x20u) != 0u) {  /* OUT2 拉高 = 计到 0 */
+            return t1 - t0;
+        }
+        if ((t1 - t0) > 4000000000ull) {   /* 等太久：认失败（别卡住启动） */
+            return 0ull;
+        }
+    }
+}
+
+static void tsc_calibrate_(void)
+{
+    u64 sum = 0ull;
+    u64 hz;
+    u32 k = 0u;
+    u8 save = inb(0x61u);
+
+    while (k < 4u) {
+        u64 d = pit2_window_();
+
+        if (d == 0ull) {
+            break;
+        }
+        sum = sum + d;
+        k++;
+    }
+    outb(0x61u, save);                     /* 喇叭/门控恢复原状 */
+    if (k < 2u) {                          /* 至少两段才敢算 */
+        return;
+    }
+    hz = (sum * 1193182ull) / ((u64)k * 65535ull);
+    if (hz < 500000000ull || hz > 20000000000ull) {
+        return;
+    }
+    g_tsc_hz = hz;
+    g_ns_mul = (1000000000ull << 32) / hz;
+}
+
 void x86_irq_init(void)
 {
     u32 i = 0;
@@ -98,6 +174,7 @@ void x86_irq_init(void)
     __asm__ __volatile__("lidt %0" : : "m"(g_idtp));
     pic_remap();
     pit_init();
+    tsc_calibrate_();      /* 标定 TSC：就在开中断之前，不受调度干扰 */
     __asm__ __volatile__("sti");
 }
 
@@ -118,12 +195,22 @@ void port_isr_exit(void)
     }
 }
 
+/* 返回"纳秒口径"的周期数：上层全部按 1 计数 = 1ns 用，所以这里把 rdtsc
+ * 按标定出来的 TSC 频率缩放（见上面的 tsc_calibrate_）。没标定成功时
+ * g_ns_mul 还是 0，就原样返回 raw TSC —— 和以前 1GHz 假设的行为一致。 */
 u64 port_cycles(void)
 {
-    u32 lo = 0;
-    u32 hi = 0;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((u64)hi << 32) | (u64)lo;
+    u64 t = rdtsc_();
+
+    if (g_ns_mul == 0ull) {
+        return t;
+    }
+    return (u64)(((unsigned __int128)t * (unsigned __int128)g_ns_mul) >> 32);
+}
+
+u64 port_tsc_hz(void)
+{
+    return g_tsc_hz;
 }
 
 u32 port_atomic_cas(volatile u32 *p, u32 expect, u32 newv)

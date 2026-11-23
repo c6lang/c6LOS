@@ -323,7 +323,7 @@ u64 lx_tty_read(u64 ubuf, u64 len, void (*yield_fn)(void))
         if (g_ppos < g_plen || g_eof != 0u) {
             break;
         }
-        if (lx_proc_wait_intr() != 0) {
+        if (lx_proc_wait_intr() != 0 || lx_proc_sig_pending() != 0) {
             return (u64)0 - (u64)LX_EINTR;
         }
         if (yield_fn != (void (*)(void))0) {
