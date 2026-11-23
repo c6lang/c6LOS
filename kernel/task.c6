@@ -13,11 +13,16 @@ static OsTask g_tasks[C6OS_MAX_TASKS] = {0};
 static u32 g_next_id = 1;
 static u32 g_rr_arr[C6OS_MAX_CORES] = {0};
 static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
+/* S3 专有的诊断埋点（写 RTC 慢存 / 读 xtensa ctx 内部布局）。其它 port 没有
+ * 这些地址和布局，宏不开时整段不编译 —— 否则 host/x86/rv32 会在非法地址上
+ * 直接崩（或链接时缺 port_cur_ctx/port_snapshot/port_switch_trace）。 */
+#if defined(C6OS_S3_DIAG)
 static u32 g_dbg_n = 0;        /* os_task_current_id 诊断计数 */
 static u32 g_dbg_pick_n = 0;   /* 调度选择诊断计数 */
 static u32 g_dbg_blk_n = 0;    /* 阻塞诊断计数 */
 static u32 g_dbg_to_fires = 0;
-static u32 g_snap_done = 0; /* 超时到期唤醒次数 */
+static u32 g_snap_done = 0;    /* 一次性快照是否已做过 */
+#endif
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
@@ -62,7 +67,9 @@ static void task_release_locks(u32 id) {
 #define g_cur (g_cur_arr[g_core])
 
 static void make_ready(OsTask *t) {
+#if defined(C6OS_S3_DIAG)
     *(volatile u32 *)0x50000D8Cu = *(volatile u32 *)0x50000D8Cu + 1u;
+#endif
     if (t->suspend_cnt > 0u) {
         t->state = (u8)OS_TASK_SUSP;
     } else {
@@ -73,8 +80,10 @@ static void make_ready(OsTask *t) {
 static u32 g_waiters = 0;
 
 static void unblock(OsTask *t, int result) {
+#if defined(C6OS_S3_DIAG)
     port_putc('u');                    /* 谁被唤醒（§250） */
     port_putc((int)('0' + (t->id & 7u)));
+#endif
     if (t->state == (u8)OS_TASK_BLOCKED && g_waiters > 0u) {
         g_waiters = g_waiters - 1u;
     }
@@ -296,6 +305,7 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     if (g_sched_lock[core] != 0u) {
         return -4; /* 调度锁内不允许阻塞 */
     }
+#if defined(C6OS_S3_DIAG)
     {
         /* 诊断：记录每个任务最后一次阻塞的信息到 RTC 0x50001C00。
          * kind: 由调用方定义（queue/sem/event 各自一套），obj 是等待对象。
@@ -335,6 +345,7 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
             bd[sl_ + 4u] = epcv;   /* 该任务被切走时保存的 EPC */
         }
     }
+#endif
     g_cur->wait_obj = obj;
     g_cur->wait_kind = kind;
     g_cur->wait_arg = arg;
@@ -361,7 +372,9 @@ int os_task_block_prepare(void *obj, u32 timeout, u8 kind, u32 arg) {
     }
     g_cur->state = (u8)OS_TASK_BLOCKED;
     g_waiters = g_waiters + 1u;
+#if defined(C6OS_S3_DIAG)
     port_putc('b');          /* 阻塞计入 g_waiters（§250） */
+#endif
     return 0;
 }
 
@@ -448,12 +461,14 @@ int os_task_wake_event(void *obj, u32 bits) {
 u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
     u32 i = 0;
     OsTask *best = 0;
+#if defined(C6OS_S3_DIAG)
     /* 诊断（§250）：RTC 0x50001820 起 4 个字
      *   [0]=调用次数 [1]=命中次数 [2]=g_waiters==0 的次数 [3]=make_ready 次数 */
     {
         volatile u32 *wd = (volatile u32 *)0x50000D80u;
         wd[0] = wd[0] + 1u;
     }
+#endif
 
     /* 不再用 g_waiters==0 做快速返回（§250）：计数器一旦与实际状态失配，
      * 这里就会把真正的等待者跳过，消息永远发不出去（真板症状：消息入队了、
@@ -469,11 +484,15 @@ u32 os_task_wake_first_id(void *obj, u8 kind, int result) {
         i++;
     }
     if (best == 0) {
+#if defined(C6OS_S3_DIAG)
         port_putc('.');      /* 没匹配上等待者（§250） */
+#endif
         return 0;
     }
+#if defined(C6OS_S3_DIAG)
     port_putc('W');         /* 匹配上并 unblock（§250） */
     *(volatile u32 *)0x50000D84u = *(volatile u32 *)0x50000D84u + 1u;
+#endif
     unblock(best, result);
     return best->id;
 }
@@ -578,6 +597,7 @@ void os_sched_tick(void) {
     }
 #endif
     now = os_tick_advance1();
+#if defined(C6OS_S3_DIAG)
     if (now >= 500u && g_snap_done == 0u) {
         g_snap_done = 1u;
 #ifndef S3_ONE_ABI
@@ -589,13 +609,16 @@ void os_sched_tick(void) {
          * 恰好在 tick=500 定死。诊断改用 JTAG 读 RTC，不在此处加窗口深度。 */
 #endif
     }
+#endif
     if (os_timeout_pending() != 0u) {
         while (os_timeout_pop_expired(now, &id) != 0) {
             OsTask *t = os_task_get(id);
+#if defined(C6OS_S3_DIAG)
             g_dbg_to_fires = g_dbg_to_fires + 1;
             if (g_dbg_to_fires < 0xFFFFFFFFu) {
                 *(volatile u32 *)0x50001600u = g_dbg_to_fires;
             }
+#endif
             if (t != 0 && t->state == (u8)OS_TASK_BLOCKED) {
                 unblock(t, -2);
             }
@@ -623,7 +646,9 @@ void *os_sched_preempt_ctx(void) {
     if (t != g_cur) {
         g_cur = t;
     }
+#if defined(C6OS_S3_DIAG)
     port_switch_trace(2u, t->id, (u32)(void *)t->ctx);       /* ISR 抢占切换 */
+#endif
     t->state = (u8)OS_TASK_RUNNING;
     return t->ctx;
 }
@@ -633,6 +658,7 @@ void os_task_start_core(u32 core) {
 
     while (1) {
         OsTask *t = sched_pick(me);
+#if defined(C6OS_S3_DIAG)
         if (t != 0) {
             /* §374：**调度热路径上不留任何 RTC 诊断写**。
              * 原来这里每次选中任务都往 RTC 慢存写 3 个字（0x50000B00，后来又
@@ -642,6 +668,7 @@ void os_task_start_core(u32 core) {
              * 需要时用 g_dbg_pick_n 在内存里数即可（不写 RTC）。 */
             g_dbg_pick_n = g_dbg_pick_n + 1u;
         }
+#endif
         if (t == 0) {
             if (os_task_count() == 0) {
                 break;
@@ -654,13 +681,15 @@ void os_task_start_core(u32 core) {
             continue;
         }
         g_cur_arr[me] = t;
+#if defined(C6OS_S3_DIAG)
         port_switch_trace(1u, t->id, (u32)(void *)t->ctx);   /* 主循环切换 */
+#endif
         t->state = (u8)OS_TASK_RUNNING;
         g_switch_count = g_switch_count + 1u;
         {
             u64 t0 = port_cycles();
             port_enter_task();
-#ifndef S3_ONE_ABI
+#if defined(C6OS_S3_DIAG) && !defined(S3_ONE_ABI)
             port_task_ctx_check(t->ctx);
 #endif
             port_task_switch(t->ctx);
@@ -823,32 +852,32 @@ OsTask *os_task_get(u32 id) {
  * 都用任务 id，不能用栈指针之类的东西糊弄。 */
 
 u32 os_task_current_id(void) {
-    u32 me = 0;
-    u32 a0id = 0;
-    u32 a1id = 0;
-    volatile u32 *d = 0;
-    u32 k = 0;
-
     if (g_cur == 0) {
         return 0;
     }
-    me = g_cur->id;
-    a0id = 0;
-    a1id = 0;
-    if (g_cur_arr[0] != 0) {
-        a0id = g_cur_arr[0]->id;
+#if defined(C6OS_S3_DIAG)
+    {
+        u32 a0id = 0;
+        u32 a1id = 0;
+        volatile u32 *d = 0;
+        u32 k = 0;
+
+        if (g_cur_arr[0] != 0) {
+            a0id = g_cur_arr[0]->id;
+        }
+        if (g_cur_arr[1] != 0) {
+            a1id = g_cur_arr[1]->id;
+        }
+        d = (volatile u32 *)0x500004A0u;
+        k = g_dbg_n & 3;
+        g_dbg_n = g_dbg_n + 1;
+        d[k * 4] = g_cur->id;
+        d[k * 4 + 1] = a0id;
+        d[k * 4 + 2] = a1id;
+        d[k * 4 + 3] = (u32)(void *)g_cur;
     }
-    if (g_cur_arr[1] != 0) {
-        a1id = g_cur_arr[1]->id;
-    }
-    d = (volatile u32 *)0x500004A0u;
-    k = g_dbg_n & 3;
-    g_dbg_n = g_dbg_n + 1;
-    d[k * 4] = me;
-    d[k * 4 + 1] = a0id;
-    d[k * 4 + 2] = a1id;
-    d[k * 4 + 3] = (u32)(void *)g_cur;
-    return me;
+#endif
+    return g_cur->id;
 }
 
 /* 诊断探针：按任务 id 取若干内部字段（what: 0=state 1=wait_kind

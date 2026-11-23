@@ -64,7 +64,7 @@ make check-host
 ## 4. L2 qemu-riscv32（ILP32）
 
 ```sh
-make check-rv32
+make run-rv32          # = make rv32 && qemu-riscv32 build/rv32/hello
 ```
 
 - `c6 --emit-llvm` → `clang --target=riscv32-unknown-elf -march=rv32imac_zicsr_zifencei -mabi=ilp32`
@@ -72,6 +72,8 @@ make check-rv32
 - 端口提供 `_start`、`ecall` 退出、`mret`/`mtvec` 最小陷阱（只验证 ABI，不验证抢占）。
 - 覆盖：`abi32.c6` + 逻辑用例；输出与 L1 相同断言集。
 - 已验证基线：`rv32: c6 kernel core says hello`，rc=0。
+- 注意：qemu user-mode 不实现机器态 `mret`，`rv32-sched`/`rv32-tick` 这类
+  走上下文切换的用例在 qemu 上会报非法指令，抢占验证要用 §4.1 的 risc6。
 
 ### 4.1 换用 risc6 跑同一批 ELF
 
@@ -95,7 +97,8 @@ make run-rv32-emu-sched
 ## 5. L3 x86-64 裸机（真抢占）
 
 ```sh
-make check-bare
+make check-all         # 构建 L1/L2/L3 全部产物
+make run-x86           # x86-64 裸机：真抢占/中断/上下文切换
 ```
 
 - `examples/boot/` 的 512B 引导器 → 长模式 → payload@0x400000；PIT 100Hz；
@@ -143,11 +146,11 @@ make s3 && make flash
 ## 8. 门禁清单（合并前）
 
 ```sh
-make lint               # 4 个 lint + 符号白名单
 make check-host         # L1 全绿
-make check-rv32         # L2 全绿
-make check-bare         # L3 全绿
-make s3                 # 镜像可生成，size 在预算内
+make check-all          # L1/L2/L3（host + x86-64 裸机 + rv32/rv32bare 构建）
+make check-linuxabi-all # 56 项 Linux ABI + Alpine 回归
+make s3                 # 镜像可生成，chkimg 通过
+make wifi               # 闭源 WiFi 库全链（可选，需 IDF 闭源 .a）
 # L4 人工执行上板阶梯，记录串口日志到 build/logs/
 ```
 
