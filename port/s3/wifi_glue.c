@@ -2036,7 +2036,6 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 extern void s3_seed_tx_buffers(void);
                 int rp = pp_attach();
                 s3_ets_printf("[ppattach] r=%d\n", rp);
-                s3_seed_tx_buffers();
             }
             /* §§1210 ★★★：`pp_attach` 只能执行一次（真板返回 0x101），
              * 而它里面的 `esf_buf_setup`（建 TX 缓冲池）那次没成功。
@@ -2389,6 +2388,8 @@ int s3_wifi_scan(void)
     /* §511 诊断：阻塞 scan 一直 12300 超时，改成异步 + 轮询结果，
      * 区分"射频没扫到 AP"和"scan-done 事件没送到等待者"。 */
     s3_ets_printf("[wifi] scan start（异步）\n");
+    /* §§1288：在扫描之前才播种 TX 缓冲（此时库已完成初始化）。 */
+    { extern void s3_seed_tx_buffers(void); s3_seed_tx_buffers(); }
 #ifdef S3_FORCE_SYNC_SCAN
     /* §809: 让 current_task_is_wifi_task() 对本次调用返回真，强制
      * ieee80211_ioctl 走同步路径 (4203f620 -> ieee80211_ioctl_process -> b1)。
@@ -3178,23 +3179,53 @@ __attribute__((section(".flash.text")))
 void s3_seed_tx_buffers(void)
 {
     extern unsigned char g_eb_list_desc[];
+    extern unsigned char g_wifi_menuconfig[];
     extern void *osi_malloc(u32 n);
-    extern int esf_buf_recycle(void *buf, u32 type);
     extern int s3_ets_printf(const char *, ...);
-    volatile unsigned char *d = (volatile unsigned char *)g_eb_list_desc + 144u;
-    u32 i;
+    u32 ids[2];
+    u32 t;
 
-    /* desc+16（idx=9）非 0，否则 recycle 直接返回 */
-    if (*(volatile unsigned short *)(void *)(d + 16u) == 0u) {
-        *(volatile unsigned short *)(void *)(d + 16u) = 32u;
+    /* §§1288 ★★★★ 播种改到**扫描前**（库初始化完成之后），
+     * 避免在库自己还在初始化 `g_eb_list_desc` 时就去改它（真板上表现为
+     * 同一固件连续三次刷写得到 231/154/113 行，很不稳定）。
+     *
+     * 只种 **idx=2 / idx=4**（§1286 探针实测只有这两个能分到缓冲），
+     * 每个 4 块，链表 next 在 **buf+40**。
+     * 另外把 `menuconfig+8/+84` 置 0，否则 `esf_buf_alloc` 会直接走 dynamic 分支、
+     * 根本不看空闲链表。 */
+    *(volatile u32 *)(void *)(g_wifi_menuconfig + 8u) = 0u;
+    *(volatile u32 *)(void *)(g_wifi_menuconfig + 84u) = 0u;
+    /* §§1289 ★★★★ 库真正用的是 **type=0 + idx 7/8/9**（管理帧）。
+     * 从调用点反汇编：
+     *   `403842ca: movi a11, 7;  movi a10, 0`  ⇒ esf_buf_alloc(0, idx=7)
+     *   `4038692d: movi a11, 8;  movi a10, 0`  ⇒ (0, 8)
+     * 之前播 idx 2/4 + type 1 是错的。
+     * 一次播 6 块 × 3 个 = 18 × 1600B = 28.8KB，在 48KB 堆内。 */
+    ids[0] = 7u;
+    ids[1] = 8u;
+    for (t = 0u; t < 2u; t++) {
+        u32 k = ids[t];
+        volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc + k * 16u;
+        void *head = 0;
+        void *prev = 0;
+        u32 i2;
+        for (i2 = 0u; i2 < 4u; i2++) {
+            void *b = osi_malloc(1600u);
+            if (b == 0) { break; }
+            *((volatile void **)b + 10) = 0;                  /* buf+40 = next */
+            *((volatile unsigned char *)b + 26u) = (unsigned char)k;
+            if (prev != 0) { *((volatile void **)prev + 10) = b; }
+            else { head = b; }
+            prev = b;
+        }
+        if (head != 0) {
+            *(volatile void **)(void *)dk = head;
+            if (*(volatile unsigned short *)(void *)(dk + 16u) == 0u) {
+                *(volatile unsigned short *)(void *)(dk + 16u) = (unsigned short)i2;
+            }
+        }
+        s3_ets_printf("[seed] idx=%u i=%u head=%x\n", (unsigned)k, (unsigned)i2, (unsigned)head);
     }
-    for (i = 0u; i < 8u; i++) {
-        void *b = osi_malloc(1600u);
-        if (b == 0) { break; }
-        *((volatile unsigned char *)b + 26u) = 1u;   /* type = 1 */
-        (void)esf_buf_recycle(b, 1u);
-    }
-    s3_ets_printf("[seed] done i=%u\n", (unsigned)i);
 }
 
 __attribute__((section(".flash.text")))
