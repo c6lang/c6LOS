@@ -27168,3 +27168,62 @@ return (s3_w2c_mutex_post((void *)&m->m) == 0) ? 0 : -1;
 **⇒ 下次接上板子，把上面两行的返回值改掉、重新构建刷机，
 扫描就应该能真正跑起来 —— 后面的 AP 关联 / DHCP / TLS / 取 qq.com 页面
 全部是现成代码路径。**
+
+## §1067 ★★★★ 重要修正：idx 19 **不是** `_mutex_lock`，`0x101` 来自 `_semphr_create` 返回 NULL
+
+`port/s3/wifi_glue.c` 里有编译期断言 `offsetof(wifi_osi_funcs_t, _magic) == 0x1DC`
+（= 476 字节 = **119 个字段**），所以那个头文件是完整、版本正确的。
+把 `esp_private/wifi_os_adapter.h` 的字段按序编号：
+
+```
+ 7 _task_yield_from_isr
+ 8 _semphr_create          ← wifi_init_in_caller_task 里的偏移 32
+ 9 _semphr_delete
+10 _semphr_take
+11 _semphr_give
+12 _wifi_thread_semphr_get
+13 _mutex_create
+14 _recursive_mutex_create
+15 _mutex_delete
+16 _mutex_lock
+17 _mutex_unlock
+18 _coex_schm_flexible_period_set
+19 _coex_schm_flexible_period_get   ← 偏移 76，**不是 mutex_lock**
+```
+
+**⇒ §1066 里"idx 19 = `_mutex_lock`、所以返回值契约反了"的推断是错的，
+那个改动已 `git revert` 掉（commit `fb3fd38`），镜像回到 `bff36e25`。**
+
+### 正确的读法
+
+`wifi_init_in_caller_task` 的两处调用其实是：
+
+```asm
+420400f9: l32i a10, a8, 32      /* idx 8 = _semphr_create(max, init) */
+420400fb: callx8 a10
+420400fe: s32i a10, a3, 0       /* 存进 g_intr_lock_mux */
+42040100: bnez a10, → 420400e8  /* **返回 NULL 就报错** */
+...
+42040124: movi a2, 0x101        /* ESP_ERR_INVALID_STATE */
+```
+
+**⇒ `0x101` 的直接原因是 `_semphr_create` 返回了 NULL。**
+
+我们的实现：
+
+```c
+static void *osi_semphr_create(u32 max, u32 init)
+{
+    HIT_OF(_semphr_create);
+    return (void *)wsem_new(max, init);   /* NULL 就完蛋 */
+}
+```
+
+**⇒ 下一步要查的就是 `wsem_new(max, init)` 为什么会返回 NULL**
+（OSI 堆只有 48 KB：`g_wifi_heap_mem[12288]`，§1056 前后已经建了不少对象；
+也可能是 `max`/`init` 的取值触发了我们自己的上限检查）。
+
+验证方法很直接：在 `osi_semphr_create` 里把 `max`/`init`/返回值打出来，
+或者失败时把 `g_wifi_osi_heap` 的剩余量一起打出来。
+
+**（真板 USB 仍未接回，这一条还没上板验证。）**
