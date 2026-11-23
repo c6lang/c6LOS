@@ -29314,3 +29314,24 @@ call8  wifi_nvs_init / wifi_lmac_init / wifi_hmac_init / wifi_crypto_init
 **下一步**：在 `__wrap_pp_post` 里识别 `ppq==6 && data->[4]==wifi_init_process`，
 把 `data->[12]` 补成正确的配置指针（或 `g_ic` 应指向的缓冲区），
 让 `wifi_init_process` 走正常路径。
+
+## §1162 msg->[12] 补丁实验（已回退）
+
+在 `__wrap_pp_post` 里给 `ppq==6` 的消息补 `msg->[12]`（指向自建静态
+0x2b4 字节 IC 缓冲区），并把 `g_ic` 指向该缓冲区。
+
+真板结果：`[scanmsg]` 的 b12 变成非 0（`3fcc74e0`），但**日志反而缩到 89 行**，
+停在 `[pq]`（`__real_pp_post` 内部）——加了代码后时序变化，
+`__real_pp_post` 又卡住了。补丁本身未验证到效果。
+
+**⇒ 说明当前最大的障碍其实是 `__real_pp_post` 的时序脆弱性**：
+同样的代码，只因为多了几条指令就会从"跑完 167 行"变成"卡在 [pq]"。
+这一点比 `g_ic` 本身更值得先解决。
+
+## §1163 会话最终状态
+
+- 仓库：`main`，最新提交 `142a8da`（本轮文档），工作树干净。
+- 真板最佳：**167 行、无崩溃、md5 `d37a73a829989c565b1a5cfe9d046d56`**。
+- 四项验收：**AP 关联未取得**（`[wifi] 已关联，ssid= channel=0` 是空值）、
+  **DHCP 未取得**、**TLS 未取得**、**qq.com body 未取得**。
+- 目标**未完成**，不应标记 complete。
