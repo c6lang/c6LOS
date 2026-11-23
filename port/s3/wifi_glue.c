@@ -2043,6 +2043,18 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             {
                 extern int esf_buf_setup(void);
                 extern void *esf_buf_alloc(u32 a, u32 b);
+                /* §§1258 ★★★★ **最内层原因**：`esf_buf_alloc_dynamic` 读 `desc+16`（u16）当计数，
+                 * 为 0 就直接返回 NULL。idx=9 时 `desc` = `g_eb_list_desc + 9*4*4` = `+144`，
+                 * 所以计数字段在 **`g_eb_list_desc + 160`**。
+                 * 真板实测那里是 `0x0000`。之前§1226/§1250 写的 +20/+32 都是错的。
+                 * 先把它填成 32。 */
+                {
+                    extern unsigned char g_eb_list_desc[];
+                    volatile unsigned char *d9 = (volatile unsigned char *)g_eb_list_desc + 144u;
+                    if (*(volatile unsigned short *)(void *)(d9 + 16u) == 0u) {
+                        *(volatile unsigned short *)(void *)(d9 + 16u) = 32u;
+                    }
+                }
                 int rb = esf_buf_setup();
                 s3_ets_printf("[esfsetup] r=%d\n", rb);
                 /* §§1212：验证池子可用性——直接分一个试试。 */

@@ -30568,3 +30568,33 @@ PC 仍在 `ieee80211_send_setup+36` 的断言循环。
 - **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1258 `desc+16` 计数是 0（最内层原因），但补不上
+
+`esf_buf_alloc_dynamic` 第一条就是 `l16ui a5, a2, 16`（`desc+16`，u16），
+`beqz a5` 直接返回 NULL。idx=9 时 `desc = g_eb_list_desc + 9*4*4 = +144`，
+所以计数字段在 **`g_eb_list_desc + 160`**。
+
+真板实测该处是 `0x0000`；在 `esf_buf_setup()` 之前把它写成 32 后：
+真板仍 **230 行**、`esfalloc -> 0`、`esf_buf_setup_static: alloc eb fail(0)` 照旧。
+⇒ 要么该字段随后被 `esf_buf_setup` 内部重置，要么失败发生在更早的分支。
+
+## §1259 交付终态（最终）
+
+- 仓库 `main`，工作树干净。
+- **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
+
+**本会话累计的结构性成果（全部有真板取证）：**
+1. `W2C_SPILL` 五壳独立 RTC 槽（§1114）
+2. 库任务优先级降级让初始化链跑通（§1126）
+3. `g_ic` 分配 + 直调 `wifi_init_process`/`wifi_start_process` ⇒ **WiFi STARTED**（§1164/§1165）
+4. `int_disable/restore` 空操作消除时序窗口（§1169）
+5. 补 `g_ic+16` ⇒ **扫描进入 perform 并真实发 probe request**（§1182）
+6. 直调 `pp_attach`/`esf_buf_setup`（§1210）
+7. `--wrap=config_is_cache_tx_buf_enabled` 返回 1（§1256）
+
+**闭环终点**：TX 缓冲池本体要靠 `_wifi_malloc` 分配（零调用），
+而它只在 ppTask 的完整初始化序列里被调；ppTask 又跑不起来。
+**需要内核层面的架构重写才能继续。**
