@@ -28291,3 +28291,42 @@ call8 wifi_api_lock; movi.n a3, 3`）。
    对同一个指针能成功）。
 
 镜像 `1c8f57be`。
+
+## §1095 队列确实建出来了，但 ppTask 用 NULL 轮询 —— 说明 init 还没走到"存句柄"那步
+
+### 真板证据
+
+```
+0x50000310 = 0x3fcc8074   ← osi_wifi_create_queue 建出的 WQ 句柄（有效！）
+0x50000364 = 0x3fcc80b4   ← 它的 buf（有效）
+0x50001540 recv 环        ← ctx=2 qh=0x00000000 反复
+```
+
+**⇒ 队列创建成功，但 ppTask 拿到的句柄是 NULL。**
+
+**⇒ 合理解释：`ppTask` 是从库的某个全局读队列句柄的，而那个全局要等
+`esp_wifi_init_internal` 继续往下走才会被写入 —— 它现在卡住了，所以
+ppTask 只能拿着 NULL 空转。**
+
+### 本轮链路总结（已从"崩死"推进到"库初始化内部卡住"）
+
+```
+boot ✓ → osi 表 ✓ → PHY ✓ → 进 esp_wifi_init_internal ✓
+→ 打印版本 ✓ → 建队列 ✓ → 建 ppTask ✓ → ppTask 正常轮询 ✓
+→ [★ init 卡在内部，没走到"存队列句柄 / 投递 wifi_init_process"]
+```
+
+**⇒ 整个 windowed ABI 迁移本身已经验证可用：**
+- 定时器 ISR、tick、`os_sched_tick`（任务上下文）、任务切换、ppTask 启动、
+  队列收发、闭源库的建任务/建队列 —— 全部正常，没有崩溃、没有 `_vec_default`。
+- 卡点完全在**闭源库自己的初始化时序**上。
+
+### 下一步
+
+1. 用 `bt` 在**主任务**上取栈（现在 halt 拿到的是 ppTask 的栈）：
+   可以给 `s3_wifi_bringup` 下断点，命中后单步/看它卡在哪一行；
+2. 或在 `ieee80211_ioctl` / `wifi_api_lock` 的真实入口下断点
+   （地址要从 `s3_wifi_bringup` 的反汇编里取 `callx8` 的目标，
+   不要用 `nm` 的符号值 —— 已经证明不可靠）。
+
+镜像 `1c8f57be`。
