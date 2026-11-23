@@ -142,6 +142,14 @@
     W2C_SPILL s3_w2c_mutex_pend, os_mutex_pend
     W2C_SPILL s3_w2c_event_wait, os_event_wait
     W2C_SPILL s3_w2c_task_delay, os_task_delay
+    /* ★★★★ §1084：队列接收也是**阻塞点**（队列空就等），必须享受 §1056 同款
+     * 处理：先 `entry a1,128` 留出自由栈，再 spill 祖先窗口。
+     *
+     * 真板证据（§1082/§1083）：任务切换真正发生之后，第一次崩就崩在
+     * `osi_queue_recv_body+0x268` 的 `retw.n`（EXCCAUSE=28,
+     * EXCVADDR=0xfffffff4、a1=0）—— 正是"阻塞后返回时祖先窗口已被覆盖"。
+     * 之前只给 sem/mutex/event/delay 加了壳，漏了 queue_recv。 */
+    W2C_SPILL s3_w2c_queue_recv, osi_queue_recv_body
 #else
     .macro  WIN_SPILL
     /* §386 教训：**绝不能在这个宏里放 `.word` 字面量**。

@@ -1552,7 +1552,9 @@ void s3_wifi_osi_init(void)
      * （ppTask→内核，只有 2 层窗口、根本不可能绕环），故障记录**逐字节不变**
      * （a1=3 / epc1=0x403822ef）⇒ **§1043 的深度/绕环理论也被推翻**：
      * 任何 windowed 调用返回后 ppTask 的 a1 都会被写成小常数，与深度无关。*/
-    OSI_SET(_queue_recv,        osi_queue_recv);
+    /* §1084：改走带 spill 的薄壳（阻塞点必须先在自由栈上 spill 祖先窗口） */
+    { extern int s3_w2c_queue_recv(void *qh, void *item, u32 ticks);
+      OSI_SET(_queue_recv, s3_w2c_queue_recv); }
     OSI_SET(_queue_msg_waiting, osi_queue_msg_waiting);
 
     /* ---- 信号量 / 互斥量 ---- */

@@ -27882,3 +27882,47 @@ timer ISR ✓ → TICK_PEND ✓ → s3_tick_consume ✓ → os_sched_tick ✓
 
 镜像 `c7aa8532`。若需稳定版（完整跑 130 行但从不切换任务）：
 `git checkout 6dc85213 -- .`
+
+## §1084 补上 queue_recv 的 spill 薄壳：**a1 不再丢**，崩溃移到"返回地址带窗口标签"
+
+### 改动（构建 `f9774194`）
+
+`w2c.S` 加了第五个阻塞点的薄壳（前四个见 §1056）：
+
+```asm
+W2C_SPILL s3_w2c_queue_recv, osi_queue_recv_body
+```
+
+`wifi_glue.c` 的 `OSI_SET(_queue_recv, osi_queue_recv)` 改指向 `s3_w2c_queue_recv`。
+
+### 真板结果（同 67 行处停住，但现场明显不同）
+
+```
+改之前（§1083）:  EXCCAUSE=28  EXCVADDR=0xfffffff4(-12)  a0=0        a1=0
+改之后（§1084）:  EXCCAUSE=0   EPC1=0x4037d6a8  WB=6 WS=0x50
+                  a0 = 0x820134c2   ← **带窗口标签的返回地址**
+                  a1 = 0x3fcc46d0   ← **sp 正常了！**
+```
+
+**⇒ `a1` 从 0 恢复成合法栈指针，说明 queue_recv 的 spill 薄壳确实起了作用
+（祖先窗口不再被覆盖）。剩下的问题换成了**返回地址 `a0` 带着窗口标签**
+（`0x820134c2` 去掉标签位应是 `0x420134c2`，落在 `s3_w2c_*` 壳区内），
+于是 `retw` 跳到一个非法地址。
+
+这正是 `w2c.S` 里 §228 注释描述过的同一类现场：
+"返回地址带窗口标签、一返回就跳飞（TRAP cause=0 pc=0x8037a7e9）"。
+
+### 进度总结（相当接近了）
+
+```
+timer ISR ✓ → TICK_PEND ✓ → s3_tick_consume ✓ → os_sched_tick ✓
+→ 超时到期 ✓ → os_task_delay 真正阻塞 ✓ → 调度器选中 ppTask ✓
+→ port_task_switch ✓ → ppTask 开始执行 ✓（不再丢 sp）
+→ [★ 壳的 retw 用到了带标签的 a0]
+```
+
+**下一步**：查 `s3_w2c_queue_recv` 壳在**任务切换后返回**时 `a0` 的来源。
+`W2C_SPILL` 宏里 `callx8 \target` 之前并不保存/恢复 `a0`（它靠 `entry` 的
+硬件保存），但**任务切换会换掉整个窗口**，壳自己的 `a0` 存在帧里、
+恢复时若帧的 WS/CALLINC 不匹配就会带上标签。需要像 §1056 那样把
+壳的 `a0` 也显式存进 RTC 保存区（`0x50001FA0+8` 那套）。
