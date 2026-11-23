@@ -514,6 +514,65 @@ u32 port_virtual_tick(void)
     return 1u;
 }
 
+/* ★★★ §1076：把 §1075 剩下的两步放进 **flash**，IRAM 只留一次 call0。
+ *
+ * 为什么必须这么做：上一轮把这两段直接内联进 ISR / os_task_delay 时，
+ * `region IRAM overflowed by 32 bytes`。IRAM 只差几十字节，所以这里
+ * 全部放 .flash.text，IRAM 侧只增加一条 call0（3 字节）。
+ *
+ * 1) `s3_tick_isr_tail()`：ISR 每次进来重置 T0 报警并递增 S3_TICK_PEND。
+ *    TIMG 的 ALARM_EN 触发一次后被硬件自动清零（真板读回
+ *    T0CONFIG=0xc00a0000，bit10 掉了），不重装就只会来一次。
+ * 2) `s3_tick_consume()`：在**任务上下文**里消费 pending tick 并推进调度。
+ *    主循环那处 `if (t == 0)` 永远不成立，所以必须由 os_task_delay 调。 */
+__attribute__((section(".flash.text")))
+void s3_tick_isr_tail(void)
+{
+    volatile u32 *tg = (volatile u32 *)S3_TIMG0_BASE;
+
+    S3_TICK_PEND = S3_TICK_PEND + 1u;
+    *(volatile u32 *)0x50001584u = *(volatile u32 *)0x50001584u + 1u;  /* tail 进入次数 */
+    tg[0x44u / 4u] = 1u;                 /* INT_CLR_TIMERS */
+    tg[0x18u / 4u] = 0u;                 /* T0LOADLO */
+    tg[0x1Cu / 4u] = 0u;                 /* T0LOADHI */
+    tg[0x20u / 4u] = 1u;                 /* T0LOAD：重装计数器，否则 ALARM 不会再次触发 */
+    tg[0x10u / 4u] = 10000u;             /* T0ALARMLO = 10ms @1MHz */
+    tg[0x14u / 4u] = 0u;                 /* T0ALARMHI */
+    tg[0x00u / 4u] = 0xC00A0400u;        /* EN|INCREASE|DIV=80|ALARM_EN */
+}
+
+__attribute__((section(".flash.text")))
+void s3_wifi_wait_ic(void)
+{
+    /* ★★★ §1077：等闭源库把 ic 建出来（g_ic 在 0x3fcd474c）。
+     * esp_wifi_init_internal 是异步的：它只把 wifi_init_process 投给 ppTask，
+     * 立刻返回 0；真正的 ic_init 由 ppTask 稍后执行。同步一路跑下去的
+     * bringup 必须在这里等一下，否则 scan_start 拿到 0x3002。
+     * 一旦 g_ic 非 0 立即继续，最多等 10 秒。 */
+    extern int s3_w2c_task_delay(u32 ticks);
+    int k = 0;
+
+    while (k < 100 && *(volatile u32 *)(void *)0x3fcd474cu == 0u) {
+        (void)s3_w2c_task_delay(10u);
+        k++;
+    }
+    s3_ets_printf_call0("[wifi] 等 ic 就绪: k=%d g_ic=%08x\n",
+               k, *(unsigned int *)(void *)0x3fcd474cu);
+}
+
+__attribute__((section(".flash.text")))
+void s3_tick_consume(void)
+{
+    extern void os_sched_tick(void);
+    u32 n = 0u;
+
+    while (port_virtual_tick() != 0u) {
+        os_sched_tick();
+        n = n + 1u;
+        if (n >= 8u) { break; }          /* 一次最多补 8 个 tick，别拖住任务 */
+    }
+}
+
 /* ---- 诊断输出：纯 call0，不经过 windowed 岛 ------------------------------
  * 之前把诊断打印放在 windowed 岛里，调用链一深就在 retw.n 上抛
  * cause=0 IllegalInstruction（窗口用尽），读数时有时无。改到这里之后

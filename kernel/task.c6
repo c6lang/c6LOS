@@ -750,6 +750,8 @@ void os_task_delay(u32 ticks) {
     if (g_cur == 0) {
         return;
     }
+    /* §1076：在任务上下文里补 tick（实现放 flash，IRAM 只多一条 call0）。 */
+    { extern void s3_tick_consume(void); s3_tick_consume(); }
     if (port_in_isr() != 0u) {
         os_panic("delay in ISR");
         return;

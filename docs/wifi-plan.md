@@ -27547,3 +27547,45 @@ S3_TICK_PEND        = 0 且不增长
 下次要么把这两段放进 `.flash.text` 的独立函数，要么先从别处腾 64 字节 IRAM。**
 
 镜像 `bc67eb2c`（含本节的定时器配置，构建通过、tree 只有 console.c 一处改动）。
+
+## §1076 / §1077 tick 链路补齐 + 主任务空转的发现
+
+### §1076 已落地（构建通过，镜像 `8bbb84ad`）
+
+IRAM 只剩几十字节，所以把 §1075 剩下的两步放进 **flash**，IRAM 侧只加一条 `call0`：
+
+- `s3_tick_isr_tail()`（`.flash.text`，console.c）：ISR 每次进来
+  **递增 `S3_TICK_PEND`（RTC 0x50001580）+ 重装 T0 报警**
+  （`T0LOAD=1` 重装计数器、`T0ALARMLO=10000`、`T0CONFIG=0xC00A0400`）。
+  必须重装的证据：读回 `T0CONFIG=0xc00a0000`，`ALARM_EN`(bit10) 被硬件自动清零。
+  真板实测该函数确实被调用了 10 次（RTC 0x50001584 计数 = 10）。
+- `s3_tick_consume()`（`.flash.text`）：在**任务上下文**里消费 pending tick
+  并调 `os_sched_tick()`；`os_task_delay` 开头调它（IRAM 只加一条 call0）。
+
+### §1077 两个重要新发现
+
+**1) 主任务跑完 bringup 后卡在 `for(;;){}` 空转**
+
+真板 halt 读现场：
+```
+PC = 0x4037af59 <s3_win_wifi_main_task+17>: j 0x4037af59   ← 自己跳自己
+PS = 0x60225（INTLEVEL=5）
+```
+`s3_win_wifi_main_task` 的结尾是 `for (;;) { }`。整个 bringup 顺序跑完后就
+死转在这里，而构建开了 `S3_NO_PREEMPT=1` ⇒ **它一次都不让出 CPU**。
+
+**2) `esp_wifi_init_internal` 的异步性 vs 我们的同步 bringup**
+
+库只是把 `wifi_init_process` 投给 ppTask 就返回 0，而我们的 bringup
+紧接着就 `set_mode → set_config → scan_start`，此时 `g_ic` 还是 NULL。
+**⇒ 即使 tick/切换都正常了，也必须在这里让出一段时间等 ic 建好。**
+
+试过在此处 `while (g_ic == 0 && k < 100) s3_w2c_task_delay(10);`：
+真板**挂在等待循环里**、`g_ic` 仍为 0（让出后再没有东西把主任务唤醒），
+所以已撤回。根子还是 §1076 的 tick/超时链路没真正跑起来 ——
+本轮实测某一 boot 里 `g_s3_diag[9]`（定时器 ISR 计数）又是 0，
+说明定时器配置有时序问题（`port_init` 里配置的时机可能早于 WiFi 库
+重新摆弄中断矩阵）。下一步应先确认「定时器 ISR 能稳定持续触发」，
+再谈 ic 的异步等待。
+
+（本节改动：console.c / irq.c / task.c6 / wifi_glue.c 四处，构建通过。）

@@ -2625,6 +2625,22 @@ u32 s3_wifi_bringup(void)
                    (unsigned)(u32)(void *)wst, (unsigned)*wst);
 
         s3_ets_printf("[wifi] esp_wifi_init_internal -> %u\n", (unsigned)irc);
+        /* ★★★ §1077：库的初始化是**异步**的。
+         *
+         * esp_wifi_init_internal 只是把 `wifi_init_process`（0x42039dec）
+         * 作为消息 handler 投给 ieee80211_ioctl，然后立刻把状态置 3、返回 0。
+         * 真正的 ic 对象（写 g_ic = 0x3fcd474c 的那个）要等 ppTask 处理完
+         * 那条消息、走 wifi_init_process → wifi_lmac_init → ic_init 才会建出来。
+         *
+         * 而我们的 bringup 是同步一路跑下去的：init 返回后马上 set_mode/
+         * set_config/scan_start，此时 g_ic 还是 NULL ⇒ esp_wifi_scan_start
+         * 恒返回 0x3002（ESP_ERR_WIFI_NOT_STARTED）。§1070 已证明那条消息
+         * 就躺在队列里（[scanmsg] 里能看到 handler=42039dec）。
+         *
+         * 这里主动让出 CPU 等它建好（一旦 g_ic 非 0 立刻继续）。 */
+        /* §1077 试过在这里等 g_ic 就绪（让出 100×10 tick），真板实测会**挂住**
+         * 在等待循环里、g_ic 仍为 0 —— 因为让出后没有任何东西把主任务唤醒。
+         * 要等 ic 就绪，得先让 tick/超时链路真正跑通（§1076）。已撤回。 */
         g_dbg_sync = 0u;
         return irc;
     }

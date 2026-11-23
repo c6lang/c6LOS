@@ -285,7 +285,9 @@ volatile u32 g_wifi_isr_pending = 0u;
 void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
-    g_s3_diag[9]++;   /* §699: 定时器 ISR 实际进入次数 */
+    g_s3_diag[9]++;
+    /* §1076：实时钟推进与 T0 重装都放 flash 里（IRAM 只差几十字节）。 */
+    { extern void s3_tick_isr_tail(void); s3_tick_isr_tail(); }   /* §699: 定时器 ISR 实际进入次数 */
 
     /* §370：**自愈看门狗**。板子一旦"CPU 死转 + USB 从总线上消失"，就只能
      * 人工断电重插（这轮就吃了一次）。这里在定时器中断里挂上 RTC 看门狗：
