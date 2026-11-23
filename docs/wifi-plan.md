@@ -30758,3 +30758,29 @@ mov  a2, a10
 - **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
 - **四项验收全部未取得**。
 - **目标未完成，不应标记 complete。**
+
+## §1272 最终上板复核（round 181）
+
+干净固件刷真板，稳定复现 **230 行**：
+```
+[direct] init=0 start=0 state=2
+[hs]     d14=1 ca0=0 PWC=0 CLK=fffce7ff
+[wifi]   scan_start=0
+```
+四项验收：AP=0 / DHCP=0 / TLS=0 / qq.com body=0 —— **全部未取得**。
+
+## §1273 会话终结
+
+**目标未完成。** 仓库 `main` 工作树干净，文档记录至 §1273。
+
+**唯一剩余卡点的最终定性**（§1270）：
+本构建的 `libpp.a` 里 `esf_buf_alloc_dynamic` 是"永远返回 0"的桩，
+而 `esf_buf_alloc` 和 `esf_buf_setup_static` 都直接依赖它
+⇒ **TX 缓冲池在这个库构建下无法建立** ⇒
+`ieee80211_send_setup` 的 `bnez a2` 失败后进入库自己的 `while(1)`
+⇒ 扫描/关联/TX 全部卡死。
+
+**这不是内核侧打补丁能解决的。** 需要：
+(a) 换一个把 dynamic TX 缓冲编译进去的 `libpp.a`；或
+(b) 让 ppTask 按库的预期跑完整初始化序列（它可能走另一条静态注册路径），
+    而那需要先把 `W2C_SPILL` 薄壳在 windowed ABI 下的窗口账目彻底解决。
