@@ -21,6 +21,9 @@
 
 #include "c6os/types.h"
 #include "los/los_typedef.h"
+/* LosSockAddr：SAL 的地址结构。协议栈层的名字查询（M64 的 getsockname/
+ * getpeername）用它填本地/对端地址，声明在本文件里，所以这里要引进来。 */
+#include "los/sal.h"
 
 #define LOS_NET_MAX_IF      4u
 /* 每个缓冲必须装得下一整帧以太网包（1500 MTU + 14 字节头），否则 e1000
@@ -132,6 +135,10 @@ INT32  UdpSockSendTo(INT32 ud, UINT32 ip, UINT16 port, const VOID *buf, UINT32 l
 INT32  UdpSockRecv(INT32 ud, VOID *buf, UINT32 max);
 INT32  UdpSockRecvFrom(INT32 ud, VOID *buf, UINT32 max, UINT32 *ip, UINT16 *port);
 INT32  UdpSockPoll(INT32 ud, UINT32 events);
+/* M64：本地/对端名字。未 bind/connect 的语义按 Linux：本地回 0.0.0.0:0，
+ * 对端回 -ENOTCONN。 */
+INT32  UdpSockName(INT32 ud, LosSockAddr *a);
+INT32  UdpSockPeerName(INT32 ud, LosSockAddr *a);
 INT32  UdpInput(LosNetIf *nif, LosNetBuf *p, UINT32 src);
 
 /* ---- TCP（kernel/net/tcp.c6） ---- */
@@ -145,6 +152,9 @@ INT32  TcpSockConnect(INT32 sd, UINT32 ip, UINT16 port);
 INT32  TcpSockSend(INT32 sd, const VOID *buf, UINT32 len);
 INT32  TcpSockRecv(INT32 sd, VOID *buf, UINT32 max);
 INT32  TcpSockPoll(INT32 sd, UINT32 events);
+/* M64：名字查询（同 UDP）。监听/关闭态没有对端 → -ENOTCONN。 */
+INT32  TcpSockName(INT32 sd, LosSockAddr *a);
+INT32  TcpSockPeerName(INT32 sd, LosSockAddr *a);
 UINT32 TcpState(INT32 sd);
 UINT32 TcpFinRecv(INT32 sd);
 VOID   TcpTick(VOID);

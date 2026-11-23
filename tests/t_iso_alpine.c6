@@ -75,6 +75,17 @@ static const char kScript[] =
     "echo alpine-wget-alive; "
     "wget -T 20 -O /data/wget.html https://qq.com && echo wget-https-ok; "
     "echo wget-done";
+#elif defined(C6OS_ALPINE_CURL)
+/* M64：真实 Alpine curl（musl 动态链接 + libcurl + OpenSSL + c-ares）的
+ * HTTPS 端到端。和 wget 走的不是同一套代码：libcurl 自己解 URL、自己管
+ * CA 路径（/etc/ssl/certs/ca-certificates.crt）、自己 poll 等握手和响应，
+ * 任何一环在 Linux ABI 上缺东西都拿不到 curl-https-ok。 */
+static const char kScript[] =
+    "echo alpine-curl-alive; "
+    "curl --version > /dev/null && echo curl-version-ok; "
+    "curl -sS -o /data/qq.html https://qq.com && echo curl-https-ok; "
+    "test -s /data/qq.html && echo curl-file-ok; "
+    "echo curl-done";
 #elif defined(C6OS_ALPINE_APPS)
 /* M28：真实 Alpine 程序冒烟——用 ISO 里的 musl 动态链接 busybox applet
  * （cat/tar）在 /data FAT16 上读写，验 VFS 文件句柄回收。

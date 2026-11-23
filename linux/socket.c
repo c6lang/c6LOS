@@ -275,7 +275,7 @@ u64 lx_sock_accept(u64 fd, u64 uaddr, u64 uaddrlen)
     if (uaddr != 0ull && lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
-    if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) == 0) {
+    if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 4ull, C6OS_PROT_W) == 0) {
         return (u64)0 - LX_EFAULT;
     }
     csd = SalAccept((int)f->node, &a);
@@ -300,7 +300,10 @@ u64 lx_sock_accept(u64 fd, u64 uaddr, u64 uaddrlen)
         lxs_addr_out_(&a, uaddr);
     }
     if (uaddrlen != 0ull) {
-        *(u64 *)uaddrlen = 16ull;
+        /* socklen_t 是 4 字节：写 8 字节会踩掉调用方栈上紧邻的变量
+         * （c-ares 的 fromlen 后面就是 recvfrom 的 sockaddr，family 被
+         * 清零后源地址校验失败，DNS 应答被整包丢弃）。 */
+        *(u32 *)uaddrlen = 16u;
     }
     return cfd;
 }
@@ -483,8 +486,8 @@ u64 lx_sock_recvfrom(u64 fd, u64 ubuf, u64 len, u64 flags,
                                  nb, &intr);
         if (rc >= 0) {
             lxs_addr_out_(&a, uaddr);
-            if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) != 0) {
-                *(u64 *)uaddrlen = 16ull;
+            if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 4ull, C6OS_PROT_W) != 0) {
+                *(u32 *)uaddrlen = 16u;
             }
         }
     } else {
@@ -548,32 +551,49 @@ u64 lx_sock_shutdown(u64 fd, u64 how)
     return 0ull;
 }
 
-/* getpeername/getsockname：SAL 没有对端/本地地址查询接口，返回全 0 sockaddr，
- * 让调用方不报错即可（真实连接地址由协议栈内部使用，不影响 echo 验收）。 */
-static u64 lxs_name_(u64 fd, u64 uaddr, u64 uaddrlen)
+/* M64：getpeername/getsockname 填真实的 sockaddr_in。
+ *
+ * 以前 SAL 没有名字查询接口，这里返回 16 个 0（family=0）只求"不报错"；
+ * 但 c-ares 1.33 的 ares__conn_set_self_ip() 用 getsockname 的结果判定
+ * 地址族，family=0 直接给 ARES_ECONNREFUSED —— curl 的
+ * "Could not resolve host" 就是卡在这（TLS/HTTP 本身没问题，--resolve 能通）。
+ * 现在 UDP/TCP 都通过 SalGetSockName/SalGetPeerName 回真实的本地端口和
+ * 对端地址；AF_UNIX 没有 INET 名字，给一个空路径的 sockaddr_un（family=1）。 */
+static u64 lxs_name_(u64 fd, u64 uaddr, u64 uaddrlen, int peer)
 {
     LxFile *f = lxs_get_(fd);
-    u64 i;
+    LosSockAddr a;
+    int rc = 0;
 
     if (f == (LxFile *)0) { return (u64)0 - LX_EBADF; }
     if (lx_user_ok(uaddr, 16ull, C6OS_PROT_W) == 0) { return (u64)0 - LX_EFAULT; }
-    for (i = 0ull; i < 16ull; i++) {
-        *(u8 *)(uaddr + i) = 0u;
+    a.family = LX_AF_INET;
+    a.port = 0u;
+    a.addr = 0u;
+    if (f->kind == LX_FD_UNIX) {
+        a.family = 1u;                   /* AF_UNIX */
+    } else if (peer != 0) {
+        rc = SalGetPeerName((int)f->node, &a);
+        if (rc < 0) { return lxs_err_(rc); }
+    } else {
+        rc = SalGetSockName((int)f->node, &a);
+        if (rc < 0) { return lxs_err_(rc); }
     }
-    if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 8ull, C6OS_PROT_W) != 0) {
-        *(u64 *)uaddrlen = 16ull;
+    lxs_addr_out_(&a, uaddr);
+    if (uaddrlen != 0ull && lx_user_ok(uaddrlen, 4ull, C6OS_PROT_W) != 0) {
+        *(u32 *)uaddrlen = 16u;
     }
     return 0ull;
 }
 
 u64 lx_sock_getpeername(u64 fd, u64 uaddr, u64 uaddrlen)
 {
-    return lxs_name_(fd, uaddr, uaddrlen);
+    return lxs_name_(fd, uaddr, uaddrlen, 1);
 }
 
 u64 lx_sock_getsockname(u64 fd, u64 uaddr, u64 uaddrlen)
 {
-    return lxs_name_(fd, uaddr, uaddrlen);
+    return lxs_name_(fd, uaddr, uaddrlen, 0);
 }
 
 /* ---- M23：sendmsg/recvmsg：iovec 展开到内核中转缓冲 ----

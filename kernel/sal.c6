@@ -315,6 +315,35 @@ INT32 SalPoll(INT32 sd, UINT32 events)
     return sal_ret_(s, s->ops->poll(s->priv, events));
 }
 
+/* ---- M64：名字查询 ----
+ * 协议栈注册时这两个槽也是必填（同 socket 的约定）：c6 里"函数指针字段 == 0"
+ * 的比较不可靠，所以这里不做 NULL 检查。UDP/TCP/RAW 都实现了。 */
+INT32 SalGetSockName(INT32 sd, LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    if (a == (LosSockAddr *)0) {
+        return sal_err_(LOS_SAL_E_INVAL);
+    }
+    return sal_ret_(s, s->ops->getsockname(s->priv, a));
+}
+
+INT32 SalGetPeerName(INT32 sd, LosSockAddr *a)
+{
+    SalSock *s = sal_sock_(sd);
+
+    if (s == (SalSock *)0) {
+        return sal_err_(LOS_SAL_E_BADF);
+    }
+    if (a == (LosSockAddr *)0) {
+        return sal_err_(LOS_SAL_E_INVAL);
+    }
+    return sal_ret_(s, s->ops->getpeername(s->priv, a));
+}
+
 /* ---- 查询 ---- */
 
 INT32 SalLastError(INT32 sd)

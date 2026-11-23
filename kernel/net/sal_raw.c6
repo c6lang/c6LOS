@@ -234,6 +234,37 @@ static INT32 raw_poll(VOID *priv, UINT32 events)
     return (raw_next_() != (RawPkt *)0) ? 1 : 0;
 }
 
+/* M64：raw socket 的名字按 Linux 习惯给 0.0.0.0:0 / connect 的目标地址。 */
+static INT32 raw_getsockname(VOID *priv, LosSockAddr *a)
+{
+    if (raws_(priv) == (RawSock *)0) {
+        return 0 - LOS_SAL_E_BADF;
+    }
+    if (a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = 0u;
+    a->addr = 0u;
+    return 0;
+}
+
+static INT32 raw_getpeername(VOID *priv, LosSockAddr *a)
+{
+    RawSock *s = raws_(priv);
+
+    if (s == (RawSock *)0 || a == (LosSockAddr *)0) {
+        return 0 - LOS_SAL_E_INVAL;
+    }
+    if (s->dst == 0u) {
+        return 0 - LOS_SAL_E_NOTCONN;
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = 0u;
+    a->addr = s->dst;
+    return 0;
+}
+
 INT32 SalRawInit(VOID)
 {
     g_sal_raw.name = "icmp-raw";
@@ -252,5 +283,7 @@ INT32 SalRawInit(VOID)
     g_sal_raw.recvfrom = raw_recvfrom;
     g_sal_raw.setopt = raw_setopt;
     g_sal_raw.poll = raw_poll;
+    g_sal_raw.getsockname = raw_getsockname;
+    g_sal_raw.getpeername = raw_getpeername;
     return SalRegister(&g_sal_raw);
 }

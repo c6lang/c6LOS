@@ -1362,6 +1362,52 @@ windowed 下不成立，`add2(1,2)` 直接返回 0）。c6 编译器是二进制
 
 ---
 
+## Alpine curl（真实 libcurl + c-ares，已通过）
+
+`make check-alpine-curl` 通过：minirootfs 里装入 Alpine 官方 `curl 8.14.1-r2`
+及完整闭包（14 个包 / 约 5.03MB 解包后：curl、libcurl、c-ares、
+ca-certificates、brotli-libs、libidn2、libpsl、libunistring、nghttp2-libs、
+zstd-libs，其余 musl/libssl3/libcrypto3/zlib 来自 minirootfs）。guest 里
+`curl -sS -o /data/qq.html https://qq.com` 完成 DNS + TLS + HTTP，落盘非空
+（`curl-version-ok` / `curl-https-ok` / `curl-file-ok` / `curl-done`）。
+
+1. **`tools/fetch-apk.py`（新文件）**：minirootfs 没有 apk 工具链、宿主也不是
+   root，`apk add --root` 走不通。脚本直接抓 `APKINDEX.tar.gz`
+   （main+community），解析 `depend` 里的 `so:`/`p:` 依赖算闭包，再下载
+   `.apk`（gzip tar，成员就是文件本身）并按包名+版本缓存；跳过 rootfs 里
+   已装的包（对比 `/lib/apk/db/installed`），只解出数据成员（跳过
+   `.PKGINFO`/`.SIGN.*`），symlink/hardlink/目录/0755 权限都处理。marker
+   文件 `.extra-pkgs` 放在 rootfs 内，rootfs 重建（`rm -rf`）才会重装。
+2. **`Makefile`**：新增 `ALPINE_REPO`、`ALPINE_EXTRA_PKGS ?= curl`、
+   `ALPINE_PKG_CACHE`；`$(ALPINE_EXTRA_MARK)` 挂进 `$(ALPINE_CPIO)` 依赖。新增
+   `x86-alpine-curl` / `check-alpine-curl`（`-cdrom curl.iso`、
+   `-nic user,model=e1000`，日志断言上面四个 tag）。
+3. **SAL 名字查询（`include/los/sal.h`、`kernel/sal.c6`、
+   `kernel/net/sal_{udp,tcp,raw}.c6`、`kernel/net/{udp,tcp}.c6`）**：SAL 原来
+   没有 `getsockname`/`getpeername`，而 c-ares 1.33 的
+   `ares_conn_set_self_ip()` 用 `getsockname` 判定地址族，看到 family=0 直接
+   `ARES_ECONNREFUSED`（curl 立刻报 `(6) Could not resolve host`）。`SalProto`
+   补 `getsockname`/`getpeername` 两个槽（UDP/TCP/RAW 都实现）；UDP `connect`
+   顺带做 Linux 的隐式 bind（临时端口 49152 起），本地地址取出口网卡 IP、对端
+   取 `rip/rport`；`linux/socket.c` 的 `lxs_name_` 改为真正查 SAL 并输出
+   `sockaddr_in`（AF_UNIX 回 family=1 的空路径）。
+4. **`linux/socket.c`（socklen_t 踩栈 —— DNS 应答被丢的真凶）**：
+   `recvfrom`/`accept`/`getsockname` 以前用 `*(u64 *)addrlen = 16` 写长度，
+   而 Linux 的 `socklen_t` 是 **4 字节**：多写的 4 个 0 正好盖掉调用方栈上
+   紧邻的变量。c-ares 的 `read_udp_packets_fd` 里 `fromlen` 后面就是源地址
+   结构，`same_address()` 看到 family 被清零，把每个合法 DNS 应答都按
+   "源地址不符"静默丢弃（查询每 ~2s 重发，3 次后 curl 失败；内核打印能看到
+   收到 67 字节合法应答却仍超时重发）。三处统一改成
+   `*(u32 *)addrlen = 16u` 后一次通过。
+5. **`tests/t_iso_alpine.c6`**：新增 `C6OS_ALPINE_CURL` 分支（版本、HTTPS
+   下载、文件非空、结束四个 tag）。
+
+> 排查提示：guest 里 `curl --resolve qq.com:443:112.60.14.252 ...` 能绕过 DNS，
+> 先用它区分"TLS/HTTP 坏了"还是"DNS 坏了"；`curl --version` 能打印不代表 DNS
+> 可用（c-ares 只在真正解析时才建 socket）。
+
+---
+
 ## 挂载点语义（cd / df，已通过）
 
 `/data` 是运行时挂上的 FAT16：stat/open/access 一直会查挂载表，但 `chdir`

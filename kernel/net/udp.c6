@@ -135,6 +135,10 @@ INT32 UdpSockBind(INT32 ud, UINT16 port)
     return 0;
 }
 
+/* M24/M64：未 bind 的 socket 在 connect（或首次 send）时选一个临时端口。
+ * Linux 的 UDP connect 也会隐式 bind，见 UdpSockConnect。 */
+static void udp_autobind_(UdpSock *s);
+
 INT32 UdpSockConnect(INT32 ud, UINT32 ip, UINT16 port)
 {
     UdpSock *s = (UdpSock *)0;
@@ -149,6 +153,58 @@ INT32 UdpSockConnect(INT32 ud, UINT32 ip, UINT16 port)
     s->rip = ip;
     s->rport = port;
     s->connected = 1u;
+    /* M64：Linux 在 connect 时就把未绑定的 UDP socket 隐式 bind 到一个临时
+     * 端口（inet_autobind）。以前这里是首次 send 才分配，紧接着的
+     * getsockname（c-ares 拿它判定地址族/本地地址）会看到 port=0。 */
+    udp_autobind_(s);
+    return 0;
+}
+
+/* M64：getsockname。未 bind/connect 时按 Linux 语义回 0.0.0.0:0；
+ * bind/connect 之后本地地址取出口网卡地址（单网卡、无策略路由）。 */
+INT32 UdpSockName(INT32 ud, LosSockAddr *a)
+{
+    UdpSock *s = (UdpSock *)0;
+    LosNetIf *nif = (LosNetIf *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (a == (LosSockAddr *)0) {
+        return udp_err_(22);
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = 0u;
+    a->addr = 0u;
+    if (s->bound != 0u || s->connected != 0u) {
+        a->port = s->lport;
+        nif = NetIfGet(0u);
+        if (nif != (LosNetIf *)0) {
+            a->addr = nif->ip;
+        }
+    }
+    return 0;
+}
+
+/* M64：getpeername。只有 connect 过的 UDP socket 有对端，其余 -ENOTCONN。 */
+INT32 UdpSockPeerName(INT32 ud, LosSockAddr *a)
+{
+    UdpSock *s = (UdpSock *)0;
+
+    s = udp_get_(ud);
+    if (s == (UdpSock *)0) {
+        return udp_err_(9);
+    }
+    if (a == (LosSockAddr *)0) {
+        return udp_err_(22);
+    }
+    if (s->connected == 0u || s->rip == 0u) {
+        return udp_err_(107);            /* -ENOTCONN */
+    }
+    a->family = (UINT16)LOS_SAL_AF_INET;
+    a->port = s->rport;
+    a->addr = s->rip;
     return 0;
 }
 
@@ -186,8 +242,6 @@ static INT32 udp_xmit_(LosNetIf *nif, UINT16 lport, UINT32 ip, UINT16 port,
     NetPut16(&h[6], c);
     return IpOutput(nif, ip, (UINT8)LOS_IP_PROTO_UDP, p);
 }
-
-static void udp_autobind_(UdpSock *s);   /* M24：前置声明，send/sendto 都要用 */
 
 INT32 UdpSockSend(INT32 ud, const VOID *buf, UINT32 len)
 {

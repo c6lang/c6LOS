@@ -2078,7 +2078,25 @@ $(ALPINE_RESOLV): $(ALPINE_ROOT)/bin/busybox alpine-dns-force
 	@printf 'nameserver 10.0.2.3\n' | cmp -s - $@ 2>/dev/null \
 	  || printf 'nameserver 10.0.2.3\n' > $@
 
-$(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox $(ALPINE_RESOLV) tools/mk-initramfs.py
+# ---- 额外 apk 包（M64：默认装 curl）----
+# minirootfs 只有 busybox，交互式 shell 里没有 curl。这里把 curl 的依赖闭包
+# （libcurl / OpenSSL / c-ares / brotli / zstd / nghttp2 / idn2 / psl …）按
+# APKINDEX 递归解出来、下载 .apk 后离线解包进 rootfs，客户机启动即可用。
+# 已由 minirootfs 提供的包（musl/OpenSSL/zlib）保持自带版本，只补缺的。
+# 不想带额外包：`make ALPINE_EXTRA_PKGS=`。
+ALPINE_REPO       ?= https://dl-cdn.alpinelinux.org/alpine/v3.20
+ALPINE_EXTRA_PKGS ?= curl
+ALPINE_PKG_CACHE  := $(ALPINE_DIR)/pkgs
+ALPINE_EXTRA_MARK := $(ALPINE_ROOT)/.extra-pkgs
+
+# 标记文件放在 rootfs 内部：tarball 更新时 busybox 那步会 rm -rf 整个 rootfs，
+# 标记跟着消失，额外包自然重装。内容没变时工具直接返回（不碰文件），避免每次
+# make 都重新解包、把 ISO 也带着重打一遍。
+$(ALPINE_EXTRA_MARK): $(ALPINE_ROOT)/bin/busybox tools/fetch-apk.py Makefile
+	@python3 tools/fetch-apk.py --root $(ALPINE_ROOT) --cache $(ALPINE_PKG_CACHE) \
+		--base $(ALPINE_REPO) --marker $@ $(ALPINE_EXTRA_PKGS)
+
+$(ALPINE_CPIO): $(ALPINE_ROOT)/bin/busybox $(ALPINE_RESOLV) $(ALPINE_EXTRA_MARK) tools/mk-initramfs.py
 	python3 tools/mk-initramfs.py $@ $(ALPINE_ROOT)
 
 # 8MB FAT16，给客户机当 /data 写
@@ -2177,6 +2195,30 @@ check-alpine-wget: x86-alpine-wget
 	@grep -q "wget-done" /tmp/check-alpine-wget.log \
 	  || { echo "FAIL: alpine wget（脚本没跑完）"; tail -60 /tmp/check-alpine-wget.log; exit 1; }
 	@echo "PASS: alpine wget（busybox HTTPS：socketpair + ssl_client + shutdown）"
+
+# ---- M64：真实 Alpine curl（libcurl/OpenSSL/c-ares 动态链接）的 HTTPS 端到端 ----
+# curl 由 ALPINE_EXTRA_PKGS 在构建 rootfs 时离线装进镜像（见 libcurl/apk 那段），
+# 这里只负责起客户机跑一次真实下载：libcurl 自己解 URL、自己找 CA
+# （/etc/ssl/certs/ca-certificates.crt）、自己轮询握手与响应。
+x86-alpine-curl: caps-check-x86 $(CD0_BIN) $(ALPINE_CPIO) $(ALPINE_DATA)
+	@rm -rf $(ISO_DIR)
+	@mkdir -p $(ISO_DIR)
+	$(MAKE) X86S_NAME=iso X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 C6_DEFS=-DC6OS_ALPINE_CURL \
+		$(ISO_KER)
+	@python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(ISO_KER) \
+		--rootfs $(ALPINE_CPIO) -o $(ALPINE_DIR)/curl.iso
+
+check-alpine-curl: x86-alpine-curl
+	@timeout 220 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/curl.iso -boot d \
+		-drive format=raw,file=$(ALPINE_DATA),if=ide \
+		-nographic -serial stdio -monitor none -no-reboot $(QEMU_NIC) 2>&1 \
+		| tr -d '\r' | tee /tmp/check-alpine-curl.log >/dev/null
+	@for tag in curl-version-ok curl-https-ok curl-file-ok curl-done; do \
+		grep -q "$$tag" /tmp/check-alpine-curl.log \
+		  || { echo "FAIL: alpine curl（缺 $$tag）"; tail -80 /tmp/check-alpine-curl.log; exit 1; }; \
+	done
+	@echo "PASS: alpine curl（libcurl + OpenSSL：https 下载到 /data）"
 
 check-alpine-apps: x86-alpine-apps
 	@timeout 200 qemu-system-x86_64 -m 256M -cdrom $(ALPINE_DIR)/apps.iso -boot d \
