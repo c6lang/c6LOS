@@ -29276,3 +29276,41 @@ C 包装替代薄壳、直接 defsym 去薄壳、按需 spill、初始化任务�
 
 **所以整条链的最后一道门就是：让 ppTask 真正消费 `wifi_init_process` 消息。**
 这仍然回到"初始化任务与 ppTask 无法同时推进"的调度问题。
+
+## §1161 `wifi_init_process` 的关键前置条件（本轮最终取证）
+
+`wifi_init_process`（`0x4203a59c`）反汇编第一段：
+
+```
+entry a1, 32
+l32i.n a5, a2, 12        ; a5 = msg->[12]（期望是 IC/配置指针）
+bnez.n a5, ok            ; 若为 0 …
+movi   a2, 0x102         ; …直接返回 ESP_ERR_INVALID_ARG，什么都不做
+ok:
+l32r   a6, g_ic
+movi   a12, 0x2b4
+callx8 memset            ; memset(g_ic, 0, 0x2b4)
+s8i    a4, a2, 20        ; *(u8*)(g_ic+0x214) = 1
+s8i    a4, a6, 234       ; *(u8*)(g_ic+0x1EA) = 1
+…
+call8  wifi_nvs_init / wifi_lmac_init / wifi_hmac_init / wifi_crypto_init
+```
+
+**⇒ `msg->[12]` 必须非 0，否则 `wifi_init_process` 立即返回 `0x102`。**
+
+真板 `[scanmsg]` 抓到的消息体：
+```
+3fcc8834: 00000326 4203a59c 00000000 00000000 3fcc8864 00000000
+          b0       b4(func)  b8       b12=0    b16      b20
+```
+**⇒ `b12 = 0`！** 所以 `wifi_init_process` 每次都走 `0x102` 早返回，
+`g_ic` 永远不会被初始化 ⇒ `wifi_start_process` 里 `l8ui (g_ic+0x1E9)`
+读地址 `0x1E9` ⇒ 崩。
+
+`esp_wifi_init_internal`（`0x42040e04`）里 `mov a4, a2`（a2 = 配置指针），
+然后在 `callx8`（zalloc 消息）**之后**才 `s32i.n a4, a10, 12`——
+`a4` 是 caller-saved，被那次调用破坏，所以写进去的是垃圾/0。
+
+**下一步**：在 `__wrap_pp_post` 里识别 `ppq==6 && data->[4]==wifi_init_process`，
+把 `data->[12]` 补成正确的配置指针（或 `g_ic` 应指向的缓冲区），
+让 `wifi_init_process` 走正常路径。
