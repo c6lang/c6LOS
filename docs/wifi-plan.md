@@ -28177,3 +28177,54 @@ intenable = 0x40           ← 只剩定时器
    投递的那个（`wq_resolve` 的兜底查找可能把它们对错了）。
 
 镜像 `410f5fe9`。
+
+## §1093 ★★★★ `esp_wifi_init_internal` 自己就没返回 —— 卡在它内部
+
+### 决定性证据（串口顺序）
+
+```
+[wifi] init 前的库状态 @3fcbad48 = 1
+[pp] pp rom version: e7ae62f
+[net80211] net80211 rom version: e7ae62f
+[task] 库建任务 fn=403823a0 id=2 stack=16384 prio=29(->2)
+.
+                                ← 到这里就没有了
+```
+
+而代码里 `esp_wifi_init_internal` 之后紧接着就是：
+
+```c
+irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
+s3_ets_printf("[wifi] init 后的库状态 @%08x = %u\n", ...);   // ← 从未打印
+```
+
+**⇒ 所以 `esp_wifi_init_internal` **没有返回**。它在创建 ppTask 之后
+（`[task] 库建任务` 就是它内部调 `_task_create` 建的）卡在某个等待上。**
+
+这也解释了 §1092 的两个断点为什么都不命中：
+`wifi_init_process` 根本没被调用（它是异步投递的，投递点在
+`esp_wifi_init_internal` 内部、卡住的位置之后），`ic_init` 自然也没跑。
+
+### 结论
+
+**整条链路现在是：**
+
+```
+boot ✓ → osi 表 ✓ → PHY ✓ → esp_wifi_init_internal 进入 ✓
+→ 库打印版本 ✓ → 库建 ppTask ✓ → [★ 卡在这里，init 不返回]
+→ (未到) wifi_init_process → wifi_lmac_init → ic_init → g_ic
+```
+
+**⇒ 卡点是 `esp_wifi_init_internal` 内部的一次等待。典型候选：**
+1. 它建完 ppTask 后要等一个"ppTask 已启动"的信号量 —— 而我们的
+   `_semphr_take` 语义/唤醒路径与库的期望不一致；
+2. 或者它要等一个队列消息（`wifi_init_process` 的投递本身走的就是
+   某个队列），而那个队列在我们这边没被正确解析（`wq_resolve` 兜底
+   查找可能把句柄对错）。
+
+**⇒ 下一步最有效的定位：halt 之后看**主任务**的调用栈（不是当前 PC）。
+主任务的 ctx 在 `g_s3_cur[0]`（`0x3fcbc7a0`）里，它的 `ctx->sp` 指向
+被中断/切换时的帧，从那里逐帧回溯就能看到 `esp_wifi_init_internal`
+内部卡在哪一行。**
+
+镜像 `410f5fe9`。
