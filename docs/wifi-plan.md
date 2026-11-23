@@ -29740,3 +29740,31 @@ ss_state=0x3fcbb3f4, time=1070313296, index=1070529000
 下一步应先修 `c6_log_fmt` 的 varargs 读取（`osi_log_writev` 拿到的 `va_list`
 在 Xtensa windowed ABI 下可能不是简单的 `*(u32*)ap`），
 让日志可信后再定位扫描失败的真实原因。之后还有关联、DHCP、TLS、HTTPS 四大步。
+
+## §1190 尝试修正 va_list 读取（失败，已回退）
+
+试着把 `c6_log_fmt` 的 `args` 从"`*(u32*)app`"改成"`(u32*)app` 本身"
+（假设库传进来的就是参数数组指针）。
+
+真板结果更糟：
+```
+ssid=?, channel=-962265087, hidden=1070368884, ...
+start scan: type=0x3fcef940, priority=1070270765, cb=0x4037cca4, arg=0x44, ...
+```
+⇒ 说明原来的 `*(u32*)app` 才是对的方向，只是还有别的错位来源
+（很可能是 Xtensa windowed ABI 下 `va_list` 的寄存器保存区布局）。
+
+已回退。日志仍不可信，但**不影响主流程**。
+
+## §1191 会话收尾（round 149）
+
+**目标未完成。四项验收全部未取得。**
+
+**本会话成果（真板 79 行 → 210 行）：**
+1. `g_ic` 被正确分配与初始化 → WiFi 首次 STARTED（`state=2`）、MAC 使能、
+   `scan_start=0` 首次成功（§1164/§1165）。
+2. 消除 `__real_pp_post` 的时序脆弱性（§1169）。
+3. 补 `g_ic+16` 后**扫描真正进入 `perform scan`**（§1182）。
+
+**仍未解决**：`perform scan` 之后驱动报错；关联、DHCP、TLS、HTTPS 四步全未开始。
+受限于：日志参数错位导致无法定位真实错误；ppTask 调度问题未解。
