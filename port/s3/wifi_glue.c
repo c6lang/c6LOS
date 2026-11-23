@@ -3209,11 +3209,18 @@ void s3_seed_tx_buffers(void)
         void *head = 0;
         void *prev = 0;
         u32 i2;
-        for (i2 = 0u; i2 < 4u; i2++) {
-            void *b = osi_malloc(1600u);
+        for (i2 = 0u; i2 < 8u; i2++) {
+            void *b = osi_malloc(320u);
+            void *dt;
             if (b == 0) { break; }
+            dt = osi_malloc(1600u);
+            if (dt == 0) { break; }
+            /* §§1296 ★★★：每块缓冲配一个数据区（`buf+4` 必须非 0，
+             * 否则 `esf_buf_alloc` 会走 memcpy 用未初始化源指针而崩）。
+             * `esf_buf` 本体 320 字节就够（实测最大字段偏移 ~200）。 */
+            *((volatile void **)b + 1) = dt;                  /* buf+4 = 数据区 */
             *((volatile void **)b + 10) = 0;                  /* buf+40 = next */
-            *((volatile unsigned char *)b + 26u) = (unsigned char)k;
+            *((volatile unsigned char *)b + 26u) = 0u;        /* type = 0 */
             if (prev != 0) { *((volatile void **)prev + 10) = b; }
             else { head = b; }
             prev = b;
