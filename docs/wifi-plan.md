@@ -28591,3 +28591,42 @@ PHY/RF 的同步等待）。
 - **唯一未完成项**：闭源库 `pp_create_task` 内部的阻塞，导致
   `wifi_init_process`/`ic_init` 永不执行、`g_ic` 恒为 NULL，
   因此 AP 关联 / DHCP / TLS / qq.com body 四项验收均未取得。
+
+## §1101 卡点精确到 `pp_create_task+0x139` 的 `callx8`（OSI index 95）
+
+### 反汇编
+
+```asm
+4201b9dc: l32i.n  a10, a4, 0        ; a4 = &s_wifi_queue（或同类全局）
+4201b9de: beqz.n  a10, 4201b9ec     ; 为 0 就跳过
+4201b9e0: l32i.n  a5, a2, 0         ; a5 = g_osi_funcs_p
+4201b9e2: l32i    a5, a5, 0x17c     ; a5 = osi_funcs[95]
+4201b9e5: callx8  a5                ; ★ 卡在这里
+4201b9e8: movi.n  a5, 0
+4201b9ea: s32i.n  a5, a4, 0
+4201b9ec: l32r    a4, (s_pp_task_create_sem)
+4201b9ef: l32i.n  a10, a4, 0
+4201b9f1: beqz.n  a10, 4201b9fa     ; sem 为 0 就跳过等待
+4201b9f3: l32i    a2, a2, 0
+...
+```
+
+**真板验证：断在 `0x4201b9fc`（该 `callx8` 之后）→ 从不命中。**
+
+**⇒ `pp_create_task` 卡在 `osi_funcs[95]` 这次调用上，永不返回。**
+
+**⇒ 也就是说：**问题出在我们 OSI 表里第 95 个函数**（不是信号量握手，
+不是 `_task_create`）。它是 `pp_create_task` 里清理/销毁旧队列的那一步
+（`s32i 0` 说明调用成功后把全局清空）。**
+
+### 下一步（一步到位）
+
+数出 `include/c6os/wifi_osi.h` 里第 95 个字段名，检查我们给它的实现：
+- 若它是 `_queue_delete` 一类，看我们的 `osi_queue_delete` 是否在
+  `wq_resolve` 里死循环（`wq_resolve` 的兜底是**遍历整个 48KB 堆**，
+  每 16 字节一次 —— 如果堆里内容异常，这个循环会非常久甚至卡住）；
+- 最可能：**`wq_resolve` 的兜底遍历在库传进来的"非 WQ 指针"上跑了
+  48KB/16 = 3072 次 `l32i`，而如果 `S3_WIFI_HEAP_SIZE` 配得比实际大，
+  就会读到非法地址 ⇒ 卡住/异常。**
+
+镜像 `1c8f57be`。
