@@ -30139,3 +30139,21 @@ bnez a2, cont
 - **真板最佳 227 行**（会话起点 79 行，**提升 148 行**）。
 - **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
 - **目标未完成，不应标记 complete。**
+
+## §1217 交付确认（round 163）
+
+用干净重建的 `build/wifi/c6os.bin`（`md5=e76a3f1cb984db10873d861a999687bc`）
+刷真板，稳定复现 **227 行**：
+
+```
+[ppattach]  r=257           ← pp_attach 已初始化过（不能重入）
+[esfsetup]  r=0             ← 直调 esf_buf_setup 成功
+[direct] init=0 start=0 state=2   ← IC 初始化 + WiFi STARTED
+[hs] d14=1 ca0=0 PWC=0 CLK=fffce7ff
+[wifi] scan_start=0          ← 扫描成功发起
+```
+
+四项验收：**AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0 —— 全部未取得。**
+
+仓库 `main` 工作树干净，最新提交 `7b91f5b`。
+**目标未完成，不应标记 complete。**
