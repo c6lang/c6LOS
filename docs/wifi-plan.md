@@ -30722,3 +30722,39 @@ bnez.n a10, 4201ca08      ; 非 0 才算成功
 ⇒ 这两者在我们"绕过 ppTask"的配置下**必然冲突**，
 库自己的正常路径（ppTask 里先 `_wifi_malloc` 预分配、再注册）才是正解。
 **继续需要内核层面的架构重写。**
+
+## §1270 `esf_buf_alloc` 也依赖同一个"永远返回 0"的函数
+
+`esf_buf_alloc`（`0x403882fc`）反汇编：
+```
+mov  a6, a2              ; type
+movi a5, 9
+addi.n a2, a3, -1        ; idx-1（必须在 0..9，即 idx 1..10）
+jx   跳表[idx-1]
+...
+403883ed:
+l32r a10, g_eb_list_desc
+addx4 a3, a3, a3
+addx4 a10, a3, a10       ; desc = g_eb_list_desc + idx*16
+call8 esf_buf_alloc_dynamic   ; ★ 同一个"永远返回 0"的函数
+mov  a2, a10
+```
+⇒ **`esf_buf_alloc` 把 `esf_buf_alloc_dynamic` 的返回值直接当结果**，
+所以它在我们这个构建里**也永远返回 NULL**。
+
+两条分支（`menuconfig+8` 和 `menuconfig+84`）最终都汇到同一个调用点，
+所以改 `menuconfig` 字段也绕不开。
+
+**⇒ 最终结论：这个 `libpp.a` 构建里的 `esf_buf_alloc_dynamic` 是"永远失败"的桩**
+（很可能因为该归档是按"不使用 dynamic TX 缓冲"的配置编译的），
+而 `esf_buf_alloc` / `esf_buf_setup_static` 都依赖它 ⇒ **TX 路径在这个库构建下无法打通**。
+
+**这不是靠内核侧补丁能解决的：需要换一个把 dynamic TX 缓冲编译进去的 libpp.a，
+或者按库的预期在 ppTask 里跑完整初始化序列（它可能走另外的静态注册路径）。**
+
+## §1271 交付终态（最终）
+
+- 仓库 `main`，工作树干净，最佳构建 `md5=326b3a05ba67ed5171761dfb3f00bb1b`。
+- **真板稳定 230 行**（本会话起点 79 行，**提升 151 行**）。
+- **四项验收全部未取得**。
+- **目标未完成，不应标记 complete。**
