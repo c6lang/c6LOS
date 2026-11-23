@@ -27390,3 +27390,29 @@ tag=7 id=3 ctx=3fcc6928 n=4    ← 创建任务 3（tcpip）
 `kernel/task.c6` 里的 `sched_pick`。
 
 两条实验均已撤回，镜像回到 `bff36e25`（构建通过、tree 干净）。
+
+## §1072 即使把库任务提到最高优先级 + 建完主动让出 20 tick，ppTask 仍不启动
+
+实验（已撤回）：`_task_create` 里把 `p` 直接设成 0，并在 `id >= 0` 后
+立刻 `s3_w2c_task_delay(20u)`，让主任务无条件交出 CPU。
+
+结果：`ppTask`（0x40382318）的硬件断点**仍然一次都没命中**，
+`scan_start` 依旧是 12290（0x3002）。
+
+**⇒ 说明 ppTask 不是"抢不到 CPU"，而是根本没有进入调度器的候选集合。**
+`os_task_create_on` 末尾明明写了 `t->state = OS_TASK_READY` 并返回了
+有效 id（日志 `[task] 库建任务 fn=40382320 id=2`），所以要么
+`sched_pick` 里 `(u32)c->core == core` 不成立，要么该槽位随后被别的东西
+改回了其它状态。下一步应当直接读 `g_tasks[2]` 的 `state/prio/core`
+（`OsTask` 偏移：ctx@0 entry@4 arg@8 id@12 prio@32 state@34 core@35，
+本构建实测 magic 落在 +28，说明实际打包与这个偏移表有出入，需先校准）。
+
+### 本轮其它已确认事实
+
+- `g_stack_pool` 里三块栈都在（trampoline 入口值出现在
+  `g_stack_pool+16316/+32700/+40892`），对应 16384/16384/8192，
+  与 `S3_STACK_POOL=40960` 正好吻合 ⇒ **栈都分配成功了**。
+- RTC `0x50000a00`（trampoline 启动计数）读到 98368 后**不再增长**，
+  而 `+4` 的 fn 值在同一时刻还会变 ⇒ 该区域被别的诊断复用过，**不可信**。
+- `port_switch_trace` 的 tag=1 只覆盖内核主循环的切换，**yield 路径不走它**，
+  所以不能用它判断 ppTask 有没有被切到。
