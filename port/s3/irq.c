@@ -107,6 +107,18 @@ void s3_irq_init(void)
     u32 old = 0;
     s3_timer_rearm();
     __asm__ __volatile__("rsr %0, intenable" : "=r"(old));
+    /* ★★★★ §1090：**只保留定时器中断，清掉 WiFi 的 bit0/bit1**。
+     *
+     * §1089 查明：库的 `_set_isr` 只记录函数指针、从不装进硬件向量表，
+     * 而 `intenable` 在 ROM 阶段就已经带着 `0x42`（bit1 + bit6）。
+     * 我们的 `__xt_vectors` 接管向量表后，`_vec_lvl2..6` →
+     * `_vec_lvl_common` 是"闪背光 N 下后 `j 4b` 停住"的调试处理器 ——
+     * 所以只要 WiFi 的那个中断一触发，整个系统就被故意停在那里
+     * （真板 halt 读到 `PS=0x60225` = INTLEVEL=5，正是 `_vec_lvl5`）。
+     *
+     * 既然库的 ISR 现在根本进不去，那这些中断开着只会打死系统。
+     * 先全部关掉；等真正把 `_set_isr` 接进向量表之后再逐个打开。 */
+    old = old & ~3u;
     __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(old | mask));
 #ifndef S3_IRQ_HOLD_OFF
     /* 排查用开关：定义 S3_IRQ_HOLD_OFF 时先不开中断（验证非中断路径） */

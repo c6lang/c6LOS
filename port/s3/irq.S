@@ -531,7 +531,15 @@ _vec_level1:
 #else
     /* windowed：进 C 之前必须把 PS 设成 INTLEVEL=1 | UM | WOE。
      * WOE=1 才能让 call8 正常分配新窗口（否则每次都走窗口溢出向量）。 */
-    movi    a2, 0x40021          /* bit18=WOE, bit5=UM, INTLEVEL=1 */
+    /* ★★★★ §1091：**不要置 UM（bit5）**。
+     *
+     * 原来写的是 0x40021 = WOE + UM + INTLEVEL=1。真板 halt 时读到
+     * `PS = 0x60225`，解开就是 INTLEVEL=5 + **UM=1** —— 而 UM=1 是
+     * 用户模式，`retw`/`wsr` 这些特权操作在用户态会抛异常。
+     * 系统会冻在 `port_core_id` 的 `retw.n` 上原地不动（连采 4 次 PC 全同）。
+     *
+     * UM 在这里没有任何作用（我们不开用户态线程），去掉。 */
+    movi    a2, 0x40001          /* bit18=WOE, INTLEVEL=1 */
     wsr     a2, ps
     rsync
     mov     a10, a1              /* 参数：陷阱帧指针 */
