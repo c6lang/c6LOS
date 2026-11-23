@@ -28773,3 +28773,48 @@ PHY/RF 的同步等待）。
   永不执行 ⇒ `g_ic` 恒为 NULL。
 
 **基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 至 §1104。
+
+## §1105 OSI 调用环（0x50000200/0x50000204）全为 0 —— 库可能没在走我们的 OSI 表
+
+`HIT_OF(f)` → `OSI_HIT(offsetof(wifi_osi_funcs_t,f)/4)`，它会：
+
+```c
+OSI_RING_BUF[k & 63] = i;      /* 0x50000204 起 */
+*OSI_RING_CNT = g_osi_ring_n;  /* 0x50000200 */
+```
+
+**真板读 `0x50000200` 全 0 ⇒ 我们的 OSI 实现**一次都没被调用过**。**
+
+**但这与"队列 0x3fcc8074 被建出来（写在 0x50000310）"矛盾** ——
+除非 `0x50000310` 是别的路径写的，或者库用的是**另一张 OSI 表**
+（比如 ROM 里自带的那张，而不是我们通过 `g_osi_funcs_p` 传进去的那张）。
+
+**⇒ 这是最后一个待查点，也是最可能的根因：库没在用我们的 OSI 表。**
+如果它用的是 ROM/内部表，那 `_task_create`/`_queue_create`/`_semphr_*`
+全是库自己或 ROM 的实现，我们的适配根本没参与 —— 于是
+`pp_create_task` 里的某一步永远等不到（因为对应的实现不是我们的，
+语义/环境都不对）。
+
+**验证方法（下一步）**：在 `g_osi_funcs_p` 被写入之后（`s3_wifi_bringup` 里
+`g_wifi_osi_funcs` 赋值处）读一次 `g_osi_funcs_p` 的实际值，确认库拿到的
+是我们那张表的地址；再在库的 `pp_create_task` 里读它实际用的表地址
+（`l32i a3, a2, 0` 之后的 a3），两者比对。
+
+### 会话最终交付（完整）
+
+**已完成：**
+1. c6LOS 全量 windowed ABI 迁移 —— 内核/中断/上下文切换/全部 C 代码
+   统一 `-mabi=windowed`，编译链接通过，真板稳定运行；
+2. 修复了一批 windowed ABI 真 bug（§1056/§1083/§1084/§1088/§1090/§1094）：
+   阻塞函数 spill 薄壳、`RESTORE_FRAME` 的 WS 并集泄漏、
+   `callx8` 轮转窗口导致库任务参数没传到、ISR 里 `call8 os_sched_tick`
+   抛异常（用 `S3_TICK_DEFER` 解决）、`intenable` 收敛、`_set_isr` 查明；
+3. 系统状态：GDB `bt` 干净（`s3_w2c_queue_recv ← ppTask ← s3_task_tramp`）、
+   ISR 24064 次、TICK_PEND 持续增长、任务正常切换、队列正常收发；
+4. 逐层定位卡点：`wifi_init_in_caller_task` → `ic_create_wifi_task` →
+   `pp_create_task` 内部不返回。
+
+**未完成：** AP 关联 / DHCP / TLS / qq.com body 四项验收。
+根因收敛到"库是否真的在使用我们提供的 OSI 表"，见上面的验证方法。
+
+**基线**：镜像 `1c8f57be`，工作树干净，`docs/wifi-plan.md` 至 §1105。
