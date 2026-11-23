@@ -26798,3 +26798,55 @@ start 的后续状态推进就会停在半路。）
 - 四条验收项仍未取得，但**离它们只差这一个功能性问题**。
 
 镜像 `c3a8b53b622bf80563b5ed067aca49d3`；串口 128 行。
+
+## §1059 发现第二个独立问题：**WiFi 账号从来没配过**
+
+`port/s3/wifi_creds.h` 里 `S3_WIFI_SSID` 默认是 `""`，
+而我们的构建从没传过 `S3_WIFI_SSID`/`S3_WIFI_PASS`。
+
+于是 `s3_wifi_associate()` 一直走进 1778 行的**"没给 SSID"分支**：
+
+```c
+if (ssid == 0 || ssid[0] == 0) {
+    s3_ets_printf("[wifi] 没给 SSID：只做 set_mode/start/scan（射频体检）\n");
+    (void)esp_wifi_set_storage(1);
+    (void)esp_wifi_set_mode(1);
+    s3_ets_printf("[wifi] start=%d\n", esp_wifi_start());
+    (void)s3_wifi_scan();
+    return 0xFFFFFFFFu;      // ← 直接返回，后面的 set_config/connect 全没走
+}
+```
+
+**⇒ 这就解释了之前所有"关联是假的"现象**：
+没有 `associate ssid=...`、没有 `set_config`、`已关联，ssid= channel=0`。
+
+修法（设计好的、不进版本库的本地覆盖文件）：
+
+```c
+/* port/s3/wifi_creds_local.h （.gitignore 已忽略） */
+#define S3_WIFI_SSID "weforpay.com"
+#define S3_WIFI_PASS "weforpay"
+```
+
+### 修好之后
+
+```
+[wifi] associate ssid=weforpay.com     ← 真的走进关联路径了
+[wifi] set_config=0
+[wifi] start=0
+[wifi] start 后的库状态 = 3            ← 状态机停在 3，没进 started
+[wifi] scan_start=12290                ← ESP_ERR_WIFI_NOT_STARTED 仍在
+```
+
+### 结论
+
+**windowed ABI 这一层已经完全没问题**（§1056），现在挡路的是两个**功能性问题**：
+1. ~~WiFi 账号没配~~ —— 已修（§1059）；
+2. `esp_wifi_start()` 返回 0，但库内部状态机没推进到 started
+   ⇒ `esp_wifi_scan_start` 报 `ESP_ERR_WIFI_NOT_STARTED`。
+
+第 2 点下一步：查 `esp_wifi_start` 内部依赖的哪个 OSI 槽没被调用
+（`s3_wifi_dump_osi` 的计数能看出来：`13=1 15=4 17=3 …`），
+大概率是某个创建/启动子任务的槽是空桩，导致 start 的后续阶段被跳过。
+
+镜像 `bff36e2543ffe178da9c5d85070fb0a7`；串口 129 行。

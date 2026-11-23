@@ -1822,6 +1822,14 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     s3_ets_printf("[wifi] set_config=%d\n", r3);
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+    /* §1059：ESP_ERR_WIFI_NOT_STARTED 说明库内部没进 started 状态。
+     * 读同一个状态机（§421 定位的 `g_wifi_osi_funcs_md5 + 4`），
+     * 看 esp_wifi_start 到底有没有推进它。 */
+    {
+        extern unsigned char g_wifi_osi_funcs_md5[];
+        volatile u32 *wst2 = (volatile u32 *)(void *)(g_wifi_osi_funcs_md5 + 4);
+        s3_ets_printf("[wifi] start 后的库状态 = %u\n", (unsigned)*wst2);
+    }
 #ifdef S3_HOME_EARLY
     /* §857: esp_wifi_start 后 chm 已建好但 home 默认 0；立即设 home=current=6，
      * 从源头避免 mgmt_output 的 chm_is_at_home_channel() 假 → AUTH 帧入延迟队列。
