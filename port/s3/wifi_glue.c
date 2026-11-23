@@ -2021,6 +2021,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
         for (i2 = 0u; i2 < 8u; i2++) { m[i2] = 0u; }
         m[3] = *(volatile u32 *)(void *)g_ic;      /* msg->[12] = IC 指针 */
         ri = wifi_init_process((void *)m);
+        /* §§1206 ★★★：直接调 `pp_attach()`。真板取证：
+         * `esf_buf_setup` 初始化的 `eb_txdesc_space @0x3fcbbf00` **全为 0** ⇒ 它从未执行。
+         * 而 `esf_buf_setup` 只在 `pp_attach` 里被调，`pp_attach` 只在 `ic_init` 里被调，
+         * 但 `ic_init` 返回 0x101（已初始化）⇒ 它那次没把 pp 部分做成。 */
+        {
+            extern int pp_attach(void);
+            int rp = pp_attach();
+            s3_ets_printf("[ppattach] r=%d\n", rp);
+        }
         rs = wifi_start_process();
         s3_ets_printf("[direct] init=%d start=%d state=%u\n",
                       ri, rs,

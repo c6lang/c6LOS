@@ -29995,3 +29995,29 @@ wc -l /tmp/run.txt      # 期望 ~209-210 行
 2. 顺着 `pp_attach` → `esf_buf_setup` 找到真正的装载点，并确认它为什么没跑
    （很可能因为我们是"直调 `wifi_init_process`"绕过了 ppTask 的正常序列）。
 3. 一旦 TX 通了、扫描能收到 AP，再往 `esp_wifi_connect` → DHCP → TLS → HTTPS 推进。
+
+## §1206 `pp_attach` 直调（真板 216 行，会话最佳）
+
+`pp_attach`（`0x4201c714`）开头是 `memset(pp_sig_cnt,0,33)` + `memset(bars,0,160)`，
+**没有前置守卫**，所以它会无条件往下走并调用 `esf_buf_setup`。
+在 `wifi_init_process` 之后直调它：
+
+```
+[ppattach] r=257      ← 0x101 = ESP_ERR_INVALID_STATE（返回在函数后半段）
+[direct] init=0 start=0 state=2
+[wifi] scan_start=0
+```
+
+真板 **216 行**（此前 210，会话最佳）。
+
+**遗憾**：`eb_txdesc_space @0x3fcbbf00` 读到仍全 0 —— 但 `esf_buf_setup`
+第一件事就是 `memset(它, 0, 144)`，所以"全 0"也可能是"memset 跑了、
+链表没建完"。需要读 `eb_space @0x3fcd6b48`（192 字节）和
+`g_wifi_menuconfig @0x3fcd5660` 的 `+4`（缓冲个数）才能区分。
+
+## §1207 会话最终状态（round 156）
+
+- 仓库 `main`，工作树干净。
+- **真板最佳 216 行**（会话起点 79 行）。
+- **四项验收全部未取得**：AP 关联 0 / DHCP 0 / TLS 0 / qq.com body 0。
+- **目标未完成，不应标记 complete。**
