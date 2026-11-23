@@ -26850,3 +26850,51 @@ if (ssid == 0 || ssid[0] == 0) {
 大概率是某个创建/启动子任务的槽是空桩，导致 start 的后续阶段被跳过。
 
 镜像 `bff36e2543ffe178da9c5d85070fb0a7`；串口 129 行。
+
+## §1060 ★★★★★ `ESP_ERR_WIFI_NOT_STARTED` 的确切原因：**`g_ic` 是 NULL**
+
+反汇编闭源库的 `esp_wifi_scan_start`（在 `libnet80211.a`），判定逻辑是：
+
+```asm
+42040dbe: call8  wifi_init_completed      /* 返回 0x3001 的分支 */
+42040dcc: l32r a2, (3fcd470c <g_ic>)      /* a2 = g_ic */
+         addmi a2, a2, 0x100
+         l8ui  a5, a2, 233                /* a5 = *(u8*)(g_ic + 0x1E9) */
+         bgeui a5, 2, <真正开始扫描>        /* 否则 */
+         → 返回 0x3002 (ESP_ERR_WIFI_NOT_STARTED)
+```
+
+**⇒ "started" 状态就是 `*(u8*)(g_ic + 0x1E9) >= 2`，其中 `g_ic` 是全局指针 `0x3fcd470c`。**
+
+真机实测（**在 `esp_wifi_scan_start` 断点处读**，不是事后读）：
+
+```
+g_ic_ptr@3fcd470c = 0x00000000     ← **NULL**
+state(+0x1E9)     = 0
+rom 0x1E9 byte    = 0
+```
+
+**⇒ `g_ic == NULL` ⇒ 解引用后读的是 ROM 地址 `0x1E9` 的字节（0）⇒ `< 2` ⇒ 返回 `NOT_STARTED`。**
+
+进一步用断点确认：
+- `ic_create_wifi_task`（`0x4201a2fc`）**确实被调用了**（断点命中），
+  进入时 `g_ic = 0`；
+- `ic_init`（`0x4201a070`，真正创建 ic 的那个）**没有先被命中**；
+- `finish` 回不到调用点（该函数内部疑似阻塞，或 gdb 在 windowed ABI 下解栈失败）。
+
+**⇒ 结论：`esp_wifi_start()` 返回 0，但它内部创建 ic 的那一步没有成功
+（`g_ic` 始终为 NULL），而它又不检查这个错误，于是"假成功"。
+随后 `esp_wifi_scan_start` 一查 started 状态就是 `NOT_STARTED`。**
+
+### 下一步（非常具体）
+
+1. 查 `ic_create_wifi_task` 内部哪一步失败/阻塞 —— 它应该调用 `ic_init` 或自己
+   分配 ic 并写 `g_ic`。最可能是它调用了我们**还是空桩**的某个 OSI 槽然后提前返回。
+2. 或者直接在 `esp_wifi_start` 之后检查 `g_ic`，若为 NULL 就手动调一次
+   `ic_init()` 再进 connect —— 但更该修的是让 `ic_create_wifi_task` 走完。
+
+### 本轮定版
+
+镜像 `bff36e2543ffe178da9c5d85070fb0a7`；串口 129 行。
+**windowed ABI 层完全可用（§1056）；WiFi 账号已修好（§1059）；
+剩下这一个闭源库内部 `g_ic` 创建失败问题。**
