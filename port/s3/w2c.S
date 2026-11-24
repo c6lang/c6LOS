@@ -725,10 +725,34 @@ or      a9, a1, a1
  * 还活在 AR 里。被调用方式（call4/8/12）由 a0 的 bit31:30 判断。
  * 这段和 esp-idf components/xtensa/include/xtensa/coreasm.h 完全一致。 */
     .align  4
+3:  .word   0x50001900           /* §1367：现场记录基址 */
+    .align  4
     .global s3_win_spill
     .type   s3_win_spill, @function
 s3_win_spill:
     entry   a1, 48
+    /* §§1367 ★★★★ **安全现场记录**。
+     *
+     * 这里是 `call8` 进来的，a2..a7 = 薄壳的 a10..a15，
+     * 而薄壳在**调用之前已经把它们存进自己的帧**、
+     * 调用之后会恢复 ⇒ **在这里破坏 a2..a7 是无害的**。
+     * （不能去改§1363 里说的 `_win_ovf8` 向量——那里破坏任何
+     * 寄存器都会产生假现象，§997 已证实。）
+     *
+     * 记录到 RTC `0x50001900`：
+     *   +0 次数   +4 windowbase   +8 windowstart
+     *   +12 本函数的 a1   +16 调用者的 a1（= a1+48） */
+    l32r    a2, 3b
+    l32i    a3, a2, 0
+    addi    a3, a3, 1
+    s32i    a3, a2, 0
+    rsr     a3, windowbase
+    s32i    a3, a2, 4
+    rsr     a3, windowstart
+    s32i    a3, a2, 8
+    s32i    a1, a2, 12
+    addi    a3, a1, 48
+    s32i    a3, a2, 16
     bbci.l  a0, 31, 1f          /* 用 call4 调的 */
     bbsi.l  a0, 30, 2f          /* 用 call12 调的 */
     call4   .Lws52              /* 用 call8 调的：再补一个 call4 */
