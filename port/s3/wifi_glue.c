@@ -687,6 +687,24 @@ void s3_timer_dispatch_guarded(void)
 }
 #endif
 
+/* §§1468 实体在 `.flash.text`，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_recv_yield(void)
+{
+    extern void os_task_yield(void);
+    extern void os_task_delay(u32 ticks);
+    static u32 s_cnt = 0u;
+    s_cnt = s_cnt + 1u;
+    /* §1130 当年删这里是因为在 W2C_SPILL 壳深处调 `port_core_id()` 会崩，
+     * 那个框架问题已在 §1449 修掉。限频：每 512 次 recv 才让一次。 */
+    /* §§1469 `os_task_yield()` 在 `g_sched_lock[core] != 0` 时**直接返回**，
+     * 而 recv 往往正在调度锁内 ⇒ 让出被吞掉。
+     * 换成 `os_task_delay(1)`：它会**真把当前任务阻塞掉**，
+     * 强制切换到 ppTask（1970里 recv 跑了 1860 万次，
+     * 每 8192 次阻塞 1 tick 对吞吐量影响很小）。 */
+    if ((s_cnt & 8191u) == 0u) { os_task_delay(1u); }
+}
+
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     {
@@ -709,6 +727,25 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     {
         extern void s3_timer_dispatch_guarded(void);
         s3_timer_dispatch_guarded();
+    }
+#endif
+#ifdef S3_YIELD_IN_RECV
+    /* §§1468 ★★★★ **ppTask 饿死。**
+     *
+     * 真板任务表取证（stride 0x70，+0x2C 为 {prio,base,state}）：
+     *   id1 : 0x00020202 → prio=2, state=2 (RUNNING)
+     *   id2 : 0x00010202 → prio=2, state=1 (**READY 但从不被调度**)
+     * 内核在 `S3_NO_PREEMPT` 下**不抢占**，当前任务不主动让出，
+     * 同优先级的 ppTask 就永远拿不到 CPU ⇒
+     * `pp_post` 的消息全堆在队列里（真板：`[pppost] ppq=7`
+     * 之后 165 秒再无事件）。
+     *
+     * §1130 当年把这里的让出删了，理由是在 W2C_SPILL 壳深处调
+     * `port_core_id()` 会崩。**那个框架问题本轮已修**（§1449），
+     * 这里重试，且限制频率（每 1/512 次才让一次）。 */
+    {
+        extern void s3_recv_yield(void);
+        s3_recv_yield();
     }
 #endif
     /* §§1120 ★★★★：**每次 recv 都推进一次时间**。

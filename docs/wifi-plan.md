@@ -33813,3 +33813,39 @@ a2 == 0 → wifi_log(...) → j 0x4202a1cc   ← **自己跳自己，永久死�
 **⇒ 消息卡在 ppTask 队列里没人消费，是最可能的停摆原因。**
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1468/1469 ★★★★★ **ppTask 饿死** —— 找到真正的停摆主因
+
+### 任务表实证（`g_tasks` stride 0x70，+0x2C 为 {prio,base,state}）
+只有 2 个任务：
+| id | 入口 | 符号 | 栈 | prio | state |
+|---|---|---|---|---|---|
+| 1 | `0x403823a8` | **`ppTask`(ROM)** | 16384 | 2 | **1 = READY（从不运行）** |
+| 2 | `0x4208611c` | **`tcpip_thread`(lwIP)** | 8192 | 2 | **2 = RUNNING** |
+
+**⇒ 一直在跑的是 lwIP 的 tcpip 线程**（所以 `osi_queue_recv_body` 被调上千万次、
+`diag[33]` 高达 1860 万），而 **ppTask 明明 READY 却拿不到 CPU**。
+
+`ppTask` 是 IDF WiFi 的**发送引擎**：`pp_post()` 把消息投进队列，只有 ppTask 会消费。
+它不跑 ⇒ probe/auth/assoc 全部发不出去、`[pppost] ppq=7` 之后彻底静默。
+**这与全部现象完全自洽**（probe 只发 1 个、扫描只走一个信道、165 秒无事件）。
+
+### 为什么让不让都没用
+- `os_task_yield()`（`kernel/task.c6:755`）开头就有
+  `if (g_cur == 0 || g_sched_lock[core] != 0u) return;` —— recv 路径**正处在调度锁内**
+  ⇒ 让出被直接吞掉。
+- 改 `os_task_delay(1)`（会真正阻塞当前任务）也无效（日志仍 253 行）。
+  **⇒ 待查：是不是那 512/8192 的取样计数根本没到，或者 `s3_recv_yield` 没被调到。**
+
+### 关键数据（本轮末）
+```
+[ppct] out r=0 hdl=2
+[ppct] boost id=2 -> prio 2 r=0      ← ppTask 创建成功，id=2，prio 已提到 2
+```
+但**注意 id 复用**：创建时 hdl=2，而现在的 id2 是 `tcpip_thread` ⇒
+**ppTask 现在的 id 可能已经变成 1**（任务表按 id 顺序排，ppTask 占 id1）。
+
+**⇒ 下一轮最关键的一步：确认 `s3_recv_yield()` 是否真的被调用（加计数），
+并想办法让 tcpip 线程真正阻塞/让出，把 CPU 还给 ppTask。**
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
