@@ -33292,3 +33292,51 @@ scan node / cnxMgr 的真实节点指针，而不是一个凭空常量）。
 尾部：越过 failed to change power status → [v4]wifi|first chan=0
 ```
 四项验收：**AP=0 DHCP=0 TLS=0 body=0** —— 仍未取得，目标继续。
+
+## §1439 `s3_fix_ic16` 必须非 0，但填任何"猜测值"都错
+
+真板隔离实验（三次构建，同一台板）：
+
+| 配置 | 结果 |
+|---|---|
+| `-DS3_NO_IC16_FIX`（不注入） | `[ic16] left 0`，`[scanp2] direct r=-1` —— **`ieee80211_sta_scan` 直接拒绝** |
+| 注入 `*(g_ic)`（= g_cnxMgr 0x3fcd6000，旧行为） | 扫描能起，但崩：`EPC1=EXCVADDR=0x3fcd6000`、`EXCCAUSE=0` |
+| `-DS3_IC16_VIF` 注入我们 seed 的 vif（0x3fccfcd4） | `[ic16] vif->3fccfcd4`，同样**推到 `first chan=0` 后仍崩在 0x3fcd6000** |
+
+**⇒ 结论：`g_ic+16` 必须非 0（否则扫描根本不启动），但它要求的既不是
+g_cnxMgr、也不是 vif —— 它要的是库**自己的扫描状态结构**，而该结构
+在我们的环境里从来没有被创建过。**
+（填 g_cnxMgr 时崩在 0x3fcd6000 = g_cnxMgr；填 vif 时崩在**同一个地址**，
+说明库是把它当结构体读某个字段、拿到 g_cnxMgr 再当函数指针 `callx8`。）
+
+## §1440 `cnx_connect_next_ap()` 不是崩溃元凶
+
+去掉 `-DS3_CNX_DIRECT`（不调 `cnx_connect_next_ap`）、保留
+`-DS3_PMOFF_FORCE -DS3_IC16_VIF`，真板仍然 `PC=0x4037a029`(`_vec_default`)、
+`EXCCAUSE=0`、`diag[32]=0`、`switch=2`。
+**⇒ 崩溃就发生在扫描内部 `[v4]wifi|first chan=0` 之后的下一拍。**
+
+## §1441 下一轮唯一正确的做法：**找出库里谁写 `g_ic+16`**
+
+不要再猜。做法：
+1. 在闭源库 `.a` 的全部目标里搜 `s32i  ... 16` 且基址来自 `g_ic` 的模式；
+2. 或者反过来：在 ROM/lib 里找读 `g_ic+16` 的函数（已知
+   `ieee80211_sta_scan` 会读），看它在**同一函数里**把什么写进 +16；
+3. 找到后，在那个函数被调用之前，用**同一个值**填 `g_ic+16`
+   ——大概率是 `ieee80211_scan_attach()` 建立的 scan 状态块，
+   需要我们自己 `osi_malloc` 一个并交给库初始化，而不是塞一个别名。
+
+## 当前最佳构建（本轮）
+
+```
+行数 250（历史最佳）
+[wifi] associate ssid=weforpay.com
+[wifi] connect=0
+[pppost] ppq=6 data=3fccab04        ← 队列通路已打通（§1437，最硬的骨头啃掉了）
+[ic16] vif->3fccfcd4                ← 越过 pm 门槛后扫描真的开始下巡
+[v4]wifi|first chan=0
+⇒ 该点之后仍崩在 g_cnxMgr（0x3fcd6000）
+```
+想复现"不崩但慢"的稳定态：去掉 `-DS3_PMOFF_FORCE`（尾部停在
+`failed to change power status`，250 行）。
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

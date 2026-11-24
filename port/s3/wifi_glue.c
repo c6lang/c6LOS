@@ -3418,10 +3418,27 @@ void s3_fix_ic16(void)
     extern int s3_ets_printf(const char *, ...);
     u32 *icp = (u32 *)(void *)g_ic;
 
+#ifdef S3_NO_IC16_FIX
+    /* §§1439 实验：不注入。用来判断 §1438 的崩溃是不是这个注入值造成的。
+     * 结果：不注入 ⇒ `[scanp2] direct r=-1`（`ieee80211_sta_scan` 直接拒绝）
+     * ⇒ 说明这个字段**必须非 0**，但填 g_cnxMgr 是错的语义。 */
+    s3_ets_printf("[ic16] left %x (no fix)\n", (unsigned)icp[4]);
+#elif defined(S3_IC16_VIF)
+    /* §§1440 ★★ 假设：`g_ic+16` 要求的是 **vif 指针**（扫描必须挂在某个 vif 上）。
+     * 我们已在 `s3_seed_tx_buffers()` 里造了 vif 并存在 `g_s3_diag[28]`。 */
+    if (icp[4] == 0u) {
+        extern volatile u32 g_s3_diag[];
+        u32 v = g_s3_diag[28];
+        if (v == 0u) { v = icp[0]; }
+        if (v != 0u) { icp[4] = v; }
+        s3_ets_printf("[ic16] vif->%x\n", (unsigned)icp[4]);
+    }
+#else
     if (icp[4] == 0u && icp[0] != 0u) {
         icp[4] = icp[0];
         s3_ets_printf("[ic16] set to %x\n", (unsigned)icp[4]);
     }
+#endif
 }
 
 /* §§1256 ★★★★ `esf_buf_setup` 的 static 分支被 ROM 函数
