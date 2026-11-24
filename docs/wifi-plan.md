@@ -36114,3 +36114,39 @@ txdesc 计数默认值），**不是 0** ⇒ **cfg 传到位了**。
 1. 烧 IDF app → GDB 读它在运行时 `g_wifi_menuconfig` 各字段的值；
 2. 与我们镜像同字段逐一比对，确认那七行"buffer num"到底读哪里。
 （注意：烧 IDF app 会让板子进重启循环，恢复命令见 §1589 末尾。）
+
+## §1592 ★★★★★ 决定性硬件判定：**射频硬件完全正常**！
+
+把 IDF 官方 station 示例的 SSID/口令改成我们的（`CONFIG_ESP_WIFI_SSID` /
+`CONFIG_ESP_WIFI_PASSWORD`，写在示例目录的 `sdkconfig` 里）后重建烧板，
+**同一块板子、同一根天线、同一套供电**：
+
+```
+I (547) wifi:state: init -> auth (0xb0)
+I (567) wifi:state: auth -> assoc (0x0)
+I (627) wifi:connected with weforpay.com, aid = 2, channel 6, 40U,
+        bssid = dc:d8:7c:5a:7a:46
+I (1667) wifi station: got ip:192.168.68.120
+I (1667) esp_netif_handlers: sta ip:192.168.68.120, mask:255.255.255.0, gw:192.168.68.1
+```
+
+**⇒ 结论（本会话最有价值的一条）：**
+- 射频硬件、天线、供电、AP、信道全部正常；
+- IDF 下 **600ms 完成关联、1.6s 拿到 DHCP 地址**；
+- ⇒ 我们 c6LOS 的差异**百分之百在 PHY/MAC 使能序列**，不是硬件。
+
+### 这为下一次指明了唯一方向
+把 IDF 的 PHY 初始化流程逐句对照我们的：
+- `components/esp_phy/src/phy_init.c` 的 `esp_phy_load_cal_and_init()`；
+- 它调用的 `register_chipv7_phy()` 参数（尤其 cal data 的来源与 mode）；
+- `esp_phy_enable()` 前后的时钟/电压/`phr`/`pm` 操作；
+- 以及 `esp_wifi_start` 触发的 `ic_init`/`hal_init` 完整链条。
+我们现在的做法是"自己拼"这几步，缺了其中某些 ⇒ 库认为设备就绪
+（握手位=1、PLL 调谐），但 MAC 收不到帧。
+
+### 板子恢复（已执行）
+```bash
+REF=/media/winger/inst_26/esp/xiaozhi/build
+esptool ... write-flash 0x0 $REF/bootloader/bootloader.bin \
+  0x8000 $REF/partition_table/partition-table.bin 0x20000 build/wifi/c6os.bin
+```
