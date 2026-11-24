@@ -4192,18 +4192,29 @@ extern int __real_ieee80211_ioctl_process(void *msg);
 int __wrap_ieee80211_ioctl_process(void *msg)
 {
     int r;
-    s3_ets_printf("[ioctlp] enter msg=%x b0=%x b1=%x\n", (u32)msg,
-                  *(volatile u32 *)msg, *(volatile u32 *)((u8 *)msg + 4));
+
     r = __real_ieee80211_ioctl_process(msg);
-    s3_ets_printf("[ioctlp] leave r=%d\n", r);
+
     return r;
 }
 
 int __wrap_wifi_scan_start_process(void *msg)
 {
     int r;
-    s3_ets_printf("[scanp] enter msg=%x b0=%x b1=%x\n", (u32)msg,
-                  *(volatile u32 *)msg, *(volatile u32 *)((u8 *)msg + 4));
+    { volatile u32 *mp = (volatile u32 *)msg;
+      /* §1537 ★ 库的 scan-start 处理函数返回 -1（参数无效）。只多打两个
+       * 关键字（IRAM 只允许这么点）：m[2] 很可能是 scan 参数指针，
+       * m[3] 被 __wrap_pp_post 填成了 g_ic。 */
+      s3_ets_printf("[scanp] enter msg=%x b=%x %x %x\n",
+                    (u32)msg, mp[0], mp[2], mp[3]); }
+#ifdef S3_SCANP_FIXARG
+    /* §1538 实验：真板读到 `b=305 0 3fcc9504` ⇒ m[2]（第一个参数）是空，
+     * 而 m[3] 指向堆里的缓冲（很像参数块）。若 m[2] 为空就把它补成 m[3]。 */
+    {
+        volatile u32 *mp = (volatile u32 *)msg;
+        if (mp[2] == 0u && mp[3] != 0u) { mp[2] = mp[3]; }
+    }
+#endif
     r = __real_wifi_scan_start_process(msg);
     s3_ets_printf("[scanp] leave r=%d\n", r);
     return r;
