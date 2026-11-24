@@ -2600,7 +2600,9 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 s3_ets_printf("[esfsetup] r=%d\n", rb);
                 /* §§1212：验证池子可用性——直接分一个试试。 */
                 {
-                    void *eb = esf_buf_alloc(1u, 0u);
+                    /* §1565 ★ 反汇编 esf_buf_alloc：第二参必须 1..10（`a3-1 <= 9` 才走分发表），
+                 * 原来传 0 ⇒ 库打印 "invalid type=0"，那是**我们自己制造的噪声**。 */
+                void *eb = esf_buf_alloc(1u, 1u);
 
                 }
             }
