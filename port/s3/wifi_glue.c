@@ -2509,6 +2509,7 @@ int s3_wifi_scan(void)
             wDev_ProcessFiq(0);
         }
 #endif
+        { extern void s3_timer_sweep(void); s3_timer_sweep(); }   /* §§1430 定时器分发 */
         s3_w2c_task_delay(100u);
 #ifdef S3_POLL_SCANH
         /* §684: pm_offchan_ready_or_defer 返回 0（deferred），它把 scan_start_handler
@@ -3155,6 +3156,55 @@ int s3_wrap_timer_func(void *arg)
 }
 
 extern int __real_pp_create_task(void);
+/* §§1428：**完整 8 寄存器透传**才不会破坏库函数。
+ * §1426 失败的原因就是声明成 `void(void)`。
+ * 它是**跨目标文件**引用（`ieee80211_scan.o` 等），`--wrap` 能生效。 */
+/* §§1430 ★★★★ **直接驱动库的定时器分发器**（放 `.flash.text`，IRAM 极紧）。
+ *
+ * 真板取证（§1429）：`g_s3_diag[31] = 0` —— ppTask 被创建但**从未运行**，
+ * 所以 `pp_post` 的消息堆积在队列里无人消费，扫描的
+ * dwell/scan-timeout 永远不到期。
+ * `ieee80211_timer_do_process(msg)` 按 `msg[0]` 查 `g_timer_info` 表
+ * （0..26，每项 8 字节）分发；这里把全部槽位扫一遍，
+ * 没到期的处理函数会自己 no-op。 */
+__attribute__((section(".flash.text")))
+void s3_timer_sweep(void)
+{
+    extern void ieee80211_timer_do_process(void *msg);
+    u8 tmsg[8];
+    int kk;
+    /* §§1431：**只驱动扫描自己用的 kind=2**。
+     * §1430 全扫 0..26 会命中需要真实参数的处理函数
+     * （真板 PC 回到 `_vec_default`）0x4037a029））。 */
+    for (kk = 2; kk <= 2; kk++) {
+        tmsg[0] = (u8)kk;
+        tmsg[1] = 0u; tmsg[2] = 0u; tmsg[3] = 0u;
+        *(u32 *)(void *)(tmsg + 4) = 0u;
+        ieee80211_timer_do_process((void *)tmsg);
+    }
+    g_s3_diag[32]++;
+}
+
+__attribute__((section(".flash.text")))
+void __wrap_ieee80211_timer_process(u32 a1, u32 a2, u32 a3, u32 a4,
+                                   u32 a5, u32 a6, u32 a7, u32 a8)
+{
+    extern void __real_ieee80211_timer_process(u32, u32, u32, u32, u32, u32, u32, u32);
+    g_s3_diag[30]++;
+    __real_ieee80211_timer_process(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+/* §§1429：**ppTask 到底跑不跑**。它是库的消息循环，
+ * 扫描定时器 / TX 完成 / RX 上送全靠它。全 8 寄存器透传。 */
+__attribute__((section(".flash.text")))
+void __wrap_ppTask(u32 a1, u32 a2, u32 a3, u32 a4,
+                   u32 a5, u32 a6, u32 a7, u32 a8)
+{
+    extern void __real_ppTask(u32, u32, u32, u32, u32, u32, u32, u32);
+    g_s3_diag[31]++;
+    __real_ppTask(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
 __attribute__((section(".flash.text")))
 int __wrap_pp_create_task(void)
 {

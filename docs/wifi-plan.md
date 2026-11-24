@@ -33094,3 +33094,54 @@ void __wrap_ieee80211_timer_process(void) { g_s3_diag[30]++; __real_...(); }
 2. 若没跑，则新建一个低优先级任务，每 ~5 tick 调一次
    `ieee80211_timer_process(...)`（**必须带正确参数**），驱动扫描定时器；
 3. 观察 `PROBE_N` 是否从 1 变成 >1。
+
+## §1429 决定性发现：ppTask 被创建但**从未运行**
+
+加 `--wrap=ppTask`（8 寄存器透传）后真板读数：
+```
+g_s3_diag[31] = 0     ← ppTask 从未执行
+g_s3_diag[30] = 0     ← ieee80211_timer_process 从未被调用
+wifi_get_init_state() = 3   ← 门槛是过的（不是它挡的）
+pp_create_task 返回 0，pp_task_hdl = 2；0x500003C0 记录了 fn/id/stack/prio
+```
+全日志只有 1 条 `[delay] ticks=1 t=1`。
+
+**⇒ 结论：库的消息循环（ppTask）根本没跑起来，
+所以 `pp_post` 的消息堆积无人消费 ⇒ 扫描 dwell/scan-timeout 永不到期。**
+
+## §1430 绕过 ppTask：直接驱动 `ieee80211_timer_do_process`
+
+`ieee80211_timer_do_process(msg)` 按 `msg[0]` 在 `g_timer_info`
+（27 项 × 8 字节，首字节是 kind）里查表分发；`ieee80211_timer_process(kind, sub, arg)`
+就是"分配 8 字节消息（[0]=sub, [4]=arg）→ `pp_post(kind, msg)`"。
+
+于是**不再依赖 ppTask**，在扫描等待循环里直接扫表：
+```
+真板：237 → 246 行（新最佳）
+新增日志：
+  [v4]wifi|cancel previous scan, ...
+  [v4]wifi|scan end: arg=0x0, status=0, ss_state=0x0
+  [v4]wifi|stop scan timer and scan, ...
+  [v4]wifi|first chan=...
+```
+**⇒ 扫描状态机真的被推动了。但随后 PC 回到 `_vec_default`（0x4037a029）——
+全扫 0..26 会命中"需要真实参数"的处理函数，传 `arg=0` 把它打崩。**
+
+## §1431 收窄到 kind=2（稳定 239 行）
+
+只驱动扫描自己用的 `kind=2`（`scan_enter_oper_channel` 用的就是 sub=2）：
+```
+真板：239 行，无崩溃
+末尾：[pmoff] a=42030530 b=0 r=2
+      [v2]wifi|scan: failed to change power status
+```
+**⇒ 不再崩溃，但扫描卡在"切换信道功率"这一步 —— 说明还需要驱动
+功率/信道相关的定时器槽（kind 不止 2）。**
+
+## §1432 下一步（round 204）
+
+1. 在 `s3_timer_sweep()` 里逐个/分组增加 kind，**找出既不崩溃又能推进扫描的集合**；
+   优先试与 pm/chm 相关的小集合，而不是一次全扫。
+2. 或者改为"**读取 `g_timer_info` 表项首字节，只对已注册且带非零 arg 的槽分发**",
+   避免把 `arg=0` 传给需要真实参数的处理函数。
+3. 根本修法仍是让 ppTask 真正运行起来（绕过只是权宜）。
