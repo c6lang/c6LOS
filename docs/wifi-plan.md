@@ -35988,3 +35988,52 @@ ESP32-S3 的 **PHY/RF 前端不把任何 802.11 帧送到 MAC**：
 解这个死结的关键仍然是"收帧"（PHY/RF）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1588 IDF 官方 app 对照：配置成功、构建被工具链版本卡住
+
+本轮把 IDF 的 `idf.py` 跑起来了（绕过损坏的 `export.sh`）：
+```bash
+export IDF_PATH=/media/winger/inst_26/esp/esp-idf
+export ESP_IDF_VERSION=6.0.1
+export IDF_MAINTAINER=1            # 把"工具版本不匹配"降级为警告
+export IDF_PYTHON_ENV_PATH=/home/winger/.espressif/python_env/idf6.0_py3.12_env
+export PATH=/home/winger/.c6os/toolchain/xtensa-esp-elf/bin:$PATH
+PY=/home/winger/.espressif/python_env/idf6.0_py3.12_env/bin/python
+$PY $IDF_PATH/tools/idf.py -B /tmp/bsta \
+    -D SDKCONFIG_DEFAULTS=/tmp/sdkdefaults set-target esp32s3   # ✅ 配置成功
+$PY $IDF_PATH/tools/idf.py -B /tmp/bsta build                    # ❌ 失败
+```
+构建失败原因：
+```
+esp_libc/platform_include/stdio.h:55: error: conflicting types for 'cookie_io_functions_t'
+```
+⇒ 我们用的 `~/.c6os/toolchain/xtensa-esp-elf`（newlib 版本较新）与 IDF 6.0.1
+期望的 `esp-15.2.0_20251204` 工具链**newlib 不兼容**。要装 IDF 专属工具链需要联网
+（`idf_tools.py install`），本环境不具备。
+
+⇒ 因此"用 IDF 官方 app 在同板上做射频对照"这条最后的路**在本环境不可完成**。
+
+---
+
+# ======== 最终交接（本会话结束）========
+
+## 状态
+- 代码：`main` 分支、工作树干净、默认配置**绿灯**；
+- 脚本：`tools/build-wifi.sh`（`build` / `best`，实测端到端通过）；
+- 文档：`docs/wifi-plan.md`（约 3.6 万行），含 16 道闸门表、
+  交接总结、下次开工命令、以及 §1565–§1588 的全部新结论。
+
+## c6LOS windowed ABI 迁移：**已完成**
+内核调度、上下文切换、窗口溢出/欠载、中断路径、WQ 桥壳、定时器、队列、
+lwIP 对接、扫描状态机、信道设置、RX 使能全部打通，修掉 16 处真实 bug。
+
+## 四项验收：AP=0 DHCP=0 TLS=0 body=0
+唯一障碍：**ESP32-S3 PHY/RF 前端不把任何 802.11 帧送到 MAC**
+（`wDev_AppendRxBlocks`=0、`eb_space`=0），而所有软件侧项均已验证正常：
+信道=6、RF PLL 调谐、RF ready 握手=1、RX 总开关=1、混杂模式开、
+中断未屏蔽、PHY init data 与 IDF 一致、phy_wakeup_init 已调、
+partial/full 校准模式都试过、关注入校准也试过、TIMG0 配置已证为遗留。
+
+## 后续唯一路径
+装 IDF 专属工具链（`esp-15.2.0_20251204`，需联网）→ 用官方 app 同板验证射频；
+若官方正常 ⇒ 差异在 PHY 使能序列；若官方也收不到 ⇒ 射频硬件/天线/供电问题。
