@@ -4469,6 +4469,10 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
  * MAC 使能那一串）—— 真板 112 行即崩，比基线（196 行）更差 ⇒ 会重跑
  * 不该重跑的初始化。已回退，不再 wrap `pp_attach`。 */
 
+/* §1569 实验记录：`__wrap_pp_attach`（只放行第一次、返回 0）——
+ * 真板 113 行即崩、连 `[ppattach]` 都没打出来 ⇒ 干扰 `pp_attach` 这条路走不通。
+ * 已回退，不 wrap `pp_attach`。 */
+
 extern int __real_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg);
 __attribute__((section(".flash.text")))
 int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)
