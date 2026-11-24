@@ -3433,6 +3433,24 @@ void s3_fix_ic16(void)
         if (v != 0u) { icp[4] = v; }
         s3_ets_printf("[ic16] vif->%x\n", (unsigned)icp[4]);
     }
+#elif defined(S3_IC16_SCAN)
+    /* §§1442 ★★★★★ **正确值找到了**。
+     *
+     * 反汇编 `ieee80211_scan_attach`（0x4202e768）：
+     *     a4 = &g_scan;  a8 = *g_scan;  *(a2 + 4) = a8
+     * 反汇编 `ieee80211_sta_scan`（0x42039774）：
+     *     a8 = &g_ic;  a9 = *(a8 + 16);  if (a9 == 0) return -1;
+     * ⇒ `g_ic+16` 要的就是 **`*g_scan`**（scan 状态结构指针）。
+     * 真板实测：`*g_scan = 0x3fcd582c`（结构已经被库分配好），
+     * 而我们之前往 +16 填的是 g_cnxMgr / vif —— **语义均错**，
+     * 库把它当 scan 状态读字段，拿到 g_cnxMgr 当函数指针 callx8 ⇒
+     * 崩在 `EPC1=EXCVADDR=0x3fcd6000`（§1439/1440）。 */
+    {
+        extern unsigned char g_scan[];
+        u32 sc = *(volatile u32 *)(void *)g_scan;
+        if (sc != 0u) { icp[4] = sc; }
+        s3_ets_printf("[ic16] scan=%x (g_scan@%x)\n", (unsigned)icp[4], (unsigned)(void *)g_scan);
+    }
 #else
     if (icp[4] == 0u && icp[0] != 0u) {
         icp[4] = icp[0];

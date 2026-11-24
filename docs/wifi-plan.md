@@ -33340,3 +33340,56 @@ g_cnxMgr、也不是 vif —— 它要的是库**自己的扫描状态结构**�
 想复现"不崩但慢"的稳定态：去掉 `-DS3_PMOFF_FORCE`（尾部停在
 `failed to change power status`，250 行）。
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1442 ★★★★★ `g_ic+16` 的正确值 = **`*g_scan`**（反汇编双向确认）
+
+两条反汇编证据合起来锁死了这个字段：
+
+```
+ieee80211_scan_attach  0x4202e768:
+    a4 = &g_scan (0x3fcef854)
+    a8 = *g_scan                     ← scan 状态结构（0x168 字节）
+    s32i.n a8, a2, 4                 ← 挂到 IC 的 +4（a2 = g_ic+12 ⇒ 即 g_ic+16）
+
+ieee80211_sta_scan     0x42039774:
+    a8 = &g_ic (0x3fcd512c)
+    a9 = *(a8 + 16)                  ← **就是 g_ic+16**
+    if (a9 == 0) return -1           ← 为 0 直接拒绝（§1439 已实测）
+```
+
+真板读数：**`*g_scan = 0x3fcd582c`** —— 这个结构**已经被库分配好了**，
+我们只要把指针挂上去即可，不需要自己 malloc。
+
+新增 `-DS3_IC16_SCAN`：`icp[4] = *(u32*)g_scan`。真板输出
+`[ic16] scan=3fcd582c (g_scan@3fcef854)`，`ieee80211_sta_scan` 不再返回 -1。
+
+## §1443 崩溃点仍指向 `&g_cnxMgr`——下一个要拆的目标
+
+即使 ic16 填对了，`[v4]wifi|first chan=0` 之后仍崩在
+`EPC1 = EXCVADDR = 0x3fcd6000`、`EXCCAUSE = 0`。
+
+`nm` 显示 **`0x3fcd6000` 就是 `g_cnxMgr` 这个 .bss 符号本身**（不是它的值），
+内容是 `[0]=2, 其余 0`。
+
+- `cnx_sta_scan_cmd`(0x42045d6c) 全函数**没有一条 callx8**（只有 call8），
+  所以崩点不在它里面；
+- 且 `*(g_ic)` 也等于 `&g_cnxMgr`（库自己写的，不是我们注入的）。
+
+**⇒ 下一个要查的：谁用 `&g_cnxMgr` 做间接跳转。**
+候选：`wifi_scan_start_process`(0x4203afd0)、`scan_start`、
+`ieee80211_start_scan` 一脉里的 `callx8`；也可能是某个
+"cb == NULL 就当函数指针调"的写法拿到了 `ic->ic_cnxmgr`。
+
+**排查方法：在这几个函数里搜 `callx8`，看它读的字段偏移，
+再对照 `g_ic` 里那个偏移当前是什么值。**
+
+## 本轮最佳构建
+
+```
+行数 241（去掉 S3_CNX_DIRECT）；ic16 注入正确值后扫描仍能下巡到 first chan
+[wifi] associate ssid=weforpay.com
+[pppost] ppq=6 data=3fccab04
+[ic16] scan=3fcd582c (g_scan@3fcef854)
+[v4]wifi|first chan=0
+```
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
