@@ -81,6 +81,40 @@ void s3_nvs_state_fix(void)
             s3_ets_printf("[ic16] already %x\n", cur);
         }
     }
+#ifdef S3_SCANSTRUCT_PROBE
+    /* §1551 ★ 库打印 `skip all 2G channels in bandmode Auto when scanning`
+     * ⇒ 2G 位图/bandmode 在 `gScanStruct`（符号已知）里。
+     * 模式填充 1..24 让它自己暴露偏移。 */
+    {
+        extern unsigned char gScanStruct[];
+        volatile u32 *gp = (volatile u32 *)(void *)gScanStruct;
+        u32 kk;
+        for (kk = 0u; kk < 24u; kk++) {
+            gp[kk] = kk + 1u;
+        }
+        s3_ets_printf("[gs] filled gScanStruct\n");
+    }
+#endif
+#ifdef S3_SETCH_DIRECT
+    /* §1549 ★★★★ 反汇编 `wifi_set_channel_process`（0x4203c528）：
+     *     a3 = *(u8*)(a2 + 8)     ← 主信道
+     *     a4 = *(u8*)(a2 + 9)     ← 次信道
+     * 其余字段由它自己从 g_ic/gScanStruct 补。
+     * 公共 API `esp_wifi_set_channel` 要过 `wifi_init_completed()` 与
+     * g_ic+0x1E9/0x1EB 的状态闸门（真板 `[ch] set=0 get=0` 之后
+     * `get` 一个字节都不写 ⇒ 信道其实没生效）。
+     * 这里**直接调内部函数**，把信道 6 真的设进去。 */
+    {
+        extern int wifi_set_channel_process(void *p);
+        u32 prm[4];
+        int scr2;
+        prm[0] = 0u; prm[1] = 0u; prm[2] = 0u; prm[3] = 0u;
+        ((u8 *)prm)[8] = 6u;      /* primary channel */
+        ((u8 *)prm)[9] = 0u;      /* secondary = none */
+        scr2 = wifi_set_channel_process((void *)prm);
+        s3_ets_printf("[setch] direct r=%d\n", scr2);
+    }
+#endif
 #ifdef S3_SCAN_STRUCT_PROBE
     /* §1548 ★ `g_ic+0x130` 就是 `ieee80211_sta_scan`/`cnx_sta_scan_cmd`
      * 都当第三参的那个扫描参数结构。库打印
@@ -4332,6 +4366,29 @@ int __wrap_wifi_scan_start_process(void *msg)
 #endif
     r = __real_wifi_scan_start_process(msg);
     s3_ets_printf("[scanp] leave r=%d\n", r);
+    return r;
+}
+
+/* §1550 ★★★★ **监管域表为空 ⇒ 任何信道都判无效**。
+ *
+ * 证据链（都是反汇编得到的）：
+ *   `wifi_set_channel_process` → `wifi_check_chan_param` →
+ *   `ieee80211_regdomain_check_channel`，后者只有两个检查：
+ *       chm_check_channel_is_valid(ch) 与 ieee80211_regdomain_chan_in_range(ch)
+ *   任一为 0 就返回 0 ⇒ 上层判"参数无效"（258/0x102）。
+ * 真板 `[setch] direct r=258`、`[ch] set=0 get=0` 就是它。
+ * 我们的构建里监管域数据表是空的（Makefile 里那套 `regdomain_table`
+ * 只给 IDF app 用），所以**信道永远设不进去** ⇒ 射频不上信道
+ * ⇒ 收不到 beacon ⇒ 扫描 0 个 AP ⇒ 后面整条链全断。
+ * 这里直接让这个检查恒通过。 */
+extern int __real_ieee80211_regdomain_check_channel(unsigned ch);
+__attribute__((section(".flash.text")))
+int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
+{
+    int r = __real_ieee80211_regdomain_check_channel(ch);
+    if (r == 0) {
+        return 1;
+    }
     return r;
 }
 

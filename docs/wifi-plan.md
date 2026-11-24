@@ -35101,3 +35101,41 @@ PHY 的 channel 设置），而不是继续追扫描参数结构：
 即使把 `channel` 设对，没有 MAC 中断也不会收到任何帧。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（本轮：扫描状态机首次启动）。
+
+## §1549–§1550 ★★★★ 射频侧总根因：监管域表为空 ⇒ **任何信道都设不进去**
+
+### 反汇编链条
+```
+esp_wifi_set_channel → wifi_set_channel_process(0x4203c528)
+    a3 = params[8] (primary)   a4 = params[9] (second)
+    a10 = wifi_check_chan_param(a3, a4, band)
+    if (a10 == 0) return 0x102 (258)          ← 真板 `[setch] direct r=258`
+wifi_check_chan_param(0x420414d0)
+    a10 = ieee80211_regdomain_check_channel(primary)
+    if (a10 == 0) return 0                    ← **就死在这里**
+ieee80211_regdomain_check_channel(0x42025268)
+    return chm_check_channel_is_valid(ch) && regdomain_chan_in_range(ch)
+```
+我们的构建里**没有监管域数据表**（Makefile 里 `regdomain_table` 只给 IDF app 用）
+⇒ 两个检查都返回 0 ⇒ **任何信道都判无效**。
+直接后果：信道设不进去 ⇒ PHY 不上信道 ⇒ 收不到 beacon
+⇒ 扫描 0 个 AP ⇒ `irq=0`（MAC 一次中断都没有）⇒ 后面 DHCP/TLS 全无可能。
+
+### 修法（默认常开，已进 Makefile/WIFI_WRAP）
+```make
+-Wl,--wrap=ieee80211_regdomain_check_channel
+```
+```c
+int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
+{ int r = __real_... (ch); return r == 0 ? 1 : r; }
+```
+真板效果：`[setch] direct r=258` → **`r=0`**（信道 6 真的设进去了）。
+
+### 仍未解决
+扫描仍打印 `skip all 2G channels in bandmode Auto`（`gScanStruct` 模式填充
+能让 `home_channel_dwell_time` 那行变化，说明结构对，但 bandmode/位图
+在读之前被 `scan_set_default_params` 之类重置）。
+⇒ 下一步：反汇编打印那句话的代码（在 `ieee80211_scan.o`，
+字符串 `skip all 2G channels in bandmode`），看它读哪个字段、什么条件。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（本轮：信道首次可设 + 扫描状态机启动）。
