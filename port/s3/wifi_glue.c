@@ -3794,11 +3794,11 @@ void s3_timer_sweep(void)
                                 icp != 0 ? icp[3] : 0u);
               }
           }
-          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u irq=%u til=%u\n",
+          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u irq=%u til=%u mid=%x\n",
                         (u32)g_s3_diag[32], (u32)g_s3_diag[5],
                         (u32)g_s3_txret, (u32)g_s3_diag[6],
                         (u32)g_s3_diag[0], (u32)g_s3_diag[10],
-                        (u32)g_s3_diag[9]); }
+                        (u32)g_s3_diag[9], (u32)g_s3_diag[36]); }
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
@@ -4322,6 +4322,7 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
      * 不加任何打印，避免影响时序。 */
     if (g_s3_first_msg == 0u && ppq == 6u && data != 0u) {
         g_s3_first_msg = data;
+        g_s3_diag[36] = *(volatile u32 *)data;   /* §1563: 第一条消息的 id */
     }
     if (ppq == 6u && data != 0u) {
         extern unsigned char g_ic[];

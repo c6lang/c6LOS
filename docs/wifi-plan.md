@@ -35343,3 +35343,22 @@ else → scan_pm_offchan(scan_enter_oper_channel_handler)
 init/attach（`esf_buf_setup` 读的那组计数仍是 0）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1563 第一条 msg id = 0x146（init 消息），喂养对象没错
+
+`[tx] ... mid=326`（=0x146）⇒ 我们截获并喂给 `wifi_init_process` 的
+第一条消息 id 是 **0x146**（init），扫描消息是 0x305，两者不同，
+所以"喂错消息"这个怀疑可以排除。
+
+⇒ 缓冲计数仍为 0 的原因只能在这条 init 消息的**内容**或
+`wifi_init_process` 内部状态（它在不同轮次还会返回 258/成功两种结果，
+说明它读的 IC/全局状态在轮次之间有差异）。
+
+### 本轮（§1560–§1563）净进展
+1. `g_scan->[+70]` bit0 置 1 ⇒ `scan_pm_offchan` 真的被调用（信道切换起步）；
+2. 用栈池换 WiFi 堆（48→56KB、不建 tcpip 任务）⇒
+   `[heap] 分配失败 n=1600` **消失**；
+3. 确认 init 消息 id=0x146（排除"喂错消息"）；
+4. 仍卡：`esf_buf_alloc: invalid type=0`（帧缓冲池为 0）+ `irq=0`。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
