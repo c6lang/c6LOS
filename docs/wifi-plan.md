@@ -33598,3 +33598,38 @@ auth timeout / handshake timeout t=0 / stop beacon and connect timers
    属于显示问题，但会掩盖真实数值，值得一并修掉。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但状态机已激活）。
+
+## §1451～1454 本轮实验记录（都验证过，结论明确）
+
+### §1452 定时器槽位不是瓶颈
+`S3_ETS_TIMER_MAX` 从 4 扩到 8、再扩到 12，并加 `-DS3_TIMER_DIAG`
+（表满时打印 `[tfull]`）：**`[tfull]` 出现 0 次**，行数 278→283。
+⇒ **"no timer handle" 不是我们的表满了**，而是库自己某个定时器句柄本就为 NULL
+（`[tarm] t=3fcd55e4 ms=120 ... fn=0` 这类 `fn=0` 的条目就是证据）。
+扩容本身无害，但**不是瓶颈**，已回退。
+
+### §1453 「信道 0」是假线索 —— 差点又走错
+看到 `perform scan: chan<0,0>`、`connect chan=0`，第一反应是射频不在信道 6。
+**但 §1188 早就记录过：这是日志变参错位的产物**（`cfg[8]=6` 已生效）。
+本轮想用 `esp_wifi_set_channel(6,0)` 强制锁信道，结果连续三次都因
+**IRAM 溢出**（4 / 260 / 44 字节）构建失败 —— 恰好逼我去复核，才发现是假线索。
+**⇒ 教训：本工程日志里所有数字都要先怀疑是不是变参错位，别拿它当判据。**
+（证据：`start scan: priority=1070368472`、`time=1070313660` 其实都是
+`0x3FCBxxxx`/`0x3FCCxxxx` 指针，即参数整体错位一格。）
+
+### §1454 IRAM 是真瓶颈
+`s3_wifi_scan`/`s3_wifi_start` 所在段**默认就是 IRAM**，往里加任何东西都容易溢出。
+试图把 `S3_PM_WAKE` 的动作挪进 `.flash.text` 辅助函数，**反而溢 264 字节**
+（函数体连同格式串一起还是进了 IRAM）。
+**⇒ 以后新增逻辑必须先确认目标函数落在哪个段；IRAM 里的函数只做"调用一个
+.flash.text 助手"这一件事，且助手内部不得再用 `s3_ets_printf` 这类重体量调用。**
+
+### 本轮净结果
+- 稳定镜像：**283 行**，连接状态机完整循环（scan → connect → auth timeout）。
+- `S3_PM_WAKE`（probe 发送的关键闸门，§691）**因 IRAM 受限暂未生效** ——
+  这是下一轮最值得攻的点。§691 说 `ppProcessTxQ` 发 probe 前调 `pm_is_waked`，
+  读 `g_pm_ptr(0x3fcef8e4)+1`，非 0 就当睡眠、直接 return -1，probe 永不发送。
+  现在 `pm_attach()` 已经装好，`g_pm_ptr` 应该已经有效，
+  **所以很可能不用强制写 byte1=0，而是要让 `pm_attach` 之后的真实状态被正确读到。**
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
