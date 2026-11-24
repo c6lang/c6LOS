@@ -3176,6 +3176,9 @@ extern int __real_pp_post(unsigned int ppq, unsigned int data);
  * 所以：自己用 `_wifi_malloc` 分配几块、设好 `buf[26]=type`、
  * 再调 `esf_buf_recycle` 挂进去。 */
 __attribute__((section(".flash.text")))
+/* §§1416 ★★★ **全局 vif 指针** —— 包装器在库传入 NULL 上下文时用它替补。
+ * 定义放在 `g_s3_probe_buf` 旁边（那里节属性已知可用），此处只需前向声明。 */
+
 void s3_seed_tx_buffers(void)
 {
     extern unsigned char g_eb_list_desc[];
@@ -3205,6 +3208,7 @@ void s3_seed_tx_buffers(void)
             vp[0] = (u32)sta;                        /* 满足 *(ctx) != 0 */
             sp[0x14cu / 4u] = 0u;                    /* +0x14c = 0 ⇒ beqz 分支 */
             *(volatile u32 *)(void *)(g_ic + 0xE8u) = (u32)vif;   /* ★ 唯一的赋值 */
+            g_s3_diag[28] = (u32)vif;                                   /* ★ 供包装器替补 */
             s3_ets_printf("[ctx] vif=%x sta=%x icE8=%x\n", (unsigned)vif, (unsigned)sta,
                           (unsigned)*(volatile u32 *)(void *)(g_ic + 0xE8u));
         } else {
@@ -3457,6 +3461,7 @@ volatile u32 g_s3_diag[20];   /* §1343：扩到 20 项，避开 [8] ISR 计数�
 #define S3_PROBE_B4 (g_s3_diag[18])
 #define S3_PROBE_FIX (g_s3_diag[19])
 volatile u32 g_s3_probe_buf = 0u;   /* §1341：库传给 send_probereq 的有效缓冲 */
+__attribute__((section(".bss")))
 extern void __real_ieee80211_send_probereq(u32, u32, u32, u32, u32, u32, u32, u32);
 __attribute__((section(".flash.text")))
 void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
@@ -3490,8 +3495,14 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
      * **说明是我们包装器传参出了错**（而不是库传了 0）。
      * 这里改成用全局 `g_s3_probe_buf`（上面从 a2 存下来的非 0 值）
      * 代替 —— 既是验证也是修法。 */
-    __real_ieee80211_send_probereq(a1, g_s3_probe_buf != 0u ? (u32)g_s3_probe_buf : a2,
-                                   a3, a4, a5, a6, a7, a8);
+    /* §§1416 ★★★★★ **上下文是 arg1（包装器的 `a1`），不是 `a2`**。
+     * 库传 NULL 时用我们自己的 vif 替补 —— 这才是真正要修的地方。 */
+    if (a1 == 0u && g_s3_diag[28] != 0u) {
+        S3_PROBE_FIX++;
+        __real_ieee80211_send_probereq((u32)g_s3_diag[28], a2, a3, a4, a5, a6, a7, a8);
+        return;
+    }
+    __real_ieee80211_send_probereq(a1, a2, a3, a4, a5, a6, a7, a8);
 }
 
 /* §§1341 ★★★★ **`ieee80211_send_setup` 的 a2 为 NULL 时用备份缓冲替补**。
@@ -3506,9 +3517,11 @@ void __wrap_ieee80211_send_setup(u32 a1, u32 a2, u32 a3, u32 a4,
                                  u32 a5, u32 a6, u32 a7, u32 a8)
 {
     extern void __real_ieee80211_send_setup(u32, u32, u32, u32, u32, u32, u32, u32);
-    if (a2 == 0u && g_s3_probe_buf != 0u) {
+    /* §§1416 ★★★ 库的 `send_setup(ctx, buf, ...)`：**`ctx` 是第 1 个实参 = `a1`**。
+     * 原来的 `a2 == 0` 检查的是缓冲，所以 §1383 的 FIX 从未命中。 */
+    if (a1 == 0u && g_s3_diag[28] != 0u) {
         S3_PROBE_FIX++;
-        __real_ieee80211_send_setup(a1, (u32)g_s3_probe_buf, a3, a4, a5, a6, a7, a8);
+        __real_ieee80211_send_setup((u32)g_s3_diag[28], a2, a3, a4, a5, a6, a7, a8);
         return;
     }
     __real_ieee80211_send_setup(a1, a2, a3, a4, a5, a6, a7, a8);
