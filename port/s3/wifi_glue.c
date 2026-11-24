@@ -602,6 +602,20 @@ static u32 osi_wifi_create_queue(u32 len, u32 size)
     u8 *buf;
     HIT_OF(_wifi_create_queue);
     if (len == 0u || size == 0u) { return 0u; }
+#ifdef S3_QUEUE_SLACK
+    /* §§1475 ★★★★★ **环形队列"满"与"空"不可区分**。
+     *
+     * 真板取证（`xphyQueue = 0x3fcc8d8c`）：
+     *   `[0]=self  [1]=buf  [2]=0 (读索引)  [3]=8 (容量)`
+     * 而 `[pppost] ppq=7` 连续出现 ⇒ 已投进 **8 条**。
+     * 写索引回绕到 0 ⇒ **write == read ⇒ 被判为空** ⇒
+     * `osi_queue_recv_body` 永远返回 0 ⇒ ppTask 的
+     * `beqi a10, 1` 永远不成立 ⇒ **它什么都不做，
+     * probe/auth/assoc 全部发不出去**。
+     *
+     * 修法：实际容量多留余量，让"满" 不再与"空"重合。 */
+    len = len * 2u + 16u;
+#endif
     q = (WQ *)osi_malloc((u32)sizeof(WQ));
     if (q == 0) { return 0u; }
     buf = (u8 *)osi_malloc(len * size);
@@ -3453,6 +3467,41 @@ int __wrap_pp_create_task(void)
     r = __real_pp_create_task();
     s3_ets_printf("[ppct] out r=%d hdl=%x\n", r,
                   (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
+#ifdef S3_PHYQUEUE_FIX
+    /* §§1474 ★★★★★ **整条链的缺失环节。**
+     *
+     * 反汇编 ROM `ppTask`（0x403823a8）主循环：
+     * ```
+     * a3  = &xphyQueue            (0x3fcef904)
+     * a10 = *(u32*)0x3fcef904     ← **队列句柄**
+     * a12 = -1                    ← portMAX_DELAY
+     * callx8 a5                   ← osi funcs 表偏移 116（slot 29）= queue_recv
+     * beqi a10, 1 → 继续；否则跳退出路径
+     * ```
+     * 而我们自己的注释早就写着：
+     * **"库的 xphyQueue 全局就是 0"**（§1095/1096）。
+     * §1437 以为"低优先级创建 → 队列先就绪"就行，
+     * 但真板到今天仍为 0。
+     *
+     * ⇒ ppTask 在**空句柄上收队列** ⇒ `osi_queue_recv_body`
+     * 立刻早返回 0 ⇒ `a10 != 1` ⇒ ppTask 什么都不做。
+     * 而 `pp_post` 的消息全堆在队列里 ⇒
+     * **probe/auth/assoc 永远发不出去**。
+     *
+     * 修法：我们自己建一个真队列填进去，
+     * 让 `pp_post`（发）与 `ppTask`（收）落到**同一个队列**上。 */
+    {
+        volatile u32 *xq = (volatile u32 *)0x3fcef904u;
+        u32 had = *xq;
+        if (had == 0u) {
+            u32 made = osi_wifi_create_queue(32u, 64u);
+            *xq = made;
+            s3_ets_printf("[ppq] xphyQueue 0 -> 自建 %x\n", (unsigned)made);
+        } else {
+            s3_ets_printf("[ppq] xphyQueue=%x (lib-set)\n", (unsigned)had);
+        }
+    }
+#endif
     /* §§1437 ★★★★ **建完再提优先级**。
      *
      * §1436 取证：若以 prio 2（高于初始化任务的 3）创建 ppTask，

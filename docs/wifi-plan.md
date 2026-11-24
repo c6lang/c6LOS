@@ -33896,3 +33896,41 @@ while (waited < ms) {
 `[lwip] polled` 还是 `[wifi] 关联超时`，再决定是修 ppTask 内部还是缩短等待。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1474～1476 ★★★★ 用 ROM 反汇编把 ppTask 的收发契约查清了
+
+### §1474 `ppTask` 主循环的真实契约（反汇编 `0x403823a8`）
+```
+a3  = &xphyQueue                 (0x3fcef904)
+a10 = *(u32*)0x3fcef904          ← 队列句柄
+a11 = a1                         ← &msg
+a12 = -1                         ← portMAX_DELAY
+callx8 a5                        ← osi funcs 偏移 116（slot 29）= queue_recv
+beqi a10, 1 → 继续；否则 j 0x40382508
+```
+**⇒ ppTask 只认返回值 `1`。**
+
+### §1475 假设被证伪：`xphyQueue` 其实是好的
+在 `__wrap_pp_create_task` 里打印后真板得到：
+```
+[ppq] xphyQueue=3fcc8d8c (lib-set)     ← **库确实赋值了**（不是 0）
+[send] t=2 qh=3fcc8d8c tk=1 q=3fcc8d8c ← pp_post 投的就是同一个队列
+```
+⇒ **收发两端本来就对上**，之前 §1095/1096"xphyQueue 全局是 0"的结论**已过时**。
+新建队列兜底的分支从未触发（`had != 0`）。
+
+### §1476 排查 recv 侧：magic 正常，但队列"满"与"空"不可区分
+- recv 调用次数 `0x50000F40[0]` = **77,412**（确实在被调用）；
+- magic 失败诊断区 `0x50000320` **全 0** ⇒ 没有 magic 失败，能过校验；
+- 队列内存 `0x3fcc8d8c`：`[0]=self, [1]=buf, [2]=0(读索引), [3]=8(容量)`；
+- 日志里 `[pppost] ppq=7` **连续出现** ⇒ 已投 8 条 ⇒ 写索引回绕到 0
+  ⇒ **write == read ⇒ 被判为"空"** ⇒ recv 永远返回 0 ⇒ `beqi a10,1` 不成立。
+
+试了 `-DS3_QUEUE_SLACK`（实际容量 `len*2+16`，让"满"不再与"空"重合）：
+队列句柄从 `3fcc8d8c` 变为 `3fcc8d4c`（证明确实生效），**但行为不变（仍 253 行）**。
+
+**⇒ 说明瓶颈不在队列容量，而在更深处**（recv 的索引/计数语义与库期望的
+`xQueueReceive` 语义仍不一致，或 ppTask 拿到 0 后走的那条
+`0x40382508` 路径本身有问题，下一步应该反汇编它）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
