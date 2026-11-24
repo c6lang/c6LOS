@@ -36372,3 +36372,28 @@ IC 初始化成功后，我们那条提前的 `pp_attach()` 反而会撞（129 �
 ```
 ⇒ 启动链首次完整跑通（init 成功 + state 到 2 + send_setup 被调用），
 但射频接收仍未建立。**与 IDF 的差异只剩库内部 MAC/RX 的最后一步。**
+
+## §1603 IC 初始化走通后暴露的两个新问题
+
+```
+[v4]wifi|filter: set rx policy=1070421224
+[v3]wifi|mode : softAP (3fcd63b8:3fcd5be8:0:1:0:3fcc8bc8)
+[v3]wifi|Total power save buffer number: 0
+[v3]wifi|Init max length of beacon: 673204480/539583525     ← **垃圾**
+[v3]wifi|Init max length of beacon: 2/-1
+```
+1. **模式被判成 softAP**（我们调 `esp_wifi_set_mode(1)`，IDF 里 1 = STA）
+   ⇒ 要么模式值映射不对，要么这条日志指的是别的对象；
+2. **beacon 长度是垃圾**（`673204480/539583525`）
+   ⇒ 说明库读的那份配置结构体**没有被正确填充**
+   （`g_wifi_menuconfig` 只有第一个字段像样，其余是垃圾）。
+
+⇒ 也就是说 `esp_wifi_init_internal(cfg)` 虽然返回 0，但**它没有把我们的
+cfg 逐字段拷进库内部结构**。这正是"配置不生效"的真正形态：
+不是没传指针，而是**传了也没被采用**。
+
+### 下一步（明确）
+- 反汇编 `esp_wifi_init_internal`，看它在什么条件下才把 cfg 拷进
+  `g_wifi_menuconfig`（例如 magic/version 校验、或某个前置状态）；
+- 对照 §1601 已确认的 `msg[12]` 语义，确认两条入口
+  （`esp_wifi_init_internal` 与 `wifi_init_process`）各自的作用。
