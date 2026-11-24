@@ -34179,3 +34179,36 @@ S3_CDEFS="... -DS3_LOCAL_SPIN -DS3_LOOP_STAGE -DS3_SWEEP_PRINT"   # 纯本地忙
 **下一轮决定性实验**：临时不启动 ppTask（跳过 `__wrap_pp_create_task`），
 若阻塞 delay 立刻能正常返回 ⇒ 结论成立，问题就变成
 "让 ppTask 的 recv 真正阻塞、或在长轮询里定期让出"。
+
+## §1492 决定性实验「跳过 ppTask」失败（实验设计有缺陷）
+
+加 `-DS3_NO_PPTASK`（`__wrap_pp_create_task` 直接返回 0）后：
+**日志只剩 86 行**，`[ppct] SKIP` 之后流程在更早的初始化阶段就断了，
+连扫描循环都没到（无 `[swp]`）。
+
+⇒ 这个实验**没有区分力**：ppTask 在更早的初始化里就是必需的，
+跳过它等于换了另一个死点，证不出"ppTask 饿死主任务"。
+
+### §1492b 重要反思：S3_LOCAL_SPIN 那版里 ppTask 其实很可能根本没跑
+351 行那版里看到的 `[take!]`、`[w6] q=6 r=0`、`[osi] 关联成功`
+**全部来自我们自己任务上下文**（我们在循环里显式调
+`s3_wifi_isr_dispatch()`，库的 ISR 处理就是在我们的栈上跑的），
+并不是 ppTask 干的。
+
+**这个认知很关键**：说明**WiFi 库的主要推进路径并不依赖 ppTask**，
+只要我们把 ISR 分发 + 定时器分发驱动起来，就能往前走。
+⇒ 下一步应该继续沿"显式驱动"路线，而不是死磕内核调度器。
+
+### §1493 当前真正挡在关联前面的东西
+351 行那版的实测：
+```
+probe=1   tfir=1   d33=61   scan_get_ap_num=0
+```
+- 扫描循环确实跑了 60 轮、定时器分发被调了 61 次；
+- 但那个 120ms 的 channel-dwell 定时器**只触发过 1 次就没再 re-arm**
+  ⇒ 信道只停留了一个周期 ⇒ 扫不到任何 AP ⇒ `scan_get_ap_num=0`
+  ⇒ 关联拿不到真实 AP 信息（`ssid=` 空、`channel=0`）。
+
+**下一轮：查回调里对 `ets_timer_arm` 的再武装为什么没生效**
+（`s3_ets_timer_dispatch` 调 `fn` 前清的字段是否把回调自己要用的状态也清了，
+或 `ets_timer_arm` 的 wrap 没把 `active` 置回 1）。

@@ -3545,6 +3545,13 @@ void __wrap_ppTask(u32 a1, u32 a2, u32 a3, u32 a4,
 __attribute__((section(".flash.text")))
 int __wrap_pp_create_task(void)
 {
+#ifdef S3_NO_PPTASK
+    /* §§1492 决定性实验：**不启动 ppTask**，验证
+     * "阻塞 delay 不返回" 是不是 ppTask 死转饿死主任务造成的。 */
+    s3_ets_printf("[ppct] SKIP (S3_NO_PPTASK)\n");
+    return 0;
+#endif
+
     int r;
     extern unsigned char pp_task_hdl[];
     s3_wrap_bump(4u);
