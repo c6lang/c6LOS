@@ -34334,3 +34334,36 @@ tests/t_s3_wifi3.c6: wifi 任务 prio 3 -> 1
 **`scan_get_ap_num=0`（RX/扫描结果路径没收到 probe response）**。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1500–§1501 时间推进的真相与 DHCP 投递方式
+
+### §1500 tick 的真实中断源不是 TIMG0
+`port/s3/irq.c:361` 注释已说明：真正触发 `s3_timer_irq` 的是 **CPU 的
+`ccompare0`**，由 `s3_timer_rearm()` 每次推到 `ccount+N`；TIMG0 不参与。
+真板 GDB 读 `TIMG0.T0CONFIG = 0xC00A0000`（ALARM_EN 被清）、`T0ALARM=0`，
+正好说明"TIMG0 没参与"是正常现象，不是故障 —— §1499 里把它当病因是**读错了**。
+（`g_c6os_ticks` 冻在 27~30 与 `d33` 每轮 +100 的矛盾，说明
+`[tk]` 那个 `extern u32 g_c6os_ticks` 读到的未必是内核真正推进的那个变量，
+下一次要先用魔数验证符号再下结论。）
+
+### §1500b 100 tick 不能减
+把扫描轮内等待从 `s3_delay_advance(100)` 减到 `2` 时日志**只剩 254 行**、
+连 `[swp] n=1` 都到不了：那 100 次 `s3_tick_consume()` 每次都触发一次
+定时器分发，**它本身就是驱动闭源库前进的引擎**，不是单纯"睡一会儿"。
+
+### §1501 `tcpip_callback` 是阻塞版 —— "已关联之后就没输出"的真因
+`c6_lwip_start_dhcp()` 里 `tcpip_callback()` 会**阻塞等 tcpip 线程执行完**，
+而 tcpip 线程（prio 2）只有我们让出 CPU 才可能运行，它的等待又要靠时间推进
+⇒ 互等死锁。改为 **`tcpip_try_callback()`**（只投递、立刻返回），
+并在进入 DHCP 的每个子步骤加了真打印（`start_dhcp 进入` / `rxcb 已注册` /
+`netif 就绪，投递 dhcp_start` / `dhcp 投递失败`）。
+
+### 现状（不稳定，必须记下来）
+同一套配置三次真板抓取分别 **405 / 308 / 290 行**，`n` 停在 60 / 11 / 6
+⇒ **结果强非确定性**，靠"我们自己模拟时间"这条路本质脆弱：
+虚拟时间与真实射频时间无法对齐，库的定时器与实际收发互相错位。
+⇒ 下一步方向应是**恢复真实 10ms tick**（把 `s3_timer_rearm` 的 ccompare0
+链路与 `S3_TICK_DEFER` 的关系理清，让 `os_sched_tick()` 能在真实中断里推进），
+而不是继续在模拟时间上打补丁。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

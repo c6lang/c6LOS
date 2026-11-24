@@ -3488,6 +3488,8 @@ void s3_timer_sweep(void)
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
+        { extern u32 g_c6os_ticks;
+          s3_ets_printf("[tk] tick=%u\n", (u32)g_c6os_ticks); }
 
     }
 #endif
@@ -3575,7 +3577,15 @@ void s3_scan_iter(u32 i)
       while (k < 20000u) { k = k + 1u; }
       { extern void os_task_yield_force(void); os_task_yield_force(); } }
 #else
-    { extern void s3_w2c_task_delay(u32 ticks); { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); } }
+    /* §1500：原来推 100 tick（=1 秒虚拟时间）**瞬跳**，
+     * 而射频收发是真实时间：定时器/扫描超时在 probe 还没真发出去时
+     * 就已经过期，库于是得到"扫到 0 个 AP"。
+     * 改成 2 tick（20ms），让虚拟时间贴近真实时间。 */
+    /* §1500b：**100 不能减。** 实测减到 2 tick 时日志只剩 254 行、
+     * 连 `[swp] n=1` 都到不了 —— 因为这 100 次 `s3_tick_consume()`
+     * 每次都触发一次定时器分发，是**驱动库前进的引擎**，
+     * 不是单纯的"睡一会儿"。 */
+    { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); }
 #endif
     c[13] = 5u;
 }

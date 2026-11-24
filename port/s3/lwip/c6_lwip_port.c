@@ -265,21 +265,32 @@ static void c6_dhcp_start_cb(void *arg)
 /* 关联成功之后再启动 DHCP（§253）。 */
 int c6_lwip_start_dhcp(void)
 {
+    s3_ets_printf("[lwip] start_dhcp 进入\n");
     LWSTAGE(0x211);
     LWSTAGE2(1, 0x2111u);
     LWSTAGE(0x212);
     (void)esp_wifi_internal_reg_rxcb(C6_WIFI_IF_STA, (void *)c6_lwip_rx);
+    s3_ets_printf("[lwip] rxcb 已注册\n");
     LWSTAGE(0x213);
     if (netif_default == 0) {
+        s3_ets_printf("[lwip] netif_default 为空\n");
         return -1;
     }
+    s3_ets_printf("[lwip] netif 就绪，投递 dhcp_start\n");
     /* §960: §959 把 tcpip 线程真正拉起来之后，dhcp_start 就不能再从这个
      * （WiFi 主任务）上下文直接调了：它要 udp_new/udp_bind/udp_connect 并挂
      * dhcp_fine_tmr，而 tcpip 线程此刻正在跑 sys_timeouts —— 两边并发改同一份
      * dhcp 状态。tcpip_callback() 是**阻塞版**（tcpip.h:88 的宏
      * `block != 0 ? tcpip_callback : tcpip_try_callback` 印证），
      * 回调在 tcpip 线程里执行完才返回。 */
-    (void)tcpip_callback(c6_dhcp_start_cb, (void *)netif_default);
+    /* §1501 ★ 改用**非阻塞版**。`tcpip_callback` 会阻塞等 tcpip 线程执行完，
+     * 而 tcpip 线程（prio 2）只能在我们让出时运行，我们又要等它回来 ——
+     * 真板表现就是 `[wifi] 已关联` 之后**再无任何输出**。
+     * `tcpip_try_callback` 只投递消息、立刻返回，tcpip 线程下次拿到 CPU
+     * 时自然会执行它。 */
+    if (tcpip_try_callback(c6_dhcp_start_cb, (void *)netif_default) != ERR_OK) {
+        s3_ets_printf("[lwip] dhcp 投递失败\n");
+    }
     LWSTAGE(0x212);
     return 0;
 }
