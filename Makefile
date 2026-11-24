@@ -3310,7 +3310,7 @@ WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
 # 改成目标 weforpay.com（wifi_glue.c 保持字节不变，避免破坏脆弱的同步扫描）
 ifdef S3_TARGET_BSSID
 WIFI_WRAP += -Wl,--wrap=cnx_add_rc
-WIFI_WRAP += -Wl,--wrap=ieee80211_send_mgmt
+WIFI_WRAP += -Wl,--wrap=ieee80211_send_setup -Wl,--wrap=ieee80211_send_mgmt
 WIFI_WRAP += -Wl,--wrap=sta_recv_mgmt
 endif
 # S3_FLASH_AUTO_MAP：镜像里有 IROM 段（闭源库代码在 flash 里）时必须打开 ——

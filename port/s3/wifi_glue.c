@@ -3427,6 +3427,8 @@ volatile u32 g_s3_diag[12];
 #define S3_PROBE_A4 (g_s3_diag[7])
 #define S3_PROBE_B0 (g_s3_diag[8])
 #define S3_PROBE_B4 (g_s3_diag[9])
+#define S3_PROBE_FIX (g_s3_diag[10])
+volatile u32 g_s3_probe_buf = 0u;   /* §1341：库传给 send_probereq 的有效缓冲 */
 extern void __real_ieee80211_send_probereq(u32, u32, u32, u32, u32, u32, u32, u32);
 __attribute__((section(".flash.text")))
 void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
@@ -3439,10 +3441,31 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
     S3_PROBE_A3  = a3;
     S3_PROBE_A4  = a4;
     if (a2 != 0u) {
+        g_s3_probe_buf = a2;   /* §1341：备份，供 send_setup 替补 */
         S3_PROBE_B0 = *(volatile u32 *)(void *)a2;
         S3_PROBE_B4 = *(volatile u32 *)(void *)(a2 + 4u);
     }
     __real_ieee80211_send_probereq(a1, a2, a3, a4, a5, a6, a7, a8);
+}
+
+/* §§1341 ★★★★ **`ieee80211_send_setup` 的 a2 为 NULL 时用备份缓冲替补**。
+ *
+ * 真板取证（§1339）：库传给 `send_probereq` 的 `a2` = `0x3fcc0cd0`
+ * （有效，`g_stack_pool+15200` 上的 802.11 帧头缓冲，含 `NEWI`），
+ * 但 `send_probereq` 内部把它弄丢了，`send_setup` 收到 0 ⇒
+ * 走进库自己的 `j .` 断言死循环。
+ * 这里在入口处把 NULL 换成那个备份，让流程继续。 */
+__attribute__((section(".flash.text")))
+void __wrap_ieee80211_send_setup(u32 a1, u32 a2, u32 a3, u32 a4,
+                                 u32 a5, u32 a6, u32 a7, u32 a8)
+{
+    extern void __real_ieee80211_send_setup(u32, u32, u32, u32, u32, u32, u32, u32);
+    if (a2 == 0u && g_s3_probe_buf != 0u) {
+        S3_PROBE_FIX++;
+        __real_ieee80211_send_setup(a1, (u32)g_s3_probe_buf, a3, a4, a5, a6, a7, a8);
+        return;
+    }
+    __real_ieee80211_send_setup(a1, a2, a3, a4, a5, a6, a7, a8);
 }
 extern u32 __real_ic_tx_pkt(u32);
 volatile u32 g_s3_txret = 0u;      /* §715: ppTxPkt 返回值（非 0 = TX 被拒） */
