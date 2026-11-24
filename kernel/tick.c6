@@ -2,20 +2,11 @@
 #include "c6os/types.h"
 #include "c6os/tick.h"
 
-static u64 g_ticks = 0;
-
-u64 os_tick_get(void) {
-    return g_ticks;
-}
-
-void os_tick_advance(u32 n) {
-    g_ticks = g_ticks + (u64)n;
-}
-
-u32 os_tick_advance1(void) {
-    g_ticks = g_ticks + 1u;
-    return (u32)g_ticks;
-}
+/* §§1334：全局化，由 ISR 推进。 */
+u64 g_c6os_ticks = 0;
+u64 os_tick_get(void) { return g_c6os_ticks; }
+void os_tick_advance(u32 n) { g_c6os_ticks = g_c6os_ticks + (u64)n; }
+u32 os_tick_advance1(void) { return (u32)g_c6os_ticks; }
 
 u32 os_tick_hz(void) {
     return (u32)C6OS_TICK_HZ;

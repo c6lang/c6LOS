@@ -31573,3 +31573,33 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, ...)
 
 **本会话的全部取证（§1114~§1333）都记录在 `docs/wifi-plan.md`，
 包含每个地址、每条反汇编、每次真板读数，可直接接续。**
+
+## §1334~§1336 ★★★★ ISR 侧超时扫描 —— 修掉调度死锁
+
+**问题**（反复确认）：`S3_TICK_DEFER` 下时间只能由任务上下文的 `s3_tick_consume()`
+经 `os_sched_tick()` 推进；一旦**两个任务都阻塞**，就再没人扫描超时
+⇒ 超时永不到期（真板：`[delay] ticks=1` 后永远没有 `[sdel]`）。
+
+**修法**（架构级）：
+1. `kernel/tick.c6`：`g_ticks` → 全局 `g_c6os_ticks`，`os_tick_advance1()` 只返回当前值。
+2. `kernel/task.c6`：`g_tasks` 全局化。
+3. `kernel/timeout.c6`：`g_to` / `g_count` → 全局 `g_to` / `g_to_count`。
+4. `port/s3/irq.c`：
+   - `S3_TICK_DEFER` 块里**直接** `g_c6os_ticks += 1`
+   - 调 `s3_isr_timeout_scan()`（`.flash.text`，**纯内存读写、不调任何其他函数**）：
+     把到期项从 `g_to` 摘掉、把对应任务的 `state` 从 `BLOCKED(4)` 改成 `READY(1)`、
+     `wait_result = -2`（超时）。
+   - 为腾 IRAM，移除了原来的 `isr_n` 诊断块（IRAM 只差 4 字节）。
+
+**真板结果**：**235 行**，而且 **`[sdel] sem=... t=1` 现在稳定出现**
+（此前因为 `os_task_delay(1)` 永不到期，`pp_create_task` 的 `[sdel]` 永远不会打印）。
+
+⇒ **调度死锁修好了。** 但扫描仍以 `[w1]wifi|` 结束、PC 仍在
+`ieee80211_send_setup+36`（TX 缓冲为 NULL，§1328 的独立问题）。
+
+## §1337 交付终态（round 200）
+
+- 仓库 `main`，工作树干净。
+- **真板 235 行**（会话最高；起点 79 行，**+156**）。
+- **四项验收全部未取得。目标未完成。**
+- **本会话第 11 个结构性修复**：ISR 侧超时扫描。

@@ -296,6 +296,35 @@ extern volatile u32 g_s3_diag[12];   /* §699: 定义在 wifi_glue.c */
 /* §705: WiFi level-1 中断在 ISR 里只置这个标志；真正的窗口化库 ISR 由
  * 任务上下文（s3_wifi_scan 轮询循环）调用，避免在任意 WINDOWBASE 上 call8。 */
 volatile u32 g_wifi_isr_pending = 0u;
+/* §§1335：ISR 侧超时扫描（纯内存读写，不调其他函数）。 */
+__attribute__((section(".flash.text")))
+void s3_isr_timeout_scan(void)
+{
+    typedef struct { unsigned int id; unsigned int deadline; } OsTimeout;
+    extern u64 g_c6os_ticks;
+    extern u32 g_to_count;
+    extern OsTimeout g_to[];
+    extern unsigned char g_tasks[];
+    u32 now = (u32)g_c6os_ticks;
+    u32 n = g_to_count;
+
+    while (n != 0u) {
+        u32 dl = g_to[0].deadline;
+        u32 id;
+        u32 i2;
+        if ((int)(dl - now) >= 0) { break; }
+        id = g_to[0].id;
+        for (i2 = 1u; i2 < n; i2++) { g_to[i2 - 1u] = g_to[i2]; }
+        n = n - 1u;
+        g_to_count = n;
+        if (id < 32u) {
+            volatile unsigned char *task = g_tasks + id * 0x70u;
+            volatile unsigned int  *wr   = (volatile unsigned int *)(void *)(task + 44u);
+            if (task[34] == 4u) { *wr = 0xFFFFFFFEu; task[34] = 1u; }
+        }
+    }
+}
+
 void *s3_timer_irq(u32 frame_sp)
 {
     u32 cc = 0;
@@ -382,20 +411,17 @@ void *s3_timer_irq(u32 frame_sp)
      * `entry a1, 144` 时真板抛 cause=0 IllegalInstruction，
      * EPC1 正好等于 os_sched_tick 入口，PS=0x00060031（EXCM=1、WOE=0）。 */
     {
+        extern u64 g_c6os_ticks;
+        extern void s3_isr_timeout_scan(void);
         volatile u32 *tp = (volatile u32 *)0x50001580u;
 
         *tp = *tp + 1u;
+        g_c6os_ticks = g_c6os_ticks + 1u;   /* §1334：时间推进不再依赖任务 */
+        s3_isr_timeout_scan();              /* §1335：ISR 侧超时扫描 */
     }
 #endif
     {
-        static u32 isr_n;
-        volatile u32 *ic = (volatile u32 *)0x50000700u;
-        isr_n = isr_n + 1u;
-        /* 诊断：每 256 次中断把计数写进 RTC，确认定时器中断在不在跑 */
-        if ((isr_n & 0xFFu) == 0u) {
-            ic[0] = isr_n;
-            ic[1] = ic[1] + 1u;
-        }
+        /* §§1336：诊断块已移除，为 ISR 超时扫描腾出 IRAM */
     }
 #ifndef S3_MINIMAL_ISR
     if (port_cur_ctx() != 0) {

@@ -9,7 +9,7 @@
 /* M1 调度器：16 槽静态池 + 优先级位图 + 同优先级轮转。
  * 协作 port 用 yield 触发调度；tick 时间片/抢占在抢占 port 接入。 */
 
-static OsTask g_tasks[C6OS_MAX_TASKS] = {0};
+OsTask g_tasks[C6OS_MAX_TASKS] = {0};   /* §1334 */
 static u32 g_next_id = 1;
 static u32 g_rr_arr[C6OS_MAX_CORES] = {0};
 static OsTask *g_cur_arr[C6OS_MAX_CORES] = {0};
