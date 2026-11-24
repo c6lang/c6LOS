@@ -2630,6 +2630,17 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 }
             }
         }
+        /* §1597 ★★★★★ 反汇编 `wifi_start_process`（0x4203b59c）：
+         *     a3 = *(u8*)(g_ic + 0x1E9)
+         *     if (a3 >= 2) return 0;        ← **第一行就返回，什么都不做**
+         * 真板 `g_ic+0x1E9` 早已是 3（之前 §1128 的打印 "start 后的库状态 = 3"）
+         * ⇒ 我们这个调用**从来没真正执行过启动链**（MAC 使能 / RX 建立都在里面）。
+         * 先把状态字节复位成 0 再调。 */
+        {
+            extern unsigned char g_ic[];
+            /* §1597：先把状态复位成 0，否则 `wifi_start_process` 第一行就返回。 */
+            *(volatile u8 *)(void *)(g_ic + 0x1E9) = 0u;
+        }
         rs = wifi_start_process();
         s3_ets_printf("[direct] init=%d start=%d state=%u\n",
                       ri, rs,
