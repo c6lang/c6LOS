@@ -431,7 +431,19 @@ void *s3_timer_irq(u32 frame_sp)
 
         *tp = *tp + 1u;
         g_c6os_ticks = g_c6os_ticks + 1u;   /* §1334：时间推进不再依赖任务 */
-        s3_isr_timeout_scan();              /* §1335：ISR 侧超时扫描 */
+        /* §1507 ★★★★ **超时扫描绝不能在这里做**。
+         *
+         * `s3_isr_timeout_scan` 是 windowed C 函数、而且链接在 flash
+         * （0x420105ac）。从 ISR 里用 call8 调它 = 在 EXCM=1 的中断上下文里
+         * 做窗口轮转，真板现场：
+         *   exccause=0x0（非法指令）、epc1=0x420105ac(s3_isr_timeout_scan)、
+         *   a0=0x8037a1fd（**带 CALLINC 标记的返回地址**被当指令地址）、
+         *   ws=0xaa02。
+         * 它每 10ms 跑一次，所以现象是"同一配置有时 290 行、有时 468 行"。
+         * 改到任务上下文（console.c 的 port_virtual_tick 里）执行。 */
+#ifdef S3_ISR_TIMEOUT_SCAN
+        s3_isr_timeout_scan();
+#endif
     }
 #endif
     {

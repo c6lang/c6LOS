@@ -207,6 +207,18 @@ void *port_task_ctx_create(void (*entry)(void *), void *arg, u32 stack_size)
     *(volatile u32 *)(top -  8u) = 0u;        /* a2 */
     *(volatile u32 *)(top -  4u) = 0u;        /* a3 */
 #endif
+    /* §1506 ★★★★ **新任务的 a1/a9 槽必须种成 top**。
+     *
+     * 帧字映射是 f[0]=a1, f[1]=a2, …, f[8]=a9, …, f[14]=a15,
+     * f[15]=EPC, f[16]=PS, f[17]=WS, f[18]=WB, f[19]=a1sl。
+     * 原来整帧清零后只种了 a1sl(f[19])，于是 `rfe` 装进 AR 的 **a9 = 0**。
+     * windowed ABI 里被调者的 a1 取的是**调用者 a9**：新任务第一次 `call8`
+     * 时被调者 `entry a1,N` 算出 `0-N` ⇒ 真板现场就是
+     * `exccause=0x1c`、`excvaddr=0xfffffff4`(-12) / `0xffffffe0`(-32)，
+     * DEPC 停在 `_win_unf8`。这也是"tcpip 线程创建成功却一次都没执行"
+     * 和"同一配置抓到 290/405/468 行不等"的物理原因。 */
+    f[0] = top;                        /* a1：自己的帧基址 */
+    f[8] = top;                        /* a9：留给第一个 call8 的被调者 */
     f[1] = (u32)entry;                 /* a2 */
 #ifdef S3_ONE_ABI
     f[3] = 1u;
