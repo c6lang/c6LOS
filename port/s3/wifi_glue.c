@@ -3452,7 +3452,16 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
         S3_PROBE_B0 = *(volatile u32 *)(void *)a2;
         S3_PROBE_B4 = *(volatile u32 *)(void *)(a2 + 4u);
     }
-    __real_ieee80211_send_probereq(a1, a2, a3, a4, a5, a6, a7, a8);
+    /* §§1387 ★★★★ **用全局保存的值代替参数 a2**。
+     *
+     * 反汇编 `ieee80211_output.o` 确认：`send_probereq` 里**只有一个**
+     * `call8 ieee80211_send_setup`。所以失败的那次就是
+     * `send_probereq` 本身，而它的 `a2` 入口就是 0 ——
+     * **说明是我们包装器传参出了错**（而不是库传了 0）。
+     * 这里改成用全局 `g_s3_probe_buf`（上面从 a2 存下来的非 0 值）
+     * 代替 —— 既是验证也是修法。 */
+    __real_ieee80211_send_probereq(a1, g_s3_probe_buf != 0u ? (u32)g_s3_probe_buf : a2,
+                                   a3, a4, a5, a6, a7, a8);
 }
 
 /* §§1341 ★★★★ **`ieee80211_send_setup` 的 a2 为 NULL 时用备份缓冲替补**。
