@@ -3422,12 +3422,26 @@ volatile u32 g_s3_diag[12];
 #define S3_CHM_R   (g_s3_diag[2])
 #define S3_RGD_N   (g_s3_diag[3])
 #define S3_RGD_R   (g_s3_diag[4])
+#define S3_PROBE_A2 (g_s3_diag[5])
+#define S3_PROBE_A3 (g_s3_diag[6])
+#define S3_PROBE_A4 (g_s3_diag[7])
+#define S3_PROBE_B0 (g_s3_diag[8])
+#define S3_PROBE_B4 (g_s3_diag[9])
 extern void __real_ieee80211_send_probereq(u32, u32, u32, u32, u32, u32, u32, u32);
 __attribute__((section(".flash.text")))
 void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
                                     u32 a5, u32 a6, u32 a7, u32 a8)
 {
     S3_PROBE_N++;
+    /* §§1339：**记录库传进来的 a2** —— 判定是"库传 0"还是
+     * "`send_probereq` 内部把它弄丢了"。 */
+    S3_PROBE_A2  = a2;
+    S3_PROBE_A3  = a3;
+    S3_PROBE_A4  = a4;
+    if (a2 != 0u) {
+        S3_PROBE_B0 = *(volatile u32 *)(void *)a2;
+        S3_PROBE_B4 = *(volatile u32 *)(void *)(a2 + 4u);
+    }
     __real_ieee80211_send_probereq(a1, a2, a3, a4, a5, a6, a7, a8);
 }
 extern u32 __real_ic_tx_pkt(u32);
