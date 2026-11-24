@@ -3587,12 +3587,25 @@ int __wrap_wifi_scan_start_process(void *msg)
     return r;
 }
 
-extern int __real_ieee80211_sta_scan(void *arg);
-int __wrap_ieee80211_sta_scan(void *arg)
+extern int __real_ieee80211_sta_scan(void *a, void *b, void *c, void *d, void *e, void *f);
+/* §§1446 ★★★★★ **真 bug：参数数目不对。**
+ *
+ * 反汇编 `ieee80211_sta_scan`（0x42039774）：
+ *     a10 = a2          ← 第 1 个参数
+ *     a11 = a3          ← **第 2 个参数**
+ *     a12 = g_ic+0x130  ← 函数内部自己构造
+ *     call8 cnx_sta_scan_cmd(a10, a11, a12)
+ * 而我们的包装器只声明了 **1 个**参数
+ * ⇒ `__real_ieee80211_sta_scan(arg)` 只传 a2，**a3 是调用者的垃圾值**，
+ * 库再把它作为第二个参数一路传给 `cnx_sta_scan_cmd`
+ * ⇒ 扫描状态机拿到乱指针 ⇒ 崩在 `callx8 &g_cnxMgr`。
+ *
+ * 修法：和其他包装器一样，**把 a2..a7 全部原样透传**。 */
+int __wrap_ieee80211_sta_scan(void *a, void *b, void *c, void *d, void *e, void *f)
 {
     int r;
-    s3_ets_printf("[stascan] enter arg=%x\n", (u32)arg);
-    r = __real_ieee80211_sta_scan(arg);
+    s3_ets_printf("[stascan] enter a=%x b=%x\n", (u32)a, (u32)b);
+    r = __real_ieee80211_sta_scan(a, b, c, d, e, f);
     s3_ets_printf("[stascan] leave r=%d\n", r);
     return r;
 }
