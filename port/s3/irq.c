@@ -460,7 +460,13 @@ void *s3_timer_irq(u32 frame_sp)
 #else
     (void)frame_sp;
 #endif
-    port_isr_enter();
+    /* §1509 ★★★★ **中断里绝不能 call8 进 windowed C 函数**。
+     * `port_isr_enter()` 定义在 console.c（windowed + flash），它内部又调
+     * `port_core_id()` ⇒ 在 EXCM=1 的中断上下文里连着做两层窗口轮转。
+     * 真板现场：`epc1=0x40378dfb`（= **port_core_id+3**）、
+     * `exccause=0x1d`、`excvaddr=0x90119ac0`、`windowbase=9`、
+     * `windowstart=0xaaaa` —— 全是坏账目。单核，直接内存加一即可。 */
+    { extern volatile u32 g_isr_nest[]; g_isr_nest[0] = g_isr_nest[0] + 1u; }
     s3_isr_mark(4u);
     {
         /* 诊断：记录进入 os_sched_tick 的次数（RTC 0x50000708），
@@ -493,7 +499,8 @@ void *s3_timer_irq(u32 frame_sp)
     if (g_hook != 0) {
         g_hook();
     }
-    port_isr_exit();
+    { extern volatile u32 g_isr_nest[];
+      if (g_isr_nest[0] != 0u) { g_isr_nest[0] = g_isr_nest[0] - 1u; } }
 #ifdef S3_NO_PREEMPT
     /* 关掉"定时器抢占切换"（§235）。
      *

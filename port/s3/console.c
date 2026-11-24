@@ -36,7 +36,7 @@ void s3_mark2(u32 idx, u32 v) { s3_mark(idx, v); }
     return *(volatile u32 *)(0x50000000u + idx * 4u);
 }
 
-static volatile u32 g_isr_nest[C6OS_MAX_CORES] = {0};
+volatile u32 g_isr_nest[C6OS_MAX_CORES] = {0};
 
 u64 port_cycles(void)
 {

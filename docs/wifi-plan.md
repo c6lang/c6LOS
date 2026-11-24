@@ -34367,3 +34367,53 @@ tests/t_s3_wifi3.c6: wifi 任务 prio 3 -> 1
 而不是继续在模拟时间上打补丁。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1502–§1510 本轮：把"随机崩溃"拆成三个确定的机制
+
+### §1503 调度器挑回自己 ⇒ 其它任务永远没机会
+`sched_pick()` 只按 `prio` 数值最小挑 READY。WiFi 主任务 prio=1（全场最小），
+`os_task_yield_force()` 把它放回 READY 后**又挑回它自己**。
+已改成：**若最优仍是自己，且存在其它 READY 任务，就换成那个**。
+（`kernel/task.c6` sched_pick，注释 §1503。）
+
+### §1506 新任务初始帧的 a9 槽是 0 ⇒ 新任务第一次 call8 必炸
+帧字映射：`f[0]=a1, f[1]=a2, …, f[8]=a9, …, f[15]=EPC, f[16]=PS, f[17]=WS, f[18]=WB, f[19]=a1sl`。
+`port_task_ctx_create` 只种了 a1sl。windowed ABI 里**被调者的 a1 取调用者的 a9**
+⇒ 新任务第一次 `call8` 的被调者 `entry a1,N` 算出 `0-N`。
+真板现场：`exccause=0x1c`、`excvaddr=0xfffffff4(-12)` / `0xffffffe0(-32)`、
+`DEPC=_win_unf8`。已补 `f[0]=top; f[8]=top;`。
+
+### §1507 / §1509 中断里 call8 进 windowed C 函数（两处，均已修）
+1. `s3_isr_timeout_scan()`（flash 0x420105ac）被 ISR 每 10ms 调一次
+   ⇒ `exccause=0`、`epc1=0x420105ac`、`a0=0x8037a1fd`（**带 CALLINC 标记**）、`ws=0xaa02`。
+   已从 ISR 移除（`S3_ISR_TIMEOUT_SCAN` 关闭），改由任务上下文
+   `port_virtual_tick()`（`S3_TICK_TIMEOUT_SCAN`）执行。
+2. `port_isr_enter()` / `port_isr_exit()`（console.c，windowed+flash）被 ISR 调，
+   内部又调 `port_core_id()` ⇒ `epc1=0x40378dfb`（**port_core_id+3**）、
+   `exccause=0x1d`、`excvaddr=0x90119ac0`、`windowbase=9`、`windowstart=0xaaaa`。
+   已改成 ISR 内**纯内存**操作 `g_isr_nest[0]±1`（`g_isr_nest` 去掉 static）。
+   ⇒ 这就是"同一配置有时 290 行、有时 468 行"的物理来源。
+
+### §1508 tcpip 线程一直没跑 += 优先级排序
+`[lwip] tcpip=3 cnt=3` ⇒ 创建成功（id=3，槽2）；状态字按
+`{prio, base, state, core}` 小端解码，`0x00010202` = prio2/**state1=READY**
+（枚举：FREE=0 READY=1 RUNNING=2 DEAD=3 BLOCKED=4）。
+**它一直是可调度的 READY，却从没被选中**：prio2 上还有 ppTask 且 ppTask 一跑就
+自旋不让出。把 `TCPIP_THREAD_PRIO` 改成 1（高于 ppTask）后
+**`[lwipt] go` 真的出现了** ⇒ 机制是通的，之前纯粹被饿死。
+
+### §1510 现在唯一的阻塞点：tcpip 第一次阻塞后切换没回来
+`tcpip` 起来后日志停在 213 行，RTC 读数：
+`0x50001588=0x600D`（入口跑了）但 `0x5000158C=0`（**没返回**），
+`0x50001000` 切换计数只有 **4**（早期同一固件是 623）。
+即它阻塞在 `sys_arch_mbox_fetch`（空 mbox，`timeout=0`=永久等待，内核语义已确认正确）
+之后，**"阻塞 → 切换出去"这条路径没有回到调度器**。
+⇒ 下一步就攻这一条：`s3_w2c_queue_get` 阻塞壳（`W2C_SPILL`）→ 内核
+`block()`/`port_task_switch`，以及被唤醒后经 `callx8` 返回的 `retw`。
+
+### 可复现的两套配置
+- **跑得最长（504 行，但 tcpip 不跑）**：`TCPIP_THREAD_PRIO=2`。
+- **tcpip 会跑（213 行后停）**：`TCPIP_THREAD_PRIO=1`，其余相同。
+共同必开：`-DS3_SPILL_SHELL`（不开只剩 80 行）、`-DS3_PHYQUEUE_FIX`
+（`[ppq] xphyQueue=3fcc8d90 (lib-set)`，库自己就设好了，不是 0）。
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
