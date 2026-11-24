@@ -3185,6 +3185,33 @@ void s3_seed_tx_buffers(void)
     u32 ids[3];
     u32 t;
 
+    /* §§1414 ★★★★★ **补上 `*(g_ic + 0xE8)`（= `g_cnxMgr+232`）——它就是
+     * `send_probereq` 的 ctx，为 0 就触发 `send_setup` 的断言死循环（§1410）。
+     *
+     * 需满足库的两级断言：`ctx != 0` 且 `*(ctx) != 0`；
+     * 再让 `*(*(ctx) + 0x14c) == 0` 走 `beqz` 分支（避开未知字段）。 */
+    {
+        extern unsigned char g_wifi_menuconfig[];
+        extern void *osi_malloc(u32 n);
+        extern unsigned char *g_eb_list_desc_ptr;
+        extern unsigned char g_ic[];
+        void *vif = osi_malloc(0x200u);
+        void *sta = osi_malloc(0x200u);
+        if (vif != 0 && sta != 0) {
+            u32 i3;
+            volatile u32 *vp = (volatile u32 *)vif;
+            volatile u32 *sp = (volatile u32 *)sta;
+            for (i3 = 0u; i3 < 0x80u; i3++) { vp[i3] = 0u; sp[i3] = 0u; }
+            vp[0] = (u32)sta;                        /* 满足 *(ctx) != 0 */
+            sp[0x14cu / 4u] = 0u;                    /* +0x14c = 0 ⇒ beqz 分支 */
+            *(volatile u32 *)(void *)(g_ic + 0xE8u) = (u32)vif;   /* ★ 唯一的赋值 */
+            s3_ets_printf("[ctx] vif=%x sta=%x icE8=%x\n", (unsigned)vif, (unsigned)sta,
+                          (unsigned)*(volatile u32 *)(void *)(g_ic + 0xE8u));
+        } else {
+            s3_ets_printf("[ctx] alloc fail vif=%x sta=%x\n", (unsigned)vif, (unsigned)sta);
+        }
+    }
+
     /* §§1288 ★★★★ 播种改到**扫描前**（库初始化完成之后），
      * 避免在库自己还在初始化 `g_eb_list_desc` 时就去改它（真板上表现为
      * 同一固件连续三次刷写得到 231/154/113 行，很不稳定）。
@@ -3233,6 +3260,7 @@ void s3_seed_tx_buffers(void)
          * 真板 `g_eb_list_desc_ptr` = **`0x3fcbb3ac`**，
          * 而我们之前一直往 `g_eb_list_desc`（`0x3fcbb354`，**根本不是列表**）里写。 */
         extern unsigned char *g_eb_list_desc_ptr;
+        extern unsigned char g_ic[];
         volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc_ptr + k * 16u;
         void *head = 0;
         void *prev = 0;
