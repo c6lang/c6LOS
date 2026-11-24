@@ -193,6 +193,20 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[rxbuf] r=%d\n", rr);
     }
 #endif
+#ifdef S3_RX_ENABLE
+    /* §1572 ★★★★★ 反汇编 `ic_enable_rx`（0x4201b6e4）：
+     *     *(u32*)0x60033084 |= (1u << 31)      ← **MAC RX 总开关**
+     * （`ic_disable_rx` 就是清这一位。）
+     * 真板 `irq=0`（MAC 从不上报）很可能就是这一位没被置过。
+     * 直接置位并读回验证。 */
+    {
+        volatile u32 *rx = (volatile u32 *)0x60033084u;
+        u32 v0 = *rx;
+        u32 v1 = v0 | 0x80000000u;
+        *rx = v1;
+        s3_ets_printf("[rxen] %x -> %x\n", v0, (u32)*rx);
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {
