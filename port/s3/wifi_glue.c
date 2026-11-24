@@ -3437,7 +3437,14 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
     S3_PROBE_N++;
     /* §§1339：**记录库传进来的 a2** —— 判定是"库传 0"还是
      * "`send_probereq` 内部把它弄丢了"。 */
+    /* §§1381：**a2 环形记录**（最近 8 次）到 `g_s3_diag[20..27]`，
+     * 用来看有没有一次的 a2 是 0。 */
     S3_PROBE_A2  = a2;
+    {
+        extern volatile u32 g_s3_diag[];
+        u32 k = g_s3_diag[0] & 7u;      /* 用 PROBE_N 作为环下标 */
+        g_s3_diag[20u + k] = a2;
+    }
     S3_PROBE_A3  = a3;
     S3_PROBE_A4  = a4;
     if (a2 != 0u) {
