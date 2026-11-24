@@ -34145,3 +34145,37 @@ S3_CDEFS="... -DS3_LOCAL_SPIN -DS3_LOOP_STAGE -DS3_SWEEP_PRINT"   # 纯本地忙
 **下一轮方向（二选一）**：
 1. 修内核唤醒路径（`os_sched_tick` → 超时 → `unblock` → 恢复 ctx）；
 2. 或者绕开内核：把 ppTask 改成"由我们显式驱动"的函数，不再依赖切换。
+
+## §1490 ★★★★ 让 tick 中断直接推进调度（仍然无效）⇒ 目标转向"ppTask 是否饿死我们"
+
+### §1490 假设与实现
+机理推断：`os_sched_tick()` 里第一件事是 `os_tick_advance1()`，
+内核 `now` **只在这里推进**，超时到期与唤醒**也只在这里发生**。
+`S3_TICK_DEFER` 把它延后到任务调 `s3_tick_consume()` ——
+一旦当前任务阻塞睡下，没人调它 ⇒ `now` 冻结 ⇒ 永不唤醒。
+
+修法：在 tick 中断尾 `s3_tick_isr_tail()` 里直接
+```c
+{ extern void os_sched_tick(void); os_sched_tick(); }
+```
+（`-DS3_TICK_IN_ISR`，`os_sched_tick` 只维护表、不切换，ISR 安全）
+
+**真板结果：`[swp] n=1` 完全不变，263 行。**
+
+### §1490b 一个容易反复踩的坑
+第一次把 `S3_TICK_IN_ISR` 放进 **`S3_C6FLAGS`** 时毫无效果 ——
+因为 `port/s3/console.c` 是 **`.c` 文件**，只有 `.c6` 才吃 `S3_C6FLAGS`。
+改放 `S3_CDEFS` 后依旧无效 ⇒ 这次不是编译问题，假设本身要修正。
+
+### §1491 修正后的判断：不是"时间不推进"，而是"让出后不被调度回来"
+既然 tick 中断确实在频繁触发（历史上 `S3_TICK_PEND` 累积到 77136），
+加了 ISR 内 `os_sched_tick()` 后 `now` 一定在前进、超时一定到期、
+任务一定被置回 READY。**但它再也没拿到 CPU。**
+
+⇒ 最可能的解释：**ppTask 让出后没有再阻塞，而是在某处死转、永不让出**
+（§1479 曾在 `g_s3_cur[0]` 抓到 ppTask 的 PC 停在 `s3_win_spill+108`，
+也就是 `osi_queue_recv` 桥壳里反复打转）。
+
+**下一轮决定性实验**：临时不启动 ppTask（跳过 `__wrap_pp_create_task`），
+若阻塞 delay 立刻能正常返回 ⇒ 结论成立，问题就变成
+"让 ppTask 的 recv 真正阻塞、或在长轮询里定期让出"。

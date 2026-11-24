@@ -531,6 +531,23 @@ void s3_tick_isr_tail(void)
     volatile u32 *tg = (volatile u32 *)S3_TIMG0_BASE;
 
     S3_TICK_PEND = S3_TICK_PEND + 1u;
+#ifdef S3_TICK_IN_ISR
+    /* §§1490 ★★★★★ **真正的死锁根因修复**。
+     *
+     * `os_sched_tick()` 里第一件事就是 `os_tick_advance1()`
+     * —— 内核的 `now` 只在这里推进，并且**超时到期 / 唤醒
+     * 也只在这里发生**。
+     * 但 `S3_TICK_DEFER` 把它延后到任务调 `s3_tick_consume()`。
+     * 一旦当前任务阻塞睡下，**没有任何任务去调它** ⇒
+     * `now` 永远冻结 ⇒ 阻塞任务的 deadline 相对冻结的 `now`
+     * 永远不到期 ⇒ **永远不会被唤醒**。
+     * 这正是 `[swp] n=1` 之后永不再增长、且主动调用
+     * `s3_tick_consume()` 也不返回的原因。
+     *
+     * `os_sched_tick()` 只维护 tick/超时表、不做上下文切换，
+     * 因此可以在中断里调。 */
+    { extern void os_sched_tick(void); os_sched_tick(); }
+#endif
     *(volatile u32 *)0x50001584u = *(volatile u32 *)0x50001584u + 1u;  /* tail 进入次数 */
     tg[0x44u / 4u] = 1u;                 /* INT_CLR_TIMERS */
     tg[0x18u / 4u] = 0u;                 /* T0LOADLO */
