@@ -571,6 +571,22 @@ void s3_tick_consume(void)
         n = n + 1u;
         if (n >= 8u) { break; }          /* 一次最多补 8 个 tick，别拖住任务 */
     }
+#ifdef S3_TIMER_DISPATCH
+    /* §§1460 ★★★★★ **根因：`s3_ets_timer_dispatch()` 从来没被调用过。**
+     *
+     * 真板取证：`g_s3_diag[33]`（dispatch 调用次数）= **0**，
+     * `g_s3_diag[7]`（定时器实际触发次数）= **0**。
+     * 原来那三个调用点（wifi_glue.c 的 2314/2548/2722）全都在
+     * **走不到的分支里**，所以所有 osi 定时器回调
+     * （扫描换信道、auth/handshake 超时、beacon 监听…）
+     * **一次都没跑过** ⇒ 扫描发一个 probe 就死、连接永远超时。
+     *
+     * 这里在**任务上下文**每次消费 tick 时调一次。 */
+    {
+        extern void s3_ets_timer_dispatch(void);
+        s3_ets_timer_dispatch();
+    }
+#endif
 }
 
 /* ---- 诊断输出：纯 call0，不经过 windowed 岛 ------------------------------

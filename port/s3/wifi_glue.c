@@ -670,6 +670,23 @@ int osi_queue_recv(void *qh, void *item, u32 ticks);
 
 extern void *port_cur_ctx(void);
 
+/* §§1461 IRAM 只留一次调用，体量全在 `.flash.text`。 */
+#ifdef S3_TIMER_DISPATCH
+__attribute__((section(".flash.text")))
+void s3_timer_dispatch_guarded(void)
+{
+    extern void s3_ets_timer_dispatch(void);
+    /* §§1462 ★ **不能用静态重入保护。**
+     * 真板证据：`g_s3_diag[33]`（dispatch 入口次数）**永远是 1**。
+     * 说明第一次调用进去之后，某个定时器回调**阻塞在里面没有返回**，
+     * 于是 `s_in_disp` 永远停在 1 ⇒ 后续所有调用全都是空操作 ⇒
+     * 定时器从此全部停止。
+     * 直接调：到期项在叫 `fn` 之前就已经把 `expire` 清掉，
+     * 所以重入不会重复触发同一个定时器。 */
+    s3_ets_timer_dispatch();
+}
+#endif
+
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     {
@@ -680,6 +697,20 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         c[2] = (u32)item;
         c[3] = ticks;
     }
+#ifdef S3_TIMER_DISPATCH
+    /* §§1461 ★★★★★ **必须放在所有早返回之前。**
+     *
+     * 下面紧跟的是 `qh == 0` 早返回（库的 `xphyQueue` 全局就是 0），
+     * 而原来的 `s3_tick_consume()` 在那之后 ⇒ **绝大多数 recv
+     * 连不到它**。真板取证：`g_s3_diag[33]`（dispatch 调用次数）= **1**，
+     * 而 `g_c6os_ticks` 已经跑到 38572、`S3_TICK_PEND` 积压 77136。
+     *
+     * 带重入保护：定时器回调里可能又去调队列。 */
+    {
+        extern void s3_timer_dispatch_guarded(void);
+        s3_timer_dispatch_guarded();
+    }
+#endif
     /* §§1120 ★★★★：**每次 recv 都推进一次时间**。
      *
      * `S3_TICK_DEFER` 下时间只能由任务调 `s3_tick_consume()` 推进。
@@ -1624,6 +1655,14 @@ void s3_ets_timer_dispatch(void)
 {
     u32 now = (u32)s3_w2c_tick_get();
     u32 i = 0;
+    /* §§1459 ★ `g_s3_diag[7]`（定时器实际触发次数）真板一直是 **0**。
+     * 先分清是“根本没人调 dispatch”还是“调了但没有到期项”：
+     * [33] 记调用次数，[34] 记当前时钟。 */
+    {
+        extern volatile u32 g_s3_diag[];
+        g_s3_diag[33] = g_s3_diag[33] + 1u;
+        g_s3_diag[34] = now;
+    }
     while (i < S3_ETS_TIMER_MAX) {
         S3EtsTimer *e = &s3_ets_timers[i];
         if (e->active != 0u && e->expire != 0u && (i32)(now - e->expire) >= 0) {
@@ -3249,6 +3288,17 @@ void s3_timer_sweep(void)
         ieee80211_timer_do_process((void *)tmsg);
     }
     g_s3_diag[32]++;
+#ifdef S3_TIMER_DISPATCH
+    /* §§1463 ★★ **真正在循环的就是这个函数。**
+     * `g_s3_diag[33]`（dispatch 入口次数）属于 `osi_queue_recv_body` 的调用
+     * **永远是 1**（那条路径全程只走一次），而 PC 实测停在
+     * `hostap_handle_timer_process`，正是本函数调起来的 ⇒
+     * **只有这里在反复执行**。把定时器分发器挂这里。 */
+    {
+        extern void s3_ets_timer_dispatch(void);
+        s3_ets_timer_dispatch();
+    }
+#endif
 #ifdef S3_SWEEP_ALL
     if ((g_s3_diag[32] % 200u) == 0u) {
         extern unsigned char g_scan[];
