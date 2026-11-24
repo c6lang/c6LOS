@@ -49,6 +49,9 @@ void s3_scan_params_probe(void *msg)
 __attribute__((section(".flash.text")))
 void s3_nvs_state_fix(void)
 {
+    /* §1566 ★ `g_wifi_menuconfig` 是**数组/结构**（反汇编 `l32r a4,<sym>; l16ui a14,a4,4`），
+     * 不是指针变量。`esf_buf_setup` 把 `*(u16*)(+4)` 当缓冲数（0 时默认 64）。
+     * 这里读一次，若为 0 就写 64。必须放在任何提前返回之前。 */
     extern unsigned char g_wifi_nvs[];
     extern int s3_ets_printf(const char *, ...);
     u32 nv = *(u32 *)(void *)g_wifi_nvs;
@@ -188,26 +191,6 @@ void s3_nvs_state_fix(void)
         extern int wDev_Rxbuf_Init(void *ic);
         int rr = wDev_Rxbuf_Init((void *)g_ic);
         s3_ets_printf("[rxbuf] r=%d\n", rr);
-    }
-#endif
-#ifdef S3_MC_CNT_FIX
-    /* §1564 实验：`esf_buf_setup` 读 `*(u16*)(g_wifi_menuconfig+4)` 当缓冲数，
-     * 0 时默认 64。把它显式写 64；若库那些 "Init ... buffer num" 打印
-     * 随之变化，就说明打印与这里同源。 */
-    {
-        extern unsigned char g_wifi_menuconfig[];
-        u32 mc = *(u32 *)(void *)g_wifi_menuconfig;
-        if (mc >= 0x3f000000u && mc < 0x40000000u) {
-            volatile u16 *cp = (volatile u16 *)(void *)(mc + 4u);
-            u16 cv = *cp;
-            s3_ets_printf("[mc4] p=%x v=%u\n", mc, (u32)cv);
-            if (cv == 0u) {
-                *cp = 64u;
-                s3_ets_printf("[mc4] -> 64\n");
-            }
-        } else {
-            s3_ets_printf("[mc4] ptr=%x\n", mc);
-        }
     }
 #endif
     st = *(volatile u8 *)(void *)nv;
