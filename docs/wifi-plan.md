@@ -35416,3 +35416,68 @@ l16ui a14, a4, 4                 ← 直接读 +4 的 u16（0 时默认 64）
 - 纠正了 `g_wifi_menuconfig` 的类型认知，写进文档避免再错。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+# ======== 交接总结（截至 §1566）========
+
+## 已经确认并**修好**的闸门（按调用顺序，全部有真板证据）
+| # | 位置 | 判据 | 修法 | 证据 |
+|---|---|---|---|---|
+| 1 | `sched_pick()` | 只按 prio 最小挑，会挑回自己 | "除自己外最优" | 其它任务终于能跑 |
+| 2 | `port_task_ctx_create` | 新任务帧 `f[0]/f[8]`(a1/a9) 为 0 | 种成 `top` | `excvaddr=0xfffffff4` 消失 |
+| 3 | ISR 里 `call8` 进 windowed C | `s3_isr_timeout_scan` / `port_isr_enter` | ISR 内纯内存操作 | `epc1=0x420105ac` / `port_core_id+3` 消失 |
+| 4 | `tcpip_callback` 阻塞版 | tcpip 线程被调度后不再返回 | 改直调 `dhcp_start()`（`[lwip] dhcbcb` 出现） | §1514 |
+| 5 | 假阳性"已关联" | `sta_get_ap_info()==0` 只代表 ioctl 入队 | 开 `S3_REAL_ASSOC_GATE` | `flag=0/b=0:0:0:0:0:0` |
+| 6 | `W2C_SPILL` 壳不可重入 | 调用者 `a1` 存全局槽，阻塞后被别的任务覆盖 | `S3_RECV_CWRAP` 用普通 C 包装 | `slot_read` 的 `out=0x3d` |
+| 7 | 野句柄调 `queue_recv` | `qh=0x3fcc51a0`（堆块头） | `S3_QFALLBACK` 回退到唯一的队列 | `qfull 1309→0` |
+| 8 | `wifi_init_process` 喂伪造消息 | 除 m[3] 外全 0 | 喂真 init 消息（id=**0x146**） | 缓冲数 0→24 |
+| 9 | `tx_buf_type/static_tx_buf_num` | `esf_buf_setup_static: alloc eb fail(0)` | 改静态 + 8 | 流程 125→9130 行 |
+| 10 | `wifi_scan_start_process` 状态字节 | `g_wifi_nvs` 解引用后 `byte & 0xFD == 1` | 强制 1 | §1542 |
+| 11 | `ieee80211_sta_scan` 早退 | `*(u32*)(g_ic+16) == 0` | 填 `g_ic+0x130` | `r=-1` 消失 |
+| 12 | 监管域检查 | `regdomain_check_channel` 恒 0（无表） | `--wrap` 恒放行 | `[setch] 258→0` |
+| 13 | 扫描 bandmode | `*(u8*)(g_ic+0x2A1) != 1` | 置 1 | "skip all 2G channels" 消失 |
+| 14 | 位图输出缓冲 | `scan_bitmap_to_channel_list(bitmap, arg=0)` | arg=0 时给 32B 缓冲 | 换成 "5G bitmap 不生效"继续走 |
+| 15 | 离信道扫描许可 | `*(u8*)(*g_scan+70) bit0 == 0` | 置 1 | `scan_pm_offchan` 被调用 |
+| 16 | RX 缓冲 1600 字节 | WiFi 堆 48KB 不够 | 栈池 40→32KB、不建 tcpip、堆 48→56KB | `[heap] 分配失败` 消失 |
+
+## 仍堵着的一条（唯一的墙）
+**帧/eb 缓冲池计数为 0** ⇒ 没有帧缓冲 ⇒ 收不到也发不出任何帧
+⇒ `irq=0`（MAC 从不中断）⇒ 扫描 0 个 AP ⇒ 后面 DHCP/TLS/body 全无可能。
+
+已知线索（都已排除不是它）：
+- 不是 `g_wifi_menuconfig+4`（那是 `esf_buf_setup` 的 txdesc 数，0 时默认 64）；
+- 不是 `g_ic+0x130`（模式填充无效）；
+- 不是 init 消息参数块（`msg+20`、`msg[12]` 都试过）；
+- `g_wifi_menuconfig` 是**数组/结构**（不是指针），它的 +88 是静态 tx 数
+  （0 时默认 10）、+60 是动态 rx 数（0 时默认 32）——
+  **这些默认值都存在，但真板 `alloc eb fail(0)` 收到的却是 0**
+  ⇒ 说明真正调 `esf_buf_setup_static` 的是**另外三个调用点**
+  （镜像 0x4201d7e9 / 0x4201d82d / 0x4201d855），
+  需要逐个看它们传的 count 从哪来。
+
+## 下次开工的第一条命令
+```bash
+cd /home/winger/rtos-c6
+O=/home/winger/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump
+$O -d --start-address=0x4201d7c0 --stop-address=0x4201d870 build/wifi/c6os.elf | grep -E "^[0-9a-f]+:"
+```
+（看另外三个 `esf_buf_setup_static` 调用点的 count 来源。）
+
+## 构建/上板（照抄）
+```bash
+export LD_LIBRARY_PATH=/home/winger/c6/tcc:$LD_LIBRARY_PATH
+make C6_ROOT=/home/winger/c6 S3_ABI=windowed S3_APP_BASE=0x20000 S3_NO_PREEMPT=1 \
+  S3_TARGET_BSSID=1 \
+  S3_CDEFS="-DS3_ONE_ABI -DS3_SKIP_FLASH_INIT -DS3_TICK_DEFER -DS3_TICK_IN_ISR \
+    -DS3_TICK_TIMEOUT_SCAN -DS3_PM_ATTACH -DS3_PMOFF_FORCE -DS3_SCAN_CB_FIX \
+    -DS3_SCAN_CB_SWEEP -DS3_PM_WAKE2 -DS3_TIMER_DISPATCH -DS3_SCAN_BITMAP \
+    -DS3_SWEEP_PRINT -DS3_YIELD_IN_GUARD -DS3_SPILL_SHELL -DS3_PHYQUEUE_FIX \
+    -DS3_REAL_ASSOC_GATE -DS3_QFALLBACK -DS3_RECV_CWRAP -DS3_IC16_FILL \
+    -DS3_SETCH_DIRECT -DS3_SCAN_FLAG_FIX -DS3_NO_TCPIP_TASK -DS3_INJECT_IDF_CAL" \
+  S3_C6FLAGS="-DS3_NO_WDT -DS3_NO_MON -DS3_ONE_ABI -DS3_SKIP_FLASH_INIT -DS3_TICK_DEFER" https
+pkill -x openocd; esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 \
+  --before default-reset --after hard-reset write-flash 0x20000 build/wifi/c6os.bin
+timeout 200 python3 tools/cap.py -t 190 > /tmp/cap.txt 2>&1
+```
+**IRAM 一点余量都没有**：加打印前先想好删哪整条（多行 printf 必须括号配平删）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
