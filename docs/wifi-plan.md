@@ -33393,3 +33393,63 @@ ieee80211_sta_scan     0x42039774:
 [v4]wifi|first chan=0
 ```
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1444 ★★★★★ `failed to change power status` 的根因：**`g_pm` 从未初始化**
+
+反汇编 `pm_offchan_ready_or_defer`（0x42018b20）得到完整判定逻辑：
+
+```
+a8 = 2                                  ← 默认返回值
+a9 = *(u8*)(g_pm + 15)
+if (a9 == 0) return 2                   ← ① 第一条就挂
+pm_off_channel()
+a9 = *(u8*)(g_pm + 14)
+a8 = 0
+if (a9 == 0) return 0                   ← ② 成功路径
+a9 = *(u8*)(g_pm + 22)
+if (a9 == 0) goto L
+    store args; a8 = 1; return 1
+L: a4 = *(u8*)(g_pm + 1)
+   if (a4 != 0) return 0
+   log(...); a8 = 2; return 2           ← ③ 我们遇到的那条
+```
+
+真板读 `g_pm`（0x3fcd6ff0，当时的构建）⇒ **6 个字全是 0**。
+`pm_attach()` 跑完后（0x3fcd7010 的构建）：`+0=1`、`+11=1`、`+12=1`，
+但 `+14`、`+15` **仍然是 0**。
+
+**⇒ PM（省电管理）模块从来没被初始化过** —— 这是扫描
+"failed to change power status" 的真正根因，不是什么射频/信道问题。
+
+修法：在扫描前调用库自己的 **`pm_attach()`**（0x4201a370 那一版，无参数，
+内部 `memset(g_pm, 0, 0x220)` 并设字段）。已加 `-DS3_PM_ATTACH`，
+真板打印 `[pm] attached`。
+
+## §1445 ★★★ 崩溃目标从 `g_cnxMgr+0` 变成 `g_cnxMgr+0x20`
+
+`-DS3_PMOFF_FORCE -DS3_PM_ATTACH -DS3_IC16_SCAN` 组合下：
+- 扫描照样推进到 `[v4]wifi|first chan=0`；
+- 仍然 `PC=0x4037a029`(`_vec_default`)、`EXCCAUSE=0`；
+- 但 `EXCVADDR/EPC1` 由 `0x3fcd6000`（`&g_cnxMgr+0`）
+  **变成 `0x3fcd6020`（`&g_cnxMgr+0x20`）**。
+
+**⇒ 强烈提示这不是"调了一个函数指针"，而是 `a0`（返回地址）被链表指针
+覆盖后 `retw` 跳飞** —— `0x20` 正是链表节点在 cnx 管理器里的偏移量级。
+这类"返回地址被数据指针覆盖"与本项目历史上 §235/§453 的窗口/帧损坏同源。
+
+**下一步应该查的**（按优先级）：
+1. `cnx_connect_next_ap` 里 `callx8 *(osi+0xE0..0xEC)`（= `_timer_arm/disarm/
+   done/setfn`）前后 `a0` 是否被 W2C 壳保存/恢复错位；
+2. `port/s3/w2c.S` 的 `W2C_SPILL` 壳在**库回调内部再阻塞**时的 `a0` 处理
+   （我们已有五个独立 RTC 槽，可对比是哪个壳漏存了 a0）。
+
+## 本轮/累计已修的真 bug（都是硬骨头）
+
+1. §1435 ISR 超时扫描偏移错（state 34→44、wait_result 44→52）
+   —— 之前**任何阻塞任务都永远唤不醒**；
+2. §1437 ppTask 先低优先级创建、返回后 boost 到 2
+   —— **消息队列终于通了**（`[pppost] ppq=6 data=3fccab04`）；
+3. §1442 `g_ic+16` 必须填 `*g_scan`（反汇编双向确认）；
+4. §1444 `pm_attach()` 从未被调用 —— PM 模块整个没初始化。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0** —— 仍未取得，目标继续。

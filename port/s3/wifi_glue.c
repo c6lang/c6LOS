@@ -3417,6 +3417,36 @@ void s3_fix_ic16(void)
     extern unsigned char g_ic[];
     extern int s3_ets_printf(const char *, ...);
     u32 *icp = (u32 *)(void *)g_ic;
+#ifdef S3_PM_ATTACH
+    /* §§1444 ★★★★★ **找到 PM 阻塞的根因：`g_pm` 全为 0**。
+     *
+     * 反汇编 `pm_offchan_ready_or_defer`（0x42018b20）：
+     *     a8 = 2                       ← 默认返回值
+     *     a9 = *(u8*)(g_pm + 15)
+     *     if (a9 == 0) return 2        ← **第一条就挂**
+     *     pm_off_channel()
+     *     a9 = *(u8*)(g_pm + 14); if (a9 == 0) return 0   ← 成功路径
+     * 真板实测 `g_pm`（0x3fcd6ff0）**6 个字全是 0** ⇒ PM 模块
+     * 从来没初始化过 ⇒ 扫描的信道切换永远“不就绪”
+     * ⇒ `wifi|scan: failed to change power status`。
+     *
+     * 修法：叫库自己的 `pm_attach()`（0x4201a324，无参数，
+     * 内部 memset(g_pm, 0, 0x220) 并设好各字段）。只调一次。 */
+    {
+        static u32 pm_done = 0u;
+        if (pm_done == 0u) {
+            extern void pm_attach(void);
+            extern volatile u32 g_s3_diag[];
+            pm_done = 1u;
+            pm_attach();
+            g_s3_diag[19] = 0x504D4100u;      /* 'PMA' 标记：已调 pm_attach */
+            s3_ets_printf("[pm] attached b15=%u b14=%u b1=%u\n",
+                          (u32)*(volatile u8 *)(0x3fcd6ff0u + 15u),
+                          (u32)*(volatile u8 *)(0x3fcd6ff0u + 14u),
+                          (u32)*(volatile u8 *)(0x3fcd6ff0u + 1u));
+        }
+    }
+#endif
 
 #ifdef S3_NO_IC16_FIX
     /* §§1439 实验：不注入。用来判断 §1438 的崩溃是不是这个注入值造成的。
