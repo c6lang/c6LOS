@@ -33662,42 +33662,6 @@ auth timeout / handshake timeout t=0 / stop beacon and connect timers
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
 
-## §1456/1457 ★★★★★ **定时器表一直是满的：12 槽在 attach 阶段就被占满**
-
-这是本项目拖了最久的一个隐藏硬伤，靠给 `osi_timer_setfn` 加一行 `[tset]` 打印才暴露：
-
-```
-[tset] n=1  t=3fcd71dc fn=42018634 slot=3fcc8494   ← 拿到槽
-...
-[tset] n=10 t=3fcd7328 fn=420185a4 slot=3fcc856c   ← 拿到槽
-[tset] n=11 t=3fcd5968 fn=4202e584 slot=3fcc8584
-[tset] n=12 t=3fcd597c fn=4202e570 slot=3fcc859c   ← 第 12 个，表满
-[tset] n=13 t=3fcd56b4 fn=4202d12c **slot=0**      ← 从此全部失败
-[tset] n=14 t=3fcd56c8 fn=4202d12c **slot=0**
-[tset] n=15 t=3fcd54b0 fn=42033550 **slot=0**
-[tset] n=16 t=3fcd55a8 fn=42029a30 **slot=0**
-```
-
-**⇒ `S3_ETS_TIMER_MAX` 原来只有 4！** §837 为解决"init 阶段 setfn 占满 4 槽"加了个
-**回收律**（把 `expire==0 && period==0` 的槽抢给新来的）—— 那只是**互相抢**，
-把别人已经注册好的回调洗掉，治标不治本。我们后来扩到 8、12，仍然不够。
-
-扩到 **32 槽**后真板复核：
-- `slot=0` 出现次数 **0**（之前每次启动都有 4+ 次）
-- `[tarm] ... fn=0` 从 2 处降到 **1 处**（剩的是 30ms 的 auth 定时器）
-- 日志行数 **283 → 303**
-
-**⇒ 结论：`ieee80211` 的定时器远不止 12 个，表必须给到 32。**
-之前所有"`fn=0` 所以回调不执行"的怪现象，根子都在这里。
-
-### 仍未解决
-- `g_s3_diag[0]`（= `S3_PROBE_N`，`ieee80211_send_probereq` 调用次数）**仍然是 1**
-  ⇒ 扫描只发了一个 probe 就停住，换信道回调虽然装上了却没真正推进。
-- `[v2]wifi|no timer handle` 仍出现（库某个定时器句柄本身是 NULL）。
-- `g_pm_ptr` 已修（§1455，真板 `= &g_pm`）。
-
-四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
-
 ## §1456～1458 本轮三个"定时器"层面的硬伤
 
 ### §1456 定时器表一直是满的（最重要）
