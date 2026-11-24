@@ -33633,3 +33633,31 @@ auth timeout / handshake timeout t=0 / stop beacon and connect timers
   **所以很可能不用强制写 byte1=0，而是要让 `pm_attach` 之后的真实状态被正确读到。**
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1455 ★★★★ `g_pm_ptr` 是 **NULL** —— 已修好，但证明它不是 probe 的门禁
+
+§691 说 `ppProcessTxQ` 发 probe 前调 `pm_is_waked`，后者读 `g_pm_ptr`
+（**绝对符号**，固定 0x3fcef8e4）指向结构体的 **byte1**：
+`byte1==0` → awake(1)；`byte1!=0` → sleeping(0) → `ppProcessTxQ` return -1。
+
+真板实测：**`*(u32*)0x3fcef8e4 == 0`**。
+`pm_attach()` 确实跑过（`g_pm` 的 +0/+11/+12 都被设好了），但**它不负责任何
+设这个指针**，于是 `pm_is_waked` 去读地址 `1` 处的字节，必然非 0 ⇒ 永远当睡眠。
+
+修法（`-DS3_PM_WAKE2`，放在 `.flash.text` 的 `s3_fix_ic16()` 里，**不占 IRAM**）：
+```
+*(u8*)(&g_pm + 1) = 0;        /* awake */
+*(u32*)0x3fcef8e4 = &g_pm;
+```
+真板复核：**`0x3fcef8e4 = 0x3fcd7040 = &g_pm`** ✓ 生效。
+
+⚠️ **这个地址是绝对符号，跨构建稳定**（IDF 链接脚本固定），所以直接写字面量地址
+是安全的；但 `&g_pm` 每构建都变，必须用符号取。
+
+### 但行为没变（仍 283 行）⇒ 结论很重要
+`pm_is_waked` 现在正确返回 awake，扫描行为**毫无变化** ⇒
+**`pm` 睡眠不是 probe 发不出去的原因**，`ppProcessTxQ`/pm 这条路可以降级。
+⇒ 下一轮应该转向真正的 TX 路径（`ieee80211_send_probereq` 是否被调用、
+帧是否真的进了 MAC 队列），而不是继续在 PM 上打转。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

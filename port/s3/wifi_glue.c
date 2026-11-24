@@ -3475,6 +3475,34 @@ void s3_fix_ic16(void)
         }
     }
 #endif
+#ifdef S3_PM_WAKE2
+    /* §§1455 ★★★★★ **`g_pm_ptr` 是 NULL (!)**。
+     *
+     * §691 指出 `ppProcessTxQ` 发 probe 前调 `pm_is_waked`（ROM 0x4000549c），
+     * 它读 `g_pm_ptr`（绝对符号，固定在 0x3fcef8e4）指向结构的 **byte1**：
+     *   byte1 == 0 → 返回 1（awake）
+     *   byte1 != 0 → 返回 0（sleeping）⇒ `ppProcessTxQ` 直接 return -1
+     *                ⇒ **probe request 永远不发** ⇒ 扫描永远零 AP。
+     *
+     * 真板取证：**`*(u32*)0x3fcef8e4 == 0`** —— `pm_attach()` 确实跑了
+     * （`g_pm` 的 +0/+11/+12 都被设好），但它 **不负责** 设这个指针。
+     * 于是 `pm_is_waked` 去读地址 `1` 处的字节，基本必非 0 ⇒ 永远当作睡眠。
+     *
+     * 修法：把它指向我们已经 `pm_attach()` 好的 `g_pm`，
+     * 并把 byte1 置 0（awake）。放在 `.flash.text` 里的本函数内，
+     * **不占 IRAM**。 */
+    {
+        extern unsigned char g_pm[];
+        volatile u32 *pmp = (volatile u32 *)0x3fcef8e4u;
+        u32 was = *pmp;
+        u32 pm_addr = (u32)(void *)g_pm;
+        if (pm_addr != 0u) {
+            *(volatile u8 *)(pm_addr + 1u) = 0u;      /* awake */
+            *pmp = pm_addr;
+        }
+        g_s3_diag[19] = 0x504D3200u | ((was == 0u) ? 2u : 1u);
+    }
+#endif
 #ifdef S3_PM_ATTACH
     /* §§1444 ★★★★★ **找到 PM 阻塞的根因：`g_pm` 全为 0**。
      *
