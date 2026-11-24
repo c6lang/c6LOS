@@ -2260,6 +2260,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     /* wifi_interface_t: 0 = WIFI_IF_STA */
     r3 = esp_wifi_set_config(0, (void *)cfg);
     s3_ets_printf("[wifi] set_config=%d\n", r3);
+
     /* §§1165 ★★★★ **直接调用** `wifi_init_process` / `wifi_start_process`，
      * 绕开 ppTask。真板已证实 `g_ic` 已分配（非 0）但内容全 0——
      * 因为 `wifi_init_process` 是 ppTask 的消息处理函数，而 ppTask 拿不到 CPU。
@@ -3496,19 +3497,41 @@ void s3_timer_sweep(void)
      * 真板读数属于 0 已经一次次导致误判（§1471、§1478）。 */
     if (g_s3_diag[32] <= 70u) {
         volatile u32 *c = (volatile u32 *)0x50000F40u;
-        { extern volatile u32 g_sched_lock[];
-          s3_ets_printf("[lk] lock0=%u lock1=%u\n",
-                        (u32)g_sched_lock[0], (u32)g_sched_lock[1]); }
         { extern volatile u32 g_s3_txret;
           /* §1517 ★ TX 取证：`g_s3_diag[5]` = 交给 MAC 的次数（ic_tx_pkt），
            * `g_s3_txret` = 最近一次返回值（非 0 = 被拒）。AUTH/ASSOC 帧要
            * 真关联就必须看到 tx>0 且 ret=0。 */
-          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u vif=%x w=%x %x %x %x\n",
+          if (g_s3_diag[32] == 1u) {
+              /* §1522 ★ 射频到底有没有被设到信道上？放这里是因为本函数在
+               * `.flash.text`，不占 IRAM（上次加在 associate 里溢出了 28 字节）。 */
+              extern int esp_wifi_get_channel(void *primary, void *second);
+              extern int esp_wifi_set_channel(unsigned int primary, unsigned int second);
+              u8 pc_ = 0xffu, sc_ = 0xffu;
+              int gcr, scr;
+              /* §1523 ★★★★ 根因：`esp_wifi_get_channel` 返回 0 但**一个字节都不写**
+               * （还是 0xFF 哨兵）⇒ 库内部信道状态从未设置 ⇒ 射频不调到任何信道
+               * ⇒ 不收 beacon ⇒ scan 0 个 AP ⇒ MAC 中断全场只有 5 次 ⇒ recv 从不进入。
+               * 我们代码里**从未调过 esp_wifi_set_channel**。这里补上（信道 6）。 */
+              scr = esp_wifi_set_channel(6u, 0u);
+              gcr = esp_wifi_get_channel((void *)&pc_, (void *)&sc_);
+              /* §1524 ★ 合并成一条（省一个格式串，DRAM 太紧）：
+               * g_ic 是"已分配但内容全 0"还是根本没建，一看便知。 */
+              {
+                  extern unsigned char g_ic[];
+                  unsigned int *icp = (unsigned int *)(*(void **)(void *)g_ic);
+                  s3_ets_printf("[ch] s=%d g=%d p=%u c=%u ic=%x %x %x %x\n",
+                                scr, gcr, (u32)pc_, (u32)sc_,
+                                icp != 0 ? icp[0] : 0u,
+                                icp != 0 ? icp[1] : 0u,
+                                icp != 0 ? icp[2] : 0u,
+                                icp != 0 ? icp[3] : 0u);
+              }
+          }
+          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u irq=%u til=%u\n",
                         (u32)g_s3_diag[32], (u32)g_s3_diag[5],
                         (u32)g_s3_txret, (u32)g_s3_diag[6],
-                        (u32)g_s3_diag[0], (u32)g_s3_diag[28],
-                        (u32)g_s3_diag[36], (u32)g_s3_diag[37],
-                        (u32)g_s3_diag[38], (u32)g_s3_diag[39]); }
+                        (u32)g_s3_diag[0], (u32)g_s3_diag[10],
+                        (u32)g_s3_diag[9]); }
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
@@ -4244,7 +4267,8 @@ void __wrap_ieee80211_send_setup(u32 a1, u32 a2, u32 a3, u32 a4,
         __asm__ __volatile__("mov %0, a10" : "=r"(w10));
         __asm__ __volatile__("mov %0, a11" : "=r"(w11));
         __asm__ __volatile__("mov %0, a12" : "=r"(w12));
-        g_s3_diag[36] = a8;
+        /* §1521 ★ 空前窗调用的**调用者返回地址**（去掉 CALLINC 高位）。 */
+        g_s3_diag[36] = ((u32)(unsigned long)__builtin_return_address(0)) & 0x3FFFFFFFu;
         g_s3_diag[37] = w10;
         g_s3_diag[38] = w11;
         g_s3_diag[39] = w12;

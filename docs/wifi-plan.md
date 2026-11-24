@@ -34586,3 +34586,45 @@ DHCP 绕开 tcpip 线程、假阳性关联闸门、全阻塞时不推进时间�
 `send_setup 收到空前窗 → 不发帧 → ic_tx_pkt=0 → 无 AUTH/ASSOC →
 g_sta_connected_flag 恒 0 → DHCP 无链路上游`。
 四项验收仍为 **AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1521–§1524 总根因：闭源库的 IC 从未被真正构造，所有 API 都是空实现
+
+### §1521 那次"空前窗"的 send_setup 调用是噪声，不是发送路径
+读 `a0`（调用者返回地址）：`ra=0`；`a8/a10/a11/a12` 也全 0。
+⇒ 整个寄存器窗口连返回地址都是 0，属于一次**伪造/空窗控制转移**，
+不是库的正常调用。可以排除。
+
+### §1522 `irq` 计数：MAC 几乎不中断
+`[tx] ... irq=%u til=%u`（`diag[10]`=WiFi MAC 中断挂起次数、
+`diag[9]`=定时器中断次数）：
+```
+[tx] n=1  irq=0 til=27
+[tx] n=60 irq=0 til=367
+```
+⇒ **定时器中断正常（367 次），但 MAC 中断整场 0~5 次**。
+射频根本没在收 —— 这就是 `scan_get_ap_num=0` 与 `recv=0` 的直接原因。
+
+### §1523 `set_channel` / `get_channel` 是空实现
+`[ch] s=0 g=0 p=255 c=255`：
+`esp_wifi_set_channel(6,0)` 返回成功，但随后 `esp_wifi_get_channel`
+**一个字节都不写**（primary/secondary 仍是我们的 0xFF 哨兵）。
+⇒ 库内部信道状态从未设置，而且这两个 API 本身不做事
+（我们代码此前**从未调过 set_channel**，补上也没有任何变化）。
+
+### §1524 `g_ic` 头部 = `2 0 0 0` ⇒ IC 根本没构造
+`[ch] ... ic=2 0 0 0`（`g_ic` 是指针变量，解引用后前 4 字）。
+真正的 `ic` 结构里应该有 phy/mac/state 等成千上万个有效字段；
+这里只有第 0 字 = 2、其余全 0。
+
+⇒ **合理解释整条现象链**：
+`g_ic` 没构造 → `set/get_channel`、`scan`、`connect` 全部"成功但无效"
+→ 射频不上信道 → 不收 beacon（MAC 中断≈0）→ 扫描 0 个 AP
+→ 无 AUTH/ASSOC（`ic_tx_pkt`=0）→ `g_sta_connected_flag` 恒 0
+→ 假阳性「已关联」→ DHCP 无链路上游 → 无 IP → DNS 失败 → 无 TLS/body。
+
+⇒ **下一步唯一方向**：让库的 bring-up 真正跑完（构造出 `g_ic`）。
+候选入口（按已有证据）：`wifi_init_process` / `wifi_start_process`
+（§1165 已尝试直调）、以及 ppTask 依赖的那条消息链。
+判据很明确：**`g_ic` 头部不再是 `2 0 0 0`，且 `[tx] irq` 开始增长**。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
