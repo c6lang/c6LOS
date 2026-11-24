@@ -720,6 +720,26 @@ void os_task_start_core(u32 core) {
                 continue;
             }
             port_idle();
+            /* §1512 ★★★★ **所有任务都阻塞时必须自己推进时间**。
+             *
+             * `S3_TICK_DEFER` 下 `g_c6os_ticks` 由任务调 `s3_tick_consume()`
+             * 推进；一旦**全部任务同时阻塞**（真板：WiFi 主任务在
+             * `s3_w2c_task_delay` 里、tcpip 线程在空 mbox 上永久等待、
+             * ppTask 在 xphyQueue 上），就没人推进时间 ⇒
+             * `os_timeout_pop_expired` 永远看不到到期 ⇒ 谁也不会被唤醒
+             * ⇒ **永久死锁**。真板症状：日志精确停在 `[lwipt] go`、
+             * 切换计数只有 4（另一配置 623）。
+             * 空闲分支兜底：转够一定圈数就**强行**走一次 tick。 */
+            {
+                static u32 idle_n;
+                idle_n = idle_n + 1u;
+                if ((idle_n & 0x3FFu) == 0u) {
+                    /* 注意：不要往 RTC 写诊断 —— 0x50001B00 实测是被别的模块
+                     * 占用的（读回来是 0x3fcc7280 这种指针值），
+                     * 本仓库的 RTC 地址表**不能凭空闲假设**（§1494b）。 */
+                    os_sched_tick();
+                }
+            }
             continue;
         }
         g_cur_arr[me] = t;
