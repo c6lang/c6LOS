@@ -33190,3 +33190,52 @@ g_s3_diag[32]（sweep 次数）= 1   ⇒ 扫描循环只跑了 1 圈
 
 **判据：修好后 `0x50001000[0]`（switch 计数）应随运行持续增长，
 且 `g_s3_diag[31]`（ppTask 运行次数）> 0。**
+
+## §1435 ★★★★★ 修掉 ISR 超时扫描的硬编码偏移（真 bug）
+
+`s3_isr_timeout_scan()` 把 `OsTask` 字段偏移写死了：`task[34]` 当 state、
+`task + 44` 当 wait_result。**实际布局不是这样。**
+
+真板实测（`g_tasks` 首槽，stride 0x70 已由 `g_tasks` 大小 0x700/16 独立确认）：
+
+```
++0x00 ctx      +0x20 stack_size   +0x2C **prio/base/state/core**  ← state 在 +44
++0x1C magic    +0x24 slice        +0x30 wait_obj
++               +0x28 delay_left   +0x34 wait_result
+```
+
+首槽 `+0x2C = 0x00010303` ⇒ prio=3, base=3, **state=1(READY)**, core=0。
+第二槽（ppTask）`+0x2C = 0x00010a0a` ⇒ prio=10, state=1。
+
+**旧代码的 `task[34] == 4` 永远不成立 ⇒ 超时条目被从 `g_to` 摘除，
+但任务永远不会被置 READY ⇒ 阻塞任务永久死锁。**
+这正是 §1433 里 "switch/yield 冻结、`g_to_count=0`、循环只跑 1 圈" 的根因。
+
+改成 `task[44]`（state）、`task + 52`（wait_result）、并顺带把 `delay_left`(+40) 清零。
+
+**修复效果（真板，立竿见影）：**
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `[pmoff]` 返回值 | `r=2`（失败）| **`r=0`（成功）** |
+| 后续流程 | 卡在 `failed to change power status` | 一路走到 `[v4]wifi|perform scan` + `[pppost]` |
+
+即库的扫描状态机**真的被推进了**，只是还差"消息循环消费队列"这一步。
+
+## §1436 ★★★★ ppTask 优先级映射：2 才是对的，但它跑起来就不让出
+
+`osi_task_create` 收到库的 `prio=29`（FreeRTOS 口径：数字越大优先级越高），
+映射到我们（0=最高）应为 `31-29 = 2`。
+
+- `p=20` / `p=10`（低于我们初始化任务的 3）：`port_task_yield()` 不会切过去
+  ⇒ ppTask 永远不运行（`diag[31]=0`），且**我们阻塞时 yield 立即返回 ⇒ 内核自旋死锁**。
+- `p=2`（高于 3）：ppTask 真的进来了（日志有 `[ppct] in`、`[task] ... prio=29(->2)`），
+  **但它进去后不出来**：两次 halt 的 PC 都停在 IRAM `wq_resolve+0x21`（0x4037b6f1），
+  switch/yield 计数冻结在 2，日志掉到 80 行。
+
+⇒ 可见 `S3_NO_PREEMPT`（协作式）下，**任一任务不让出就全局饿死**。
+ppTask 空转的原因是 `wq_resolve()` 对每次队列操作都做 O(堆大小/16) 扫描，
+而传入的 qh 的 magic 总不匹配 ⇒ 每次走全扫分支，且空队列时立刻重试不阻塞。
+
+**下一轮目标：让 ppTask 在空队列上真正阻塞**（修 `wq_resolve` 热路径 + 队列空时
+走 `osi_sem_take` 阻塞路径），而不是继续调优先级。

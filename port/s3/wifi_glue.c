@@ -925,7 +925,23 @@ static int osi_task_create(void *fn, const char *name, u32 stack, void *arg,
      * 改成 p=20 后它**再也不运行**（§1429 真板取证 diag[31]=0）。
      * 说明调度器本身没问题，是优先级把它饿死了。
      * 取中间值 10：让它能被调度，又不至于把初始化任务完全挤掉。 */
-    u32 p = 10u;
+    /* §§1436 ★★★★ **优先级方向反了**。
+     * 我们的初始化任务 prio=3（真板实测 g_tasks+44 = 0x00010303）。
+     * `S3_NO_PREEMPT` 下 port_task_yield() 只会切到**更高优先级**的任务，
+     * p=20/10 都低于 3 ⇒ yield 直接返回；而此时调用者已被置为
+     * BLOCKED（超时条目还被 ISR 摘掉了）⇒ **在内核里自旋死锁**。
+     * 真板取证完全吻合：g_to_count=0、diag[32]=1（循环只跑 1 圈）、
+     * switch/yield 计数冻结在 3、[scand] 一次没出现。
+     * 改成 2（高于我们的 3）⇒ yield 真的切到 ppTask了（真板取证：
+     * 日志出现 `[ppct] in` + `[task] 库建任务 fn=40382390 id=2 prio=29(->2)`）。
+     * **但 ppTask 进去后就出不来了**：PC 两次 halt 都停在
+     * IRAM `wq_resolve+0x21`（0x4037b6f1）——那是我们自己的 WiFi 堆扫描循环，
+     * 它在里面空转，switch/yield 计数冻结在 2，日志只剩 80 行。
+     * ⇒ 下一个硬骨头不是优先级，而是 **ppTask 为什么不在空队上阻塞**
+     *   （`wq_resolve` 对每次队列操作都做 O(堆/16) 扫描，而 qh 的 magic
+     *   总是不匹配 ⇒ 每次都走全扫分支）。
+     * 本轮先退回 20 保住 239 行的稳定基线，下一轮专门修这个。 */
+    u32 p = 20u;
     (void)prio;
     HIT_OF(_task_create);
     /* 库请求的栈往往偏小（ppTask 只要 3584），而 WiFi 协议栈的调用链很深，

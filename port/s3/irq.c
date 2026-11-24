@@ -318,9 +318,23 @@ void s3_isr_timeout_scan(void)
         n = n - 1u;
         g_to_count = n;
         if (id < 32u) {
+            /* §§1435 ★★★★ **偏移硬编码错了**。
+             * `include/c6os/task.h` 里 `state` 在 +34，但 .c6 编译器
+             * 对 `OsTask` 的实际排布不同（u64 对齐差异）。
+             * 真板实测（g_tasks 首槽，stride 0x70 已由 g_tasks 大小 0x700/16 确认）：
+             *   +0x1C magic, +0x20 stack_size, +0x24 slice, +0x28 delay_left,
+             *   +0x2C prio/base/state/core  ← state 在 **+44**，值 0x01=READY
+             *   +0x30 wait_obj, +0x34 wait_result, ...
+             * 旧代码写 `task[34]` —— 那里是 0，所以 `==4` 永不成立，
+             * 超时条目已被从 g_to 摘除但任务永远不被唤醒
+             * ⇒ 死锁。这就是 §1433 里 switch/yield 冻结在 3 的根因。 */
             volatile unsigned char *task = g_tasks + id * 0x70u;
-            volatile unsigned int  *wr   = (volatile unsigned int *)(void *)(task + 44u);
-            if (task[34] == 4u) { *wr = 0xFFFFFFFEu; task[34] = 1u; }
+            volatile unsigned int  *wr   = (volatile unsigned int *)(void *)(task + 52u);
+            if (task[44] == 4u) {
+                *wr = 0xFFFFFFFEu;          /* wait_result = -2 (超时) */
+                *(volatile unsigned int *)(void *)(task + 40u) = 0u;  /* delay_left = 0 */
+                task[44] = 1u;              /* state = READY */
+            }
         }
     }
 }
