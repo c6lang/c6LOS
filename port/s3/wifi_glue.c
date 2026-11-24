@@ -4524,6 +4524,10 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
 /* §1582 实验记录：包 `hal_init` 计数 ⇒ 因 DRAM 已到绝对上限
  * （连一个包装器都放不下，BSS/栈碰撞）而无法落地。已回退。 */
 
+/* §1590 实验记录：想包 `esp_wifi_init_internal` 验证 cfg 指针是否真的传到位，
+ * 但 DRAM 已到绝对上限（连这个探针都放不下，BSS/栈碰撞）。已回退。
+ * 剩余手段：在 IDF 参考构建里 dump 运行时 `g_wifi_menuconfig` 逐字节比对。 */
+
 extern int __real_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d);
 __attribute__((section(".flash.text")))
 int __wrap_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d)
