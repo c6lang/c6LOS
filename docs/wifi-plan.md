@@ -35481,3 +35481,28 @@ timeout 200 python3 tools/cap.py -t 190 > /tmp/cap.txt 2>&1
 **IRAM 一点余量都没有**：加打印前先想好删哪整条（多行 printf 必须括号配平删）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1567–§1568 又一次"自造噪声"：`esf_buf_setup` 其实带 count 参数
+
+反汇编 `esf_buf_setup`（0x4201d728）：
+```
+a11 = a2                     ← **它就是静态缓冲数**
+l16ui a11, a4, 88            ← 若 a11 为 0，则从 g_wifi_menuconfig+88 取
+...
+call8 esf_buf_setup_static(a10=1, a11, a12)
+```
+我们一直写 `extern int esf_buf_setup(void); esf_buf_setup();`
+⇒ 隐式 a2 = 未定义（实际是 0）⇒ 真板 `esf_buf_setup_static: alloc eb fail(0)`。
+
+**但把调用改成 `esf_buf_setup(32u)` 后，日志从 187 行掉到 121 行**（更差）
+⇒ 说明该调用点失败的原因不止 count（也说明这条直调路径本身很脆弱）。
+**已回退**，保持 187 行的基线。
+
+### 结论（写给下一轮）
+`alloc eb fail(0)` 里那个 `0` **大概率就是我们这条无参直调造成的**，
+但修正它并不会让池子可用 —— 因为 `esf_buf_setup_static` 内部还会失败
+（它自己的 eb 描述符/池子指针仍是空）。真正的路只有一条：
+**让库自己的 `pp_attach → esf_buf_setup` 在 `ic_init` 里完整跑一次**，
+而不是我们在外面补调。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
