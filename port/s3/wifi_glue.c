@@ -4374,8 +4374,7 @@ int __wrap_wifi_scan_start_process(void *msg)
       /* §1537 ★ 库的 scan-start 处理函数返回 -1（参数无效）。只多打两个
        * 关键字（IRAM 只允许这么点）：m[2] 很可能是 scan 参数指针，
        * m[3] 被 __wrap_pp_post 填成了 g_ic。 */
-      s3_ets_printf("[scanp] enter msg=%x b=%x %x %x\n",
-                    (u32)msg, mp[0], mp[2], mp[3]); }
+ }
 #ifdef S3_SCANP_PROBE
     /* §1546 ★ 参数块布局探针：填 1..16，库打印的 `channel=N` /
      * `home_channel_dwell_time=N` 会直接暴露字段偏移。 */

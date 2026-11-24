@@ -35225,3 +35225,29 @@ if (a10 != 1) → "skip all 2G channels in bandmode Auto when scanning"
    `scan_enter_oper_channel_process` / MAC 中断是否开始增长。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1556 尝试把 `chm_start_op` 的 op_state 复位（未落地）
+
+`g_chm->op_state(+4)` 必须是 `0xff`，否则 `chm_start_op` 直接返回 3、
+channel-enter 回调不执行、probe 帧不生成（§693 的旧结论）。
+本轮想用现成的 `S3_CHM_RESET` 打开它，但：
+- 直接打开 ⇒ **IRAM 溢出 40 字节**；
+- 把整块搬进 `.flash.text` 助手的补丁因锚点不匹配没落地
+  （`s3_scan_params_probe` 那段已被删，锚点失效）。
+
+⇒ 下次直接用一条命令改：在 `s3_nvs_state_fix()`（已在 flash）里加
+```c
+{ volatile u32 *c = (volatile u32 *)0x3fcef850u; u32 p = *c;
+  if (p) *(volatile u8 *)(p + 4u) = 0xffu; }
+```
+并在扫描前确认它被调用（`s3_nvs_state_fix()` 已经在扫描前被调用）。
+
+### 本轮（§1549–§1556）净进展汇总
+1. **监管域放行** ⇒ 信道首次可设（`[setch] r=258 → 0`）；
+2. **bandmode** `g_ic+0x2A1 = 1` ⇒ 不再"跳过所有 2G 信道"；
+3. **位图输出缓冲**（`arg==0` 时给 32 字节）⇒ 越过"2g bitmap 全无效"，
+   库推进到 `In 2G band, 5G channel bitmap does not take effect`；
+4. 记录了从 `r=-1` 到当前这一步之间的**每一道闸门**及其判据，
+   全部来自静态反汇编（`libnet80211.a` + 镜像地址）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
