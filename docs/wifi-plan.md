@@ -34447,3 +34447,36 @@ GDB 在停住时 halt，**live PC 就停在 `os_task_block_prepare`**（0x420173
 - `0x50001B00` **已被占用**（读回 0x3fcc7280 一类指针），我上一轮往那里写
   计数是错的，已删掉该写；
 - 结论不变：**任何新 RTC 诊断地址，先写魔数再读回验证**，不要凭"看起来空"。
+
+## §1514–§1515 本轮的两个实质结论
+
+### §1514 绕开 tcpip 线程：DHCP 回调**能**在我们任务里跑
+`tcpip_try_callback` 那条路要等 tcpip 线程被调度，而真板已证明它一旦跑起来
+就再也不会返回。改成**直接调用** `dhcp_start()`：
+真板打出 `[lwip] dhcp 直调` → `[lwip] dhcbcb` → `[lwip] DHCP 超时`。
+⇒ 回调确实执行了（`[lwip] dhcbcb` 是回调体内的打印），
+**DHCP 这条路本身是通的，只是没有收到 DHCP OFFER**。
+同时把 `TCPIP_THREAD_PRIO` 回到 2（不让它抢 CPU 又卡死）。
+
+### §1515 ★关键：**从来就没有真关联过**
+打开 `S3_REAL_ASSOC_GATE`（用库自己的 `g_sta_connected_flag==1` 判定，
+而不是 `esp_wifi_sta_get_ap_info()` 的返回值）后，真板打出：
+
+```
+[assoc] r=12306 flag=0 b=0:0:0:0:0:0
+```
+
+`flag=0`、BSSID 全 0 ⇒ **AP 关联从未成功**。
+之前所有 `[wifi] 已关联，ssid= channel=0` 都是**假阳性**
+（`sta_get_ap_info` 返回 0 只代表 ioctl 入队成功，§856 早有注释）。
+⇒ 这才是四项验收里第一项的真正门：**先让 AUTH/ASSOC 帧真的走完**，
+后面的 DHCP（DISCOVER 需要链路）、DNS、TLS、body 都是它的下游。
+
+⇒ 下一步唯一方向：AUTH/ASSOC 帧的**发送与接收**。
+- 发送：`ieee80211_send_setup` / `send_probereq` 的封装路径是否真的把帧交给 MAC；
+- 接收：AP 回的 AUTH response 是否被 `ppTask`/ISR 收进来（`0x500017C0` 被拒帧计数）。
+
+### §1516 栈/堆余量（顺手记录）
+`[https] 页缓冲申请失败`：`malloc(704)` 仍然失败 ⇒ C 堆已耗尽
+（`g_wifi_heap_mem` 48KB 被闭源库与 lwIP 吃掉）。等到真能连上时再处理。
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

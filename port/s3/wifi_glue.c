@@ -2954,6 +2954,17 @@ int s3_wifi_wait_connected(int ms)
          * 让延迟在 g_ic+0x1a8 的 AUTH 帧有机会被冲出去。 */
         {
             extern u8 g_sta_connected_flag;
+            /* §1515 ★ 取证：`r==0` 只是 ioctl 入队成功，**不代表真关联**。
+             * 把库自己的连接标志与 AP 记录里的 BSSID 打出来：
+             * 应看到 b=dc:d8:7c:5a:7a:46（我们路由器）且 flag=1。 */
+            { static u32 an_;
+              an_ = an_ + 1u;
+              if (an_ <= 6u) {
+                  s3_ets_printf("[assoc] r=%d flag=%u b=%x:%x:%x:%x:%x:%x\n",
+                                r, (u32)g_sta_connected_flag,
+                                (u32)ap[0], (u32)ap[1], (u32)ap[2],
+                                (u32)ap[3], (u32)ap[4], (u32)ap[5]);
+              } }
             if (r == 0 && g_sta_connected_flag == 1u) {
                 s3_ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
                            (const char *)(ap + 6), (unsigned)ap[39]);
@@ -3485,6 +3496,9 @@ void s3_timer_sweep(void)
      * 真板读数属于 0 已经一次次导致误判（§1471、§1478）。 */
     if (g_s3_diag[32] <= 70u) {
         volatile u32 *c = (volatile u32 *)0x50000F40u;
+        { extern volatile u32 g_sched_lock[];
+          s3_ets_printf("[lk] lock0=%u lock1=%u\n",
+                        (u32)g_sched_lock[0], (u32)g_sched_lock[1]); }
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);

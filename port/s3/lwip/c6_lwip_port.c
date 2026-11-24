@@ -288,9 +288,12 @@ int c6_lwip_start_dhcp(void)
      * 真板表现就是 `[wifi] 已关联` 之后**再无任何输出**。
      * `tcpip_try_callback` 只投递消息、立刻返回，tcpip 线程下次拿到 CPU
      * 时自然会执行它。 */
-    if (tcpip_try_callback(c6_dhcp_start_cb, (void *)netif_default) != ERR_OK) {
-        s3_ets_printf("[lwip] postfail\n");
-    }
+    /* §1514 ★ 绕过 tcpip 线程：真板已证明"tcpip 线程一旦被调度就再也不会
+     * 返回"（阻塞/唤醒路径在 windowed 切换下不可靠，日志精确停在
+     * `[lwipt] go`、切换计数只有 4）。而 DHCP 只需要在 netif 上发起
+     * DISCOVER，不依赖 tcpip 线程的 mailbo。这里直接调用。 */
+    s3_ets_printf("[lwip] dhcp 直调\n");
+    c6_dhcp_start_cb((void *)netif_default);
     LWSTAGE(0x212);
     return 0;
 }

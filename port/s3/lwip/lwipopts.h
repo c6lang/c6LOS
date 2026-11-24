@@ -45,7 +45,7 @@
 /* lwIP 的 tcpip 线程：默认 TCPIP_THREAD_STACKSIZE=0（在 NO_SYS=0 下非常危险），
  * 我们内核会把 0 当成最小值；这里显式给 4KB，优先级放在我们任务的中间档。 */
 #define TCPIP_THREAD_STACKSIZE          (4 * 1024)
-#define TCPIP_THREAD_PRIO               1  /* §1508 实验：与 WiFi 主任务同级 */
+#define TCPIP_THREAD_PRIO               2
 #define TCPIP_MBOX_SIZE                 16
 #define DEFAULT_RAW_RECVMBOX_SIZE       8
 #define DEFAULT_UDP_RECVMBOX_SIZE       8

@@ -26,7 +26,7 @@ static u32 g_snap_done = 0;    /* 一次性快照是否已做过 */
 
 static void os_task_wake_join(u32 id);
 static void (*g_mutex_release_hook)(u32 id) = 0;
-static volatile u32 g_sched_lock[C6OS_MAX_CORES] = {0};
+volatile u32 g_sched_lock[C6OS_MAX_CORES] = {0};
 static volatile u32 g_switch_count = 0;
 
 void os_task_set_mutex_release_hook(void (*fn)(u32 id)) {
