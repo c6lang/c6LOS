@@ -109,6 +109,9 @@ static OsTask *sched_pick(u32 core) {
     OsTask *best = 0;
     u32 best_idx = 0;
 
+    u32 other_idx = 0;
+    OsTask *other = 0;
+
     while (i < (u32)C6OS_MAX_TASKS) {
         u32 idx = (g_rr + i) % (u32)C6OS_MAX_TASKS;
         OsTask *c = &g_tasks[idx];
@@ -118,11 +121,29 @@ static OsTask *sched_pick(u32 core) {
                 best = c;
                 best_idx = idx;
             }
+            /* §1503 ★★★ **除自己以外**的最优候选。
+             *
+             * 原来本函数只按"prio 数值最小"挑，而我们的 WiFi 主任务是
+             * prio=1（全场最小）⇒ `os_task_yield_force()` 把它放回 READY
+             * 之后，这里**又挑回它自己**，ppTask(prio2)/tcpip(prio2)
+             * 永远拿不到 CPU。真板证据：tcpip 线程创建成功（句柄 3）
+             * 却连入口第一行都没执行；`[tks]` 三个任务同时 READY。
+             * 主动让出时必须换成别人跑。 */
+            if (c != g_cur_arr[core]) {
+                if (other == 0 || (u32)c->prio < (u32)other->prio) {
+                    other = c;
+                    other_idx = idx;
+                }
+            }
         }
         i++;
     }
     if (best == 0) {
         return 0;
+    }
+    if (best == g_cur_arr[core] && other != 0) {
+        g_rr = (other_idx + 1u) % (u32)C6OS_MAX_TASKS;
+        return other;
     }
     g_rr = (best_idx + 1u) % (u32)C6OS_MAX_TASKS;
     return best;

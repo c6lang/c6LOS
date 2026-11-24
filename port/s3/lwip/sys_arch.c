@@ -280,6 +280,22 @@ extern volatile u32_t g_next_task_windowed;
 
 extern volatile unsigned int g_lwip_stage[8];
 
+/* §1502 ★ tcpip 线程到底跑没跑过？直接在线程入口打一行。
+ * 没有这行 ⇒ 线程从未被调度（问题在内核唤醒/调度，不在 lwIP）。 */
+static lwip_thread_fn s_real_thread;
+static void *s_real_arg;
+static void s_thread_thunk(void *a)
+{
+    extern int s3_ets_printf(const char *fmt, ...);
+    /* §1504 ★ 用 RTC 魔数取证（跨复位保留，不怕串口丢字）：
+     *   0x50001588 = 0x600D ⇒ 线程入口真的被执行了
+     *   0x5000158C = 0xDEAD ⇒ 线程入口跑完返回了（说明它立刻退出） */
+    *(volatile unsigned int *)0x50001588u = 0x600Du;
+    s3_ets_printf("[lwipt] go\n");
+    s_real_thread(s_real_arg);
+    *(volatile unsigned int *)0x5000158Cu = 0xDEADu;
+}
+
 sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
                             void *arg, int stacksize, int prio)
 {
@@ -295,9 +311,20 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     }
 
     g_next_task_windowed = 1u;
-    g_lwip_stage[4] = 0x541u;
-    (void)s3_w2c_task_create(name, (void *)thread, arg,
-                             (u32_t)prio, (u32_t)stacksize);
+    g_lwip_stage[4] = 0x541u; {
+        extern int s3_ets_printf(const char *fmt, ...);
+        /* §1502 ★ 原来这里 `(void)` 把返回值丢掉 —— 栈池不够时 tcpip 线程
+         * **创建失败也没有任何提示**，于是 tcpip_init 看似成功、DHCP 回调
+         * 永远没人执行。必须把它打出来。 */
+        int t;
+        s_real_thread = thread;
+        s_real_arg = arg;
+        t = (int)s3_w2c_task_create(name, (void *)s_thread_thunk, 0,
+                                    (u32_t)prio, (u32_t)stacksize);
+        g_lwip_stage[5] = (unsigned int)t;
+        { extern unsigned int os_task_count(void);
+          s3_ets_printf("[lwip] tcpip=%d cnt=%u\n", t, os_task_count()); }
+    }
     g_lwip_stage[4] = 0x542u;
     g_next_task_windowed = saved;
     return 1;

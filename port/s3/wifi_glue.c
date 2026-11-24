@@ -3490,6 +3490,16 @@ void s3_timer_sweep(void)
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
         { extern u32 g_c6os_ticks;
           s3_ets_printf("[tk] tick=%u\n", (u32)g_c6os_ticks); }
+        /* §1502 ★ tcpip 创建成功却从没跑过 —— 把每个任务的状态字
+         * （kernel/task.c6 的 +0x2C = {prio, base, state, core}）打出来。 */
+        { extern unsigned char g_tasks[]; extern u32 os_task_count(void);
+          unsigned int k;
+          s3_ets_printf("[tks] n=%u", os_task_count());
+          for (k = 0u; k < 6u; k++) {
+              u32 *tp = (u32 *)(void *)(g_tasks + k * 0x70u);
+              s3_ets_printf(" %x", tp[0x2Cu / 4u]);
+          }
+          s3_ets_printf("\n"); }
 
     }
 #endif

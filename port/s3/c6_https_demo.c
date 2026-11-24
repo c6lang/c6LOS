@@ -166,16 +166,16 @@ int c6_https_demo(void)
      * cap=4096 时实际上也只攒到 2048 字节就 break 了，多出的 2KB 纯浪费；
      * 而 OSI 堆只有 48KB（wifi_glue.c 的 g_wifi_heap_mem[12288]）、库自己还要用。
      * 打印只取前 700 字节，2048 完全够。省下的 2KB 留给 TLS 缓冲。 */
-    char *page = (char *)malloc(2048);
+    char *page = (char *)malloc(1024);
 
     net__tls12_hs__tls12_trace = 1;
     if (page == 0) {
         printf("[https] 页缓冲申请失败\n");
         return -1;
     }
-    memset(page, 0, 2048);
+    memset(page, 0, 1024);
     printf("[https] === 开始取 https://qq.com/ ===\n");
-    if (https_get("qq.com", "/", page, 2048) <= 0) {
+    if (https_get("qq.com", "/", page, 1024) <= 0) {
         printf("[https] 失败\n");
         return -1;
     }

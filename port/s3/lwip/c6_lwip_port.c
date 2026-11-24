@@ -259,24 +259,24 @@ int c6_lwip_start(const unsigned char *mac)
 /* §960: dhcp_start 必须在 tcpip 线程里执行 —— 见 c6_lwip_start_dhcp 的说明。 */
 static void c6_dhcp_start_cb(void *arg)
 {
+    s3_ets_printf("[lwip] dhcbcb\n");
     (void)dhcp_start((struct netif *)arg);
 }
 
 /* 关联成功之后再启动 DHCP（§253）。 */
 int c6_lwip_start_dhcp(void)
 {
-    s3_ets_printf("[lwip] start_dhcp 进入\n");
+    s3_ets_printf("[lwip] sd in\n");
     LWSTAGE(0x211);
     LWSTAGE2(1, 0x2111u);
     LWSTAGE(0x212);
     (void)esp_wifi_internal_reg_rxcb(C6_WIFI_IF_STA, (void *)c6_lwip_rx);
-    s3_ets_printf("[lwip] rxcb 已注册\n");
     LWSTAGE(0x213);
     if (netif_default == 0) {
-        s3_ets_printf("[lwip] netif_default 为空\n");
+        s3_ets_printf("[lwip] nonetif\n");
         return -1;
     }
-    s3_ets_printf("[lwip] netif 就绪，投递 dhcp_start\n");
+    s3_ets_printf("[lwip] sd ok\n");
     /* §960: §959 把 tcpip 线程真正拉起来之后，dhcp_start 就不能再从这个
      * （WiFi 主任务）上下文直接调了：它要 udp_new/udp_bind/udp_connect 并挂
      * dhcp_fine_tmr，而 tcpip 线程此刻正在跑 sys_timeouts —— 两边并发改同一份
@@ -289,7 +289,7 @@ int c6_lwip_start_dhcp(void)
      * `tcpip_try_callback` 只投递消息、立刻返回，tcpip 线程下次拿到 CPU
      * 时自然会执行它。 */
     if (tcpip_try_callback(c6_dhcp_start_cb, (void *)netif_default) != ERR_OK) {
-        s3_ets_printf("[lwip] dhcp 投递失败\n");
+        s3_ets_printf("[lwip] postfail\n");
     }
     LWSTAGE(0x212);
     return 0;
