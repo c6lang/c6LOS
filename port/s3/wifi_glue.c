@@ -3433,6 +3433,11 @@ void s3_timer_sweep(void)
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
+        s3_ets_printf("[yd] ent=%u sw=%u cur=%x st=%u\n",
+                      (u32)*(volatile u32 *)0x5000181Cu,
+                      (u32)*(volatile u32 *)0x50001000u,
+                      (u32)*(volatile u32 *)0x50001004u,
+                      (u32)*(volatile u32 *)0x50001820u);
     }
 #endif
 #ifdef S3_SWEEP_ALL
