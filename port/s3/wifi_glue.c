@@ -2693,6 +2693,11 @@ int s3_wifi_scan(void)
         return -1;
 #endif
     }
+#ifdef S3_LOOP_STAGE
+    /* §§1484 阶段变量：用一个 RTC 字记"死在第几句"。每处只多 2 条指令。
+     *   1=循环头  2=过 ISR 分发  3=过定时器扫表  4=过 delay */
+    { volatile u32 *c = (volatile u32 *)0x50000F40u; c[12] = i; c[13] = 1u; }
+#endif
     for (i = 0; i < 60; i++) {
         /* §705: WiFi MAC 中断在 call0 的 ISR 里只置标志；窗口化的库 ISR
          * 必须在本任务（windowed）上下文调用 —— ISR 里 call8 会在任意
@@ -2713,6 +2718,9 @@ int s3_wifi_scan(void)
                 __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
             }
         }
+#ifdef S3_LOOP_STAGE
+        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 2u; }
+#endif
 #ifdef S3_ETS_TIMER_DISPATCH
         /* §687: 驱动 ETS 软件定时器 —— scan 的 channel-dwell 回调靠它推进 */
         s3_ets_timer_dispatch();
@@ -2726,8 +2734,14 @@ int s3_wifi_scan(void)
             wDev_ProcessFiq(0);
         }
 #endif
+#ifdef S3_LOOP_STAGE
+        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 3u; }
+#endif
         { extern void s3_timer_sweep(void); s3_timer_sweep(); }   /* §§1430 定时器分发 */
         s3_w2c_task_delay(100u);
+#ifdef S3_LOOP_STAGE
+        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 4u; }
+#endif
 #ifdef S3_POLL_SCANH
         /* §684: pm_offchan_ready_or_defer 返回 0（deferred），它把 scan_start_handler
          * 存进 g_scan 等待 PM 稍后回调；我们的 PM stub 不会触发，所以真射频扫描
@@ -3926,6 +3940,13 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
         if (ppq < 18u) { ((volatile u8 *)0x3fcbbd50u)[ppq] = 0u; }
 #endif
         int rr = __real_pp_post(ppq, data);
+#ifdef S3_LOOP_STAGE
+        {
+            volatile u32 *c = (volatile u32 *)0x50000F40u;
+            s3_ets_printf("[stg] i=%u s=%u n=%u\n", (u32)c[12], (u32)c[13],
+                          (u32)g_s3_diag[32]);
+        }
+#endif
 #ifdef S3_TRACE_SCANMSG
         /* §671: 第 6 条消息投递后，用 windowed 包装读 ppTask 状态 + 队列计数。
          * os_task_probe 是 call0，直接从 windowed 的 wifi_glue.c 调会 TRAP，

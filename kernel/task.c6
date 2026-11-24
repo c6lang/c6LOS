@@ -844,15 +844,14 @@ void os_task_delay(u32 ticks) {
      * 这里改成自旋：反复 `s3_tick_consume()` 直到延迟到期；
      * 并**每 8 次强制让出一次**，让 ppTask 也能拿到 CPU。
      * 这样既不会死锁，也不会把同优先级任务饿死。 */
+    /* §§1484 纯忙等版本：**不调任何函数**，只把延迟消费掉就返回。
+     * 上一版自旋里调 `s3_tick_consume()`（会进入调度切换），
+     * 真板仍然 `[swp] n=1` 不动 ⇒ 疑点就在那次切换里。
+     * 这里完全不碰调度器，保证延迟一定返回。 */
     {
-        extern void s3_tick_consume(void);
         u32 n = 0u;
-        u32 lim = ticks + 4u;
-        while (g_cur->delay_left != 0u && n < lim) {
-            s3_tick_consume();
-            n = n + 1u;
-            if ((n & 7u) == 0u) { os_task_yield_force(); }
-        }
+        u32 lim = ticks * 200u + 200u;
+        while (n < lim) { n = n + 1u; }
         g_cur->delay_left = 0u;
         return;
     }
