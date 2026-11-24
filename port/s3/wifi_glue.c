@@ -23,6 +23,30 @@ void s3_fix_ic16(void);
  * ⇒ 该对象首字节必须是 **1 或 3**，否则扫描处理函数直接返回 -1
  * （真板一直 `[scanp] leave r=-1`）。放在 flash 里，IRAM 侧只留一次调用。 */
 __attribute__((section(".flash.text")))
+void s3_scan_params_probe(void *msg)
+{
+    /* §1547 ★★★★ 反汇编 `wifi_scan_start_process`：
+     *     a5 = *(u8*)(msg + 8);
+     *     a10 = (a5 == 0) ? 0 : (msg + 20);
+     *     ieee80211_sta_scan(a10, a4=*(u32*)(msg+12), ...)
+     * ⇒ **参数块在 `msg+20`，而且要 `msg[8] != 0` 才会被用**。
+     * 真板 `msg[8]=0` ⇒ 参数为 NULL ⇒ 库用默认值 ⇒ 打印 `channel=0`
+     * ⇒ "skip all 2G channels"。
+     * 这里把标志置 1，并把 msg+20 起的 16 个字填 1..16 作为布局探针。 */
+    volatile u8 *b = (volatile u8 *)msg;
+    volatile u32 *p;
+    u32 i;
+    if (msg == 0) {
+        return;
+    }
+    b[8] = 1u;
+    p = (volatile u32 *)(void *)((volatile u8 *)msg + 20u);
+    for (i = 0u; i < 16u; i++) {
+        p[i] = i + 1u;
+    }
+}
+
+__attribute__((section(".flash.text")))
 void s3_nvs_state_fix(void)
 {
     extern unsigned char g_wifi_nvs[];
@@ -4275,6 +4299,14 @@ int __wrap_wifi_scan_start_process(void *msg)
        * m[3] 被 __wrap_pp_post 填成了 g_ic。 */
       s3_ets_printf("[scanp] enter msg=%x b=%x %x %x\n",
                     (u32)msg, mp[0], mp[2], mp[3]); }
+#ifdef S3_SCANP_PROBE
+    /* §1546 ★ 参数块布局探针：填 1..16，库打印的 `channel=N` /
+     * `home_channel_dwell_time=N` 会直接暴露字段偏移。 */
+    {
+        extern void s3_scan_params_probe(void *params);
+        s3_scan_params_probe((void *)((volatile u32 *)msg)[3]);
+    }
+#endif
 #ifdef S3_SCANP_FIXARG
     /* §1538 实验：真板读到 `b=305 0 3fcc9504` ⇒ m[2]（第一个参数）是空，
      * 而 m[3] 指向堆里的缓冲（很像参数块）。若 m[2] 为空就把它补成 m[3]。 */

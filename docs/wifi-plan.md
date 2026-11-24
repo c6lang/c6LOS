@@ -35041,3 +35041,34 @@ home_channel_dwell_time）去对 scan 参数结构体的真实布局。
 可以从 `wifi_scan_start_process` 里 `a2+20`（参数块）的字段访问反推。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但扫描流程已首次真正启动）。
+
+## §1546–§1547 扫描参数定位：`msg+8` 标志 + 参数块在 `msg+20`（但库用的是内部副本）
+
+反汇编 `wifi_scan_start_process` 给出取参逻辑：
+
+```
+a5 = *(u8*)(msg + 8)
+a4 = *(u32*)(msg + 12)
+a10 = (a5 == 0) ? 0 : (msg + 20)      ← 参数块在这里，且要 msg[8] != 0
+ieee80211_sta_scan(a10, a4, g_ic+0x130)
+```
+
+真板 `msg[8] = 0` ⇒ 参数为 NULL ⇒ 库用默认值 ⇒ 打印 `channel=0`
+⇒ `skip all 2G channels in bandmode Auto`。
+
+实验（`-DS3_SCANP_PROBE`）：把 `msg[8]=1` 并把 `msg+20` 起填 1..16 作为
+**布局探针**（若生效，库打印的 `channel=N` / `home_channel_dwell_time=N`
+会直接暴露字段偏移）。
+结果：探针确实执行了（`[scanp]` 出现一次、`[ic16]`/`[nvs]` 都在），
+但库**仍打印 `channel=0`** ⇒ 它读的是**自己内部的参数副本**，
+不是这条消息里的块。
+
+⇒ 下一步：参数最终进入 `g_ic+0x130` 那个结构（`ieee80211_sta_scan` 和
+`cnx_sta_scan_cmd` 都拿它当第三参）。要么直接改 `g_ic+0x130` 里的
+band/信道字段，要么找到库把 msg 参数拷进去的那一步（`scan_cancel`
+之前的一小段）。
+
+### 本轮净进展
+**扫描状态机第一次真正启动**（库自己打印 `Start wifi scan`），
+`[scanp] leave r=-1` 消失。这是 40 多轮以来第一次越过 scan-start 的门。
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
