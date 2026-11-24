@@ -434,6 +434,12 @@ void port_init(void)
      * 这里按 IDF 的口径把 TIMG0 T0 配成 10ms 周期中断：
      *   APB 80MHz / 80 = 1MHz，报警值 10000 个计数 = 10ms。
      * 中断使能位（intenable bit6 = 0x40）start.S 已由 ROM 保留，无需再开。 */
+#ifndef S3_NO_TIMG_TICK
+    /* §1587 ★★★ 这段可能有害：ROM 的 `ets_timer` 用 **FRC1 = TIMG0 T0**，
+     * 我们把 T0 改成自己的 10ms 闹钟并接管其中断，会**破坏库的全部 ROM 定时器**
+     * ⇒ 库在扫描时从不武装 osi 定时器（`[tarm]`=0）、信道驻留永不结束。
+     * 而我们的 tick 实际来自 `ccompare0`（§1500 已证），这段是历史遗留。
+     * 用 `-DS3_NO_TIMG_TICK` 可关掉它做对照。 */
     {
         volatile u32 *tg = (volatile u32 *)S3_TIMG0_BASE;
 
@@ -450,6 +456,7 @@ void port_init(void)
         tg[0x00u / 4u] = 0xC0000000u | (80u << 13) | 0x00000400u;
         tg[0x64u / 4u] = 0u;               /* 重新上锁 */
     }
+#endif /* S3_NO_TIMG_TICK */
     /* RTC 慢存跨 CPU 复位是**保留**的，诊断区若不清零，读回来的就是上一次
      * （甚至更早）启动的残留 —— 我们已经被这一点误导过：两处"库侧返回地址"
      * 看起来都落在 ppTask 里，其实是前一次启动写下的。所以启动时统一清掉。 */
