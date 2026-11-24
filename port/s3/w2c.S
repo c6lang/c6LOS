@@ -744,15 +744,24 @@ s3_win_spill:
      *   +12 本函数的 a1   +16 调用者的 a1（= a1+48） */
     l32r    a2, 3b
     l32i    a3, a2, 0
-    addi    a3, a3, 1
+    /* §§1369：RTC 上电是垃圾 —— 读到 >=0x400 就当作垃圾重置。 */
+    movi    a4, 0x400
+    bltu    a3, a4, 4f
+    movi    a3, 0
+4:  addi    a3, a3, 1
     s32i    a3, a2, 0
-    rsr     a3, windowbase
-    s32i    a3, a2, 4
-    rsr     a3, windowstart
-    s32i    a3, a2, 8
-    s32i    a1, a2, 12
-    addi    a3, a1, 48
-    s32i    a3, a2, 16
+    /* 环形缓冲：最近 4 次 spill，每条 16 字节，基址 +0x20 */
+    extui   a5, a3, 0, 2
+    slli    a5, a5, 4
+    addi    a4, a2, 0x20
+    add     a4, a4, a5
+    rsr     a5, windowbase
+    s32i    a5, a4, 0
+    rsr     a5, windowstart
+    s32i    a5, a4, 4
+    s32i    a1, a4, 8
+    addi    a5, a1, 48
+    s32i    a5, a4, 12
     bbci.l  a0, 31, 1f          /* 用 call4 调的 */
     bbsi.l  a0, 30, 2f          /* 用 call12 调的 */
     call4   .Lws52              /* 用 call8 调的：再补一个 call4 */
