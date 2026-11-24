@@ -36037,3 +36037,50 @@ partial/full 校准模式都试过、关注入校准也试过、TIMG0 配置已�
 ## 后续唯一路径
 装 IDF 专属工具链（`esp-15.2.0_20251204`，需联网）→ 用官方 app 同板验证射频；
 若官方正常 ⇒ 差异在 PHY 使能序列；若官方也收不到 ⇒ 射频硬件/天线/供电问题。
+
+## §1589 ★ IDF 官方 app 已在同板跑起来（重大对照资产），并得到关键反证
+
+### 我们成功构建并烧写了 IDF 官方 station 示例
+```bash
+export IDF_PATH=/media/winger/inst_26/esp/esp-idf ESP_IDF_VERSION=6.0.1
+PY=/home/winger/.espressif/python_env/idf6.0_py3.12_env/bin/python
+# 关键：用 IDF 自己的工具链（本机已存在！）
+export PATH=/media/winger/inst_26/esp/.espressif/tools/xtensa-esp-elf/esp-15.2.0_20251204/xtensa-esp-elf/bin:$PATH
+$PY $IDF_PATH/tools/idf.py -B /tmp/bsta -D SDKCONFIG_DEFAULTS=/tmp/sdkdefaults set-target esp32s3
+$PY $IDF_PATH/tools/idf.py -B /tmp/bsta build        # ✅ 成功
+```
+产物：`/tmp/bsta/wifi_station.bin`（**这份 ELF 带符号，可做逐函数对照**）。
+
+### IDF app 在同板上的库打印（对照基准）
+```
+Init data frame dynamic rx buffer num: 32
+Init static rx mgmt buffer num: 5
+Init management short buffer num: 32
+Init dynamic tx buffer num: 32
+```
+⇒ **库本身完全正常**，配置值来自 `WIFI_INIT_CONFIG_DEFAULT()`。
+
+### 反证：我们的 cfg 数值与 IDF 一致、偏移也对，但库仍读到 0
+- 已按 IDF 的 `sdkconfig.h` 把数值改回
+  `static_rx=10 / dynamic_rx=32 / tx_buf_type=1 / dynamic_tx=32 / mgmt=32`；
+- `wpa_crypto_funcs_t` 实测就是 **44 字节**（4+4+9×4），与我们用的偏移一致；
+- 但真板库打印**仍然全是 0**。
+
+⇒ **结论：不是数值、也不是偏移，而是"这块 cfg 根本没被库接收"**
+（`esp_wifi_init_internal` 返回 0 却不生效 —— 与本项目反复出现的
+"windowed 参数没传到位"是同一类问题）。
+下一步非常明确：**在 IDF app 与我们的镜像里分别 dump
+`g_wifi_menuconfig` / `g_wifi_cfg_blob` 的运行时内容并逐字节比对**，
+定位是"指针没传到"还是"库拷到了别处"。
+
+### 板子恢复（务必记住）
+刷过 IDF app 后板子会**重启循环**（它的分区表把 app 放在 0x10000，
+与 c6LOS 的 0x20000 不符）。恢复办法（`tools/flashbl.sh` 的等价手写版）：
+```bash
+REF=/media/winger/inst_26/esp/xiaozhi/build
+esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset --after hard-reset \
+  write-flash 0x0 $REF/bootloader/bootloader.bin \
+              0x8000 $REF/partition_table/partition-table.bin \
+              0x20000 build/wifi/c6os.bin
+```
+（不要用 `tools/flashbl.sh`，它用 `sudo -n`，非交互会失败。）
