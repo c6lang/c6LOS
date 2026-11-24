@@ -32879,3 +32879,57 @@ void __wrap_ieee80211_send_setup(u32 a1, u32 a2, ...)
 
 **⇒ 构建通过。真板尚未验证（USB 掉线，`/dev/ttyACM*` 不存在）。**
 **⇒ 恢复连接后第一件事：刷写并看 `S3_PROBE_FIX`（`g_s3_diag[19]`）是否从 0 变正。**
+
+## §1417 ELF 级验证：两个包装器的替补逻辑都正确生成
+
+反汇编当前构建（`md5=7b032c7a30abf7909c27b0434c7d847e`）：
+
+`__wrap_ieee80211_send_setup` @ `0x420118b8`：
+```
+420118cb: bnez.n a2, +0x34      ; ★ 检查的是 a2 —— 它正是"参数 a1"(=ctx)
+420118d3: l32i   a9, a8, 112    ; g_s3_diag[28]      (112/4 = 28)
+420118d6: beqz.n a9, +0x34      ; 为 0 则不替补
+420118db: l32i   a9, a8, 76     ; g_s3_diag[19] = S3_PROBE_FIX++
+420118e9: l32i   a10, a8, 112   ; 取出 vif 放进 a10（第 1 实参）
+```
+`__wrap_ieee80211_send_probereq` @ `0x42011824`：
+```
+4201188c: bnez.n a10, +0x1e     ; ctx != 0 ?（编译器已把参数 a1 拷到 a10）
+42011891: l32i   a9, a8, 112    ; g_s3_diag[28]
+42011894: beqz.n a9, +0x1e
+42011899: l32i   a9, a8, 76     ; S3_PROBE_FIX++
+420118a7: l32i   a10, a8, 112   ; 替补 vif
+420118b0: call8  ieee80211_send_probereq
+```
+**⇒ 两个替补点都放在第 1 个实参位置，检查的也是第 1 个实参。逻辑正确。**
+
+另外 `ieee80211_send_probereq` 的反汇编也证实了这一点：
+```
+297: mov a10, a2      ; ← send_setup 的 ctx = send_probereq 的 arg1
+2a0: mov a11, a4      ; ← buf  = arg3(a4)
+2a2: ... callx8 ieee80211_send_setup
+```
+
+## §1418 ⚠ 硬件阻塞与恢复清单
+
+**开发板 USB 已掉线**：`/dev/ttyACM*` 不存在，`lsusb` 无 ESP 设备，
+`openocd` 报 `esp_usb_jtag: could not find or open device!`。
+
+**需要物理重插 USB 线（正常复位，不要用 JTAG reset）。**
+
+恢复后按序执行（本构建已就绪）：
+```bash
+cd /home/winger/rtos-c6
+pkill -x openocd 2>/dev/null
+esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset --after hard-reset \
+  write-flash 0x20000 build/wifi/c6os.bin
+timeout 160 python3 tools/cap.py -t 150 > /tmp/c400.txt 2>&1
+wc -l /tmp/c400.txt
+grep -E "\[ctx\]|scan_start|关联|ap_num|scanp2|\[w1\]" /tmp/c400.txt | tail -8
+```
+**判据：**
+- `[ctx] vif=... icE8=...` 出现（已确认会打印）；
+- **`g_s3_diag[19]`（`S3_PROBE_FIX`）应从 0 变为正数** ← 这是替补是否命中的唯一判据；
+- 若 FIX > 0 且行数 > 235、或出现 `[wifi] 已关联`，说明方向通了。
+
+`g_s3_diag` 当前 `0x3fcc7c90`，`slot28 = 0x3fcc7d00`，`slot19(FIX) = 0x3fcc7cdc`。
