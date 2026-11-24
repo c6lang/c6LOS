@@ -3390,11 +3390,11 @@ u32 s3_wifi_bringup(void)
             wcfg(4u + k * 4u, tab[k]);
         }
     }
-    wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
-    wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
+    wcfg(48u,  4u);            /* static_rx_buf_num      Kconfig default 10  */
+    wcfg(52u,  8u);            /* dynamic_rx_buf_num     default 32          */
     wcfg(56u,  0u);             /* §1527 tx_buf_type = 0 静态（库调的是 esf_buf_setup_static） */
     wcfg(60u,  8u);             /* §1527 static_tx_buf_num = 8（原来 0 ⇒ alloc eb fail(0)） */
-    wcfg(64u,  32u);            /* dynamic_tx_buf_num     default 32          */
+    wcfg(64u,  8u);            /* dynamic_tx_buf_num     default 32          */
     wcfg(68u,  1u);             /* rx_mgmt_buf_type       DYNAMIC_RX_MGMT_BUF default 1 */
     wcfg(72u,  5u);             /* rx_mgmt_buf_num        default 5           */
     wcfg(76u,  0u);             /* cache_tx_buf_num       feature_caps 未开 CACHE_TX_BUFFER */
@@ -3407,7 +3407,7 @@ u32 s3_wifi_bringup(void)
     wcfg(104u, 6u);             /* rx_ba_win              default 6           */
     wcfg(108u, 0u);             /* wifi_task_core_id      单核跑，用 0 号核    */
     wcfg(112u, 752u);           /* beacon_max_len         default 752         */
-    wcfg(116u, 32u);            /* mgmt_sbuf_num          default 32          */
+    wcfg(116u, 8u);            /* mgmt_sbuf_num          default 32          */
     wcfg(120u, 0u);             /* feature_caps 低 32 位   先全关             */
     wcfg(124u, 0u);             /* feature_caps 高 32 位                       */
     wcfg(128u, 1u);             /* sta_disconnected_pm    default y           */

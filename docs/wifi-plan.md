@@ -35283,3 +35283,40 @@ channel-enter 回调不执行、probe 帧不生成（§693 的旧结论）。
 -DS3_SETCH_DIRECT` 时：信道可设、扫描状态机启动到"构造信道列表"，
 停在 `In 2G band, 5G channel bitmap does not take effect` 之后。
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1560–§1561 扫描标志位修正有效，但撞上**WiFi 堆耗尽**
+
+### §1560 `g_scan->[+70]` bit0（已修，有效果）
+反汇编 `scan_enter_oper_channel_process`（0x4202f650）：
+```
+a8 = g_scan; a8 = *(u32*)a8; a8 = *(u8*)(a8 + 70)
+if ((a8 & 1) == 0) → retw            ← 什么都不做
+else → scan_pm_offchan(scan_enter_oper_channel_handler)
+```
+真板 `[scanfl] b70=0 -> 1` 之后，`scan_pm_offchan` **真的被调用了**
+（`[pmoff] a=42030c58 b=0 r=2`），说明这个 bit 是"是否允许离信道扫描"。
+但它返回 **2**，紧接着出现：
+
+### §1561 ★ 新墙：`[heap] 分配失败 n=1600`
+```
+[heap] 分配失败 n=1600
+[v1]wifi|esf_buf_alloc: invalid type=0
+```
+⇒ 库要为 RX 分配 1600 字节，而 **48KB 的 WiFi 堆已耗尽** ⇒ 帧缓冲分配失败
+⇒ 依然收不到帧（`irq=0`）。
+
+- 试过把堆从 48KB 加到 64KB ⇒ **BSS/栈碰撞**（DRAM 一点余量都没有）；
+- 试过把我们 cfg 里的动态/静态缓冲数从 32/10 降到 8/4
+  ⇒ `[heap] 分配失败 n=1600` **不变**（那 1600 字节不是按这些计数分配的）。
+
+⇒ 下一步必须**腾 DRAM**（例如把栈池里 tcpip 那 8KB 让给 WiFi 堆，
+两者都是静态数组，一增一减不改变总 DRAM）：
+```c
+/* port/s3/ctx.c */  #define S3_STACK_POOL 40960u   → 32768u
+/* port/s3/wifi_glue.c */ g_wifi_heap_mem[12288]  → [14336]   (48KB→56KB)
+```
+前提是把 `sys_thread_new` 给 tcpip 的 8192 降到 ~4096 仍能创建
+（wifi 16KB + ppTask 16KB + tcpip 4KB = 36KB > 32KB ⇒ 还要再挤，
+或者干脆不创建 tcpip —— 我们已经在 §1514 绕开它了）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
