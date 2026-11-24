@@ -1496,7 +1496,21 @@ static int osi_event_post(const char *base, int id, void *data, u32 size, u32 ti
  * 这里用内核 tick（TICK_HZ=100，10ms/格）实现最小软件定时器；
  * 回调由 s3_ets_timer_dispatch() 在 windowed 上下文触发。
  * ETSTimer 布局（rom/ets_sys.h）：next@0 expire@4 period@8 func@12 arg@16。 */
-#define S3_ETS_TIMER_MAX 4u
+/* §§1456 ★ **回收律会偷掉已 setfn 但还没 arm 的定时器**。
+ * 真板证据：`[tarm] t=3fcd55e4 ms=120 ... fn=0`（扫描的换信道
+ * 定时器回调是空的）⇒ 扫完第一个信道就再无下文。
+ * 那个定时器分明 setfn 过，但§837 为了让 init 阶段占满 4 槽的
+ * 定时器不挡路，加了回收律（expire==0 && period==0 的槽直接拿来用）
+ * ⇒ **把那些"已注册、未装配"的定时器洗掉了**。
+ * 扩到 12 槽后不再需要回收，关掉它。 */
+/* §§1457 ★★★★★ **12 槽在 attach 阶段就被占满了。**
+ * 真板 `[tset]` 证据：n=1..12 全都拿到了槽（slot=3fcc8494..），
+ * 而 **n=13〜16 的 slot 全是 0** ⇒ 表满。那几个定时器后来
+ * arm 时就是 `fn=0`（真板 `[tarm] t=3fcd55e4 ms=120 ... fn=0`）
+ * ⇒ **扫描的换信道回调从来没装上** ⇒ 扫完第一个信道就死。
+ * §837 那个"回收律"只是把别人的槽抢给新来的，治不了本。
+ * 扩到 32。 */
+#define S3_ETS_TIMER_MAX 32u
 typedef struct {
     void *t;
     void (*fn)(void *);
@@ -1555,6 +1569,18 @@ static void osi_timer_setfn(void *t, void *fn, void *arg)
 {
     S3EtsTimer *e = s3_ets_find(t, 1);
     if (e != 0) { e->fn = (void (*)(void *))fn; e->arg = arg; }
+#ifdef S3_TIMER_DIAG
+    /* §§1457 把每次 setfn 都记下来，和 `[tarm]` 的 t 对比，
+     * 就能直接看出哪些定时器被 arm 但根本没 setfn 过。 */
+    {
+        static u32 n = 0u;
+        n = n + 1u;
+        if (n <= 20u) {
+            s3_ets_printf("[tset] n=%u t=%x fn=%x slot=%x\n",
+                          n, (u32)t, (u32)fn, (u32)(void *)e);
+        }
+    }
+#endif
 }
 
 __attribute__((section(".flash.text")))
