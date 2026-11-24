@@ -2835,30 +2835,7 @@ __attribute__((section(".flash.text")))
  * 直接在固件里打，没有地址歧义。
  * OsTask（stride 0x70）：+0=ctx, +8=入口, +0x1C=magic,
  * +0x20=栈大小, +0x28=delay_left, +0x2C={4 个字节}。 */
-__attribute__((section(".flash.text")))
-void s3_dump_tasks(void)
-{
-    /* §§1478 ★ **任务表全量转储到 RTC**（零字符串、体积最小）。
-     * `g_tasks` 地址每构建都变，已因地址错配误判过（§1471）；
-     * 从固件里直接读就没有歧义。
-     * 输出：0x50002000 起，每任务 6 个字：
-     *   {magic, 入口, 栈大小, ctx, delay_left, 尾部四字节} */
-    extern unsigned char g_tasks[];
-    volatile u32 *o = (volatile u32 *)0x50002000u;
-    u32 ii;
-    for (ii = 0u; ii < 6u; ii++) {
-        volatile u8 *b = (volatile u8 *)(void *)g_tasks + ii * 0x70u;
-        u32 mag = *(volatile u32 *)(void *)(b + 0x1Cu);
-        u32 *d = (u32 *)(void *)((volatile u32 *)o + ii * 6u);
-        if (mag != 0xc6a50001u) { continue; }
-        d[0] = mag;
-        d[1] = *(volatile u32 *)(void *)(b + 8);
-        d[2] = *(volatile u32 *)(void *)(b + 0x20u);
-        d[3] = *(volatile u32 *)(void *)(b + 0);
-        d[4] = *(volatile u32 *)(void *)(b + 0x28u);
-        d[5] = *(volatile u32 *)(void *)(b + 0x2Cu);
-    }
-}
+
 
 int s3_wifi_wait_connected(int ms)
 {
@@ -3551,9 +3528,6 @@ int __wrap_pp_create_task(void)
             extern int os_task_set_prio(u32 id, u32 prio);
             int pr = os_task_set_prio((u32)h, 2u);
             s3_ets_printf("[ppct] boost id=%u -> prio 2 r=%d\n", h, pr);
-#ifdef S3_TASK_DUMP
-            { extern void s3_dump_tasks(void); s3_dump_tasks(); }
-#endif
         }
     }
     return r;

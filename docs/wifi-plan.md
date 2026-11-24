@@ -33969,3 +33969,33 @@ beqi a10, 1 → 继续；否则 j 0x40382508
    （`os_task_create_on` + 自己的入口），而不是在裸上下文里跑完。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1478～1479 核选择其实是对的；ppTask 确实在跑，是在 recv 桥里空转
+
+### §1478 `g_prid_base` 是哨兵值，但**不影响**核选择
+真板读数：
+```
+$prid           = 52685 = 0xCDCD
+g_prid_base[0]  = 0xCDCD   g_prid_base[1] = 0xFFFFFFFF   （从未登记）
+g_s3_cur[0]     = 0x3fcc727c   （有效上下文）
+g_s3_cur[1]     = 0
+```
+`ctx.S` 的核选择是 `rsr prid` 与 `g_prid_base[0]` 比较：
+**两边都是 0xCDCD ⇒ 相等 ⇒ a12=0 ⇒ 用 `g_s3_cur[0]`（有效）**。
+⇒ 所以 §1477 推测的"索引到 g_s3_cur[1]=0 导致切换失效"**不成立**，
+`port_core_bind_self()` 因为 `g_prid_base[0] == v` 直接早返回，但它不改值也不影响结果。
+
+**⇒ 切换计数停在 3 的真实含义：系统里只有一个任务在实际运行，其余都被阻塞，
+所以几乎没有切换发生** —— 不是切换坏了。
+
+### §1479 `g_s3_cur[0] = 0x3fcc727c` 正是任务 id1 的 ctx
+之前任务表读数：`id1 ent=0x403823a8`（=**ppTask**）`ctx=0x3fcc727c`。
+两者相同 + `PC` 停在 `s3_win_spill+108`（我们的 W2C 桥壳内）
+⇒ **ppTask 此刻正在运行，并在 recv 桥里反复打转。**
+
+而 `[pppost] ppq=7` 的消息没有进到它手里的队列
+⇒ 要么 `pp_post` 实际投的是**另一个队列**，要么消息已被取走后
+`msg->id` 未能匹配到处理分支。**这是下一步要分辨的**
+（在 recv 成功分支上记录"取到了什么消息"到 RTC，而不是加 printf —— printf 会撑爆 IRAM）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
