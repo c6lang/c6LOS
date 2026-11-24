@@ -80,6 +80,20 @@ void s3_nvs_state_fix(void)
         } else {
             s3_ets_printf("[ic16] already %x\n", cur);
         }
+#ifdef S3_2GBITMAP_FILL
+        /* §1553 ★ 位图本身是 0（库打印 `2g bitmap ... = 0x0`）。
+         * 它与 bandmode(g_ic+0x2A1) 在同一个 band-info 结构里，
+         * 先把附近三个 u16 位置都写成 0x3FFF（1〜14 信道），
+         * 看库打印的位图值变不变来确定真实偏移。 */
+        {
+            u32 off;
+            for (off = 0x2A0u; off <= 0x2A4u; off = off + 2u) {
+                volatile u16 *w = (volatile u16 *)(void *)((u8 *)g_ic + off);
+                *w = 0x3FFFu;
+            }
+            s3_ets_printf("[2gb] 2A0..2A4 = 3FFF\n");
+        }
+#endif
         /* §1551 ★★★★★ 反汇编 `scan_bitmap_to_channel_list`（0x4202f5e4）：
          *     a4 = g_ic + 0x200
          *     a10 = *(u8*)(a4 + 161)        ⇒ g_ic + 0x2A1 = **bandmode**

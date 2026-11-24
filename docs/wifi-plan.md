@@ -35174,3 +35174,24 @@ if (a10 != 1) → "skip all 2G channels in bandmode Auto when scanning"
 3. 扫描状态机从 `r=-1` 一路推进到"构造信道列表"这一步。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1553 位图字段不在 `g_ic+0x2A0..0x2A4`
+
+`-DS3_2GBITMAP_FILL`：往 `g_ic+0x2A0/0x2A2/0x2A4` 三处 u16 写 `0x3FFF`。
+- 第一次（顺序错）：把 `g_ic+0x2A1`（bandmode）覆盖成 `0x3F`
+  ⇒ `skip all 2G channels` 立刻回来 —— 反而**反证**了 bandmode 就是这一格；
+- 改成**先写位图、最后写 bandmode** 后：`[band] 63 -> 1` 正确落定，
+  但库仍打印 `2g bitmap contains only invalid channels= 0x0`
+  ⇒ 位图**不在** `0x2A0..0x2A4`。
+
+⇒ 位图很可能在 `g_scan`（`3fcef854`）指向的结构里，或扫描自己的局部状态。
+`scan_build_chan_list` 里有 `a10 = g_scan; a9 = *(u32*)a10; a11 = *(u32*)(a9+76)`
+⇒ `g_scan->[+76]` 是一块信道数组，说明 `g_scan` 是个二级指针结构，
+位图应当也在它或它指向的结构里。
+
+### 当前状态（本轮结束）
+- 监管域放行 ⇒ 信道可设（`[setch] r=0`）；
+- bandmode=1 ⇒ 不再"跳过所有 2G 信道"；
+- 卡在"2G 位图为 0 ⇒ 只有无效信道"。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
