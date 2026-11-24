@@ -33061,3 +33061,36 @@ ppTask 创建后 `g_s3_diag` 仍为：
 
 **⇒ 扫描状态机在发出第一个 probe 后停住，等一个不会到来的事件。**
 最可能是 dwelt-time / scan-timeout 定时器不推进（与 §1422 的判断一致）。
+
+## §1426 尝试驱动 `ieee80211_timer_process` —— 失败并回退（79 行）
+
+**动机**：`ieee80211_scan.o` 依赖 `ieee80211_timer_process` 推进 dwell/scan-timeout；
+它若不跑，扫描就永远停在第一个信道（§1425）。它是**跨目标文件**引用，
+所以 `--wrap` 能生效。
+
+**做法**：加 `-Wl,--wrap=ieee80211_timer_process` +
+```c
+void __wrap_ieee80211_timer_process(void) { g_s3_diag[30]++; __real_...(); }
+```
+
+**结果：79 行（大幅回归）**。
+原因：真实的 `ieee80211_timer_process` **有 2 个参数**（反汇编 `entry a1,32` 后
+`mov a6,a2` / `extui a3,a3,0,8`），而包装器声明成 `void(void)` ⇒
+`__real_` 调用时 `a10/a11` 是垃圾 ⇒ 库内部逻辑崩坏。
+
+**⇒ 已完整回退**（去掉 wrap 与包装器），真板恢复 **237 行**。
+
+**教训**：对闭源库函数做 `--wrap` 时，**必须保持签名完全一致**；
+未知签名就只能原样透传全部 8 个寄存器参数（像 `__wrap_sta_recv_mgmt` 那样）。
+
+## §1427 round 201 结论
+
+**本轮净成果：ppTask 真正创建（`pp_task_hdl=2`，`pp_create_task` 返回 0），
+真板 235 → 237 行（新最佳）。**
+
+**待办（下一轮）：**
+1. 用**正确签名**（8 寄存器透传）重新包装 `ieee80211_timer_process` 计数，
+   确认它到底有没有在跑；
+2. 若没跑，则新建一个低优先级任务，每 ~5 tick 调一次
+   `ieee80211_timer_process(...)`（**必须带正确参数**），驱动扫描定时器；
+3. 观察 `PROBE_N` 是否从 1 变成 >1。
