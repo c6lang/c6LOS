@@ -161,7 +161,11 @@ void os_main(void)
      * 溢出源是 `s3_wifi_bringup()` 里那次 `esp_wifi_init_internal()` ——
      * 库在这个调用里跑得很深。8192 + 5168 > 13360，取 16384 留出余量。
      * 栈池同步从 36864 抬到 45056（16384 + 6144*4 = 40960，再留 4096 余量）。 */
-    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 3u, 16384u));
+    /* §1498 ★ prio 1，压过闭源库的 ppTask/tcpip_thread（都是 2）。
+     * 原来是 3 ⇒ `sched_pick` 严格按优先级取，只要 ppTask 是 READY，
+     * 我们的任务永远排不上，而 ppTask 在 `osi_queue_recv` 里自旋不让出
+     * ⇒ 永久饿死（真板任务表：task0 prio=3 READY / task1 prio=2 RUNNING）。 */
+    s3_beacon(2u, (u32)os_task_create("wifi", s3_win_wifi_main_task, 0, 1u, 16384u));
     g_next_task_windowed = 0u;
 #endif
     pstr("M4 task wifi ok\n");

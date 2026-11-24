@@ -34260,3 +34260,77 @@ ent=1228704039 sw=2 cur=af8bd444 st=1077385624
 判据：把 `port_task_switch` 里 `s32i a1, a3, 64` 存下的 sp 与
 各任务 `ctx->sp` 比对，若相等即说明调度器帧被任务帧顶替。
 （RTC 地址须先写魔数验证，见 §1494b。）
+
+## §1496–§1499 ★★★★★ 饿死与时间冻住：两个真 bug、两个真修
+
+这一轮用 GDB 读**权威符号**（不再靠 RTC 猜地址），把"让出后回不来"彻底定性。
+
+### §1496 否定：不是锁、不是任务数
+在 `[yd]` 打印里读 `g_sched_lock[0]` 与 `os_task_count()`，真板：
+```
+[yd] sw=2 lock=0 cnt=3
+```
+⇒ `os_task_yield()` 的两道早退（`g_cur==0 || g_sched_lock!=0`、
+`os_task_count()<=1`）**都不是原因**。
+（顺带：`.c6` 里新加的任何函数**默认进 IRAM**，那个 12 字节访问器
+直接把 IRAM 顶出去 4 字节；`__attribute__((section(".flash.text")))`
+在这个 `.c6` 编译器里**不生效**。要腾 IRAM 只能删代码或把逻辑搬 `.c`。）
+
+### §1496b 真 bug 一：我们的任务优先级太低（3 > 2，被饿死）
+GDB 读 `g_tasks`（stride 0x70，`+0x2C` = {prio, base, state, core}）：
+```
+task0 ctx=0x3fcc7270 ent=0x4037ab88(s3_win_wifi_main) stk=0x4000  word=0x00010303
+      -> prio=3, base=3, state=1(READY), core=0
+task1 ctx=0x3fcc72bc ent=0x403823a4(ppTask)         stk=0x4000  word=0x00010202
+      -> prio=2, state=2(RUNNING)
+task2 ctx=0x3fcc7308 ent=0x420862e8(tcpip_thread)   stk=0x2000  word=0x00010202
+      -> prio=2, state=2(RUNNING)
+```
+`sched_pick()` 选**prio 数值最小者**。我们的任务 prio=3，库任务都是 2 ⇒
+只要 ppTask 是 READY，**我们永远排不上**。而 ppTask 在 `osi_queue_recv`
+里自旋（队列空/`qh==0` 立刻返回）从不阻塞 ⇒ 永久饿死。
+**修：`tests/t_s3_wifi3.c6` 里 `os_task_create("wifi", ..., 1u, 16384u)`（3→1）。**
+（另一个记账疑点：表里**两个任务同时 state=RUNNING**，切换时状态没回写，
+但那是次要矛盾，先按优先级修。）
+
+### §1497 让出必须在对侧也有：`S3_YIELD_IN_GUARD`
+ppTask 自旋不让出，只提升我们的优先级仍会**反过来饿死 ppTask**。
+`S3_YIELD_IN_RECV` 不能用 —— 它在 IRAM 侧 `osi_queue_recv_body` 里多一次调用，
+**正好把 IRAM 顶出去 4 字节**（真板链接报 `overflowed by 4 bytes`）。
+改用零 IRAM 成本的做法：那个函数本来就无条件调 `s3_timer_dispatch_guarded()`，
+把"每 64 次让出一次（ISR 内跳过）"塞进**这个 flash 助手**里。
+
+### §1497b 真 bug 二：时间冻住（`g_c6os_ticks` 不涨）
+GDB 读数（决定性）：
+```
+g_c6os_ticks = 0x1b   (27)
+monitor resume; sleep 2; monitor halt
+g_c6os_ticks = 0x1b   (仍然是 27)
+```
+⇒ `S3_TICK_DEFER` 下时间只能由任务调 `s3_tick_consume()` 推进，
+而**阻塞等待的任务自己不会推进** ⇒ 每个 `os_task_delay()` 都在等
+一个永远不来的 tick，第一个 delay 就永久阻塞（日志停在 `[swp] n=1`）。
+**修：`s3_delay_advance(ticks)`（放 `.flash.text`）——先把时间推满，
+最后一次让出。** 替换我们自己的三处等待点
+（`s3_scan_iter` / `s3_wifi_wait_connected` / 另一处 `100u`）。
+**库的 `osi_task_delay` 不能这么换**（换了下板更早挂，日志只剩 79 行）。
+
+### §1499 真板结果（可用配置）
+```
+S3_CDEFS += -DS3_TICK_IN_ISR -DS3_YIELD_IN_GUARD
+S3_C6FLAGS 不变
+tests/t_s3_wifi3.c6: wifi 任务 prio 3 -> 1
+```
+```
+[swp] n=57 recv=0 yld=0 probe=1 tfir=2 d33=5658
+[swp] n=60 recv=0 yld=0 probe=1 tfir=2 d33=5961
+[wifi] scan_get_ap_num=0 num=0
+[wifi] connect=0
+[wifi] 已关联，ssid= channel=0
+```
+**405 行**（此前最好 356）；扫描 60 轮跑满；`d33` 从 **2** 涨到 **5961**；
+`tfir` 从 0 涨到 **2**（120ms dwell 定时器真触发过）。
+⇒ 时间与调度两个基础问题都解决了，剩下的瓶颈是
+**`scan_get_ap_num=0`（RX/扫描结果路径没收到 probe response）**。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

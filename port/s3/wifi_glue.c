@@ -698,8 +698,63 @@ void s3_timer_dispatch_guarded(void)
      * 直接调：到期项在叫 `fn` 之前就已经把 `expire` 清掉，
      * 所以重入不会重复触发同一个定时器。 */
     s3_ets_timer_dispatch();
+#ifdef S3_YIELD_IN_GUARD
+    /* §1497 ★ 零 IRAM 成本地把"让出"塞进 ppTask 的 recv 循环。
+     *
+     * ppTask 的 `osi_queue_recv` 往往立刻返回 0（队列空 / qh==0 早返回），
+     * 于是它在 recv 里**自旋、从不阻塞**，而无抢占内核下它不让出，
+     * 同优先级的我们的任务就永远拿不回 CPU。
+     * 这个助手本来就已经被 `osi_queue_recv_body` 每轮无条件调用，
+     * 所以在这里让出不增加 IRAM 任何一个字节（IRAM 只剩 4 字节裕量）。
+     * ISR 上下文里必须跳过。 */
+    {
+        static u32 n = 0u;
+        n = n + 1u;
+        if ((n & 63u) == 0u) {
+            extern u32 port_in_isr(void);
+            extern void os_task_yield_force(void);
+            if (port_in_isr() == 0u) { os_task_yield_force(); }
+        }
+    }
+#endif
 }
 #endif
+
+/* §1499 ★★★★★ **等待必须自己推进时间。**
+ *
+ * `S3_TICK_DEFER` 下 `g_c6os_ticks` 只能由任务调 `s3_tick_consume()` 推进。
+ * 真板 GDB 取证：挂死时 `g_c6os_ticks = 27`，`monitor resume` 两秒后
+ * **仍然是 27** —— 时间彻底冻住。于任何 `os_task_delay()` 都在等一个
+ * 永远不会到来的 tick，第一个 delay 就永久阻塞（日志停在 `[swp] n=1`）。
+ *
+ * 这里用"推进 1 tick + 让出一次"的循环实现等待，两个方向都能前进：
+ * 我们让出 → ppTask（prio 2，此刻唯一 READY）拿到 CPU 处理消息 →
+ * 它经 `S3_YIELD_IN_GUARD` 让出 → 环路按优先级（我们 prio 1）选回我们。
+ */
+__attribute__((section(".flash.text")))
+void s3_delay_advance(u32 ticks)
+{
+    extern void s3_tick_consume(void);
+    extern void os_task_yield_force(void);
+    u32 n = 0u;
+#ifdef S3_ADVANCE_YIELD_EACH
+    while (n < ticks) {
+        s3_tick_consume();
+        os_task_yield_force();
+        n = n + 1u;
+    }
+#else
+    /* §1499b：先把时间推满（不依赖任何切换，确定性推进），
+     * 最后让出一次，把 CPU 交给库任务。上一版每 tick 让出一次，
+     * 虽然 d33 从 2 涨到 103，但扫描循环只跑到 n=2（原来 60）——
+     * 每轮 100 次往返太依赖 ppTask 的配合。 */
+    while (n < ticks) {
+        s3_tick_consume();
+        n = n + 1u;
+    }
+    os_task_yield_force();
+#endif
+}
 
 /* §§1468 实体在 `.flash.text`，IRAM 侧只留一次调用。 */
 __attribute__((section(".flash.text")))
@@ -712,7 +767,7 @@ void s3_recv_yield(void)
     {   /* §§1471 真板取证：+4=recv_yield 调用次数，+5=强制让出次数 */
         volatile u32 *c = (volatile u32 *)0x50000F40u;
         c[4] = c[4] + 1u;
-        if ((s_cnt & 8191u) == 0u) { c[5] = c[5] + 1u; }
+        if ((s_cnt & 255u) == 0u) { c[5] = c[5] + 1u; }
     }
     /* §1130 当年删这里是因为在 W2C_SPILL 壳深处调 `port_core_id()` 会崩，
      * 那个框架问题已在 §1449 修掉。限频：每 512 次 recv 才让一次。 */
@@ -721,7 +776,7 @@ void s3_recv_yield(void)
      * 换成 `os_task_delay(1)`：它会**真把当前任务阻塞掉**，
      * 强制切换到 ppTask（1970里 recv 跑了 1860 万次，
      * 每 8192 次阻塞 1 tick 对吞吐量影响很小）。 */
-    if ((s_cnt & 8191u) == 0u) { os_task_yield_force(); }
+    if ((s_cnt & 255u) == 0u) { os_task_yield_force(); }
 }
 
 /* §§1480 干净取证：**到底有没有真正取到消息**。
@@ -2464,7 +2519,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             ie |= 1u;
             __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
             s3_ets_timer_dispatch();
-            s3_w2c_task_delay(100u);
+            { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); }
         }
     }
 #endif
@@ -2946,7 +3001,7 @@ int s3_wifi_wait_connected(int ms)
             s3_ets_timer_dispatch();
         }
 #endif
-        s3_w2c_task_delay(100u);
+        { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); }
 #ifdef S3_FORCE_YIELD_LOOP
         /* §§1472 ★★★★ **关键：让 ppTask 真正跑起来。**
          *
@@ -3428,16 +3483,12 @@ void s3_timer_sweep(void)
 #ifdef S3_SWEEP_PRINT
     /* §§1482 ★ **让固件自己报数**，彻底避开"GDB 读太早/地址错配"问题。
      * 真板读数属于 0 已经一次次导致误判（§1471、§1478）。 */
-    if (g_s3_diag[32] <= 2u || (g_s3_diag[32] % 20u) == 0u) {
+    if (g_s3_diag[32] <= 70u) {
         volatile u32 *c = (volatile u32 *)0x50000F40u;
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
-        s3_ets_printf("[yd] ent=%u sw=%u cur=%x st=%u\n",
-                      (u32)*(volatile u32 *)0x5000181Cu,
-                      (u32)*(volatile u32 *)0x50001000u,
-                      (u32)*(volatile u32 *)0x50001004u,
-                      (u32)*(volatile u32 *)0x50001820u);
+
     }
 #endif
 #ifdef S3_SWEEP_ALL
@@ -3520,9 +3571,11 @@ void s3_scan_iter(u32 i)
 #elif defined(S3_LOCAL_SPIN)
     /* §§1487 完全不碰内核：就地空转。用来区分
      * "延迟本身卡住" 还是 "延迟之后的代码卡住"。 */
-    { u32 k = 0u; while (k < 200000u) { k = k + 1u; } }
+    { u32 k = 0u;
+      while (k < 20000u) { k = k + 1u; }
+      { extern void os_task_yield_force(void); os_task_yield_force(); } }
 #else
-    { extern void s3_w2c_task_delay(u32 ticks); s3_w2c_task_delay(100u); }
+    { extern void s3_w2c_task_delay(u32 ticks); { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); } }
 #endif
     c[13] = 5u;
 }
