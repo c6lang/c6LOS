@@ -32989,3 +32989,40 @@ probe 已成功发出（`txret=0`），但：
 下一步应查：TX 完成/回收路径（`ic_tx_pkt` → `pp_post` → ppTask →
 `esf_buf_recycle`）里，我们播种的空闲链表块是否被正确回收；
 以及扫描超时/结果回调（`scan_done`）为何不触发。
+
+## §1421 RX 侧现状：收包环有数据，但 `sta_recv_mgmt` 一次没进
+
+真板读数（c402 那次运行之后）：
+```
+g_lwip_stage[4] = 0x00000542   → 高 16 位 = 0 ⇒ **sta_recv_mgmt 调用数 = 0**
+0x50000800（recv 环）: 0,2,0x3fcc48b0,**0x00983d81**,2,0x3fcc4710,**0x00983d7a**,...
+0x50001300（recv 返回值环）: 0x3fcba610,0,1,0x3fcc8074
+0x50000F40: 全 0
+```
+**⇒ 底层 recv 环确实有记录（带递增时间戳），说明驱动层在收包；
+但管理帧没有走到 `sta_recv_mgmt`。**
+
+**⇒ 所以瓶颈既不在"完全没有 RX"，也不在 TX（TX 已成功）——
+而是在 RX → 802.11 管理帧解析 → 扫描结果 这一段。**
+
+## §1422 round 200 结论与下一轮方向
+
+**已确认打通：**
+1. 上下文替补命中（`FIX=1`）；
+2. probe 帧构建 + TX 成功（`txret=0`）；
+3. 系统不再崩溃（tick 正常推进）；
+4. 驱动层 RX 有数据进入。
+
+**未打通：**
+- `PROBE_N` 仍是 1（只发了一个 probe，扫描没有推进到下一个信道）；
+- `sta_recv_mgmt` = 0（管理帧未进入解析）；
+- 无 scan-done、无关联、无 DHCP/TLS。
+
+**下一轮方向（按优先级）：**
+1. **查扫描为什么只发 1 个 probe**：`ss_state->scan_channel` 的推进依赖
+   每个信道的 dwell 定时器；看库的 `scan_timeout`/`scan_done` 回调为何不触发
+   （很可能与 `S3_TICK_DEFER` 下库自己的 timer 不推进有关）。
+2. **查 RX 到 `sta_recv_mgmt` 之间断在哪**：`0x50000800` 环已有包，
+   顺着 `ppRxPkt`/`sta_input` 找第一个没被调用的包装器（`sta_recv_mgmt` 已有计数）。
+3. 若两者都指向"库内部定时器不跑"，则考虑在 S3_TICK_DEFER 的 tick 里
+   同时驱动库的 `ets_timer` 处理链。
