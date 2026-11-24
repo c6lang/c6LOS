@@ -650,10 +650,21 @@ static void osi_wifi_delete_queue(u32 qh)
     WQ *q = (WQ *)qh;
     HIT_OF(_wifi_delete_queue);
     if (q == 0 || q->magic != WQ_MAGIC) { return; }
+#ifdef S3_QLEAK
+    /* §1534 ★★★★ **不真正释放**。
+     *
+     * 真板证据：ppTask 传给 `_queue_recv` 的句柄 `0x3fcc51a0` 落在 WiFi 堆里、
+     * 周围全是堆块头（`0xC6A50001`），既不是 `WQ*` 也不是 `&WQ.q`
+     * ⇒ 很像"队列已经被删掉、内存被别的分配复用，而库还在用旧句柄"。
+     * 这里改成只计数不释放（泄漏几十字节，可接受），让旧句柄仍然可解析。 */
+    *(volatile u32 *)0x50000368u = *(volatile u32 *)0x50000368u + 1u;
+    return;
+#else
     (void)s3_w2c_queue_destroy((void *)&q->q);
     osi_free(q->q.buf);
     q->magic = 0u;
     osi_free(q);
+#endif
 }
 static u32 osi_queue_create(u32 len, u32 size) { HIT_OF(_queue_create); return osi_wifi_create_queue(len, size); }
 static void osi_queue_delete(void *qh) { osi_wifi_delete_queue((u32)qh); }
@@ -814,6 +825,15 @@ int s3_recv_ret(int r, void *item)
     return 1;
 }
 
+#ifdef S3_RECV_CWRAP
+/* §1536：`_queue_recv` 的普通 windowed C 包装（可重入）。 */
+int osi_queue_recv_body(void *qh, void *item, u32 ticks);
+int s3_recv_cwrap(void *qh, void *item, u32 ticks)
+{
+    return osi_queue_recv_body(qh, item, ticks);
+}
+#endif
+
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     {
@@ -936,9 +956,17 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
          * ⇒ 所有 ioctl `failed to post` ⇒ 扫描 0 个 AP。
          * 改成从真队列取消息，让 ppTask 继续跑它自己的状态机。 */
 #ifdef S3_QFALLBACK
-        WQ *fb = s3_q_fallback();
-        if (fb != 0) {
-            q = fb;
+        /* §1535 ★ 纯内存内联，**不调用任何函数**。
+         * 上次用 flash 助手 `s3_q_fallback()`（callx8）时，ppTask 收到消息后
+         * 立刻崩在 `slot_read`（out=0x3d、WB=10、WS=0x540）——
+         * 在这个壳的窗口状态下再插一次调用就是又一次窗口轮转。
+         * 全场只创建过**一个**队列（RTC 0x50000350=1，句柄 0x3fcc8d44），
+         * 所以直接用 xphyQueue 那个全局里的值并校验 magic 即可。 */
+        {
+            WQ *fb = (WQ *)*(void **)0x3fcef904u;
+            if (fb != 0 && fb->magic == WQ_MAGIC) {
+                q = fb;
+            }
         }
 #endif
     }
@@ -1976,8 +2004,19 @@ void s3_wifi_osi_init(void)
      * （a1=3 / epc1=0x403822ef）⇒ **§1043 的深度/绕环理论也被推翻**：
      * 任何 windowed 调用返回后 ppTask 的 a1 都会被写成小常数，与深度无关。*/
     /* §1084：改走带 spill 的薄壳（阻塞点必须先在自由栈上 spill 祖先窗口） */
+#ifdef S3_RECV_CWRAP
+    /* §1536 ★★★★ `W2C_SPILL` 壳**不可重入**：它把调用者的 `a1` 存在**全局槽**
+     * 里，而 `queue_recv` 会阻塞 ⇒ 任务切换 ⇒ 另一个任务进入同一个壳、
+     * 覆盖那个槽 ⇒ 第一个任务回来时恢复成**别人的 a1**
+     * ⇒ ppTask 的输出指针变野值（真板：`slot_read` 里 out=0x3d、WB=10、WS=0x540）。
+     * 这里改用**普通 windowed C 包装**：参数走窗口、a1 在自己的帧里，
+     * 天然可重入。 */
+    { extern int s3_recv_cwrap(void *qh, void *item, u32 ticks);
+      OSI_SET(_queue_recv, s3_recv_cwrap); }
+#else
     { extern int s3_w2c_queue_recv(void *qh, void *item, u32 ticks);
       OSI_SET(_queue_recv, s3_w2c_queue_recv); }
+#endif
     OSI_SET(_queue_msg_waiting, osi_queue_msg_waiting);
     /* §§1132 ★★★：补上之前漏登记的回调。
      *
