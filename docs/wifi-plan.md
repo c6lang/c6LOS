@@ -34480,3 +34480,34 @@ GDB 在停住时 halt，**live PC 就停在 `os_task_block_prepare`**（0x420173
 `[https] 页缓冲申请失败`：`malloc(704)` 仍然失败 ⇒ C 堆已耗尽
 （`g_wifi_heap_mem` 48KB 被闭源库与 lwIP 吃掉）。等到真能连上时再处理。
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1517 TX 链断点的精确定位（本轮最硬的证据）
+
+在 `[swp]` 旁边加了 `[tx]`，把三个计数同时打出来：
+
+```
+[tx] n=58 tx=0 ret=0 ss=1 probe=0
+（n = 扫描轮次；tx = __wrap_ic_tx_pkt 次数；ss = __wrap_ieee80211_send_setup 次数；
+  probe = g_s3_diag[0]）
+```
+
+- **`tx=0`**：整个运行期间 `ic_tx_pkt` **一次都没被调用** ⇒ **没有任何一帧交给 MAC**。
+- **`ss=1`**：`ieee80211_send_setup` 只被调了 **1 次**（connect 里那一次）。
+- **`recv=0`**（同一行的 `[swp]` 里）：`osi_queue_recv_body` **从未被进入**。
+
+⇒ 结论（三条互相印证）：
+1. 不是"MAC 拒帧"，而是**帧根本没到 MAC**；
+2. `send_setup` 只调一次 ⇒ connect 的 AUTH 构造环节之后就没再继续；
+3. ppTask 的收队列体一次都没进 ⇒ **ppTask 虽然被创建、也进了 tramp
+   （入口 0x4038239c），但从没走到 `osi_queue_recv`**，所以它不可能帮我们把
+   tx 队列排空。
+
+⇒ 下一步就三选一查（按代价从低到高）：
+- `__wrap_ieee80211_send_setup` 里 `__real_...` 的**调用约定**：它是 `call8`
+  进库函数的薄壳，参数轮转（a2..a7 vs a10..a15）如果错位，库会拿到空 buf
+  而静默返回、不 tx；
+- 库内部 `send_setup` 是否只是把帧挂到 tx queue、真正发送要等 `ppProcessTxQ`
+  （若如此，问题回到 ppTask 为什么不跑）；
+- ppTask 停在它自己启动后的哪一步（在 tramp 里给 ppTask 单独记一个进度字）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
