@@ -1671,6 +1671,23 @@ void s3_ets_timer_dispatch(void)
             void *arg = e->arg;
             if (e->period != 0u) { e->expire = e->expire + e->period; }
             else { e->expire = 0u; }
+#ifdef S3_TIMER_DIAG
+            /* §§1465 **记录到底哪些定时器真的触发了**。
+             * 真板现状：扫描的 120ms 换信道定时器已经 arm 好
+             * （`[tarm] t=3fcd5864 ms=120 fn=4202d0a8`），分发器也跑了 2300 万次，
+             * 但 `g_s3_diag[7]` 只有 2 ⇒ **要看清是哪两个在跑、
+             * 扫描那个为什么没跑**。 */
+            {
+                extern volatile u32 g_s3_diag[];
+                u32 nf = g_s3_diag[35];
+                if (nf < 12u) {
+                    g_s3_diag[35] = nf + 1u;
+                    s3_ets_printf("[tfir] fn=%x arg=%x exp=%u now=%u\n",
+                                  (u32)(void *)fn, (u32)arg,
+                                  (u32)e->expire, (u32)now);
+                }
+            }
+#endif
             if (fn != 0) { fn(arg); }
         }
         i++;
