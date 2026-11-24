@@ -4521,6 +4521,9 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
 /* §1578 ★★★★★ `wDev_AppendRxBlocks` 是 ISR 把收到的帧挂进 RX 链表的入口。
  * 包住它计数：**这里为 0 就说明射频真的没收到任何帧**（比看 eb_space 更直接，
  * 因为 eb 分配发生在更后面，可能被别的因素挡）。 */
+/* §1582 实验记录：包 `hal_init` 计数 ⇒ 因 DRAM 已到绝对上限
+ * （连一个包装器都放不下，BSS/栈碰撞）而无法落地。已回退。 */
+
 extern int __real_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d);
 __attribute__((section(".flash.text")))
 int __wrap_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d)
