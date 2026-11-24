@@ -34678,3 +34678,42 @@ Init static rx buffer num: 0
 **`[tx] irq` 与 `tx` 开始增长**。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1526 下一步的唯一入口：把**真 init 消息**喂给 `wifi_init_process`
+
+### 已确认的事实
+- 配置块 `g_wifi_cfg_blob` 是**正确**的：真板日志
+  `B2 cfg@3fcc7e90 osi=3fcc81a8 magic@144=1f2f3f4f`，
+  且七个字段都按 IDF 官方 `WIFI_INIT_CONFIG_DEFAULT()` 填了
+  （`dynamic_rx_buf_num=32`、`dynamic_tx_buf_num=32`、`mgmt_sbuf_num=32` …）。
+- 但库自己打印的七项 `buffer num` **仍然是 0** ⇒ 库没从这块 cfg 取到数值。
+- `g_wifi_menuconfig` **早已非 0**（我们 `if (==0)` 的分支从未进入）
+  ⇒ 之前往 `s_mc[16]` 里填值全是空操作（那段已删，省 64 字节 DRAM）。
+
+### 推断（下一步要验证的）
+库里那些计数是在 `wifi_init_process` 里**从消息内容**复制进配置全局的。
+我们一直喂的是**手工伪造的消息**：
+```c
+u32 m[8]; for (i<8) m[i]=0;  m[3] = g_ic;  wifi_init_process(m);
+```
+除 `m[3]` 外全是 0 ⇒ 库把 0 复制进配置全局 ⇒ 七项缓冲数量全 0
+⇒ `esf_buf_alloc` 永远失败 ⇒ 一帧都分配不出来 ⇒ `ic_tx_pkt` 恒 0。
+
+而 `esp_wifi_init_internal` 当年**确实把真 init 消息投进了队列**
+（老日志里 `[pppost] ppq=6 data=3fcc93e0`），只是 ppTask 拿不到 CPU、
+这条真消息从未被处理。
+
+### 具体改法（已写好、因 IRAM 差 20~40 字节回退）
+1. `u32 g_s3_first_msg = 0u;`（已加，4 字节 DRAM）；
+2. `__wrap_pp_post` 里第一条 `ppq==6` 的消息存进 `g_s3_first_msg`；
+3. 直调处改成
+   `ri = wifi_init_process((void *)(g_s3_first_msg != 0u ? g_s3_first_msg : (u32)m));`
+4. 腾 IRAM 的办法：`__wrap_pp_post` 里 `[pppost]`、`[send]`、`[ppct] in`
+   这几条打印都在 IRAM，删掉任意 2~3 条即可（注意：**它们是多行 printf，
+   要整条删**，本轮两次只删了首行导致语法错误，白费了轮次）。
+
+### 判据
+库自己打印的 `Init ... buffer num:` **不再是 0**，且 `[tx]` 的
+`irq` / `tx` 开始增长。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
