@@ -81,6 +81,21 @@ void s3_nvs_state_fix(void)
             s3_ets_printf("[ic16] already %x\n", cur);
         }
     }
+#ifdef S3_SCAN_STRUCT_PROBE
+    /* §1548 ★ `g_ic+0x130` 就是 `ieee80211_sta_scan`/`cnx_sta_scan_cmd`
+     * 都当第三参的那个扫描参数结构。库打印
+     * `channel=0` / `home_channel_dwell_time=0` 说明它是空的。
+     * 用模式填充 1..24 让它自己把偏移打印出来。 */
+    {
+        extern unsigned char g_ic[];
+        volatile u32 *sp = (volatile u32 *)(void *)((u8 *)g_ic + 0x130u);
+        u32 k;
+        for (k = 0u; k < 24u; k++) {
+            sp[k] = k + 1u;
+        }
+        s3_ets_printf("[sp] filled g_ic+0x130\n");
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {

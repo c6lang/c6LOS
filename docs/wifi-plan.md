@@ -35072,3 +35072,32 @@ band/信道字段，要么找到库把 msg 参数拷进去的那一步（`scan_c
 **扫描状态机第一次真正启动**（库自己打印 `Start wifi scan`），
 `[scanp] leave r=-1` 消失。这是 40 多轮以来第一次越过 scan-start 的门。
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1548 `g_ic+0x130` 也不是那组打印的数据源
+
+`-DS3_SCAN_STRUCT_PROBE`：把 `g_ic+0x130` 起 24 个字填成 1..24
+（它就是 `ieee80211_sta_scan` / `cnx_sta_scan_cmd` 都当第三参的结构）。
+真板 `[sp] filled g_ic+0x130` 打印了，但库仍打印
+`channel=0 / home_channel_dwell_time=0 / skip all 2G channels`
+⇒ 那组打印读的**不是** `g_ic+0x130`，也不是 `msg+20`，也不是 `msg[12]`。
+
+⇒ 说明扫描参数另有一份（很可能是扫描任务自己的局部/全局状态，
+在 `ieee80211_start_scan` 内部构造）。继续静态追这条要有耐心，
+但**收益可能有限**，因为下面这个更根本的问题：
+
+### ★ 更根本的矛盾：扫描"开始了"，MAC 中断仍是 0
+同一轮日志：
+```
+[v4]wifi|Start wifi scan
+...
+[tx] n=1 tx=0 ret=0 ss=0 probe=0 irq=0 til=18
+```
+`irq` = `g_s3_diag[10]`（ISR 里 `ipend & 1` 的次数）= **0**。
+扫描都启动了、信道驻留了，MAC 却一次中断都没有
+⇒ **射频侧根本没有产生收发事件**（收不到 beacon，也就永远 0 个 AP）。
+
+⇒ 下一步应该转回**射频/MAC 使能**这一层（`ic_enable` / `mac enable` /
+PHY 的 channel 设置），而不是继续追扫描参数结构：
+即使把 `channel` 设对，没有 MAC 中断也不会收到任何帧。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（本轮：扫描状态机首次启动）。
