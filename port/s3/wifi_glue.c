@@ -3238,6 +3238,27 @@ int __wrap_pp_create_task(void)
     r = __real_pp_create_task();
     s3_ets_printf("[ppct] out r=%d hdl=%x\n", r,
                   (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
+    /* §§1437 ★★★★ **建完再提优先级**。
+     *
+     * §1436 取证：若以 prio 2（高于初始化任务的 3）创建 ppTask，
+     * 它**一创建就抢占**，而此时 `pp_create_task` 还没把库里的
+     * `ppQueue` 全局赋值 ⇒ ppTask 拿到的队列句柄是 0
+     * （`osi_queue_recv_body` 里 `qh == 0` 早返回的自己的注释就写着
+     * “库的 xphyQueue 全局是 0”）⇒ 它永远空转，创建者也永远回不来。
+     * 若以 prio 20（低于 3）创建，`pp_create_task` 能顺利跑完、
+     * 队列也赋值了，但 ppTask 再也得不到 CPU。
+     *
+     * 正解：**低优先级创建 → 返回后再改成 2**。
+     * 这样队列先就绪，ppTask 上来就能接到真队列并在空队上阻塞。
+     * 注意 hdl 就是任务 id（真板：创建前 hdl=0，创建后 hdl=2）。 */
+    {
+        unsigned h = *(volatile u32 *)(void *)pp_task_hdl;
+        if (h != 0u && h < 32u) {
+            extern int os_task_set_prio(u32 id, u32 prio);
+            int pr = os_task_set_prio((u32)h, 2u);
+            s3_ets_printf("[ppct] boost id=%u -> prio 2 r=%d\n", h, pr);
+        }
+    }
     return r;
 }
 
@@ -3517,6 +3538,14 @@ int __wrap_pm_offchan_ready_or_defer(void *a, void *b)
 {
     int r = __real_pm_offchan_ready_or_defer(a, b);
     s3_ets_printf("[pmoff] a=%x b=%x r=%d\n", (u32)a, (u32)b, r);
+#ifdef S3_PMOFF_FORCE
+    /* §§1438 实验：扫描总是卡在 `failed to change power status`。
+     * 真板取证：第一次 `pm_offchan_ready_or_defer` 返回 0（成功），
+     * 第二次（参数 a=0x42030578，来自信道切换路径）返回 2
+     * ⇒ 库判定 off-channel 不就绪 ⇒ 扫描中止 ⇒ AP 列表永远是空。
+     * 这里强制返回 0，验证能否跨过这个门槛。 */
+    if (r != 0) { return 0; }
+#endif
     return r;
 }
 

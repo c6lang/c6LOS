@@ -33239,3 +33239,56 @@ ppTask 空转的原因是 `wq_resolve()` 对每次队列操作都做 O(堆大小
 
 **下一轮目标：让 ppTask 在空队列上真正阻塞**（修 `wq_resolve` 热路径 + 队列空时
 走 `osi_sem_take` 阻塞路径），而不是继续调优先级。
+
+## §1437 ★★★★★ ppTask 优先级：**低优先级创建 → 返回后 boost 到 2**
+
+§1436 的死结解开。真板取证：
+- prio 2 创建 ⇒ ppTask 立刻抢占，但此时 `pp_create_task` 还没给库里的
+  `ppQueue` 全局赋值 ⇒ ppTask 拿到的队列句柄是 0 ⇒ 空转不让出
+  （`[ppct] in hdl=0` 之后**永远没有 `[ppct] out`**）。
+- prio 20 创建 ⇒ `pp_create_task` 能跑完（`[ppct] out r=0 hdl=2`），
+  但 ppTask 低于初始化任务的 3 ⇒ 永远得不到 CPU。
+
+**正解：`osi_task_create` 仍用 p=20 创建，`__wrap_pp_create_task` 在
+`__real_pp_create_task()` 返回后调 `os_task_set_prio(hdl, 2)`。**
+
+**效果（决定性）：队列终于活了。**
+```
+[ppct] out r=0 hdl=2
+[ppct] boost id=2 -> prio 2 r=0
+[zalloc] -> 3fccab04
+[pppost] ppq=6 data=3fccab04      ← 真实扫描消息进队列（此前恒为 ppq=0）
+[scanmsg] 3fccab04: 00000305 4037e43c ...
+[send] t=1 qh=3fcc8a74            ← 队列句柄有效
+```
+（`hdl` 就是任务 id；创建前 0、创建后 2。）
+
+## §1438 打通 `failed to change power status`，但强制 pmoff 会崩
+
+真板取证：扫描路径上 `pm_offchan_ready_or_defer` 被调用两次 ——
+第一次（`a=0x42030824`）返回 **0（成功）**，第二次（`a=0x42030578`，
+来自信道切换路径）返回 **2** ⇒ 库判定 off-channel 不就绪 ⇒
+`wifi|scan: failed to change power status` ⇒ 扫描中止 ⇒ AP 列表恒空。
+
+加 `-DS3_PMOFF_FORCE`（包装器里 `r != 0` 时返回 0）后：
+- **推进了**：越过该报错，出现 `[v4]wifi|first chan=0`（开始遍历信道）；
+- **但随后崩在 `_vec_default`（PC=0x4037a029）**：
+  `EXCCAUSE=0`、`EPC1 = EXCVADDR = 0x3fcd6000`、`a0=0x82030571`、`WB=8`、`WS=0x100`。
+  **EPC1 是个 DRAM 数据指针 —— 跳到数据上执行了。**
+
+`0x3fcd6000` 正是日志里我们自己的 `[ic16] set to 3fcd6000` 注入值
+（`s3_fix_ic16` 为了让 `ieee80211_sta_scan` 通过 `*(u32*)(g_ic+16) != 0` 而补的）。
+**⇒ 这个注入值是错的**：扫描一旦真正往下走，库会把它当别的用途（很可能是函数指针/
+链表节点）用 ⇒ 崩。**下一轮先查 `s3_fix_ic16` 该填什么真值**（大概率应是当前
+scan node / cnxMgr 的真实节点指针，而不是一个凭空常量）。
+
+## 本轮最佳构建
+
+```
+行数 250（历史最佳；此前 239）
+[wifi] associate ssid=weforpay.com     ← 出现了真正的关联尝试
+[wifi] connect=0
+[pppost] ppq=6 data=3fccab04          ← 队列通路打通
+尾部：越过 failed to change power status → [v4]wifi|first chan=0
+```
+四项验收：**AP=0 DHCP=0 TLS=0 body=0** —— 仍未取得，目标继续。
