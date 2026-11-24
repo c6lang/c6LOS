@@ -33026,3 +33026,38 @@ g_lwip_stage[4] = 0x00000542   → 高 16 位 = 0 ⇒ **sta_recv_mgmt 调用数 
    顺着 `ppRxPkt`/`sta_input` 找第一个没被调用的包装器（`sta_recv_mgmt` 已有计数）。
 3. 若两者都指向"库内部定时器不跑"，则考虑在 S3_TICK_DEFER 的 tick 里
    同时驱动库的 `ets_timer` 处理链。
+
+## §1424 ★★★★ ppTask 真正被创建（真板新最佳 237 行）
+
+之前一直以为"只创建了 1 个库任务"，本轮加打印后看清了：
+
+```
+[ppct] in hdl=0
+[task] 库建任务 fn=40382380 id=2 stack=16384 prio=29(->20)   ← 这就是 ppTask
+[ppct] out r=0 hdl=2
+```
+**⇒ `pp_create_task()` 正常返回 0，`pp_task_hdl = 2`，ppTask 已创建。**
+
+（之前 `__wrap_pp_create_task` 没有打印，所以误判成"没创建"；
+`0x50000E00+16` 的计数 `[4] = 1` 其实早就说明它被调用过。）
+
+**⇒ 真板行数 235 → 237（本会话新最佳）。**
+
+顺便确认：`pp_create_task` 的第一件事是调
+`g_osi_funcs_p->[168]`（`g_osi_funcs_p @0x3fcef940 → 0x3fcc8048`，
+`+168 = 0x4037b708`，非空 ROM 函数），vtable 是好的。
+
+## §1425 仍未解决：扫描只发 1 个 probe
+
+ppTask 创建后 `g_s3_diag` 仍为：
+```
+[0] PROBE_N = 1     ← 只发一个 probe
+[3] RGD_N   = 2
+[4] RGD_R   = 1
+[5] TX 数   = 1
+[19] FIX    = 1
+```
+卡点 PC 落在 `os_task_block_prepare+0x325`（阻塞/等待中，非崩溃）。
+
+**⇒ 扫描状态机在发出第一个 probe 后停住，等一个不会到来的事件。**
+最可能是 dwelt-time / scan-timeout 定时器不推进（与 §1422 的判断一致）。

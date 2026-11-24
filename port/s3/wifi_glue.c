@@ -2037,6 +2037,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 int rp = pp_attach();
                 s3_ets_printf("[ppattach] r=%d\n", rp);
             }
+            /* §1423（已回退：直调 pp_create_task 会自崩，147 行）ppTask 未被创建 */
             /* §§1210 ★★★：`pp_attach` 只能执行一次（真板返回 0x101），
              * 而它里面的 `esf_buf_setup`（建 TX 缓冲池）那次没成功。
              * 真板证据：`eb_txdesc_space @0x3fcbbf00` 全 0 ⇒ 池子没建。
@@ -3154,10 +3155,19 @@ int s3_wrap_timer_func(void *arg)
 }
 
 extern int __real_pp_create_task(void);
+__attribute__((section(".flash.text")))
 int __wrap_pp_create_task(void)
 {
+    int r;
+    extern unsigned char pp_task_hdl[];
     s3_wrap_bump(4u);
-    return __real_pp_create_task();
+    /* §§1424：**看它到底返回了没有**，以及旧句柄是否已存在。 */
+    s3_ets_printf("[ppct] in hdl=%x\n",
+                  (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
+    r = __real_pp_create_task();
+    s3_ets_printf("[ppct] out r=%d hdl=%x\n", r,
+                  (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
+    return r;
 }
 
 extern int __real_pp_post(unsigned int ppq, unsigned int data);
