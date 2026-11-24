@@ -35874,3 +35874,27 @@ irq=0
 **AP=0 DHCP=0 TLS=0 body=0** —— 四项均未取得。
 唯一障碍不在 ABI/内核层，而是 ESP32-S3 的 PHY/RF 前端不把任何
 802.11 帧送到 MAC（软件侧可查项已全部验证正常或排除）。
+
+## §1584 PHY 校准模式换成 FULL(2) 也无效
+
+`S3_PHY_CAL_MODE=0` 是 `PHY_RF_CAL_PARTIAL`（用 `g_phy_cal` 里已有的校准数据）；
+我们的 `g_phy_cal` 是 BSS 里的 0x770 字节（很可能是全 0），
+所以"用空数据做部分校准"本身就是可疑的。
+试 `-DS3_PHY_CAL_MODE=2`（`PHY_RF_CAL_FULL`，现场重做完整校准）：
+```
+[phy] calling register_chipv7_phy(mode=2)
+[rfpll] #1 ch=1 / #2 ch=6 / #3 ch=11 ...      ← PLL 照旧调谐
+irq=0                                        ← MAC 仍然一帧未收
+```
+⇒ 校准模式不是原因。
+
+### 至此：射频侧从软件层面能做的全部做完
+- 校准模式（partial / full）都试过；
+- 注入校准关掉也试过；
+- init data 与 IDF 一致、`phy_wakeup_init` 被调用、无 `phy_close_rf`；
+- RF ready 握手=1、PLL 调谐、RX 总开关开、混杂模式开、中断未屏蔽；
+- **`wDev_AppendRxBlocks` 计数 = 0、`eb_space` 全 0**。
+
+⇒ 结论：需要**板级硬件对照**（IDF 官方 app 跑同一块板子）才能判定是
+射频硬件、天线/供电，还是 PHY 使能序列与 IDF 的细节差异。
+本会话软件侧工作到此为止，代码与文档均已落档、可复现。
