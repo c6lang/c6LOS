@@ -35506,3 +35506,29 @@ call8 esf_buf_setup_static(a10=1, a11, a12)
 而不是我们在外面补调。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1570 给 `esf_buf_setup` 传 count 反而更差 ⇒ `alloc eb fail(0)` 是库自己的调用
+
+- 我们那条直调改成 `esf_buf_setup(32u)`（并修正原型、补回 `[esfalloc]` 打印）
+  ⇒ 真板 **121 行即崩**（基线 187 行），而且 `alloc eb fail(**0**)` 依旧出现；
+- 既然我们传的是 32、打印里仍是 0 ⇒ **那两次失败来自库自己的
+  `esf_buf_setup` 调用**，不是我们这条。
+
+⇒ 我们这条直调**保持无参原样**（它能返回 0、并让 `[seed]` 把
+idx=2/3/4 各 8 个 head 写好），别再去动它。
+
+### 当前真实状态（很关键，别误判）
+- `[esfsetup] r=0`、`[seed] idx=2/3/4 i=8 head=3fcc...` ⇒ **我们这条路径的池子是好的**；
+- 但库自己那条路径仍 `alloc eb fail(0)`；
+- `irq=0` 依旧 ⇒ MAC 从不上报 ⇒ 收不到帧。
+
+⇒ 下一轮不要再在 `esf_buf_setup` 上打转（已三次证明更差）。
+优先查 **MAC 中断为什么一次都不来**：
+1. `[setintr] src=2/src=0 prio=1`、`[ints_on] mask=1` 确实执行过；
+2. 我们的 `s3_timer_irq` 里对 `ipend & 1` 有计数（`g_s3_diag[10]`），恒 0
+   ⇒ 要么 MAC 没使能，要么 WiFi 中断被我们自己在 `intenable` 里长期屏蔽；
+3. `s3_scan_iter` 每轮会 `ie0 |= 1` 重新打开，但**非扫描期间**没人开
+   ⇒ 若 MAC 只在非扫描期间才有事件，也会被漏掉。
+   可以把"重新打开 WiFi 中断位"挪到 `s3_timer_sweep`（每轮都做）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
