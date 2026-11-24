@@ -177,6 +177,25 @@ int register_chipv7_phy(const void *init_data, void *cal_data, int cal_mode);
 
 static phy_cal_data_t g_phy_cal;
 
+/* §1593：把本机 MAC 写进 PHY 校准数据的头 6 字节（IDF 的
+ * `esp_phy_load_cal_and_init` 就这么做；校准只对同一 MAC 有效）。
+ * 放 `.flash.text`，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_phy_cal_set_mac(void *cal)
+{
+    extern int ets_efuse_get_mac(void *out);
+    u8 mac[6];
+    u8 *c = (u8 *)cal;
+    u32 i;
+    for (i = 0u; i < 6u; i++) { mac[i] = 0u; }
+    (void)ets_efuse_get_mac(mac);
+    if (c != 0) {
+        for (i = 0u; i < 6u; i++) { c[i] = mac[i]; }
+    }
+}
+
+
+
 /* 校准模式：0 = PHY_RF_CAL_PARTIAL（上电后的常规路径，轻）
  *           2 = PHY_RF_CAL_FULL（首次/换环境用，耗时长、电流大） */
 #ifndef S3_PHY_CAL_MODE
@@ -364,6 +383,19 @@ int s3_win_phy_step(int step)
     }
     if (step <= 4) {
         return 0;
+    }
+    /* §1593 ★★★★★ **IDF 会先把本机 MAC 写进校准数据**：
+     * `esp_phy_load_cal_and_init()` 里
+     *     cal_data = calloc(...); esp_efuse_mac_get_default(sta_mac);
+     *     memcpy(cal_data->mac, sta_mac, 6);
+     * 而 `esp_phy_calibration_data_t` 的第一个字段就是 `u8 mac[6]`，
+     * 且 IDF 文档明确写着"校准数据只对**同一 MAC** 的芯片有效"。
+     * 我们的 `g_phy_cal` 是 BSS（全 0）⇒ MAC 全 0 ⇒ 校准校验必然失败
+     * （真板 `register_chipv7_phy rc=1` 正是 ESP_CAL_DATA_CHECK_FAIL）。
+     * 这里用 ROM 的 `ets_efuse_get_mac` 读出 MAC 并写进去。 */
+    {
+        extern void s3_phy_cal_set_mac(void *cal);
+        s3_phy_cal_set_mac((void *)&g_phy_cal);
     }
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }

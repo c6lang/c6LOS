@@ -36150,3 +36150,50 @@ REF=/media/winger/inst_26/esp/xiaozhi/build
 esptool ... write-flash 0x0 $REF/bootloader/bootloader.bin \
   0x8000 $REF/partition_table/partition-table.bin 0x20000 build/wifi/c6os.bin
 ```
+
+## §1593 按 IDF 的做法把 MAC 写进 PHY 校准数据（正确性修复，但仍未解锁收帧）
+
+对照 IDF `esp_phy_load_cal_and_init()` 发现两处我们没做：
+```c
+cal_data = calloc(1, sizeof(esp_phy_calibration_data_t));
+esp_efuse_mac_get_default(sta_mac);
+memcpy(cal_data->mac, sta_mac, 6);          ← **我们从来没做**
+register_chipv7_phy(init_data, cal_data, calibration_mode);
+```
+`esp_phy_calibration_data_t` 的第一个字段就是 `u8 mac[6]`，IDF 文档明确：
+"校准数据只对**同一 MAC** 的芯片有效"。我们的 `g_phy_cal` 是 BSS（MAC 全 0）
+⇒ `register_chipv7_phy` 必然返回 `ESP_CAL_DATA_CHECK_FAIL`（真板 `rc=1` 正是它）。
+
+已修（`s3_phy_cal_set_mac()` 放 `.flash.text`，用 ROM 的 `ets_efuse_get_mac`）。
+真板 `mode=2`（FULL）下：`rc=1 → retry rc=0` 照旧、`[eb] 0 0 0 0`、`irq=0`。
+
+⇒ 这条是**应该修的**（与 IDF 对齐），但**还不是收帧的缺失环节**。
+
+---
+
+# ======== 本会话最终结论 ========
+
+## 硬件已排除（决定性证据 §1592）
+IDF 官方 station 示例在**同一块板子**上 600ms 关联、1.6s 拿到
+`192.168.68.120` ⇒ 射频硬件/天线/供电/AP 全部正常。
+
+## c6LOS 侧已完成
+windowed ABI 全量迁移（内核/中断/上下文切换）✅，修掉 16+ 处真实 bug，
+其中包含本轮新增的两条（§1591 cfg 传到位、§1593 校准数据要带 MAC），
+并且**从头到尾可复现**：`tools/build-wifi.sh best`。
+
+## 仍未达成（四项验收全 0）
+`wDev_AppendRxBlocks`=0、`eb_space`=0 ⇒ 我们的固件收不到任何 802.11 帧，
+而 IDF 固件在同一硬件上工作正常。
+
+## 下一次的唯一方向（已收窄到可执行）
+逐句对照 IDF 的 PHY/MAC 使能链，重点是**我们没有、IDF 有**的那些调用：
+1. `esp_phy_get_init_data()` —— 它从 **NVS/自定义分区**读 init data
+   （我们用的是编译期常量表，虽然前 70 值一致）；
+2. `phy_bbpll_en_usb(true)`（CONFIG_ESP_PHY_ENABLE_USB）；
+3. `esp_phy_load_cal_and_init` 之后的 `esp_phy_enable()` 包装、
+   `phy_digital_regs_load()`；
+4. `esp_wifi_start` 触发 `ic_init → hal_init → lmacInit → pp_attach →
+   wDev_Rxbuf_Init → pm_attach` 这条链**是否每一步都真的执行**。
+最有效的做法：在 IDF app 里给这些函数下断点/加打印，记录**真实调用序列与参数**，
+再逐条搬到 c6LOS。
