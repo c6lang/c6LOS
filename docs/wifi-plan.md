@@ -31701,3 +31701,33 @@ g_s3_diag[7] = 0x3fcae3a8    ; A4
 - **真板 235 行**（会话最高；起点 79 行，**+156**）。
 - **本会话修复 11 个结构性缺陷**（最新：ISR 侧超时扫描）。
 - **四项验收全部未取得。目标未完成。**
+
+## §1345 根因上溯到目标文件级别：两者都在 `ieee80211_output.o`
+
+```
+$ nm -A --defined-only libnet80211.a | grep 'send_setup\|send_probereq'
+libnet80211.a:ieee80211_output.o:0000006c T ieee80211_send_probereq
+libnet80211.a:ieee80211_output.o:00000030 T ieee80211_send_setup
+```
+
+⇒ **`send_probereq` 和 `send_setup` 在同一个 `.o` 里，调用是对象内局部引用。**
+GNU ld 的 `--wrap` 只影响**未定义引用**（undefined reference），
+对同一目标文件内已定义的符号无效 —— 这解释了 §1343 探针 `FIX = 0`。
+
+**⇒ 结论：这条 TX 链上任何 `--wrap` 手段都不可能生效。**
+可行的替代只有：
+1. 用 `objcopy` 改写 `ieee80211_output.o`（拆分定义与引用，代价高、易错）；
+2. 换一个把 TX 缓冲路径暴露出来的库版本；
+3. 或者干脆自己实现 probe request 的构造与发送（绕开 `send_probereq`）。
+
+**⇒ 方案 3 其实是本会话一直没试过的正路**：既然
+`ieee80211_getmgtframe(0, idx, len)` 已经能拿到缓冲（§1329 的 `a4`），
+我们可以自己构造 802.11 probe request 帧、用 `ic_tx_pkt` 直接发出去，
+完全绕开闭源库里那条会弄丢 `a2` 的路径。
+
+## §1346 交付终态（round 204）
+
+- 仓库 `main`，工作树干净。
+- **真板 235 行**（会话最高；起点 79 行，**+156**）。
+- **本会话修复 11 个结构性缺陷。**
+- **四项验收全部未取得。目标未完成。**
