@@ -291,7 +291,7 @@ static void s3_isr_mark(u32 i)
 extern void os_wdt_start(u32 secs);
 extern void os_wdt_feed(void);
 
-extern volatile u32 g_s3_diag[12];   /* §699: 定义在 wifi_glue.c */
+extern volatile u32 g_s3_diag[20];   /* §699: 定义在 wifi_glue.c */
 
 /* §705: WiFi level-1 中断在 ISR 里只置这个标志；真正的窗口化库 ISR 由
  * 任务上下文（s3_wifi_scan 轮询循环）调用，避免在任意 WINDOWBASE 上 call8。 */

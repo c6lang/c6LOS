@@ -1340,7 +1340,7 @@ extern void intr_matrix_set(u32 cpu, u32 src, u32 intr);
 static void (*s_wifi_isr_fn[8])(void *arg);
 static void *s_wifi_isr_arg[8];
 
-extern volatile u32 g_s3_diag[12];   /* §699: 前置声明（定义在文件末尾） */
+extern volatile u32 g_s3_diag[20];   /* §1343：扩到 20 项，避开 [8] ISR 计数器和越界的 [12] */   /* §699: 前置声明（定义在文件末尾） */
 /* §715: PWR 事件寄存器（0x60035118）从未测过。wDev_ProcessFiq 的 TBTT/TSF
  * 定时器事件从 PWR 取（a5=0x1e → wdev_process_tbtt；a6=0x1e0 → tsf_timer）。
  * 扫描 dwells 靠这些定时器推进；如果 PWR 一直为 0，就是"定时器没跑"。 */
@@ -1487,7 +1487,7 @@ typedef struct {
 static S3EtsTimer s3_ets_timers[S3_ETS_TIMER_MAX];
 /* §698: 0x50001100 是被踩坏的 RTC 区（读到 1242037968 垃圾），
  * 导致 `<=24` 守卫永远不成立、[tarm] 从不打印。改用 BSS 计数器。 */
-extern volatile u32 g_s3_diag[12];   /* 定义在文件末尾 */
+extern volatile u32 g_s3_diag[20];   /* §1343：扩到 20 项，避开 [8] ISR 计数器和越界的 [12] */   /* 定义在文件末尾 */
 #define s3_ets_arm_n (g_s3_diag[6])
 extern u64 s3_w2c_tick_get(void);
 
@@ -3416,18 +3416,18 @@ int __wrap_chm_acquire_lock(void *a)
 }
 
 /* §694: 零 printf 计数器（JTAG 直接读 g_s3_diag[]），判定 probe 发送链在哪一环断掉。 */
-volatile u32 g_s3_diag[12];
+volatile u32 g_s3_diag[20];   /* §1343：扩到 20 项，避开 [8] ISR 计数器和越界的 [12] */
 #define S3_PROBE_N (g_s3_diag[0])
 #define S3_CHM_N   (g_s3_diag[1])
 #define S3_CHM_R   (g_s3_diag[2])
 #define S3_RGD_N   (g_s3_diag[3])
 #define S3_RGD_R   (g_s3_diag[4])
-#define S3_PROBE_A2 (g_s3_diag[5])
-#define S3_PROBE_A3 (g_s3_diag[6])
-#define S3_PROBE_A4 (g_s3_diag[7])
-#define S3_PROBE_B0 (g_s3_diag[8])
-#define S3_PROBE_B4 (g_s3_diag[9])
-#define S3_PROBE_FIX (g_s3_diag[10])
+#define S3_PROBE_A2 (g_s3_diag[14])
+#define S3_PROBE_A3 (g_s3_diag[15])
+#define S3_PROBE_A4 (g_s3_diag[16])
+#define S3_PROBE_B0 (g_s3_diag[17])
+#define S3_PROBE_B4 (g_s3_diag[18])
+#define S3_PROBE_FIX (g_s3_diag[19])
 volatile u32 g_s3_probe_buf = 0u;   /* §1341：库传给 send_probereq 的有效缓冲 */
 extern void __real_ieee80211_send_probereq(u32, u32, u32, u32, u32, u32, u32, u32);
 __attribute__((section(".flash.text")))
