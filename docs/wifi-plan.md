@@ -34417,3 +34417,11 @@ tests/t_s3_wifi3.c6: wifi 任务 prio 3 -> 1
 共同必开：`-DS3_SPILL_SHELL`（不开只剩 80 行）、`-DS3_PHYQUEUE_FIX`
 （`[ppq] xphyQueue=3fcc8d90 (lib-set)`，库自己就设好了，不是 0）。
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+### §1511 三次优先级实验同点冻结 ⇒ 阻塞切换路径是唯一的墙
+`TCPIP_THREAD_PRIO=1` 下分别试 `WiFi 主任务 prio=1` / `prio=0`，
+**两次都精确停在 213 行、`[lwipt] go` 之后**；切换计数恒为 4。
+⇒ 与"谁优先"无关，是 **tcpip 线程第一次阻塞（空 mbox，永久等待）之后
+`s3_w2c_queue_get` 阻塞壳 → 内核 block() → port_task_switch 这条路径
+没有回到调度器**。下一步只需要盯这一条。
+（注：`kernel/queue.c6` 已确认 `timeout==0` = 永久等待，语义正确。）
