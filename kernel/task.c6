@@ -829,6 +829,34 @@ void os_task_delay(u32 ticks) {
         os_task_yield();
         return;
     }
+#ifdef S3_DELAY_SPIN
+    /* §§1483 ★★★★★ **把§1118 只写在注释里的"自旋"真正实现**。
+     *
+     * 真板铁证：`[swp] n=1 recv=0 yld=0` —— `s3_timer_sweep()`
+     * 只被调用**一次**。它是 `s3_wifi_scan` 里那个 60 轮
+     * 扫描等待循环每轮都调的 ⇒ **循环只跑 1 轮就卡死**，
+     * 卡在 `s3_w2c_task_delay(100u)` 里再也醒不来。
+     *
+     * 原因正是 §1118 说的：`S3_TICK_DEFER` 下时间推进靠任务调
+     * `s3_tick_consume()`；一旦当前任务阻塞睡下去、其余任务也都在
+     * 阻塞，**没有任何人推进 tick ⇒ 超时永不到期 ⇒ 永远醒不来**。
+     *
+     * 这里改成自旋：反复 `s3_tick_consume()` 直到延迟到期；
+     * 并**每 8 次强制让出一次**，让 ppTask 也能拿到 CPU。
+     * 这样既不会死锁，也不会把同优先级任务饿死。 */
+    {
+        extern void s3_tick_consume(void);
+        u32 n = 0u;
+        u32 lim = ticks + 4u;
+        while (g_cur->delay_left != 0u && n < lim) {
+            s3_tick_consume();
+            n = n + 1u;
+            if ((n & 7u) == 0u) { os_task_yield_force(); }
+        }
+        g_cur->delay_left = 0u;
+        return;
+    }
+#endif
     g_cur->state = (u8)OS_TASK_BLOCKED;
     port_task_yield();
 }

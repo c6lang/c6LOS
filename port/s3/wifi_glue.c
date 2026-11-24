@@ -724,6 +724,30 @@ void s3_recv_yield(void)
     if ((s_cnt & 8191u) == 0u) { os_task_yield_force(); }
 }
 
+/* §§1480 干净取证：**到底有没有真正取到消息**。
+ * ppTask 的 ROM 循环只认返回 1（§1474）。把成功次数与
+ * 消息前 4 个字写 RTC（零字符串，不会撞 IRAM）：
+ *   0x50002100[0]        = 成功次数
+ *   0x50002100[1+4k..4+4k] = 第 k 条消息的 m[0..3] */
+__attribute__((section(".flash.text")))
+int s3_recv_ret(int r, void *item)
+{
+    if (r != 0 || item == 0) { return 0; }
+    {
+        volatile u32 *o = (volatile u32 *)0x50002100u;
+        u32 n = o[0];
+        if (n < 16u) {
+            volatile u32 *m = (volatile u32 *)item;
+            o[1u + n * 4u] = m[0];
+            o[2u + n * 4u] = m[1];
+            o[3u + n * 4u] = m[2];
+            o[4u + n * 4u] = m[3];
+        }
+        o[0] = n + 1u;
+    }
+    return 1;
+}
+
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
 {
     {
@@ -961,7 +985,11 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
         QDIAG[2] = ticks;
         QDIAG[3] = q->q.count;
     }
+#ifdef S3_RECV_DIAG
+    { extern int s3_recv_ret(int r, void *item); return s3_recv_ret(r, item); }
+#else
     return (r == 0) ? 1 : 0;
+#endif
 }
 /* ---- 隔离测试：只走"库调用 _queue_recv"这一条路径 ----------------------
  * 用和库完全一样的方式建队列（osi_wifi_create_queue），再经 osi_queue_recv
@@ -3429,6 +3457,16 @@ void s3_timer_sweep(void)
         s3_ets_timer_dispatch();
     }
 #endif
+#ifdef S3_SWEEP_PRINT
+    /* §§1482 ★ **让固件自己报数**，彻底避开"GDB 读太早/地址错配"问题。
+     * 真板读数属于 0 已经一次次导致误判（§1471、§1478）。 */
+    if (g_s3_diag[32] <= 2u || (g_s3_diag[32] % 20u) == 0u) {
+        volatile u32 *c = (volatile u32 *)0x50000F40u;
+        s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
+                      (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
+                      (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
+    }
+#endif
 #ifdef S3_SWEEP_ALL
     if ((g_s3_diag[32] % 200u) == 0u) {
         extern unsigned char g_scan[];
@@ -3438,6 +3476,20 @@ void s3_timer_sweep(void)
                       (u32)(sp != 0 ? sp[0] : 0xFFFFFFFFu),
                       (u32)(sp != 0 ? sp[13] : 0), (u32)(sp != 0 ? sp[14] : 0),
                       (u32)(sp != 0 ? sp[15] : 0), (u32)(sp != 0 ? sp[16] : 0));
+    }
+#endif
+#ifdef S3_FORCE_YIELD_LOOP
+    /* §§1481 ★★★★ **在扫描等待循环里让出 CPU**。
+     *
+     * `s3_wifi_wait_connected` 里的计数器全 0 ⇒ 流程**连它都没到**，
+     * 卡在 `s3_wifi_scan` 的 60 轮扫描等待循环里。
+     * 那个循环每轮都调 `s3_timer_sweep()`，而**本函数在 flash 里**
+     * ⇒ 在这里让出是**零 IRAM 成本**。 */
+    {
+        extern void os_task_yield_force(void);
+        volatile u32 *c = (volatile u32 *)0x50000F40u;
+        c[6] = c[6] + 1u;
+        os_task_yield_force();
     }
 #endif
 }
