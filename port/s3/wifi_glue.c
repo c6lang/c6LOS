@@ -4504,6 +4504,21 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
  * 真板 113 行即崩、连 `[ppattach]` 都没打出来 ⇒ 干扰 `pp_attach` 这条路走不通。
  * 已回退，不 wrap `pp_attach`。 */
 
+/* §1575 ★ RF PLL 是否被调到信道上？`set_channel_rfpll_freq`（0x420519b0）
+ * 是真正写 RF PLL 的函数。包一层计数：若一次都没被调用，
+ * 就说明"信道设了、但 RF 从没被调谐"—— 这正是 `irq=0` 的最后一层。 */
+extern unsigned int __real_set_channel_rfpll_freq(unsigned int ch);
+volatile u32 g_rfpll_n = 0u;
+__attribute__((section(".flash.text")))
+unsigned int __wrap_set_channel_rfpll_freq(unsigned int ch)
+{
+    extern int s3_ets_printf(const char *, ...);
+    unsigned int r = __real_set_channel_rfpll_freq(ch);
+    g_rfpll_n = g_rfpll_n + 1u;
+    s3_ets_printf("[rfpll] #%u ch=%u r=%x\n", (u32)g_rfpll_n, ch, r);
+    return r;
+}
+
 extern int __real_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg);
 __attribute__((section(".flash.text")))
 int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)
