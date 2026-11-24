@@ -34940,3 +34940,35 @@ qfull = 0                      （1309 → 0）
 （`g_ic` 里 scan 相关字段），而这需要 IDF 侧对照。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1542–§1543 ★ 反汇编拿到 `wifi_scan_start_process` 的 -1 判据并修掉
+
+从 `libnet80211.a` 的 `ieee80211_ioctl.o` 反汇编出真身
+（镜像里 `0x4203b4f4`）：
+
+```
+entry a1,32
+a3 = g_wifi_nvs          ; 指针变量（本构建 0x3fcbaec0）
+a3 = *(u32*)a3           ; 再解引用
+a3 = *(u8*)a3 & 0xFD     ; 对象首字节，屏蔽 bit1
+if (a3 != 1) { wifi_log(...); return -1; }   ← 3f 个字节后就 return -1
+... reset_cs_thres(); wifi_log(); ieee80211_sta_scan(...)
+```
+
+⇒ **那个对象首字节必须是 1 或 3**（2 会被 `&0xFD` 抹成 0）。
+
+实测与修法：
+- `[nvs] obj=3fcd5c48 st=0` ⇒ 被修成 `1`（`s3_nvs_state_fix()`，放在 `.flash.text`，
+  IRAM 侧只留一次调用）；
+- 修完之后 `[scanp] leave r=-1` **仍然出现** ⇒ 这个状态检查已经过关，
+  **-1 现在来自它内部 `ieee80211_sta_scan(...)` 的返回值**。
+
+⇒ 下一步（明确）：反汇编 `ieee80211_sta_scan`（镜像地址可用 `nm` 取），
+看它在什么条件下返回 -1 —— 很可能是"信道/scan 参数无效"或
+`g_ic` 的 scan 上下文未就绪。这条路由**静态反汇编**推进，
+比之前靠猜寄存器快得多。
+
+附带纠正：之前 objdump 看到的"第二份 `wifi_scan_start_process`"是
+**反汇编范围错位造成的假象**，`nm` 复核镜像里只有一份。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

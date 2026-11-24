@@ -14,6 +14,48 @@
 wifi_osi_funcs_t g_wifi_osi_funcs;
 
 void s3_fix_ic16(void);
+/* §1542 ★★★★★ **反汇编得到的判据**（libnet80211 `wifi_scan_start_process`
+ * @0x4203b440）：
+ *     a3 = g_wifi_nvs;      // 指针变量
+ *     a3 = *(u32*)a3;       // 再解引用
+ *     a3 = *(u8*)a3 & 0xFD; // 对象首字节，屏蔽 bit1
+ *     if (a3 != 1) { log; return -1; }
+ * ⇒ 该对象首字节必须是 **1 或 3**，否则扫描处理函数直接返回 -1
+ * （真板一直 `[scanp] leave r=-1`）。放在 flash 里，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_nvs_state_fix(void)
+{
+    extern unsigned char g_wifi_nvs[];
+    extern int s3_ets_printf(const char *, ...);
+    u32 nv = *(u32 *)(void *)g_wifi_nvs;
+    u8 st;
+    if (nv == 0u) {
+        s3_ets_printf("[nvs] null\n");
+        return;
+    }
+    st = *(volatile u8 *)(void *)nv;
+    s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
+    if ((st & 0xFDu) != 1u) {
+        *(volatile u8 *)(void *)nv = 1u;
+        s3_ets_printf("[nvs] forced st=1\n");
+    }
+    /* §1543 ★★★ **镜像里有两份 `wifi_scan_start_process`**，各自引用不同的
+     * `g_wifi_nvs`（符号在 0x3fcbae64，另一份在 0x3fcbae98）。
+     * 真板实测第一份已是 st=0→1 却仍 r=-1 ⇒ 实际生效的是另一份。
+     * 两份都修（地址做合理性校验：解引用后必须是 0x3f 开头）。 */
+    {
+        u32 nv2 = *(volatile u32 *)(void *)0x3fcbae98u;
+        if (nv2 >= 0x3f000000u && nv2 < 0x40000000u) {
+            u8 st2 = *(volatile u8 *)(void *)nv2;
+            s3_ets_printf("[nvs2] obj=%x st=%u\n", nv2, (u32)st2);
+            if ((st2 & 0xFDu) != 1u) {
+                *(volatile u8 *)(void *)nv2 = 1u;
+                s3_ets_printf("[nvs2] forced st=1\n");
+            }
+        }
+    }
+}
+
 void s3_fix_menuconfig(void);
 void *g_osi_funcs_p = (void *)&g_wifi_osi_funcs;
 
@@ -2726,6 +2768,8 @@ int s3_wifi_scan(void)
 #endif
     /* §511 诊断：阻塞 scan 一直 12300 超时，改成异步 + 轮询结果，
      * 区分"射频没扫到 AP"和"scan-done 事件没送到等待者"。 */
+    /* §1542 ★ 库的状态字节修正（逻辑在 flash 助手里，IRAM 只留一次调用）。 */
+    { extern void s3_nvs_state_fix(void); s3_nvs_state_fix(); }
     s3_ets_printf("[wifi] scan start（异步）\n");
     /* §§1288：在扫描之前才播种 TX 缓冲（此时库已完成初始化）。 */
     { extern void s3_seed_tx_buffers(void); s3_seed_tx_buffers(); }
