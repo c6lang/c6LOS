@@ -124,6 +124,18 @@ int os_mutex_pend(OsMutex *m, u32 timeout) {
     u32 st = 0;
     int r = 0;
 
+    /* §1419：**先做地址范围预检**。闭源 WiFi 库偶尔会传进一个垃圾指针
+     * （真板实测 `0x60400`），此时下面的 `m->magic` 会直接 LoadStoreError，
+     * 把整个系统打死在 `_vec_default`。只接受内部 DRAM 与 RTC 慢速内存。 */
+    {
+        u32 p = (u32)m;
+        int ok = 0;
+        if (p >= 0x3FC80000u && p < 0x3FD00000u) { ok = 1; }      /* 内部 DRAM */
+        if (p >= 0x50000000u && p < 0x50002000u) { ok = 1; }      /* RTC 慢速 */
+        if (ok == 0) {
+            return -1;
+        }
+    }
     if (m == 0 || m->magic != MUTEX_MAGIC) {
         return -1;
     }

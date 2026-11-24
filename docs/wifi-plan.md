@@ -32933,3 +32933,59 @@ grep -E "\[ctx\]|scan_start|关联|ap_num|scanp2|\[w1\]" /tmp/c400.txt | tail -8
 - 若 FIX > 0 且行数 > 235、或出现 `[wifi] 已关联`，说明方向通了。
 
 `g_s3_diag` 当前 `0x3fcc7c90`，`slot28 = 0x3fcc7d00`，`slot19(FIX) = 0x3fcc7cdc`。
+
+## §1419 ★★★★★ 三连环突破（round 200）
+
+### 一、上下文替补真正命中（§1416 修法生效）
+真板 `g_s3_diag[19]`（`S3_PROBE_FIX`）**从恒 0 变成 1** —— 这是 §1383 之后一直没跨过的一步。
+
+### 二、probe 帧**真正发出去了**
+```
+g_s3_diag[5]  = 1      ← __wrap_ic_tx_pkt 被调用一次
+g_s3_txret    = 0      ← ★ TX 返回值 0 = 成功
+g_s3_txarg    = 0x3fccf464
+g_s3_diag[3]  = 2      RGD_N
+g_s3_diag[4]  = 1      RGD_R
+```
+日志末尾也出现了完整的扫描链路：
+```
+[wifi] scan_start=0
+[v4]wifi|start scan: type=..., ss_state=0x3fcbb4ac
+[v4]wifi|perform scan: ss_state=0x0, chan<0,0>, dur<0,0>
+[pppost] ppq=0 data=0
+[send] t=1 qh=3fcc8a24 tk=1 q=3fcc8a24
+[scanp2] direct r=0
+```
+**⇒ 这是本会话第一次让 probe request 真正走上 TX 并成功返回 0。**
+
+### 三、修掉两处致命 bug
+1. **`g_s3_diag` 数组越界**：只声明了 20 项，但 §1381 的环形写 [20..27]、以及本轮
+   §1416 写 [28] 都在**踩 `g_wifi_cfg_blob`**（WiFi 配置块）。
+   已扩到 **40** 项（3 处声明 + 定义全部改为 `[40]`）。
+2. **`os_mutex_pend` 垃圾指针崩机**：库传进 `mutex = 0x60400`，
+   `m->magic` 直接 LoadStoreError，把系统打死在 `_vec_default`
+   （`EXCVADDR=0x60408`、`epc1=0x420129d5`=`os_mutex_pend+0x55`、
+   返回地址 `0x42013a47`=`s3_w2c_mutex_pend`，薄壳传参本身是对的）。
+   在 `kernel/mutex.c6` 的 `os_mutex_pend` 入口加**地址范围预检**：
+   只接受 `0x3FC80000..0x3FD00000`（内部 DRAM）与 `0x50000000..0x50002000`（RTC），
+   否则直接 `return -1`，不再解引用。
+
+### 真板验证：系统**活了**
+修复后：
+```
+PC = 0x4037fa01（不再是 _vec_default 的 j . 死循环）
+g_c6os_ticks: 0x802f → 0x8288（3 秒内推进 601，约 200/s）
+```
+**⇒ 崩溃消失，tick 正常，系统存活。** 但行数仍 235，扫描仍未完成/无结果。
+
+## §1420 当前卡点（下一轮直接接着打）
+
+probe 已成功发出（`txret=0`），但：
+- 没有 scan-done 回调日志（`[v4]wifi|scan done` 之类）；
+- 没有 `[wifi] 已关联`；
+- 行数仍 235。
+
+**⇒ 问题已从"发不出去"变成"发出去后没有结果回来"。**
+下一步应查：TX 完成/回收路径（`ic_tx_pkt` → `pp_post` → ppTask →
+`esf_buf_recycle`）里，我们播种的空闲链表块是否被正确回收；
+以及扫描超时/结果回调（`scan_done`）为何不触发。
