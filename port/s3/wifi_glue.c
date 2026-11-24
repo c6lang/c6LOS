@@ -48,6 +48,12 @@ u32 g_lra_seq = 0u;
  * §629 的手工消息布局不对（msg[0]=5、m[4]=0），FSM 立刻 cancel/end；
  * 这里保存库构造的真消息指针，交给直接调用路径用。 */
 u32 g_s3_real_scan_msg = 0u;
+/* §1526 ★★★★ 库在 `esp_wifi_init_internal` 里会把**真** init 消息投进队列，
+ * 那条消息里带着完整配置。ppTask 拿不到 CPU，所以它从没被处理。
+ * 这里把第一条真消息截下来，直接喂给 `wifi_init_process` ——
+ * 之前喂的是我们手工伪造的消息（除 m[3] 外全 0），库于是把 0 复制进自己的
+ * 配置全局 ⇒ 七项帧缓冲数量全 0 ⇒ esf_buf_alloc 永远失败 ⇒ 一帧都发不出去。 */
+u32 g_s3_first_msg = 0u;
 
 #define OSI_HIT(i) do { \
     g_osi_calls[(i)] = g_osi_calls[(i)] + 1u; \
@@ -2955,17 +2961,9 @@ int s3_wifi_wait_connected(int ms)
          * 让延迟在 g_ic+0x1a8 的 AUTH 帧有机会被冲出去。 */
         {
             extern u8 g_sta_connected_flag;
-            /* §1515 ★ 取证：`r==0` 只是 ioctl 入队成功，**不代表真关联**。
-             * 把库自己的连接标志与 AP 记录里的 BSSID 打出来：
-             * 应看到 b=dc:d8:7c:5a:7a:46（我们路由器）且 flag=1。 */
-            { static u32 an_;
-              an_ = an_ + 1u;
-              if (an_ <= 6u) {
-                  s3_ets_printf("[assoc] r=%d flag=%u b=%x:%x:%x:%x:%x:%x\n",
-                                r, (u32)g_sta_connected_flag,
-                                (u32)ap[0], (u32)ap[1], (u32)ap[2],
-                                (u32)ap[3], (u32)ap[4], (u32)ap[5]);
-              } }
+            /* §1515 取证结论（已确认）：`r==0` 只是 ioctl 入队成功、
+             * `g_sta_connected_flag==0`、BSSID 全 0 ⇒ **从来没有真关联过**。
+             * 打印已删除（IRAM 紧张，结论已定）。 */
             if (r == 0 && g_sta_connected_flag == 1u) {
                 s3_ets_printf("[wifi] 已关联，ssid=%s channel=%u\n",
                            (const char *)(ap + 6), (unsigned)ap[39]);
@@ -3884,7 +3882,6 @@ __attribute__((section(".flash.text")))
 void s3_fix_menuconfig(void)
 {
     extern unsigned char g_wifi_menuconfig[];
-    static u32 s_mc[16];
 
     if (*(volatile u32 *)(void *)g_wifi_menuconfig == 0u) {
         u32 k;
@@ -3896,13 +3893,10 @@ void s3_fix_menuconfig(void)
          * ⇒ 不可能有任何 TX（`ic_tx_pkt` 全场 0）。这些数字正是从这个配置块读的。
          * 原来只写了 `s_mc[1]=64`，其余全 0。现在整块填非零，
          * 并靠库自己那六行打印确认布局（数字不再是 0 就说明找对了）。 */
-        for (k = 0u; k < 16u; k++) {
-            s_mc[k] = 8u;
-        }
-        s_mc[1] = 64u;
-        *(volatile u32 *)(void *)g_wifi_menuconfig = (u32)(void *)s_mc;
-        { extern int s3_ets_printf(const char *, ...);
-          s3_ets_printf("[mc] set %x\n", (unsigned)(void *)s_mc); }
+        /* §1526：实测 `g_wifi_menuconfig` 早已非 0（库自己设过），
+         * 本分支从未进入 ⇒ 这些缓冲计数不是从这里读的。
+         * s_mc[16] 已删除（省 64 字节 DRAM）。 */
+        (void)k;
     }
 }
 
