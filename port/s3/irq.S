@@ -378,6 +378,9 @@ _vec_default:
     s32i    a5, a3, 132
     s32i    a6, a3, 136
     s32i    a7, a3, 140
+    s32i    a9, a3, 144
+    s32i    a10, a3, 148
+    s32i    a11, a3, 152
     /* 未处理向量/双重异常现场存进 RTC 慢速内存（CPU 复位后不丢，esptool
      * read-mem 0x50000100 起 16 字节即可读到）：
      *   +0x100 标记 0xBAD0 / +0x104 EXCCAUSE / +0x108 EXCVADDR / +0x10C EPC1

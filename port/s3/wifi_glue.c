@@ -3197,13 +3197,43 @@ void s3_timer_sweep(void)
     /* §§1431：**只驱动扫描自己用的 kind=2**。
      * §1430 全扫 0..26 会命中需要真实参数的处理函数
      * （真板 PC 回到 `_vec_default`）0x4037a029））。 */
+#ifdef S3_SCAN_CB_SWEEP
+    /* §§1450 **库会在我们修复之后重新把 `gScanStruct+60`
+     * 写回 `&g_cnxMgr`**（真板取证：`scan_cb_fix` 设成 0 后，
+     * 崩溃前再读已变回 0x3fcd6030）。
+     * 而 `0x4203034e` 处是 **无条件 `callx8 a7`**，
+     * ⇒ 只要那个字还是指针就必崩。
+     * 这里在**每次定时器扫表之前**持续压制成空桩，
+     * 抢在库写入之后、`callx8` 之前。 */
+    {
+        extern unsigned char g_scan[];
+        u32 *sp = *(u32 **)(void *)g_scan;
+        if (sp != 0 && sp[15] != 0u) { sp[15] = (u32)(void *)glue_ret0; }
+    }
+#endif
+#ifdef S3_SWEEP_ALL
+    /* §§1451 崩溃修好了（§1449/1450），重试全范围扇表。 */
+    for (kk = 0; kk <= 26; kk++) {
+#else
     for (kk = 2; kk <= 2; kk++) {
+#endif
         tmsg[0] = (u8)kk;
         tmsg[1] = 0u; tmsg[2] = 0u; tmsg[3] = 0u;
         *(u32 *)(void *)(tmsg + 4) = 0u;
         ieee80211_timer_do_process((void *)tmsg);
     }
     g_s3_diag[32]++;
+#ifdef S3_SWEEP_ALL
+    if ((g_s3_diag[32] % 200u) == 0u) {
+        extern unsigned char g_scan[];
+        u32 *sp = *(u32 **)(void *)g_scan;
+        s3_ets_printf("[swp] n=%u t=%u p=%u st=%x f=%x/%x/%x/%x\n",
+                      (u32)g_s3_diag[32], (u32)g_s3_diag[30], (u32)g_s3_diag[31],
+                      (u32)(sp != 0 ? sp[0] : 0xFFFFFFFFu),
+                      (u32)(sp != 0 ? sp[13] : 0), (u32)(sp != 0 ? sp[14] : 0),
+                      (u32)(sp != 0 ? sp[15] : 0), (u32)(sp != 0 ? sp[16] : 0));
+    }
+#endif
 }
 
 __attribute__((section(".flash.text")))
@@ -3412,11 +3442,39 @@ void s3_fix_menuconfig(void)
 }
 
 __attribute__((section(".flash.text")))
+/* §§1449 ★★★★★ **崩溃根因找到了：`gScanStruct+60` 里装着 `&g_cnxMgr`。**
+ *
+ * 0x420301f0 入口：
+ *     a4 = &g_scan;  a5 = *(a4);  a7 = *(a5 + 60)      ← **a7 = scan[15]**
+ *     a5 = &g_ic;    a6 = *(a5 + 16)
+ * 并且 0x4203034e 处：
+ *     a10 = *(a2 + 64);  callx8 a7      ← **无 NULL 保护！**
+ * 真板实测：`*g_scan = 0x3fcd5860`、`gScanStruct+60 = 0x3fcd6030 = &g_cnxMgr`
+ * ⇒ `callx8` 直接跳到 DRAM 里的 `g_cnxMgr` ⇒ EXCCAUSE=0 ⇒ `_vec_default`。
+ * （这完全对上我们记录的现场 a5=&g_osi_funcs_p、a6=gScanStruct、a7=&g_cnxMgr。）
+ *
+ * 这个回调属于“scan 状态通知”类，库里从来没赋值（内存里残留的是
+ * 别处写进去的指针），所以我们装一个**安全空桩**。 */
 void s3_fix_ic16(void)
 {
     extern unsigned char g_ic[];
     extern int s3_ets_printf(const char *, ...);
     u32 *icp = (u32 *)(void *)g_ic;
+#ifdef S3_SCAN_CB_FIX
+    {
+        extern unsigned char g_scan[];
+        u32 *sp = *(u32 **)(void *)g_scan;
+        u32 was = 0;
+        if (sp != 0) {
+            was = sp[15];
+            sp[15] = (u32)(void *)glue_ret0;   /* 用已有空函数，不新增代码 */
+        }
+        {
+            extern volatile u32 g_s3_diag[];
+            g_s3_diag[19] = 0x53434200u | (was & 0xFFu);
+        }
+    }
+#endif
 #ifdef S3_PM_ATTACH
     /* §§1444 ★★★★★ **找到 PM 阻塞的根因：`g_pm` 全为 0**。
      *

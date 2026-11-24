@@ -33543,3 +33543,58 @@ callx8 a7
 这既是干扰源，也正好被我们利用来确认上一版的数据是对的。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1449 ★★★★★ **崩溃根因：`gScanStruct+60` 里装着 `&g_cnxMgr`，被无条件 `callx8`**
+
+`0x420301f0`（扫描取消/复位路径）入口：
+
+```
+a4 = &g_scan;  a5 = *(a4);  a7 = *(a5 + 60)      ← a7 = scan[15]
+a5 = &g_ic;    a6 = *(a5 + 16)
+...
+0x4203034e: a10 = *(a2 + 64)
+0x42030351: callx8 a7                            ← **无任何 NULL 保护**
+```
+
+真板实测 **`gScanStruct+60 = 0x3fcd6030 = &g_cnxMgr`**（`*g_scan = gScanStruct`），
+于是 `callx8` 直接跳到 DRAM 里 ⇒ `EXCCAUSE=0`、`EPC1=EXCVADDR=&g_cnxMgr`。
+
+**这条结论和对上的现场完全自洽**：异常帧里 `a5=&g_osi_funcs_p`、`a6=gScanStruct`、
+`a7=&g_cnxMgr` —— 正是上面 4 条指令留下的寄存器状态。
+
+### 两个关键坑（都踩过）
+
+1. **`gScanStruct+60` 会被库重新写回去。** 在扫描前把它置 0（`-DS3_SCAN_CB_FIX`）
+   只能顶一时 —— 崩溃前再读，它已经又变回 `0x3fcd6030`。
+   ⇒ 必须在**每次定时器扫表之前持续压制**（`-DS3_SCAN_CB_SWEEP`，放在
+   `s3_timer_sweep()` 里，抢在库写入之后、`callx8` 之前）。
+   用已有的 `glue_ret0` 当空桩，**不新增任何 IRAM 代码**（否则 IRAM 溢 232 字节）。
+2. **`0x50000140` 是 `s3_trap` 自己的现场记录区**（§308）。补 a4..a7 转储时
+   一开始写到那里，两边互相覆盖，读出来的值"既像寄存器又像 cause/va/pc/ps"，
+   差点误判。现改到 **+128/+132/+136/+140（a4..a7）与 +144/+148/+152（a9/a10/a11）**。
+
+### 修复后的效果
+
+崩溃消失（PC 不再停在 `_vec_default`，而是正常停在 `s3_w2c_queue_recv` 里等消息）。
+再打开**全范围定时器扫表**（`-DS3_SWEEP_ALL`，kind 0..26）后，真板日志从 244 行
+涨到 **278 行**，并且第一次出现**完整的连接状态机循环**：
+
+```
+connect chan=0 / connect status 0 -> 0
+cancel previous scan / scan end: status=0 / stop scan timer and scan
+start scan / perform scan / sta has disconnected from AP
+auth timeout / handshake timeout t=0 / stop beacon and connect timers
+```
+
+**⇒ WiFi 协议栈第一次真正"活着"在跑扫描→认证→连接流程，而不是卡死在第一条语句。**
+
+### 目前暴露的新问题（下一步）
+
+1. `[v2]wifi|no timer handle` —— 连接超时定时器没装上句柄；
+2. `connect chan=0`（应为 6）—— 连接用的信道还是 0；
+3. `auth timeout` —— 认证帧没能在信道上发出去；
+4. 日志里出现 `first chan=1819636256`、`ss_state=0x6c757220`（ASCII " rue"）
+   这类垃圾参数 ⇒ **变参 printf 在 windowed ABI 下的取值错位**，
+   属于显示问题，但会掩盖真实数值，值得一并修掉。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但状态机已激活）。
