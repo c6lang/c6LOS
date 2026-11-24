@@ -34759,3 +34759,52 @@ ri = wifi_init_process((void *)(g_s3_first_msg != 0u ? g_s3_first_msg : (u32)m))
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但整条链已从"配置全 0"推进到
 "队列收发不配对"，这是本轮最实质的推进）。
+
+## §1528–§1531 ppTask 拿着**野指针**当队列句柄（当前最硬的墙）
+
+### 现象（9130 行那版）
+```
+[v2]wifi|pp task q full: s=0 p=0          （整场 1309 次）
+[v2]wifi|ioctl: failed to post WiFi task 0
+[wifi] 关联超时（15000 ms），sta_get_ap_info=12306
+```
+`[swp]` 里 `recv` 每轮 +64、累计 3840 ⇒ **ppTask 确实在反复进
+`osi_queue_recv_body`**，可队列还是满。
+
+### RTC 取证
+- `xphyQueue`（recv 时读 `0x3fcef904`）= `0x3fcc8234`；
+- RTC `0x50000360`（首个 magic 不符的 recv 句柄）= `0x3fcc51a0`；
+- 把该句柄前 6 字打出来（`[badq]`）：
+  ```
+  [badq] 3fcc51a0: 0 0 3fcc9424 c6a50001 3fcc9424 c6a50001
+  ```
+  `0xC6A50001` 是 **WiFi 堆块魔数**（`WhBlk.magic`）⇒ 那里躺着两个堆块头，
+  **根本不是队列对象**。
+
+⇒ **ppTask 有时把野指针当队列句柄传给 `_queue_recv`。**
+`wq_resolve()` 认不出（既不是 `WQ*`、也不是 `&WQ.q`、也不等于任何 `q.buf`）
+⇒ body 走 `return 0`（"没收到"）⇒ **真正的 xphyQueue 永远没人取**
+⇒ 队列塞满 ⇒ 所有 ioctl `failed to post` ⇒ 扫描 0 个 AP。
+
+### 已经试过但没生效
+在 `wq_resolve` 里补 `(u32)(void*)&c->q == (u32)qh` 这条匹配（§1529）：
+真板 `qfull` 仍是 1309、行数不变 ⇒ 那个野指针不落在任何 WQ 上。
+
+### 下一步（代码已写好但因 IRAM 差 12~28 字节回退）
+在 `osi_queue_recv_body` 的"认不出句柄"分支里加回退：
+```c
+{ WQ *fb = wq_resolve(*(void **)0x3fcef904u);   /* 真正的 xphyQueue */
+  if (fb != 0) { q = fb; } }
+```
+即**野句柄时改从真队列取消息**，让 ppTask 继续跑它自己的状态机。
+代价约 12~20 字节 IRAM —— 需要先删掉 IRAM 里的整条 printf 或
+`s3_wrap_bump()` 调用（注意 `s3_wrap_bump` 删了反而更费，别动它；
+要删就删**整条** `s3_ets_printf(...);`，本次两次删掉了多行 printf 的首行，
+导致语法错误白费轮次，务必用括号配平删除）。
+
+### 另一个可并行尝试的方向
+`pp post` 与 `ppTask recv` 可能压根不是同一个队列对象
+（日志里 `[ppq] xphyQueue=3fcc8d90`，RTC 里 recv 时为 `0x3fcc8234`）。
+若回退法生效，qfull 会立刻下降，这一点自然就验证了。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（链条已推进到"ppTask 拿野句柄"这一环）。
