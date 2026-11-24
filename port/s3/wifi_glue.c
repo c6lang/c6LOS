@@ -2693,55 +2693,9 @@ int s3_wifi_scan(void)
         return -1;
 #endif
     }
-#ifdef S3_LOOP_STAGE
-    /* §§1484 阶段变量：用一个 RTC 字记"死在第几句"。每处只多 2 条指令。
-     *   1=循环头  2=过 ISR 分发  3=过定时器扫表  4=过 delay */
-    { volatile u32 *c = (volatile u32 *)0x50000F40u; c[12] = i; c[13] = 1u; }
-#endif
     for (i = 0; i < 60; i++) {
-        /* §705: WiFi MAC 中断在 call0 的 ISR 里只置标志；窗口化的库 ISR
-         * 必须在本任务（windowed）上下文调用 —— ISR 里 call8 会在任意
-         * WINDOWBASE 上旋转窗口，retw 与 CALLINC 不匹配，真板实测 a0 被
-         * 写成垃圾掉进 _vec_default。本文件是 windowed 编译，直接 call8
-         * 进 s3_wifi_isr_dispatch() ABI 正确。 */
-        {
-            extern volatile u32 g_wifi_isr_pending;
-            {
-                extern void s3_wifi_isr_dispatch(void);
-                u32 ie = 0;
-                g_wifi_isr_pending = 0u;
-                s3_wifi_isr_dispatch();
-                /* §708: wDev_ProcessFiq 已清掉 MAC/PWR 事件寄存器，
-                 * 现在重新使能 intenable 的 WiFi 位，否则中断永久关闭。 */
-                __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
-                ie |= 1u;
-                __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
-            }
-        }
-#ifdef S3_LOOP_STAGE
-        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 2u; }
-#endif
-#ifdef S3_ETS_TIMER_DISPATCH
-        /* §687: 驱动 ETS 软件定时器 —— scan 的 channel-dwell 回调靠它推进 */
-        s3_ets_timer_dispatch();
-#endif
-#ifdef S3_POLL_FIQ
-        /* §635: 库注册的 wDev_ProcessFiq 被我们的空 set_isr 吞掉了。
-         * 这里从 windowed 上下文直接周期调用它，手动 drain MAC 事件。 */
-        {
-            /* §678: 无日志版本，省 IRAM */
-            extern void wDev_ProcessFiq(void *arg);
-            wDev_ProcessFiq(0);
-        }
-#endif
-#ifdef S3_LOOP_STAGE
-        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 3u; }
-#endif
-        { extern void s3_timer_sweep(void); s3_timer_sweep(); }   /* §§1430 定时器分发 */
-        s3_w2c_task_delay(100u);
-#ifdef S3_LOOP_STAGE
-        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[13] = 4u; }
-#endif
+        { extern void s3_scan_iter(u32 i); s3_scan_iter((u32)i); }   /* §§1486 */
+
 #ifdef S3_POLL_SCANH
         /* §684: pm_offchan_ready_or_defer 返回 0（deferred），它把 scan_start_handler
          * 存进 g_scan 等待 PM 稍后回调；我们的 PM stub 不会触发，所以真射频扫描
@@ -3506,6 +3460,48 @@ void s3_timer_sweep(void)
         os_task_yield_force();
     }
 #endif
+}
+
+/* §§1486 ★★★★ **把扫描等待循环的循环体整体搬进 flash。**
+ *
+ * 之前循环体在 IRAM 里，每次加一个计数器都会
+ * `region IRAM overflowed` ⇒ 插桩没法做，所以一直没搞清
+ * "第一轮之后到底死在哪一句"。
+ * 搬到 flash 后：IRAM 只保留**一次调用**，插桩零成本。
+ *
+ * 建议阶段号（RTC `0x50000F40[13]`）：
+ *   1=进入  2=ISR 分发完  3=扫表完  4=延迟完 */
+__attribute__((section(".flash.text")))
+void s3_scan_iter(u32 i)
+{
+    volatile u32 *c = (volatile u32 *)0x50000F40u;
+    c[12] = i;
+    c[13] = 1u;
+    {
+        extern volatile u32 g_wifi_isr_pending;
+        extern void s3_wifi_isr_dispatch(void);
+        u32 ie = 0u;
+        g_wifi_isr_pending = 0u;
+        s3_wifi_isr_dispatch();
+        __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
+        ie |= 1u;
+        __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
+    }
+    c[13] = 2u;
+#ifdef S3_ETS_TIMER_DISPATCH
+    { extern void s3_ets_timer_dispatch(void); s3_ets_timer_dispatch(); }
+#endif
+    c[13] = 3u;
+    { extern void s3_timer_sweep(void); s3_timer_sweep(); }
+    c[13] = 4u;
+#ifdef S3_LOCAL_SPIN
+    /* §§1487 完全不碰内核：就地空转。用来区分
+     * "延迟本身卡住" 还是 "延迟之后的代码卡住"。 */
+    { u32 k = 0u; while (k < 200000u) { k = k + 1u; } }
+#else
+    { extern void s3_w2c_task_delay(u32 ticks); s3_w2c_task_delay(100u); }
+#endif
+    c[13] = 5u;
 }
 
 __attribute__((section(".flash.text")))
