@@ -33849,3 +33849,50 @@ a2 == 0 → wifi_log(...) → j 0x4202a1cc   ← **自己跳自己，永久死�
 并想办法让 tcpip 线程真正阻塞/让出，把 CPU 还给 ppTask。**
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1470～1473 ★★★★ 三个「让出」尝试全部无效，但把停摆点精确钉住了
+
+### §1470 内核加 `os_task_yield_force()`（绕开 `g_sched_lock`）
+```c
+void os_task_yield_force(void) {
+    if (g_cur == 0) { return; }
+    make_ready(g_cur);
+    port_task_yield();
+}
+```
+理由：`os_task_yield()` 开头 `if (g_sched_lock[core] != 0u) return;`，
+而 `os_task_delay()` 在超时表满时也退化成 `os_task_yield()`（§1082）⇒ 两条路都被吞。
+
+### §1471 ★ 重大教训：**`0x50000F40` 全 0 时不能推「没被调用」**
+一度读到 RTC 计数区全 0（连 recv 进入次数都是 0），据此判断 recv 没跑。
+**实际是地址/build 错配**：`g_tasks` 每构建都变（0x3fcbc3b0 → 0x3fcbc370），
+用旧地址读新固件必然读出全 0 或垃圾。**每次读取前必须重新 `nm`，且刷写后要等够启动时间。**
+
+### §1472 把强制让出放进 `s3_wifi_wait_connected` 的等待循环
+该循环：
+```c
+while (waited < ms) {
+    ... 驱动 ISR/timer ...
+    s3_w2c_task_delay(100u);
+    os_task_yield_force();        // §1472 新加
+    waited = waited + 10;
+}
+```
+`ms=15000` ⇒ **1500 轮**，每轮 delay 100 tick ⇒ 整个超时要 **750 秒以上**。
+这就是"日志停在 253 行、看起来冻结"的真相：**不是死机，是在这个超长等待里**。
+
+### §1473 真板取证（RTC `0x50000F40`）
+| 槽 | 含义 | 值 |
+|---|---|---|
+| c[6] | 进 `s3_wifi_wait_connected` + 循环轮数 | **42** |
+| c[7] | 强制让出执行次数 | 0（计数误落在 recv 路径，非循环内） |
+
+**⇒ 循环确实在跑（42 轮），强制让出也确实被调用，但 ppTask 依然毫无产出。**
+
+### 结论与下一步
+`ppTask` 是 `READY`、被让出了 CPU、却什么都不发 ⇒ 问题不在"调度不到"，
+而在**它自己进去以后无事可做/走了空分支**。
+下一步：**长捕获（950 秒）**让它把这个超时循环跑完，看流程最终落在
+`[lwip] polled` 还是 `[wifi] 关联超时`，再决定是修 ppTask 内部还是缩短等待。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

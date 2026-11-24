@@ -692,9 +692,14 @@ __attribute__((section(".flash.text")))
 void s3_recv_yield(void)
 {
     extern void os_task_yield(void);
-    extern void os_task_delay(u32 ticks);
+    extern void os_task_yield_force(void);
     static u32 s_cnt = 0u;
     s_cnt = s_cnt + 1u;
+    {   /* §§1471 真板取证：+4=recv_yield 调用次数，+5=强制让出次数 */
+        volatile u32 *c = (volatile u32 *)0x50000F40u;
+        c[4] = c[4] + 1u;
+        if ((s_cnt & 8191u) == 0u) { c[5] = c[5] + 1u; }
+    }
     /* §1130 当年删这里是因为在 W2C_SPILL 壳深处调 `port_core_id()` 会崩，
      * 那个框架问题已在 §1449 修掉。限频：每 512 次 recv 才让一次。 */
     /* §§1469 `os_task_yield()` 在 `g_sched_lock[core] != 0` 时**直接返回**，
@@ -702,7 +707,7 @@ void s3_recv_yield(void)
      * 换成 `os_task_delay(1)`：它会**真把当前任务阻塞掉**，
      * 强制切换到 ppTask（1970里 recv 跑了 1860 万次，
      * 每 8192 次阻塞 1 tick 对吞吐量影响很小）。 */
-    if ((s_cnt & 8191u) == 0u) { os_task_delay(1u); }
+    if ((s_cnt & 8191u) == 0u) { os_task_yield_force(); }
 }
 
 int osi_queue_recv_body(void *qh, void *item, u32 ticks)
@@ -2818,7 +2823,10 @@ int s3_wifi_wait_connected(int ms)
     int i = 0;
     int r = 0;
 
+    /* §§1473 真板取证：确定流程到底进没进这个循环。 */
+    { volatile u32 *c = (volatile u32 *)0x50000F40u; c[6] = c[6] + 1u; }
     while (waited < ms) {
+        { volatile u32 *c = (volatile u32 *)0x50000F40u; c[6] = c[6] + 1u; }
         for (i = 0; i < 96; i++) { ap[i] = 0; }
 #ifdef S3_DRIVE_TOP
         /* §865: 早退判定之前先驱 ISR+timer。之前驱动块在 early-return 之后，
@@ -2922,6 +2930,23 @@ int s3_wifi_wait_connected(int ms)
         }
 #endif
         s3_w2c_task_delay(100u);
+#ifdef S3_FORCE_YIELD_LOOP
+        /* §§1472 ★★★★ **关键：让 ppTask 真正跑起来。**
+         *
+         * `s3_wifi_wait_connected(15000)` 每轮 `s3_w2c_task_delay(100)` 才
+         * `waited += 10` ⇒ **1500 轮**。而两个任务同为 prio 2，
+         * `S3_NO_PREEMPT` 下当前任务不让出 ⇒
+         * `ppTask`（READY）**整整饿了这么久**，
+         * AUTH/ASSOC 帧全部发不出去。
+         *
+         * `s3_timer_dispatch_guarded()` 之前挂在 recv 里，但这条流程
+         * **根本不经过 recv**（真板：`0x50000F40` 全 0）。 */
+        {
+            extern void os_task_yield_force(void);
+            { volatile u32 *c = (volatile u32 *)0x50000F40u; c[7] = c[7] + 1u; }
+            os_task_yield_force();
+        }
+#endif
         waited = waited + 10;
     }
 #ifdef S3_CONN_DIAG2

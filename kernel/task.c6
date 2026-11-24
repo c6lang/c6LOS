@@ -767,6 +767,24 @@ void os_task_yield(void) {
     port_task_yield();
 }
 
+/* §§1470 ★★★★ **强制让出，忽略 `g_sched_lock`。**
+ *
+ * `os_task_yield()` 开头就有 `if (g_sched_lock[core] != 0u) return;`。
+ * 而 lwIP 的 `tcpip_thread` 在 `osi_queue_recv` 里忙等时**正处于调度锁内**
+ * ⇒ 让出被吞掉 ⇒ 同优先级的 `ppTask`（READY）永远拿不到 CPU。
+ * 真板任务表实证：id1=`ppTask`(state=READY)、id2=`tcpip_thread`(state=RUNNING)。
+ * ppTask 是 IDF WiFi 的**发送引擎**，它不跑 ⇒ probe/auth/assoc 全部发不出去。
+ *
+ * `os_task_delay()` 也靠不住：超时表满时它退化成 `os_task_yield()`（§1082），
+ * 同样被锁吞掉。 */
+void os_task_yield_force(void) {
+    if (g_cur == 0) {
+        return;
+    }
+    make_ready(g_cur);
+    port_task_yield();
+}
+
 void os_task_delay(u32 ticks) {
     if (g_cur == 0) {
         return;
