@@ -600,6 +600,14 @@ static WQ *wq_resolve(void *qh)
     return 0;
 }
 
+/* §1532 ★ 野句柄回退：认不出 `qh` 时改从**真正的 xphyQueue** 取消息。
+ * 放在 `.flash.text`，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+static WQ *s3_q_fallback(void)
+{
+    return wq_resolve(*(void **)0x3fcef904u);
+}
+
 static u32 osi_wifi_create_queue(u32 len, u32 size)
 {
     WQ *q;
@@ -920,6 +928,19 @@ int osi_queue_recv_body(void *qh, void *item, u32 ticks)
     if (g_qbad == 0u && (q == 0 || q->magic != WQ_MAGIC)) {
         g_qbad = 1u;
         *(volatile u32 *)0x50000360u = (u32)qh;   /* 第一个不过 magic 的 recv 句柄 */
+    }
+    if (q == 0 || q->magic != WQ_MAGIC) {
+        /* §1532 ★★★★ ppTask 有时把**野指针**（WiFi 堆块头，如 0x3fcc51a0）
+         * 当队列句柄传进来。原来这里 `return 0`（"没收到"），于是真正的
+         * xphyQueue **永远没人取** ⇒ `pp task q full` 1309 次
+         * ⇒ 所有 ioctl `failed to post` ⇒ 扫描 0 个 AP。
+         * 改成从真队列取消息，让 ppTask 继续跑它自己的状态机。 */
+#ifdef S3_QFALLBACK
+        WQ *fb = s3_q_fallback();
+        if (fb != 0) {
+            q = fb;
+        }
+#endif
     }
     if (q == 0 || q->magic != WQ_MAGIC) {
         QDIAG[0] = (u32)qh;                 /* 句柄不像我们的队列 */
@@ -2295,7 +2316,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             {
                 extern void s3_seed_tx_buffers(void);
                 int rp = pp_attach();
-                s3_ets_printf("[ppattach] r=%d\n", rp);
+
             }
             /* §1423（已回退：直调 pp_create_task 会自崩，147 行）ppTask 未被创建 */
             /* §§1210 ★★★：`pp_attach` 只能执行一次（真板返回 0x101），
@@ -2322,7 +2343,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 /* §§1212：验证池子可用性——直接分一个试试。 */
                 {
                     void *eb = esf_buf_alloc(1u, 0u);
-                    s3_ets_printf("[esfalloc] -> %x\n", (unsigned)eb);
+
                 }
             }
         }
@@ -3720,7 +3741,7 @@ int __wrap_pp_create_task(void)
         if (had == 0u) {
             u32 made = osi_wifi_create_queue(32u, 64u);
             *xq = made;
-            s3_ets_printf("[ppq] xphyQueue 0 -> 自建 %x\n", (unsigned)made);
+
         } else {
             s3_ets_printf("[ppq] xphyQueue=%x (lib-set)\n", (unsigned)had);
         }

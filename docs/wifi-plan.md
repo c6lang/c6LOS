@@ -34808,3 +34808,39 @@ ri = wifi_init_process((void *)(g_s3_first_msg != 0u ? g_s3_first_msg : (u32)m))
 若回退法生效，qfull 会立刻下降，这一点自然就验证了。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（链条已推进到"ppTask 拿野句柄"这一环）。
+
+## §1532 野句柄回退实测：`q full` 1309 → **0**，但暴露出更深的窗口损坏
+
+加了 flash 助手 `s3_q_fallback()`（认不出 `qh` 时改从真正的 `xphyQueue` 取），
+并整条删掉三条 IRAM 打印（`[ppq]`、`[ppattach]`、`[esfalloc]`）腾空间。
+
+### 效果（`-DS3_QFALLBACK`）
+```
+qfull = 0        （之前 1309）
+```
+⇒ **队列塞满的墙被拆掉了**，ppTask 真的开始收到消息。
+
+### 但随即在更深一层崩
+日志 181 行，停在 `[wifi] scan_start=0` 之后的扫描等待里。RTC 现场：
+```
+exccause=0x0         (非法指令)
+excvaddr=0x3d
+epc1 =0x4201223e     = slot_read(queue.c) 的 `s8i a8, a9, 0`
+ps   =0x0006081f
+a0   =0x8201270c     (带 CALLINC 标记)
+WB   =0x000a  (10，非法)   WS=0x0540  (非法)
+```
+⇒ `slot_read` 往 **`a9 = 0x3d`** 这个野地址写字节。
+即 ppTask 自己的**输出指针/栈指针已被窗口损坏**（和 §1520 的 `ra=0`、
+§1506 的 `a9=0` 同一类）。
+
+### 两套配置都保留（开关 `S3_QFALLBACK`）
+- **关**（默认）：9130 行，队列一直满、ioctl 全失败、扫描 0 AP（原地打转）；
+- **开**：qfull=0，但 181 行就崩在 `slot_read` 的野指针上（把真实阻塞暴露出来）。
+
+⇒ 下一步不再是队列，而是**ppTask 的窗口状态**：
+它进入/退出 `_queue_recv` 时 `a9`（= 被调者 a1）与 WINDOWSTART 已经不一致。
+需要检查 `W2C_SPILL s3_w2c_queue_recv, osi_queue_recv_body, 24` 这个壳
+在 `callx8` 之后 `retw` 之前对 `a0..a3`/`a9` 的恢复顺序。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
