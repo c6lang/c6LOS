@@ -3304,7 +3304,7 @@ WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
              -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
              -Wl,--wrap=pm_offchan_ready_or_defer -Wl,--wrap=chm_acquire_lock \
              -Wl,--wrap=config_is_cache_tx_buf_enabled \
-             -Wl,--wrap=ppTask -Wl,--wrap=ieee80211_timer_process -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan -Wl,--wrap=ieee80211_regdomain_check_channel -Wl,--wrap=scan_bitmap_to_channel_list -Wl,--wrap=set_channel_rfpll_freq \
+             -Wl,--wrap=ppTask -Wl,--wrap=ieee80211_timer_process -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan -Wl,--wrap=ieee80211_regdomain_check_channel -Wl,--wrap=scan_bitmap_to_channel_list -Wl,--wrap=set_channel_rfpll_freq -Wl,--wrap=wDev_AppendRxBlocks \
              -Wl,--wrap=ic_tx_pkt
 # §846: S3_TARGET_BSSID 时在 flash 侧 wrap get_ap_records，把扫描结果的 BSSID
 # 改成目标 weforpay.com（wifi_glue.c 保持字节不变，避免破坏脆弱的同步扫描）

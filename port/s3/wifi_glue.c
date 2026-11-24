@@ -4516,6 +4516,23 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
 /* §1575 ★ RF PLL 是否被调到信道上？`set_channel_rfpll_freq`（0x420519b0）
  * 是真正写 RF PLL 的函数。包一层计数：若一次都没被调用，
  * 就说明"信道设了、但 RF 从没被调谐"—— 这正是 `irq=0` 的最后一层。 */
+/* §1578 ★★★★★ `wDev_AppendRxBlocks` 是 ISR 把收到的帧挂进 RX 链表的入口。
+ * 包住它计数：**这里为 0 就说明射频真的没收到任何帧**（比看 eb_space 更直接，
+ * 因为 eb 分配发生在更后面，可能被别的因素挡）。 */
+extern int __real_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d);
+__attribute__((section(".flash.text")))
+int __wrap_wDev_AppendRxBlocks(void *a, void *b, void *c, void *d)
+{
+    extern int s3_ets_printf(const char *, ...);
+    extern volatile u32 g_s3_diag[];
+    int r = __real_wDev_AppendRxBlocks(a, b, c, d);
+    g_s3_diag[39] = g_s3_diag[39] + 1u;      /* §1578 收帧计数（复用诊断槽） */
+    if (g_s3_diag[39] <= 5u) {
+        s3_ets_printf("[rxblk] #%u r=%d\n", (u32)g_s3_diag[39], r);
+    }
+    return r;
+}
+
 extern unsigned int __real_set_channel_rfpll_freq(unsigned int ch);
 volatile u32 g_rfpll_n = 0u;
 __attribute__((section(".flash.text")))
