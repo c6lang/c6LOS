@@ -32379,3 +32379,53 @@ __real_ieee80211_send_probereq(a1, g_s3_probe_buf != 0u ? g_s3_probe_buf : a2, .
 - **真板稳定 233~235 行**（会话起点 79，**+156**）。
 - **本会话：12 个结构性缺陷修复 + 环形现场仪器化（已验证）。**
 - **四项验收全部未取得。目标未完成。**
+
+---
+
+# 执行摘要（Executive Summary）
+
+## 目标（未达成）
+在真板上让 **c6LOS 自身**通过 IDF 闭源 windowed WiFi 库完成：
+真实 AP 关联 → DHCP 取 IP → TLS 握手 → 打印 https://qq.com 的页面 body。
+
+**验收状态：四项全部未取得**（AP=0 DHCP=0 TLS=0 body=0）。
+
+## 已达成的真板里程碑（稳定 233~235 行，起点 79 行）
+```
+[sdel] sem=... t=1                ✓ ISR 侧超时扫描生效（调度死锁已修）
+[direct] init=0 start=0 state=2   ✓ WiFi 进入 STARTED
+[hs] d14=1                        ✓ MAC 使能
+[seed] idx=2 i=8                  ✓ TX 空闲链表播种生效
+[wifi] scan_start=0               ✓ 扫描已发起
+```
+
+## 本会话修掉的 12 个结构性缺陷
+1. `W2C_SPILL` 五壳共用 RTC 槽 ⇒ 各自独立（8/12/16/20/24）
+2. 库任务优先级 `31-prio` 饿死初始化任务 ⇒ 固定 20
+3. `g_ic` 分配 + 直调 `wifi_init_process`/`wifi_start_process` ⇒ WiFi 首次 STARTED
+4. `os_wifi_int_disable/restore` 改空操作 ⇒ 消除 `__real_pp_post` 时序窗口
+5. 补 `g_ic+16` ⇒ 扫描进入 `perform scan`
+6. 直调 `pp_attach` / `esf_buf_setup`
+7. `--wrap=config_is_cache_tx_buf_enabled` 返回 1
+8. 真实的 `(type=0, idx=7/8)` 播种参数
+9. 正确的空闲链表基址 `g_eb_list_desc_ptr`
+10. `W2C_SPILL` 的 `a0` 保存
+11. **ISR 侧超时扫描**（`s3_isr_timeout_scan`）—— 修掉调度死锁
+12. 保护调用者帧的 `a0..a3` + 修寄存器使用序
+
+## 最后卡点（已彻底闭环）
+`ieee80211_send_setup(context, buf, ...)` 在 `+0x24` 断言 `context != 0` 失败，
+真板死循环在该断言里；调用点是 `send_probereq+0x239`，传入
+`a10 = a2 = 0`、`a11 = a4 = 0x3fcc0cd0`（有效缓冲）。
+
+**为什么所有 `--wrap` 手段都无效**（§1296/§1343/§1345/§1381/§1383/§1387 同一原因）：
+`--wrap` 只重写**未定义的直接调用引用**；
+对于**同一目标文件内部**的局部调用，以及**函数指针表**发起的调用，**全部无效**。
+`send_probereq`/`send_setup` 都在 `ieee80211_output.o` 里。
+
+**⇒ 必须在编译期（源码或换库）解决，链接期手段已到尽头。**
+
+## 下一步建议（按可行性排序）
+1. **换一份把 TX 缓冲路径暴露出来的 WiFi 库**（最直接）；
+2. 或 `objcopy` 拆分 `ieee80211_output.o` 的符号，让内部调用变成未定义引用；
+3. 或参考 NuttX / Rust `esp-wifi`，把 OSI 回调层改成**不跨窗口边界**的轮询模型。
