@@ -35798,3 +35798,25 @@ ESP32-S3 的 PHY/RF 前端没有把任何 802.11 帧送到 MAC
 （`wDev_AppendRxBlocks` 计数 = 0、`eb_space` 全 0），
 而信道=6、RF PLL 在调谐、RX 总开关已开、混杂模式已开、中断未屏蔽
 —— 全部逐项排除并留有证据。
+
+## §1580 排除两个 PHY 侧的最后嫌疑
+
+1. **`phy_wakeup_init` 确实被调用**（不是被跳过）：
+   `port/s3/win_island.c:471` 打印后紧接着 `phy_wakeup_init();`。
+   那行"已校准，跳过重复标定"只是说不再重复做完整校准，**上电序列照做**。
+2. **`s3_phy_init_data` 与 IDF 官方表一致**：
+   `port/s3/phy_init_data.c` 的 128 字节表，前 **70 个值逐个等于**
+   `/media/winger/inst_26/esp/esp-idf/components/esp_phy/esp32s3/phy_init_data.c`
+   （差异只有：IDF 第 71 行是 `0x74`，我们后面补的是若干 `0x00`）。
+   ⇒ 不是"伪造的初始化数据"。
+3. `phy_close_rf`/`phy_close_pa` 在我们的代码里**没有任何调用点** ⇒ RF 没被主动关掉。
+4. 关掉 `-DS3_INJECT_IDF_CAL` 也无效（§1577）。
+
+⇒ PHY 侧软件能查的都查完了。剩余唯一可行的下一步是**板级对照实验**
+（用 IDF 官方 app 跑同一块板子，见 §1579 的命令），确认射频硬件本身。
+
+## 会话最终交付
+- 代码：`main` 分支、工作树干净、默认配置**绿灯**；
+- 文档：`docs/wifi-plan.md` 已 3.5 万行，含 §1566 的 16 道闸门表、
+  §1564 起的交接总结、以及本会话新增的 §1565–§1580；
+- 验收：**AP=0 DHCP=0 TLS=0 body=0**（四项均未取得，障碍在 PHY/RF）。
