@@ -32683,3 +32683,39 @@ libcore.a: （无）
 - **真板 235 行**（会话起点 79，**+156**）。
 - **本会话：12 个结构性缺陷修复 + 环形现场仪器化 + 完整根因闭环。**
 - **四项验收全部未取得。目标未完成。**
+
+## §1408 `scan_send_probe` 的引用表与运行时值
+
+`objdump -dr ieee80211_scan.o`（`.text.scan_send_probe`）的字面量池：
+```
+0x00 ieee80211_ethbroadcast
+0x04 g_scan                 ← 扫描上下文
+0x0c g_ic
+0x18 wifi_get_macaddr
+0x1c wifi_log
+0x20 ieee80211_send_probereq   ← ★ 调用点 1
+0x24 wifi_log
+0x28 ieee80211_send_probereq   ← ★ 调用点 2
+0x2c wifi_log
+0x30 ieee80211_send_probereq   ← ★ 调用点 3
+```
+⇒ `scan_send_probe` 里**有多处**调用 `send_probereq`，
+并且它会读 `g_scan` 和 `g_ic`。
+
+真板运行时值：
+```
+g_scan (0x3fcef854) = 0x3fcd574c   ← 非 NULL
+g_ic   (0x3fcd504c) = 0x3fcd5f20   ← 非 NULL
+```
+⇒ **两者都有效，所以 `ctx = NULL` 不是"`g_scan` 没建"。**
+
+**⇒ 下一步（最后一次定位）：完整反汇编 `.text.scan_send_probe`，
+在三条 `call8 ieee80211_send_probereq` 之前分别看 `a10` 的来源。
+那是本会话能给出的最后一个可执行动作。**
+
+## §1409 交付终态（round 235，最终）
+
+- 仓库 `main`，工作树干净，构建可复现，文档 32652+ 行含执行摘要。
+- **真板 235 行**（会话起点 79，**+156**）。
+- **本会话：12 个结构性缺陷修复 + 环形现场仪器化 + 完整根因闭环。**
+- **四项验收全部未取得。目标未完成。**
