@@ -4432,10 +4432,27 @@ extern int __real_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg);
 __attribute__((section(".flash.text")))
 int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)
 {
+    extern int s3_ets_printf(const char *, ...);
+    static unsigned char s_chbuf[32];
+    int r;
+    unsigned in = bitmap;
+    unsigned argin = arg;
     if (bitmap == 0u) {
         bitmap = 0x3FFFu;
     }
-    return __real_scan_bitmap_to_channel_list(bitmap, arg);
+/* §1555 ★ 默认开启：`arg==0` 时给输出缓冲。 */
+#if 1
+    /* §1555 ★★★★ 真板 `[bmp] in=3fff arg=0 r=-1` ⇒ 位图本来就对，
+     * 失败原因是**第二个参数是 0**（它就是输出信道列表的缓冲）。
+     * 给它一块自己的缓冲。 */
+    if (arg == 0u) {
+        arg = (unsigned)(void *)s_chbuf;
+    }
+#endif
+    r = __real_scan_bitmap_to_channel_list(bitmap, arg);
+    /* §1554 ★ 取证：打印**进来的**位图、替换后用的、以及返回值。 */
+    s3_ets_printf("[bmp] in=%x arg=%x r=%d\n", in, argin, r);
+    return r;
 }
 
 extern int __real_ieee80211_sta_scan(void *a, void *b, void *c, void *d, void *e, void *f);

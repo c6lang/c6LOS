@@ -35195,3 +35195,33 @@ if (a10 != 1) → "skip all 2G channels in bandmode Auto when scanning"
 - 卡在"2G 位图为 0 ⇒ 只有无效信道"。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1554–§1555 位图函数的第二参数是 0 —— 给它缓冲后越过这道门
+
+真板取证（`[bmp]`）：
+```
+[bmp] in=3fff use=3fff arg=0 r=-1
+```
+- **位图本来就是 0x3FFF**（所以之前那句 `= 0x0` 打印的是别的量）；
+- 真正失败的是**第二参数 `arg == 0`**（它就是输出信道列表的缓冲）；
+- 库在这条路径上返回 `r = -1`。
+
+`-DS3_BMP_ARGFIX`（现默认开启）：`arg == 0` 时用一块 32 字节的静态缓冲。
+真板效果：库的打印从
+`2g bitmap contains only invalid channels` 变成
+```
+[v2]wifi|In 2G band, 5G channel bitmap does not take effect
+```
+⇒ **位图检查已通过**，扫描又往前走了一段。
+
+### 当前闸门顺序（已全部记录下来，按出现顺序）
+1. `wifi_scan_start_process` 的 `g_wifi_nvs` 状态字节（1/3）—— 已修；
+2. `ieee80211_sta_scan` 的 `*(u32*)(g_ic+16) == 0` —— 已修（填 `g_ic+0x130`）；
+3. `wifi_check_chan_param` → 监管域检查 —— 已修（`--wrap` 恒放行）；
+4. `scan_bitmap_to_channel_list` 的 bandmode(`g_ic+0x2A1`)==1 —— 已修；
+5. 同一函数的 `arg == 0` —— 已修（本节的缓冲）；
+6. **当前停在** `In 2G band, 5G channel bitmap does not take effect`，
+   之后没有新日志 ⇒ 需要看它后面是否进入
+   `scan_enter_oper_channel_process` / MAC 中断是否开始增长。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
