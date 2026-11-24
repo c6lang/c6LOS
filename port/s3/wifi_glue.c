@@ -207,6 +207,20 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[rxen] %x -> %x\n", v0, (u32)*rx);
     }
 #endif
+#ifdef S3_GETCH
+    /* §1573 ★ 直接问库"当前信道是多少"：`chm_get_current_channel()`
+     * 返回当前信道（`chm_set_current_channel` 写的就是它）。
+     * 若这里读到不是 6，说明 §1550 的"设信道成功"只是返回 0、实际没写。 */
+    {
+        extern unsigned int chm_get_current_channel(void);
+        unsigned int cur = chm_get_current_channel();
+        unsigned int ch = 0u;
+        if (cur >= 0x3f000000u && cur < 0x40000000u) {
+            ch = *(volatile unsigned char *)(void *)cur;
+        }
+        s3_ets_printf("[curch] p=%x ch=%u\n", cur, ch);
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {
