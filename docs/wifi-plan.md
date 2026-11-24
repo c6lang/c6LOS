@@ -34972,3 +34972,37 @@ if (a3 != 1) { wifi_log(...); return -1; }   ← 3f 个字节后就 return -1
 **反汇编范围错位造成的假象**，`nm` 复核镜像里只有一份。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1544 `ieee80211_sta_scan` 的两个出口已看清；-1 来自更内层
+
+反汇编（镜像 `0x42039c98`）：
+
+```
+entry a1,32
+a9 = *(u32*)(g_ic + 16)
+a2 = -1
+if (a9 == 0) → retw            ← 子结构指针为空就直接 -1
+*(u16*)scannum = 0
+return cnx_sta_scan_cmd(msg, arg, g_ic+0x130)
+```
+
+- 试过把 `g_ic+16` 填成 vif 替补（`-DS3_IC16_FILL`）：
+  **`[ic16]` 一次都没打印** ⇒ 说明 `g_ic+16` **本来就不是 0**
+  ⇒ 第一个出口没走。
+- 于是 `-1` 只能是 `cnx_sta_scan_cmd(...)` 的返回值。
+
+⇒ **下一轮入口：反汇编 `cnx_sta_scan_cmd`（`nm` 取地址），
+找它返回 -1 的条件。** 这条路（静态反汇编 → 条件 → 定点修）
+已经被证明是有效的：§1542 就是靠它拿到 `g_wifi_nvs` 的状态判据。
+
+### 反汇编工作流（记下来，别再摸索）
+```bash
+L=/media/winger/inst_26/esp/esp-idf/components/esp_wifi/lib/esp32s3
+cd /tmp/wl && ar x $L/libnet80211.a            # 或 libpp.a / libcore.a
+objdump -d -r 目标.o | sed -n '/<函数名>:/,/^$/p'   # 带重定位，能看出全局符号
+# 镜像内地址用 nm 取，再用 objdump --start-address/--stop-address 看解析后的 l32r
+```
+注意：`objdump` 的标签在范围边界处会错位（会显示成邻近函数名），
+**函数名与地址一律以 `nm` 为准**（§1543 的"两份符号"就是错位假象）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

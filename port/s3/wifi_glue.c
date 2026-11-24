@@ -33,6 +33,23 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[nvs] null\n");
         return;
     }
+    /* §1544 ★★★★ 反汇编 `ieee80211_sta_scan`（0x42039c98）：
+     *     a9 = *(u32*)(g_ic + 16);
+     *     a2 = -1;
+     *     if (a9 == 0) → return -1;        ← **子结构指针为空就直接 -1**
+     *     否则 return cnx_sta_scan_cmd(msg, arg, g_ic+0x130);
+     * 真板 `g_ic` 头部是 `2 0 0 0` ⇒ g_ic+16 == 0 ⇒ 必然 -1。
+     * 这里把它填成我们已经建好的 vif 替补（`g_s3_diag[28]`）。 */
+    {
+        extern unsigned char g_ic[];
+        extern volatile u32 g_s3_diag[];
+        u32 *icp = (u32 *)(void *)g_ic;
+        u32 cur = icp[4];      /* +16 */
+        if (cur == 0u && g_s3_diag[28] != 0u) {
+            icp[4] = g_s3_diag[28];
+            s3_ets_printf("[ic16] 0 -> %x\n", (u32)g_s3_diag[28]);
+        }
+    }
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {
