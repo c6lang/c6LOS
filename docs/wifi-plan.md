@@ -36397,3 +36397,28 @@ cfg 逐字段拷进库内部结构**。这正是"配置不生效"的真正形态
   `g_wifi_menuconfig`（例如 magic/version 校验、或某个前置状态）；
 - 对照 §1601 已确认的 `msg[12]` 语义，确认两条入口
   （`esp_wifi_init_internal` 与 `wifi_init_process`）各自的作用。
+
+## §1604 结论性读数：库内那份配置**没有**从我们的 cfg 拷贝
+
+```
+[direct] init=0 b112=752 m112=0
+```
+- `b112=752` ⇒ **我们的 cfg 块**（`g_wifi_cfg_blob + 112 = beacon_max_len`）是对的；
+- `m112=0`  ⇒ **库内部的配置结构体**（`g_wifi_menuconfig + 112`）是 0。
+
+结合之前 `g_wifi_menuconfig+0 = 10`、`+4 = 32`（看起来像 IDF 默认值）
+⇒ 库用的是**它自己那份默认配置**，而不是我们传入的 cfg。
+
+⇒ 这与它打印 `Init max length of beacon: <垃圾>` 完全一致。
+
+### 这意味着
+`esp_wifi_init_internal(cfg)` → `wifi_init_in_caller_task(cfg)` 这条链
+虽然返回 0，但**没有把 cfg 的字段搬进 `g_wifi_menuconfig`**。
+由于 `wifi_init_in_caller_task` 在闭源库里，**只能靠 IDF app 侧断点
+或逐函数反汇编**才能看清它到底拷了哪些字段。
+
+### 已修复的一个真 bug（§1604）
+本轮编辑曾吃掉一个闭合括号（初始化块），导致整个文件后面的函数被嵌套、
+一堆 `invalid storage class` 错误。已补回，构建恢复。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

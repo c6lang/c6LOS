@@ -2676,10 +2676,12 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
            * 指向的结构里读配置（+0/+8/+12...），从不看我们传的 cfg。
            * 这里打印这个指针的运行时值 —— 若为 0，就说明
            * `esp_wifi_init_internal` 根本没把它建起来。 */
-          s3_ets_printf("[direct] init=%d sr=%d state=%u\n",
-                        ri, rs,
-                        (unsigned)*(volatile unsigned char *)(void *)(g_ic + 0x1E9)); }
-    }
+          { extern u32 g_wifi_cfg_blob[];
+            s3_ets_printf("[direct] init=%d b112=%u m112=%u\n",
+                          ri, (unsigned)g_wifi_cfg_blob[28],
+                          (unsigned)*(volatile u32 *)(void *)(g_wifi_menuconfig + 112u)); }
+        }
+    }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
     /* §§1128 ★★★★：`esp_wifi_start()` 只是把 `wifi_start_process`
