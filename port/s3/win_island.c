@@ -181,6 +181,12 @@ static phy_cal_data_t g_phy_cal;
  * `esp_phy_load_cal_and_init` 就这么做；校准只对同一 MAC 有效）。
  * 放 `.flash.text`，IRAM 侧只留一次调用。 */
 __attribute__((section(".flash.text")))
+void s3_phy_en_prep(void)
+{
+    phy_bbpll_en_usb(1u);   /* 文件级已有声明：void phy_bbpll_en_usb(u32) */
+}
+
+__attribute__((section(".flash.text")))
 void s3_phy_cal_set_mac(void *cal)
 {
     extern int ets_efuse_get_mac(void *out);
@@ -395,7 +401,13 @@ int s3_win_phy_step(int step)
      * 这里用 ROM 的 `ets_efuse_get_mac` 读出 MAC 并写进去。 */
     {
         extern void s3_phy_cal_set_mac(void *cal);
+        extern void s3_phy_en_prep(void);
         s3_phy_cal_set_mac((void *)&g_phy_cal);
+        /* §1595 ★ IDF 在 `esp_phy_load_cal_and_init()` 里、校准之前还有两步：
+         *   `phy_bbpll_en_usb(true)`（CONFIG_ESP_PHY_ENABLE_USB=1 时）
+         *   `esp_phy_get_init_data()` 取 init data（我们已用等价常量表）
+         * 前者我们从来没做。放 flash 助手里调用。 */
+        s3_phy_en_prep();
     }
     return register_chipv7_phy(s3_phy_init_data, &g_phy_cal, S3_PHY_CAL_MODE);
 }

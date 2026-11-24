@@ -36276,3 +36276,30 @@ c6LOS 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 �
 - 分支 `main`，工作树干净，默认配置绿灯（1298 个提交）；
 - `tools/build-wifi.sh build|best` 可复现（best 会构建+刷板+抓取+摘要指标）；
 - 板子当前是 c6LOS 固件（刷过 IDF app 后已恢复；恢复命令见 §1589 末尾）。
+
+## §1595–§1596 又对齐两处 IDF 步骤，并排除一个结构性问题
+
+### §1595 `phy_bbpll_en_usb(true)`（已补，与 IDF 一致）
+IDF 在 `esp_phy_load_cal_and_init()` 里、校准之前会调它
+（因为 `CONFIG_ESP_PHY_ENABLE_USB=1`）。我们从来没调。
+已补进 flash 助手 `s3_phy_en_prep()`。真板无变化（`eb` 仍 0）。
+
+### §1596 排除"提前调 pp_attach 导致 ic_init 跳过后续"
+假设：我们提前调 `pp_attach` ⇒ 库的 `ic_init` 里它返回 0x101 就 **return**，
+后续 `wDev_Rxbuf_Init`/`pm_attach`/MAC 使能全被跳过。
+实验：不提前调 ⇒ 真板 **108 行即崩**（基线 175）⇒ 提前调用是必要的，假设不成立。
+已回退。
+
+### 本轮对齐清单（与 IDF 逐条比对后补齐的）
+| 项 | 状态 |
+|---|---|
+| PHY init data 128 字节 | ✅ 已换成 IDF 编译产物的精确字节（§1594，原先差 18 字节） |
+| 校准数据里的 MAC | ✅ 已写入（§1593） |
+| `phy_bbpll_en_usb` | ✅ 已调用（§1595） |
+| 校准模式 FULL/PARTIAL | ✅ 两种都试过 |
+| PHY/WiFi 时钟与复位 | ✅ 日志证明 CLK/RST 已正确 |
+| RX 总开关 / 混杂 / 中断 / 信道 / chm | ✅ 全部验证正常 |
+
+仍未收帧（`eb`=0、`irq`=0）。**剩余差异只能在库内部的 MAC/wDev 初始化细节**，
+下一步应改用"在 IDF app 里给 `ic_init`/`hal_init`/`lmacInit`/`pp_attach`
+下断点，记录真实调用序列与参数"的办法（我们这边已无外部可调项）。

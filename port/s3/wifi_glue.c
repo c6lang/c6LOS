@@ -2593,6 +2593,9 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             s3_fix_menuconfig();
             {
                 extern void s3_seed_tx_buffers(void);
+                /* §1596 实验记录：曾试过**不**提前调 `pp_attach`（希望让库自己的
+                 * `ic_init` 走完整链），真板 108 行即崩（基线 175）⇒
+                 * 提前调用是必要的，不能去掉。已回退。 */
                 int rp = pp_attach();
 
             }
