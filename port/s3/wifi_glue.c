@@ -544,9 +544,7 @@ static u32 osi_event_group_wait_bits(void *g, u32 bits, int clear, int wait_all,
 {
     WEvt *e = (WEvt *)g;
 
-    s3_ets_printf("[evwait] t=%u g=%x bits=%x all=%d tk=%x\n",
-               (unsigned)s3_w2c_current_task(), (unsigned)(void *)g,
-               (unsigned)bits, wait_all, (unsigned)ticks);
+
     u32 got;
     HIT_OF(_event_group_wait_bits);
     if (e == 0 || e->magic != WEVT_MAGIC) { return 0u; }
@@ -659,8 +657,7 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     int r;
     HIT_OF(_queue_send);
     /* §§1127：临时无条件打印，确认 pp_post 是否真的进到 _queue_send。 */
-    s3_ets_printf("[send] t=%u qh=%x tk=%x q=%x\n", (unsigned)s3_w2c_current_task(),
-               (unsigned)qh, (unsigned)ticks, (unsigned)q);
+
     if (q == 0 || q->magic != WQ_MAGIC) {
         SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
         SDIAG[1] = (u32)((WQ *)qh)->magic;
@@ -2282,7 +2279,9 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
         int rs;
         for (i2 = 0u; i2 < 8u; i2++) { m[i2] = 0u; }
         m[3] = *(volatile u32 *)(void *)g_ic;      /* msg->[12] = IC 指针 */
-        ri = wifi_init_process((void *)m);
+        { extern u32 g_s3_first_msg;
+          ri = wifi_init_process((void *)(g_s3_first_msg != 0u
+                                          ? g_s3_first_msg : (u32)m)); }
         /* §§1206 ★★★：直接调 `pp_attach()`。真板取证：
          * `esf_buf_setup` 初始化的 `eb_txdesc_space @0x3fcbbf00` **全为 0** ⇒ 它从未执行。
          * 而 `esf_buf_setup` 只在 `pp_attach` 里被调，`pp_attach` 只在 `ic_init` 里被调，
@@ -3132,8 +3131,8 @@ u32 s3_wifi_bringup(void)
     }
     wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
     wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
-    wcfg(56u,  1u);             /* tx_buf_type            default 1 = dynamic */
-    wcfg(60u,  0u);             /* static_tx_buf_num      动态模式下为 0      */
+    wcfg(56u,  0u);             /* §1527 tx_buf_type = 0 静态（库调的是 esf_buf_setup_static） */
+    wcfg(60u,  8u);             /* §1527 static_tx_buf_num = 8（原来 0 ⇒ alloc eb fail(0)） */
     wcfg(64u,  32u);            /* dynamic_tx_buf_num     default 32          */
     wcfg(68u,  1u);             /* rx_mgmt_buf_type       DYNAMIC_RX_MGMT_BUF default 1 */
     wcfg(72u,  5u);             /* rx_mgmt_buf_num        default 5           */
@@ -3500,6 +3499,15 @@ void s3_timer_sweep(void)
            * `g_s3_txret` = 最近一次返回值（非 0 = 被拒）。AUTH/ASSOC 帧要
            * 真关联就必须看到 tx>0 且 ret=0。 */
           if (g_s3_diag[32] == 1u) {
+              { extern u32 g_s3_first_msg;
+                if (g_s3_first_msg != 0u) {
+                    u32 *mp = (u32 *)(void *)g_s3_first_msg;
+                    s3_ets_printf("[msg] %x %x %x %x %x %x %x %x\n",
+                                  mp[0], mp[1], mp[2], mp[3],
+                                  mp[4], mp[5], mp[6], mp[7]);
+                } else {
+                    s3_ets_printf("[msg] none\n");
+                } }
               /* §1522 ★ 射频到底有没有被设到信道上？放这里是因为本函数在
                * `.flash.text`，不占 IRAM（上次加在 associate 里溢出了 28 字节）。 */
               extern int esp_wifi_get_channel(void *primary, void *second);
@@ -3679,8 +3687,7 @@ int __wrap_pp_create_task(void)
     extern unsigned char pp_task_hdl[];
     s3_wrap_bump(4u);
     /* §§1424：**看它到底返回了没有**，以及旧句柄是否已存在。 */
-    s3_ets_printf("[ppct] in hdl=%x\n",
-                  (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
+
     r = __real_pp_create_task();
     s3_ets_printf("[ppct] out r=%d hdl=%x\n", r,
                   (unsigned)*(volatile u32 *)(void *)pp_task_hdl);
@@ -4052,6 +4059,9 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
     /* §§1164（无打印版）：`wifi_init_process` 需要 `msg->[12]` 非 0 且
      * `g_ic` 指向 0x2b4 字节的 IC 结构（它一进来就 memset(g_ic,0,0x2b4)）。
      * 不加任何打印，避免影响时序。 */
+    if (g_s3_first_msg == 0u && ppq == 6u && data != 0u) {
+        g_s3_first_msg = data;
+    }
     if (ppq == 6u && data != 0u) {
         extern unsigned char g_ic[];
         volatile u32 *m = (volatile u32 *)data;

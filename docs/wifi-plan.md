@@ -34717,3 +34717,45 @@ u32 m[8]; for (i<8) m[i]=0;  m[3] = g_ic;  wifi_init_process(m);
 `irq` / `tx` 开始增长。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1527 两个实质突破：真 init 消息 + 静态 TX 缓冲
+
+### (1) 喂**真 init 消息**，帧缓冲数量从 0 变成 24
+`__wrap_pp_post` 里截下第一条 `ppq==6` 的消息（`g_s3_first_msg`），
+直调处改成优先用它：
+```c
+ri = wifi_init_process((void *)(g_s3_first_msg != 0u ? g_s3_first_msg : (u32)m));
+```
+真板结果（库自己的打印）：
+```
+第一次（伪造消息）： Init data frame dynamic rx buffer num: 0   ← 全 0
+第二次（真消息）  ： Init data frame dynamic rx buffer num: 24  ← 有值了
+                     Init dynamic tx buffer num: 24
+                     Init tx cache buffer num: 24
+```
+⇒ 之前的推断成立：**库是从消息内容里取配置的**。
+
+### (2) `tx_buf_type`/`static_tx_buf_num` 改成静态，流程从 125 行 → **9130 行**
+只改了两个常量（不增加任何代码）：
+`wcfg(56u, 0u)`（tx_buf_type = 静态）、`wcfg(60u, 8u)`（static_tx_buf_num = 8）。
+原来 `static_tx_buf_num=0` 时库打印 `esf_buf_setup_static: alloc eb fail(0)`。
+
+### 新的失败点（下一个要攻的）
+```
+[v2]wifi|pp task q full: s=0 p=0        （整场 1309 次）
+[v2]wifi|ioctl: failed to post WiFi task 0
+[wifi] 关联超时（15000 ms），sta_get_ap_info=12306
+```
+- `recv` 计数每轮 +64、累计 3840 ⇒ **ppTask 确实在反复进 `osi_queue_recv_body`**；
+- 但队列仍然满 ⇒ 发与收**很可能不是同一个队列对象**：
+  RTC `0x50000864`（recv 时的 `xphyQueue`）= `0x3fcc8234`，
+  而 `[ppq]` 打印的 `xphyQueue` = `0x3fcc8d90`（同一次运行内不同时刻）。
+- `osi_queue_recv_body` 里 magic 不匹配的早返回**不取消息**，
+  所以句柄一旦对不上就是"recv 空转 + 队列塞满"。
+
+⇒ 下一步：确认 `pp_post` 写入的队列与 `ppTask` 读取的 `xphyQueue`
+是不是同一个对象（把两处句柄同时记进 RTC 同一时刻对比），
+对不上的话就让 `pp_post` 也走 `xphyQueue`（或反过来）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但整条链已从"配置全 0"推进到
+"队列收发不配对"，这是本轮最实质的推进）。
