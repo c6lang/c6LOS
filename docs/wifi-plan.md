@@ -35139,3 +35139,38 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
 字符串 `skip all 2G channels in bandmode`），看它读哪个字段、什么条件。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**（本轮：信道首次可设 + 扫描状态机启动）。
+
+## §1551–§1552 bandmode 与 2G 位图：扫描的最后两道闸门
+
+### §1551 bandmode（已修，效果立竿见影）
+反汇编 `scan_bitmap_to_channel_list`（0x4202f5e4）：
+```
+a4 = g_ic + 0x200
+a10 = *(u8*)(a4 + 161)        ⇒ g_ic + 0x2A1 = **bandmode**
+if (a10 != 1) → "skip all 2G channels in bandmode Auto when scanning"
+```
+真板 `[band] 0 -> 1` 之后：
+- **`skip all 2G channels` 这句消失**；
+- 库继续往下走，打出下一句 `2g bitmap contains only invalid channels= 0x0`。
+
+### §1552 2G 位图（未修成）
+`scan_bitmap_to_channel_list(u16 bitmap, u8 arg)`，`bitmap == 0` 时打印
+`2g bitmap contains only invalid channels= 0x0`。
+试过 `-Wl,--wrap=scan_bitmap_to_channel_list`（bitmap 为 0 时换成 0x3FFF）：
+**真板仍打印 `0x0`** ⇒ 这个包装**没被调用** —— 该函数与调用者很可能在
+同一个目标文件里，链接期的 `--wrap` 只作用于**跨对象的未定义引用**，
+同对象内的直接调用拦不到（和 §1450 的 `diag[31]` 同一个道理）。
+
+⇒ 下一步两条路：
+1. 找到调用点，把它取位图的那个字段（在 `g_ic` 里，很可能就在 0x2A1 附近，
+   如 `g_ic+0x2A2`/`+0x2A0` 的 u16）直接写成 0x3FFF；
+2. 或者把 `scan_bitmap_to_channel_list` 的首字节 patch 成"位图为 0 就用 0x3FFF"
+   （flash 里改不了，但可以 `--wrap` 它的**跨对象**调用者）。
+
+### 本轮净进展（写下来别忘了）
+1. **监管域放行**：`--wrap=ieee80211_regdomain_check_channel` ⇒ 信道首次可设
+   （`[setch] direct r=258 → 0`）；
+2. **bandmode 修正**：`g_ic+0x2A1 = 1` ⇒ 扫描不再跳过所有 2G 信道；
+3. 扫描状态机从 `r=-1` 一路推进到"构造信道列表"这一步。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

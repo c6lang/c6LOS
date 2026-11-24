@@ -80,6 +80,20 @@ void s3_nvs_state_fix(void)
         } else {
             s3_ets_printf("[ic16] already %x\n", cur);
         }
+        /* §1551 ★★★★★ 反汇编 `scan_bitmap_to_channel_list`（0x4202f5e4）：
+         *     a4 = g_ic + 0x200
+         *     a10 = *(u8*)(a4 + 161)        ⇒ g_ic + 0x2A1 = **bandmode**
+         *     if (a10 != 1) → 打印 "skip all 2G channels in bandmode Auto"
+         *     ⇒ 直接跳过所有信道，扫描什么都不做。
+         * 真板一直是这句 ⇒ 把 bandmode 置 1（2.4G）。 */
+        {
+            volatile u8 *bm = (volatile u8 *)(void *)((u8 *)g_ic + 0x2A1u);
+            u8 bv = *bm;
+            if (bv != 1u) {
+                *bm = 1u;
+                s3_ets_printf("[band] %u -> 1\n", (u32)bv);
+            }
+        }
     }
 #ifdef S3_SCANSTRUCT_PROBE
     /* §1551 ★ 库打印 `skip all 2G channels in bandmode Auto when scanning`
@@ -4390,6 +4404,24 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
         return 1;
     }
     return r;
+}
+
+/* §1552 ★★★★ 反汇编 `scan_bitmap_to_channel_list`（0x4202f5e4）：
+ *     a2 = bitmap(u16), a3 = arg
+ *     a4 = g_ic + 0x200; a10 = *(u8*)(a4+161)   ← bandmode(g_ic+0x2A1)
+ *     if (a10 != 1) → "skip all 2G channels in bandmode Auto"
+ *     if (bitmap == 0) → "2g bitmap contains only invalid channels= 0x0"
+ * 真板 bandmode 已修成 1，随后就打出第二句 ⇒ **位图本身就是 0**。
+ * 位图由调用方从 IC/参数里取（我们构建里没填）。这里在 0 时替换成
+ * 2.4G 全信道位图（1〜14 = 0x3FFE，bit0 是信道 1）。 */
+extern int __real_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg);
+__attribute__((section(".flash.text")))
+int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)
+{
+    if (bitmap == 0u) {
+        bitmap = 0x3FFFu;
+    }
+    return __real_scan_bitmap_to_channel_list(bitmap, arg);
 }
 
 extern int __real_ieee80211_sta_scan(void *a, void *b, void *c, void *d, void *e, void *f);
