@@ -33697,3 +33697,32 @@ auth timeout / handshake timeout t=0 / stop beacon and connect timers
 - `g_pm_ptr` 已修（§1455，真板 `= &g_pm`）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1456～1458 本轮三个"定时器"层面的硬伤
+
+### §1456 定时器表一直是满的（最重要）
+给 `osi_timer_setfn` 加一行 `[tset]` 打印后，真板暴露出：
+**`S3_ETS_TIMER_MAX` 原来是 4，attach 阶段就被 12 个 setfn 占满，
+之后所有 setfn 都返回 `slot=0`（失败）** ⇒ 那些定时器 arm 时 `fn=0`
+⇒ 扫描的换信道回调从来没装上 ⇒ 扫完第一个信道就死。
+
+§837 当年为绕开这个问题加的"回收律"（抢 `expire==0&&period==0` 的槽）
+只是让它们**互相抢**，反而把别人注册好的回调洗掉，治标不治本。
+
+扩到 **32 槽**后真板复核：
+- `slot=0` 次数：**0**（之前每次启动 4 次以上）
+- `[tarm] ... fn=0`：**2 处 → 1 处**
+- 日志：**283 → 303 行**
+
+### §1455 `g_pm_ptr` 是 NULL（已修，但证伪）
+`pm_is_waked` 读绝对符号 `0x3fcef8e4` 所指结构的 byte1。真板 `= 0`（NULL）
+⇒ 它去读地址 `1` 处的字节，必然非 0 ⇒ 永远判睡眠 ⇒ `ppProcessTxQ` return -1。
+已把它指向 `pm_attach()` 初始化好的 `g_pm` 且 byte1=0，真板复核 `= &g_pm` ✓。
+**但行为毫无变化 ⇒ PM 睡眠不是 probe 发不出去的门禁，这条线可以降级。**
+
+### §1458 仍未解决
+- `g_s3_diag[0]`（= `S3_PROBE_N`）**始终是 1** ⇒ 扫描只发一个 probe 就停，
+  换信道回调虽已装上却没真正推进。
+- `[v2]wifi|no timer handle` 仍出现（库自己某个定时器句柄是 NULL）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
