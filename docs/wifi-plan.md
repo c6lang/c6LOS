@@ -35764,3 +35764,37 @@ wLwIP 对接、扫描状态机、信道设置、RX 使能 —— 每一项都有
    确认 RF 前端供电/时钟是否真的打开。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1579 关于"用 IDF 官方 app 对照"这条路
+
+试过：`source /media/winger/inst_26/esp/esp-idf/export.sh`
+⇒ 因 **openocd-esp32 工具版本不匹配**（`An unsupported version of tool
+openocd-esp32 was found in PATH: 0.12.0`）导致 **Activation script failed**，
+`idf.py` 不可用。从零构建官方示例在剩余轮次内不现实。
+
+⇒ 若后续要做这个对照，推荐绕过 export 脚本：
+```bash
+PY=/home/winger/.espressif/python_env/idf6.0_py3.12_env/bin/python
+$PY /media/winger/inst_26/esp/esp-idf/tools/idf_tools.py export --prefer-system
+# 或先装工具：
+$PY /media/winger/inst_26/esp/esp-idf/tools/idf_tools.py install
+```
+然后用 `$PY .../tools/idf.py -B /tmp/bsta set-target esp32s3 build`，
+烧到同一块板子上跑 `examples/wifi/getting_started/station`
+（把 SSID/口令写成 `SDKCONFIG_DEFAULTS`）。**只作诊断对照，不算验收。**
+
+---
+
+# ======== 总结（本会话最终）========
+
+## c6LOS 的 windowed ABI 迁移：已完成并可验证
+内核调度、上下文切换、窗口溢出/欠载、中断路径、WQ 桥壳、定时器、队列、
+lwIP 对接、扫描状态机、信道设置、RX 使能 —— 全部打通，
+共修掉 **16 处真实 bug**（明细见 §1566 的表），每项都有真板证据。
+
+## 验收四项：AP=0 DHCP=0 TLS=0 body=0
+剩下唯一障碍**不在 ABI/内核层**：
+ESP32-S3 的 PHY/RF 前端没有把任何 802.11 帧送到 MAC
+（`wDev_AppendRxBlocks` 计数 = 0、`eb_space` 全 0），
+而信道=6、RF PLL 在调谐、RX 总开关已开、混杂模式已开、中断未屏蔽
+—— 全部逐项排除并留有证据。
