@@ -3439,7 +3439,9 @@ void __wrap_ieee80211_send_probereq(u32 a1, u32 a2, u32 a3, u32 a4,
      * "`send_probereq` 内部把它弄丢了"。 */
     /* §§1381：**a2 环形记录**（最近 8 次）到 `g_s3_diag[20..27]`，
      * 用来看有没有一次的 a2 是 0。 */
-    S3_PROBE_A2  = a2;
+    /* §§1401 ★★★ **记录 `a1` —— 它才是 `send_setup` 要的“上下文”**。 */
+    S3_PROBE_A2  = a1;
+    S3_PROBE_A3  = a2;
     {
         extern volatile u32 g_s3_diag[];
         u32 k = g_s3_diag[0] & 7u;      /* 用 PROBE_N 作为环下标 */
