@@ -34511,3 +34511,45 @@ GDB 在停住时 halt，**live PC 就停在 `os_task_block_prepare`**（0x420173
 - ppTask 停在它自己启动后的哪一步（在 tramp 里给 ppTask 单独记一个进度字）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1518–§1519 唯一的 send_setup 调用拿到的是「空上下文 + 空缓冲」
+
+在 `[swp]` 旁边把 `[tx]` 扩成：
+
+```
+[tx] n=60 tx=0 ret=0 ss=1 probe=0 vif=3fcd0084 sa=0 0 0
+```
+
+- `ss=1`：整场运行 `__wrap_ieee80211_send_setup` 只被调 **1 次**；
+- `sa=0 0 0`：这**唯一一次**收到的前三个实参是 **0, 0, 0**
+  （`ctx=0`、`buf=0`、第三参 0）；
+- `vif=3fcd0084`：我们的 vif 替补是**有**的（所以不是"没种子"）。
+
+⇒ 结论：**库调用 `send_setup` 时把 `ctx` 和 `buf` 都传成了 0**，
+于是即便我们替补了 ctx，**buf 仍然是空** ⇒ 库静默返回、不产生任何 TX
+（`ic_tx_pkt` 计数恒 0）⇒ 没有 AUTH/ASSOC 帧 ⇒ `g_sta_connected_flag` 恒 0
+⇒ 假阳性「已关联」⇒ DHCP 无链路、无 OFFER。
+
+并且**我们的代码里没有任何地方直接调用 `send_setup`**（grep 确认），
+所以这次调用确实来自闭源库内部。
+
+⇒ 两种可能，下一步用一条实验区分：
+1. **参数根本没到位**：wrapper 被 `call0`/`callx0` 或窗口错位的方式进入，
+   `a2..a7` 全是 0（"0,0,0" 正是干净的初始窗口值）。验证法：在 wrapper 里把
+   **a8..a15 也存进 diag 槽**——若真参数在 a10..a15，一看便知。
+2. 库确实用 0 参数调（例如它自己的 `esf_buf_alloc` 返回 NULL 后走到一条
+   "空帧"分支，§674 注释提过 `esf_buf_alloc` 恒 NULL）。
+
+### 本轮累计（§1502–§1519）修掉的真 bug
+1. `sched_pick()` 换成"除自己外最优"，不再把自己挑回来（其它任务才有 CPU）；
+2. `port_task_ctx_create` 补 `f[0]=a1`、`f[8]=a9`（新任务第一次 call8 的
+   被调者 a1 取自 a9，原来是 0 ⇒ `excvaddr=0xfffffff4`）；
+3. ISR 里去掉两处 `call8` 进 windowed C 函数（`s3_isr_timeout_scan`、
+   `port_isr_enter/exit`），改成纯内存操作；
+4. DHCP 直调 `dhcp_start()`，绕开"tcpip 线程一被调度就再也不返回"的死结
+   —— 真板已验证 `[lwip] dhcbcb` 会执行；
+5. 打开 `S3_REAL_ASSOC_GATE`，把"假阳性已关联"彻底暴露出来；
+6. 空闲分支兜底推进时间（全部任务阻塞时不至于永久死锁）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（本轮把每个 0 都变成了可解释、
+可复现、有计数的物理原因）。

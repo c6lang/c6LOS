@@ -3503,10 +3503,12 @@ void s3_timer_sweep(void)
           /* §1517 ★ TX 取证：`g_s3_diag[5]` = 交给 MAC 的次数（ic_tx_pkt），
            * `g_s3_txret` = 最近一次返回值（非 0 = 被拒）。AUTH/ASSOC 帧要
            * 真关联就必须看到 tx>0 且 ret=0。 */
-          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u\n",
+          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u vif=%x sa=%x %x %x\n",
                         (u32)g_s3_diag[32], (u32)g_s3_diag[5],
                         (u32)g_s3_txret, (u32)g_s3_diag[6],
-                        (u32)g_s3_diag[0]); }
+                        (u32)g_s3_diag[0], (u32)g_s3_diag[28],
+                        (u32)g_s3_diag[36],
+                        (u32)g_s3_diag[37], (u32)g_s3_diag[38]); }
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
@@ -4229,6 +4231,16 @@ void __wrap_ieee80211_send_setup(u32 a1, u32 a2, u32 a3, u32 a4,
     /* §§1416 ★★★ 库的 `send_setup(ctx, buf, ...)`：**`ctx` 是第 1 个实参 = `a1`**。
      * 原来的 `a2 == 0` 检查的是缓冲，所以 §1383 的 FIX 从未命中。 */
     g_s3_diag[6]++;      /* §1517: send_setup 被调用次数（tx=0 时用来分辨） */
+    /* §1518 ★ 只调过 1 次 send_setup、而 ic_tx_pkt 一次都没有 —— 必须看清
+     * 那一次到底传了什么：a1=ctx（0 表示库没拿到 vif）、a2=buf。 */
+    /* §1519 ★ 这里**不能**用 s3_ets_printf：真板实测计数写成功了、打印一行
+     * 都没有 ⇒ 这次调用发生在串口打印不可用的上下文里。改成写 DRAM 诊断槽
+     * （纯内存写），由正常的 `[tx]` 那行带出来。 */
+    if (g_s3_diag[6] <= 3u) {
+        g_s3_diag[36] = a1;
+        g_s3_diag[37] = a2;
+        g_s3_diag[38] = a3;
+    }
     if (a1 == 0u && g_s3_diag[28] != 0u) {
         S3_PROBE_FIX++;
         __real_ieee80211_send_setup((u32)g_s3_diag[28], a2, a3, a4, a5, a6, a7, a8);
