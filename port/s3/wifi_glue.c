@@ -3836,6 +3836,8 @@ void s3_timer_sweep(void)
                                 icp != 0 ? icp[3] : 0u);
               }
           }
+          { volatile u32 *hs = (volatile u32 *)0x60033d14u;
+            s3_ets_printf("[hs] %x\n", hs[0]); }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
