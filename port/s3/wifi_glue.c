@@ -2577,10 +2577,34 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
         int ri;
         int rs;
         for (i2 = 0u; i2 < 8u; i2++) { m[i2] = 0u; }
-        m[3] = *(volatile u32 *)(void *)g_ic;      /* msg->[12] = IC 指针 */
+        /* §1598 ★★★★★ 反汇编 `wifi_init_process`：
+         *     a5 = *(u32*)(msg + 12);
+         *     if (a5 == 0) return 0x102 (258);       ← 我们一直命中
+         *     memset(g_ic, 0, 0x2b4);                ← g_ic 是**结构体本身**
+         * 所以 msg[12] 应该传 **`g_ic` 的地址**（结构体地址），
+         * 而原来传的是 `*(u32*)g_ic`（结构体第一个字，通常是 0）⇒ 必然 258。 */
+        m[3] = (u32)(void *)g_ic;                  /* msg->[12] = IC 结构体地址 */
         { extern u32 g_s3_first_msg;
-          ri = wifi_init_process((void *)(g_s3_first_msg != 0u
-                                          ? g_s3_first_msg : (u32)m)); }
+          if (g_s3_first_msg != 0u) {
+              /* §1599 ★★★★★ 真消息的 `msg[12]`(IC 指针) 是 0 ——
+               * `__wrap_pp_post` 里的补丁没生效（那边要靠 osi_malloc 成功）。
+               * 反汇编已确认：`wifi_init_process` 只有 `msg[12]==0` 这一条
+               * 返回 258 的路，所以这里**就地补上** g_ic 的地址。 */
+              volatile u32 *rm = (volatile u32 *)g_s3_first_msg;
+              /* §1601 ★★★★★ **msg[12] 是"配置结构指针"，不是 IC 指针！**
+               * 证据：把它设成 g_ic 后，库打印
+               *   `Init data frame dynamic rx buffer num: 1970151538`
+               *   （把 g_ic 的内容当配置读出的垃圾）
+               * ⇒ 它从 msg[12] 指向的结构里读那七组缓冲数。
+               * 所以这里应传**我们自己构造的 cfg 块**。 */
+              {
+                  extern u32 g_wifi_cfg_blob[];
+                  rm[3] = (u32)(void *)g_wifi_cfg_blob;
+              }
+              ri = wifi_init_process((void *)g_s3_first_msg);
+          } else {
+              ri = wifi_init_process((void *)m);
+          } }
         /* §§1206 ★★★：直接调 `pp_attach()`。真板取证：
          * `esf_buf_setup` 初始化的 `eb_txdesc_space @0x3fcbbf00` **全为 0** ⇒ 它从未执行。
          * 而 `esf_buf_setup` 只在 `pp_attach` 里被调，`pp_attach` 只在 `ic_init` 里被调，
@@ -2596,7 +2620,12 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 /* §1596 实验记录：曾试过**不**提前调 `pp_attach`（希望让库自己的
                  * `ic_init` 走完整链），真板 108 行即崩（基线 175）⇒
                  * 提前调用是必要的，不能去掉。已回退。 */
-                int rp = pp_attach();
+                int rp;
+#ifdef S3_NO_DIRECT_PPATTACH
+                rp = 0;   /* §1600 实验：让库自己的 ic_init 去 attach */
+#else
+                rp = pp_attach();
+#endif
 
             }
             /* §1423（已回退：直调 pp_create_task 会自崩，147 行）ppTask 未被创建 */
@@ -2642,9 +2671,14 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             *(volatile u8 *)(void *)(g_ic + 0x1E9) = 0u;
         }
         rs = wifi_start_process();
-        s3_ets_printf("[direct] init=%d start=%d state=%u\n",
-                      ri, rs,
-                      (unsigned)*(volatile unsigned char *)(void *)(g_ic + 0x1E9));
+        { extern unsigned char g_wifi_menuconfig[];
+          /* §1602 ★ 反汇编 `wifi_lmac_init`：它从 **`*(void**)g_wifi_menuconfig`**
+           * 指向的结构里读配置（+0/+8/+12...），从不看我们传的 cfg。
+           * 这里打印这个指针的运行时值 —— 若为 0，就说明
+           * `esp_wifi_init_internal` 根本没把它建起来。 */
+          s3_ets_printf("[direct] init=%d mc=%x state=%u\n",
+                        ri, (unsigned)*(volatile u32 *)(void *)g_wifi_menuconfig,
+                        (unsigned)*(volatile unsigned char *)(void *)(g_ic + 0x1E9)); }
     }
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
@@ -4397,7 +4431,8 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
                 extern void *osi_malloc(u32 n);
                 *(volatile u32 *)(void *)g_ic = (u32)osi_malloc(0x2b4u);
             }
-            m[3] = *(volatile u32 *)(void *)g_ic;
+            /* §1598：同样改成传结构体地址（原来传的是第一个字，通常为 0）。 */
+            m[3] = (u32)(void *)g_ic;
         }
     }
 #ifdef S3_TRACE_SCANMSG

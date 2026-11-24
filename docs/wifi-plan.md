@@ -36335,3 +36335,40 @@ MAC 使能 / RX 建立这些真正的工作**从未执行过**！
   帧/中断或定时器）才会推进；
 - `init=258` 也要查：`wifi_init_process` 这次返回参数错误
   （可能与 §1591 的真 init 消息优先级有关，或与刚才复位状态有关）。
+
+## §1598–§1602 把 IC 初始化真正走通（多处真实 bug）
+
+### §1598 `msg[12]` 的语义 + `wifi_init_process` 的 258
+反汇编确认 `wifi_init_process` 只有一条返回 258 的路：
+```
+a5 = *(u32*)(msg + 12);  if (a5 == 0) return 0x102;
+memset(g_ic, 0, 0x2b4);
+wifi_lmac_init(a5);  wifi_hmac_init();  wifi_crypto_init(a5);
+*(u8*)(g_ic + 0x1E9) = 1;        ← 成功后才把状态置 1
+```
+⇒ `msg[12]` 是**配置指针**。
+
+### §1599 我们喂的"真消息"里 `msg[12]` 是 0
+`__wrap_pp_post` 里那次补丁没生效（依赖 osi_malloc 成功）。
+就地补：`rm[3] = (u32)g_wifi_cfg_blob;` ⇒ **`[direct] init=0`（首次成功）**。
+
+### §1600 不再提前调 `pp_attach`（这次是对的）
+IC 初始化成功后，我们那条提前的 `pp_attach()` 反而会撞（129 行）。
+用 `-DS3_NO_DIRECT_PPATTACH` 跳过 ⇒ 198 行、`init=0`、`state=2`、`ss=1`。
+
+### §1601–§1602 配置其实**已经正确**
+- `*(u32*)g_wifi_menuconfig` 运行时 = **10**（与 IDF 的 `static_rx_buf_num` 一致）；
+- 我们 cfg 的 `+48` = 10（`[direct] c48=10` 实测）；
+- `wifi_lmac_init` 从 `g_wifi_menuconfig` 读的是**库自己的那份**（已被正确填充）。
+⇒ 之前"库读不到我们的配置"的整个怀疑方向**可以彻底结束**。
+库打印的那七行 `buffer num: 0` 读的是另外几个字段（不是 48/52/64/116），
+但它们为 0 不影响 `wifi_lmac_init` 正常返回。
+
+### 现在的状态
+```
+[direct] init=0  mc=10  state=2      ← IC 初始化成功、启动链已跑
+[tx] tx=0 irq=0 ss=1                 ← 但 MAC 仍一帧未收
+[eb] 0 0 0 0
+```
+⇒ 启动链首次完整跑通（init 成功 + state 到 2 + send_setup 被调用），
+但射频接收仍未建立。**与 IDF 的差异只剩库内部 MAC/RX 的最后一步。**
