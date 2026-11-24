@@ -1542,6 +1542,18 @@ static int osi_event_post(const char *base, int id, void *data, u32 size, u32 ti
  * §837 那个"回收律"只是把别人的槽抢给新来的，治不了本。
  * 扩到 32。 */
 #define S3_ETS_TIMER_MAX 32u
+/* §§1466 ★ `(*g_scan)[15]` 不能用"什么都不做"的空桩：
+ * 它同时是扫描状态机自己要用的字段，
+ * 被我们压成空桩后，扫描只走一个信道就停
+ * （真板：定时器只触发 2 次、probe 只发 1 次。）
+ * 改成指向库里真正负责推进扫描的 process 函数。 */
+#ifdef S3_SCAN_CB_FN
+extern void scan_inter_channel_timeout_process(void *arg);
+#define S3_SCAN_CB_TARGET ((u32)(void *)scan_inter_channel_timeout_process)
+#else
+#define S3_SCAN_CB_TARGET ((u32)(void *)glue_ret0)
+#endif
+
 typedef struct {
     void *t;
     void (*fn)(void *);
@@ -2459,6 +2471,24 @@ int s3_wifi_scan(void)
      * 锁定目标 AP 的信道对后续关联更有利。 */
     cfg[8] = 6;
 #endif
+#ifdef S3_SCAN_BITMAP
+    /* §§1467 ★★★ **给扫描一张真正的信道位图。**
+     *
+     * 真板证据链：120ms 换信道定时器的回调是个跳板（直接转
+     * `__wrap_ieee80211_timer_process(7, 8, arg)`），它**只触发一次就不再
+     * 重新 arm**（`[tarm]` 再也不出现），probe 也只发 1 个
+     * ⇒ **扫描的信道列表只有一个信道**。
+     *
+     * 原因：`wifi_scan_config_t.channel_bitmap` 在偏移 32
+     * （ghz_2 @32 为 u16、ghz_5 @36 为 u32）一直是 0，
+     * 只靠 cfg[8]=6 指定单一信道。
+     * 这里把 2G 位图填成 0x3FFF（信道 1〜14），
+     * 并把 cfg[8] 清 0 让位图生效。 */
+    cfg[32] = 0xFFu;    /* ghz_2 bitmap 低字节：信道 1〜8  */
+    cfg[33] = 0x3Fu;    /* ghz_2 bitmap 高字节：信道 9〜14 */
+    cfg[36] = 0u; cfg[37] = 0u; cfg[38] = 0u; cfg[39] = 0u;
+    cfg[8] = 0u;        /* 不指定单一信道 */
+#endif
 #ifdef S3_PM_WAKE
     /* §691: ppProcessTxQ (40380963) 在发 probe 前调 pm_is_waked(ROM 4003c364)，
      * 它读 g_pm_ptr(0x3fcef8e4) 指向结构的 byte1：byte1==0 → 返回 1（awake），
@@ -3290,7 +3320,7 @@ void s3_timer_sweep(void)
     {
         extern unsigned char g_scan[];
         u32 *sp = *(u32 **)(void *)g_scan;
-        if (sp != 0 && sp[15] != 0u) { sp[15] = (u32)(void *)glue_ret0; }
+        if (sp != 0 && sp[15] != S3_SCAN_CB_TARGET) { sp[15] = S3_SCAN_CB_TARGET; }
     }
 #endif
 #ifdef S3_SWEEP_ALL
@@ -3560,7 +3590,7 @@ void s3_fix_ic16(void)
         u32 was = 0;
         if (sp != 0) {
             was = sp[15];
-            sp[15] = (u32)(void *)glue_ret0;   /* 用已有空函数，不新增代码 */
+            sp[15] = S3_SCAN_CB_TARGET;
         }
         {
             extern volatile u32 g_s3_diag[];
