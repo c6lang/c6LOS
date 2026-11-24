@@ -35006,3 +35006,38 @@ objdump -d -r 目标.o | sed -n '/<函数名>:/,/^$/p'   # 带重定位，能看
 **函数名与地址一律以 `nm` 为准**（§1543 的"两份符号"就是错位假象）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1545 ★★★ 补上 `g_ic+16` 后，扫描流程**真的跑起来了**
+
+装 `-DS3_IC16_FILL`（在扫描前若 `*(u32*)(g_ic+16) == 0` 就填成 `g_ic+0x130`）
+之后，真板第一次出现：
+
+```
+[nvs] obj=3fcd5c58 st=0 -> forced 1
+[ic16] 0 -> 3fcd5574            ← g_ic+16 原本确实是 0
+[scanp] enter msg=3fcc9814 b=305 0 3fcc9544
+[v4]wifi|Start wifi scan
+[v4]wifi|ssid=?, channel=0, hidden=0, type=?, active=<0,0>, passive=0
+[v4]wifi|home_channel_dwell_time=0
+[v2]wifi|skip all 2G channels in bandmode Auto when scanning
+```
+
+- `[scanp] leave r=-1` **不再出现** ⇒ §1544 的 -1 出口被堵上，处理函数继续往下走；
+- 库里自己的扫描日志出现 ⇒ **扫描状态机第一次被真正启动**。
+
+### 下一个障碍（库自己写得很清楚）
+```
+skip all 2G channels in bandmode Auto when scanning
+```
+⇒ `bandmode = Auto` 且 2G 信道位图被判为空 ⇒ **所有信道被跳过 ⇒ 依旧 0 个 AP**。
+库打印的 `channel=0` 也印证：没有指定信道。
+
+⇒ 下一步（明确、小改动）：让 scan 参数里
+`channel` 非 0 **或** bandmode/2G 位图正确。
+我们现有的 `S3_SCAN_BITMAP` 往 `cfg[32]/[33]` 写了 `0xFF/0x3F`
+（信道 1〜14），但库仍认为"全跳过" ⇒ 说明**字段偏移不对**，
+需要按库打印的顺序（ssid、channel、hidden、type、active/passive、
+home_channel_dwell_time）去对 scan 参数结构体的真实布局。
+可以从 `wifi_scan_start_process` 里 `a2+20`（参数块）的字段访问反推。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**（但扫描流程已首次真正启动）。

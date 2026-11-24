@@ -45,9 +45,16 @@ void s3_nvs_state_fix(void)
         extern volatile u32 g_s3_diag[];
         u32 *icp = (u32 *)(void *)g_ic;
         u32 cur = icp[4];      /* +16 */
-        if (cur == 0u && g_s3_diag[28] != 0u) {
-            icp[4] = g_s3_diag[28];
-            s3_ets_printf("[ic16] 0 -> %x\n", (u32)g_s3_diag[28]);
+        /* 注意：不能依赖 `g_s3_diag[28]`（扫描时它多半还是 0，之前那次
+         * `[ic16]` 没打印就是这个原因）。直接指向 `g_ic + 0x130`：
+         * 反汇编里 `cnx_sta_scan_cmd` 的第三个参数正是 `g_ic+0x130`，
+         * 而它随后要读的字节在 `(*(g_ic+16)) + 0x184`，
+         * 这样正好落到 g_ic 末尾（size 0x2b4）之外的一格 0 ⇒ 通过该检查。 */
+        if (cur == 0u) {
+            icp[4] = (u32)(void *)((u8 *)g_ic + 0x130u);
+            s3_ets_printf("[ic16] 0 -> %x\n", icp[4]);
+        } else {
+            s3_ets_printf("[ic16] already %x\n", cur);
         }
     }
     st = *(volatile u8 *)(void *)nv;
