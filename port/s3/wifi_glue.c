@@ -158,6 +158,38 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[sp] filled g_ic+0x130\n");
     }
 #endif
+    /* §1557 ★ `chm_start_op` 要求 `g_chm->op_state(+4) == 0xff`，
+     * 否则直接返回 3、channel-enter 回调不执行、probe 帧不生成。
+     * 本函数已在扫描前被调用，且它在 `.flash.text`，零 IRAM 成本。 */
+    {
+        extern unsigned char g_chm[];
+        volatile u32 *cp = (volatile u32 *)(void *)g_chm;
+        u32 chp = *cp;
+        if (chp >= 0x3f000000u && chp < 0x40000000u) {
+            u8 st8 = *(volatile u8 *)(void *)(chp + 4u);
+            s3_ets_printf("[chm] p=%x st=%u\n", chp, (u32)st8);
+            if (st8 != 0xffu) {
+                *(volatile u8 *)(void *)(chp + 4u) = 0xffu;
+                s3_ets_printf("[chm] -> ff\n");
+            }
+        }
+    }
+#ifdef S3_RXBUF_INIT
+    /* §1558 ★★★★★ 反汇编 `ic_init`（0x4201b5e4）：
+     *     call8 pp_attach(...)
+     *     if (ret != 0) return ret        ← **直接退出**（真板 ret=0x101）
+     *     call8 wDev_Rxbuf_Init(ic)       ← **分配 RX 缓冲**
+     *     call8 pm_attach()
+     * 我们这条链上 `pp_attach` 一直返回 0x101（"已初始化"），
+     * 于是 **wDev_Rxbuf_Init 从未执行** ⇒ MAC 收不到帧 ⇒ `irq=0`
+     * ⇒ 扫描永远 0 个 AP。这里补上这一步。 */
+    {
+        extern unsigned char g_ic[];
+        extern int wDev_Rxbuf_Init(void *ic);
+        int rr = wDev_Rxbuf_Init((void *)g_ic);
+        s3_ets_printf("[rxbuf] r=%d\n", rr);
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {
@@ -4427,6 +4459,10 @@ int __wrap_ieee80211_regdomain_check_channel(unsigned ch)
  * 真板 bandmode 已修成 1，随后就打出第二句 ⇒ **位图本身就是 0**。
  * 位图由调用方从 IC/参数里取（我们构建里没填）。这里在 0 时替换成
  * 2.4G 全信道位图（1〜14 = 0x3FFE，bit0 是信道 1）。 */
+/* §1559 实验记录：让 `__wrap_pp_attach` 返回 0（以便 `ic_init` 继续走
+ * MAC 使能那一串）—— 真板 112 行即崩，比基线（196 行）更差 ⇒ 会重跑
+ * 不该重跑的初始化。已回退，不再 wrap `pp_attach`。 */
+
 extern int __real_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg);
 __attribute__((section(".flash.text")))
 int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)

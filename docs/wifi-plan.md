@@ -35251,3 +35251,35 @@ channel-enter 回调不执行、probe 帧不生成（§693 的旧结论）。
    全部来自静态反汇编（`libnet80211.a` + 镜像地址）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1557–§1559 三个"看起来像根因"的候选，实测排除
+
+| 候选 | 判据来源 | 实测 | 结论 |
+|---|---|---|---|
+| `g_chm->op_state(+4)` 需 `0xff` | §693 旧结论 | `[chm] p=3fcd58d0 st=255` | **本来就是 0xff**，不是它 |
+| `wDev_Rxbuf_Init` 从未执行 | 反汇编 `ic_init`：`pp_attach != 0` 就 return | `[rxbuf] r=257` | 也是"已初始化"，RX 缓冲已建 |
+| `__wrap_pp_attach` 返回 0 让 `ic_init` 续跑 | 同上 | **112 行即崩**（基线 191 行） | 会重跑不该重跑的初始化，**已回退** |
+
+### 当前确切的停点
+```
+[v4]wifi|Start wifi scan
+[v4]wifi|ssid=?, channel=0, hidden=0, type=?, active=<0,0>, passive=0
+[v4]wifi|home_channel_dwell_time=0
+[v2]wifi|In 2G band, 5G channel bitmap does not take effect
+[w1]wifi|                                  ← 之后再无动作
+```
+- **没有武装任何 osi 定时器**（`[tarm]` 0 次、`tfir=0`）⇒ 信道驻留定时器没起来；
+- **MAC 中断仍 0**（`irq=0`）；
+- `[scanp]` 处理函数已不再返回 -1（那道门已过）。
+
+⇒ 下一步两个方向（都需要更多轮次）：
+1. 反汇编 `scan_enter_oper_channel_process`（`ieee80211_scan.o`，已知它调
+   `chm_start_op` + `ic_enable_rx`），看它当前在哪一步静默返回；
+2. 反汇编 `cnx_sta_scan_cmd` 后半段（0x42046328 之后 `scan_cancel` 那条路），
+   确认扫描是否被 cancel 掉。
+
+### 本轮（§1549–§1559）最终状态
+默认配置绿灯；启用 `-DS3_QFALLBACK -DS3_RECV_CWRAP -DS3_IC16_FILL
+-DS3_SETCH_DIRECT` 时：信道可设、扫描状态机启动到"构造信道列表"，
+停在 `In 2G band, 5G channel bitmap does not take effect` 之后。
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
