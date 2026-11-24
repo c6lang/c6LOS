@@ -36239,3 +36239,40 @@ IDF 官方 app 同板 600ms 关联、1.6s 拿到 `192.168.68.120`。
 在 IDF app 上给 `esp_phy_load_cal_and_init` / `esp_phy_enable` /
 `ic_init` 下断点或用 `ESP_LOG` 打点，**记录真实调用序列与每个参数**，
 再逐条搬到 c6LOS（我们目前是"自己拼"这条链）。
+
+# ======== 会话交接（最终，务必先读这段）========
+
+## 一句话结论
+c6LOS 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 处真实 bug）；
+四项验收（AP/DHCP/TLS/body）**仍为 0**，唯一障碍是：**我们的固件收不到任何
+802.11 帧**，而 **IDF 官方 app 在同一块板子上 600ms 关联、1.6s 拿到 IP**
+（§1592）—— 所以硬件没问题，差异在 **PHY/MAC 使能序列**。
+
+## 已经对齐/验证正常的（不要再重复排查）
+- 硬件/天线/供电/AP/信道（IDF 同板实测）；
+- 我们的 tick 源（`ccompare0`，TIMG0 那段是遗留，§1587）；
+- 信道设置（`[curch] ch=6`）、RF PLL 调谐（`[rfpll] ch=1/6/11`）、
+  RF ready 握手（`0x60033d14`=1）、RX 总开关（`0x60033084` bit31=1）、
+  中断未被屏蔽、混杂模式可开、`chm` 前置满足；
+- 配置链路（库内部 `g_wifi_menuconfig+4`=32，§1591）；
+- PHY 校准数据已带本机 MAC（§1593，与 IDF 一致）；
+- PHY 初始化数据表 = IDF 编译产物的精确 128 字节（§1594，之前差 18 字节）。
+
+## 仍为 0 的表现
+`wDev_AppendRxBlocks` 计数 = 0、`eb_space` 全 0、`irq=0`（MAC 从不中断）。
+
+## 下一步（唯一有效）
+在 **IDF app** 里给下列函数加日志/断点，记录**真实调用序列与参数**，
+再逐条搬到 c6LOS（我们目前是手工拼这条链）：
+1. `esp_phy_load_cal_and_init()`（含 `esp_phy_get_init_data()` 的来源与
+   `phy_bbpll_en_usb`）；
+2. `esp_phy_enable()`；
+3. `esp_wifi_start()` → `ic_init → lmacInit → pp_attach → wDev_Rxbuf_Init
+   → pm_attach` 整链；
+4. 特别关注 **`hal_init()` 是否真的被调用**（本轮想 wrap 它但 DRAM 不许，
+   可用 IDF app 侧断点确认，再对照我们这边）。
+
+## 工程状态
+- 分支 `main`，工作树干净，默认配置绿灯（1298 个提交）；
+- `tools/build-wifi.sh build|best` 可复现（best 会构建+刷板+抓取+摘要指标）；
+- 板子当前是 c6LOS 固件（刷过 IDF app 后已恢复；恢复命令见 §1589 末尾）。
