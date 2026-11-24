@@ -36084,3 +36084,33 @@ esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset --after 
               0x20000 build/wifi/c6os.bin
 ```
 （不要用 `tools/flashbl.sh`，它用 `sudo -n`，非交互会失败。）
+
+## §1591 ★ 更正：我们的 cfg **确实被库接收了**（`g_wifi_menuconfig+4 = 32`）
+
+把 `[hs]` 打印改成读库内部配置计数（与 `esf_buf_setup` 读同一格）：
+```
+[mc] mc4=32
+[eb] 0 0 0 0
+```
+⇒ 库内部那一格是 **32**（正是我们 cfg 里 `static_rx_buf_num=10` 之外的
+txdesc 计数默认值），**不是 0** ⇒ **cfg 传到位了**。
+
+⇒ 因此 §1589 的"cfg 根本没被接收"这个结论**作废**。
+库打印的 `Init data frame dynamic rx buffer num: 0` 等七行读的是
+**另外一组偏移**（很可能在 `g_wifi_menuconfig` 的其它区域或另一个全局），
+与我们 cfg 的 48/52/64/116 不是同一批字段。
+
+### 这带来一个重要收窄
+- 配置链路：✅ 通（mc4=32 为证）；
+- `eb_space` 全 0：只是"**没有帧被用过**"，不代表池子没建；
+- MAC 中断 0 / `wDev_AppendRxBlocks`=0：**射频侧确实没有帧**。
+
+⇒ 结论与 §1576–§1581 一致：**卡在 PHY/RF 收帧**，
+而配置/MAC 使能/信道/中断全部正常。
+
+### 已具备的对照资产
+`/tmp/bsta/wifi_station.elf`（IDF 官方 station 示例，带符号，同板可跑）。
+下次可以直接：
+1. 烧 IDF app → GDB 读它在运行时 `g_wifi_menuconfig` 各字段的值；
+2. 与我们镜像同字段逐一比对，确认那七行"buffer num"到底读哪里。
+（注意：烧 IDF app 会让板子进重启循环，恢复命令见 §1589 末尾。）
