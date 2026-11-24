@@ -52,7 +52,7 @@ typedef char s3_ctx_size_check[(sizeof(S3Ctx) == 76) ? 1 : -1];
  * `S3_STACK_TOP=0x3FCD9500`（链接器报 "S3 BSS/stack collision"）。
  * 池从 0x9000 涨到 0xA000，`_bss_end` 上移 0x1000，
  * 主栈从约 20KB 降到约 16KB（§432 那次只剩 146 字节才出事，16KB 够用）。 */
-#define S3_STACK_POOL    40960u
+#define S3_STACK_POOL    32768u   /* §1562 40KB->32KB（tcpip 任务已不创建） */
 
 /* 窗口 spill 的总开关（w2c.S 的每个壳在进内核前读它）。
  *   0 = 完全不动窗口状态（和以前的行为一致，保住已通过的 PHY/串口基线）

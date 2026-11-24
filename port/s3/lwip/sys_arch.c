@@ -310,6 +310,15 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
         stacksize = 8192;
     }
 
+#ifdef S3_NO_TCPIP_TASK
+    /* §1562 ★ 不创建 tcpip 线程：§1514 起 DHCP 已改成直调 `dhcp_start()`，
+     * 不再依赖 tcpip 线程。省下的 8KB 栈从栈池让给 WiFi 堆
+     * （两者都是静态数组，一增一减总 DRAM 不变）。 */
+    if (name != 0 && name[0] == 't' && name[1] == 'c') {
+        g_next_task_windowed = 0;
+        return 1;
+    }
+#endif
     g_next_task_windowed = 1u;
     g_lwip_stage[4] = 0x541u; {
         extern int s3_ets_printf(const char *fmt, ...);

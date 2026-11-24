@@ -292,7 +292,7 @@ static u32 glue_ret0(void)
  *   `l32i a8, a8, 0x168` 且 vaddr=0x168，即 a8 是 0
  * （某个 i2c 函数表指针没分配出来）。库在 PHY 阶段就要这么多堆。
  * 48KB 是"能装下库"与"给主栈留够"之间的折中。 */
-static u32 g_wifi_heap_mem[12288];      /* 48KB */
+static u32 g_wifi_heap_mem[14336];      /* §1562 48KB->56KB（栈池让出 8KB） */
 #define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
 #define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 

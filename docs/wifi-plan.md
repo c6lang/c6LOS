@@ -35320,3 +35320,26 @@ else → scan_pm_offchan(scan_enter_oper_channel_handler)
 或者干脆不创建 tcpip —— 我们已经在 §1514 绕开它了）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1562 用栈池换 WiFi 堆（成功，但更深一层仍卡住）
+
+做法（总 DRAM 不变，一增一减）：
+1. `-DS3_NO_TCPIP_TASK`：`sys_thread_new` 遇到名字以 "tc" 开头的直接返回不创建
+   （§1514 起 DHCP 已改成直调 `dhcp_start()`，不再需要 tcpip 线程）；
+2. `port/s3/ctx.c`：`S3_STACK_POOL` **40960 → 32768**（16K+16K 刚好够
+   wifi 主任务与 ppTask）；
+3. `port/s3/wifi_glue.c`：`g_wifi_heap_mem[12288] → [14336]`（**48KB → 56KB**）。
+
+真板效果：
+- `[heap] 分配失败 n=1600` **消失**（RX 缓冲分得出来了）；
+- `[tks] n=2`（tcpip 任务不再创建，符合预期）；
+- 但 **`esf_buf_alloc: invalid type=0` 仍在**，`Init static tx buffer num: 0`
+  ⇒ 帧缓冲池（eb 池）依旧没建好；
+- 流程仍停在 `In 2G band, 5G channel bitmap does not take effect`，
+  `irq=0`。
+
+⇒ 结论：堆问题解决了，但"**帧缓冲池为 0**"这条（§1525/§1527 追过的
+`esf_buf_setup` 路径）依然挡在射频前面。这一条必须让库真正跑完它的
+init/attach（`esf_buf_setup` 读的那组计数仍是 0）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
