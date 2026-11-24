@@ -190,6 +190,26 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[rxbuf] r=%d\n", rr);
     }
 #endif
+#ifdef S3_MC_CNT_FIX
+    /* §1564 实验：`esf_buf_setup` 读 `*(u16*)(g_wifi_menuconfig+4)` 当缓冲数，
+     * 0 时默认 64。把它显式写 64；若库那些 "Init ... buffer num" 打印
+     * 随之变化，就说明打印与这里同源。 */
+    {
+        extern unsigned char g_wifi_menuconfig[];
+        u32 mc = *(u32 *)(void *)g_wifi_menuconfig;
+        if (mc >= 0x3f000000u && mc < 0x40000000u) {
+            volatile u16 *cp = (volatile u16 *)(void *)(mc + 4u);
+            u16 cv = *cp;
+            s3_ets_printf("[mc4] p=%x v=%u\n", mc, (u32)cv);
+            if (cv == 0u) {
+                *cp = 64u;
+                s3_ets_printf("[mc4] -> 64\n");
+            }
+        } else {
+            s3_ets_printf("[mc4] ptr=%x\n", mc);
+        }
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {

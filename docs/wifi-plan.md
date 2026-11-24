@@ -35362,3 +35362,27 @@ init/attach（`esf_buf_setup` 读的那组计数仍是 0）。
 4. 仍卡：`esf_buf_alloc: invalid type=0`（帧缓冲池为 0）+ `irq=0`。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1564 `g_wifi_menuconfig+4` 也不是那组计数的来源
+
+`-DS3_MC_CNT_FIX`：把 `*(u16*)(g_wifi_menuconfig + 4)` 从 0 写成 64
+（`esf_buf_setup` 明确把它当缓冲数，0 时默认 64）。
+真板：**`[mc4]` 一次都没打印**（该指针不在我们校验的堆范围内），
+且库的 `Init ... buffer num:` **仍是 0**。
+
+⇒ 那七组计数来自**第三个地方**（既不是 `g_wifi_menuconfig`、
+不是 `g_ic+0x130`、也不是 init 消息里的参数块）。
+最可能是在 `wifi_init_process` 内部从**我们传给 `esp_wifi_init_internal`
+的 cfg 之外的某个编译期常量结构**拷贝 —— 需要在 `libpp.a`/`libnet80211.a`
+里找到打印那七行的函数并追它的读地址（本轮已定位到
+`esf_buf.o` 的 `.rodata_wlog_info.10`，但所属函数被字面量池混淆，
+需要按 `l32r` 目标逐个核对）。
+
+### 本轮（§1560–§1564）净进展
+1. `g_scan->[+70]` bit0 ⇒ `scan_pm_offchan` 真的被调用；
+2. 栈池换堆（48→56KB + 不建 tcpip）⇒ `[heap] 分配失败 n=1600` 消失；
+3. init 消息 id 确认为 **0x146**；
+4. 排除 `g_wifi_menuconfig+4` 与 `g_ic+0x130` 是缓冲计数来源。
+仍卡：帧缓冲池为 0 ⇒ `esf_buf_alloc: invalid type=0` ⇒ 无帧 ⇒ `irq=0`。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
