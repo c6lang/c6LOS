@@ -3494,7 +3494,25 @@ void s3_scan_iter(u32 i)
     c[13] = 3u;
     { extern void s3_timer_sweep(void); s3_timer_sweep(); }
     c[13] = 4u;
-#ifdef S3_LOCAL_SPIN
+#ifdef S3_TICKED_DELAY
+    /* §§1489 **既推进时间、又让 ppTask 跑** 的等待。
+     * 纯忙等虽然能返回，但 ppTask 拿不到 CPU；
+     * 而 blocking delay 虽然能让出，却因 tick 无人推进而永不醒。
+     * 这里把两者合起来：每轮先 `s3_tick_consume()` 推进超时表，
+     * 再 `os_task_yield()`（不阻塞）让 ppTask 有机会跑。 */
+    {
+        extern void s3_tick_consume(void);
+        extern void os_task_yield(void);
+        u32 k;
+        for (k = 0u; k < 12u; k++) {
+            u32 z = 0u;
+            s3_tick_consume();
+            os_task_yield();
+            while (z < 60000u) { z = z + 1u; }
+        }
+        c[14] = c[14] + 1u;
+    }
+#elif defined(S3_LOCAL_SPIN)
     /* §§1487 完全不碰内核：就地空转。用来区分
      * "延迟本身卡住" 还是 "延迟之后的代码卡住"。 */
     { u32 k = 0u; while (k < 200000u) { k = k + 1u; } }
