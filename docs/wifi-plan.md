@@ -34628,3 +34628,53 @@ g_sta_connected_flag 恒 0 → DHCP 无链路上游`。
 判据很明确：**`g_ic` 头部不再是 `2 0 0 0`，且 `[tx] irq` 开始增长**。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1525 帧缓冲池全为 0 —— TX 不可能成功的直接原因
+
+库自己的打印（串口里能看到，前缀 `[v3]wifi|`）：
+
+```
+Init data frame dynamic rx buffer num: 0
+Init dynamic rx mgmt buffer num: 0
+Init management short buffer num: 0
+Init dynamic tx buffer num: 0
+Init tx cache buffer num: 0
+Init static tx FG buffer num: 0
+Init static rx buffer num: 0
+[esfsetup] r=0
+[v1]wifi|esf_buf_alloc: invalid type=0
+```
+
+⇒ **七项缓冲数量全是 0** ⇒ `esf_buf_alloc` 永远失败
+⇒ 一个帧缓冲都分配不到 ⇒ **不可能有任何 TX**（`ic_tx_pkt` 全场 0）
+⇒ 没有 AUTH/ASSOC ⇒ `g_sta_connected_flag` 恒 0。
+
+### 试过但无效：`s3_fix_menuconfig()` 是空操作
+把 `g_wifi_menuconfig` 指向的 16 字整块填成 8/64 之后，库打印**仍然是 0**，
+而且 `[mc] set ...` 这行**没有打印** ⇒ `g_wifi_menuconfig` **早就非 0**
+（库自己设过），我们的 `if (== 0)` 分支从未进入 ⇒ 这段代码一直是空操作。
+
+⇒ 那六个计数**不是**从 `g_wifi_menuconfig` 读的，而是库内部另一处全局
+（正常由库里自己的 init/attach 流程填写）。这与 §1524 的 `g_ic = 2 0 0 0`
+是同一件事的两面：**库的 bring-up 没跑完**。
+
+### 当前完整因果链（已闭合、每一步都有计数）
+```
+库 bring-up 未完成
+  → g_ic 头部 = 2 0 0 0                  （[ch] ic=2 0 0 0）
+  → 七项帧缓冲池 = 0                     （库自打印 + esf_buf_alloc 失败）
+  → 射频不上信道（set/get_channel 空实现）  （[ch] s=0 g=0 p=255 c=255）
+  → MAC 中断整场 0~6 次、recv 体从不进入     （[tx] irq=0..6 / recv=0）
+  → 扫描 0 个 AP                          （scan_get_ap_num=0）
+  → 无 AUTH/ASSOC、ic_tx_pkt=0            （[tx] tx=0）
+  → connected_flag 恒 0（此前"已关联"全是假阳性）
+  → DHCP 无链路上游（回调能跑但收不到 OFFER）
+  → 无 IP → DNS 失败 → 无 TLS/body
+```
+
+### 下一步唯一入口
+补上库 bring-up 缺失的那一段：让那七项缓冲数量变成非 0。
+判据（两条同时看）：**库打印的 `buffer num:` 不再为 0**、
+**`[tx] irq` 与 `tx` 开始增长**。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

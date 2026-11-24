@@ -3887,6 +3887,18 @@ void s3_fix_menuconfig(void)
     static u32 s_mc[16];
 
     if (*(volatile u32 *)(void *)g_wifi_menuconfig == 0u) {
+        u32 k;
+        /* §1525 ★★★★ **关键发现**：库自己的打印是
+         *   `Init data frame dynamic rx buffer num: 0`
+         *   `Init dynamic tx buffer num: 0` … 六项全是 0
+         *   `esf_buf_alloc: invalid type=0`
+         * ⇒ 帧缓冲池一个都没有 ⇒ `esf_buf_alloc` 永远失败 ⇒ 连一帧都分配不出来
+         * ⇒ 不可能有任何 TX（`ic_tx_pkt` 全场 0）。这些数字正是从这个配置块读的。
+         * 原来只写了 `s_mc[1]=64`，其余全 0。现在整块填非零，
+         * 并靠库自己那六行打印确认布局（数字不再是 0 就说明找对了）。 */
+        for (k = 0u; k < 16u; k++) {
+            s_mc[k] = 8u;
+        }
         s_mc[1] = 64u;
         *(volatile u32 *)(void *)g_wifi_menuconfig = (u32)(void *)s_mc;
         { extern int s3_ets_printf(const char *, ...);
