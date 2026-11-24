@@ -221,6 +221,15 @@ void s3_nvs_state_fix(void)
         s3_ets_printf("[curch] p=%x ch=%u\n", cur, ch);
     }
 #endif
+#ifdef S3_PROMISC
+    /* §1576 ★ 打开混杂模式（绕过所有 RX 过滤）：
+     * 若 eb_space 仍全 0 ⇒ 物理层/PHY 收不到；若开始有帧 ⇒ 是过滤策略问题。 */
+    {
+        extern int esp_wifi_set_promiscuous(int en);
+        int pr = esp_wifi_set_promiscuous(1);
+        s3_ets_printf("[promisc] r=%d\n", pr);
+    }
+#endif
     st = *(volatile u8 *)(void *)nv;
     s3_ets_printf("[nvs] obj=%x st=%u\n", nv, (u32)st);
     if ((st & 0xFDu) != 1u) {
