@@ -2613,9 +2613,8 @@ void s3_ets_timer_dispatch(void)
              * 打印恢复成两参数（DRAM 到顶，省一个 u32 字段）。 */
             { u32 ps_ = 0u;
               __asm__ __volatile__("rsr %0, ps" : "=r"(ps_));
-              s3_ets_printf("[dp] n=%u now=%u tisr=%u ps=%x\n",
-                            (u32)g_s3_diag[33], (u32)now,
-                            (u32)g_s3_diag[9], ps_); }
+              /* §1713 `[dp]` 心跳已删：一次运行 1.3 万行噪音，
+               * 格式串还占 DRAM（BSS 反复顶到栈界）。只保留计数。 */ }
         }
     }
     while (i < S3_ETS_TIMER_MAX) {
@@ -4666,6 +4665,15 @@ void s3_timer_sweep(void)
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33],
                       (u32)g_s3_diag[10], (u32)g_s3_diag[8],
                       (u32)g_s3_diag[11], (u32)g_s3_pwr_or, (u32)g_s3_diag[39]);
+        {
+            /* §1713 打包打印 ppTask(id=2) 的 {state, wait_kind, core} 与队列计数，
+             * 分清它到底是"阻塞在信号量"还是"在 recv 里空转"。 */
+            extern u32 s3_w2c_task_probe(u32 id, u32 what);
+            u32 st_ = s3_w2c_task_probe(2u, 0u);
+            u32 wk_ = s3_w2c_task_probe(2u, 1u);
+            u32 wo_ = s3_w2c_task_probe(2u, 2u);
+            s3_ets_printf("[p2] st=%x wk=%x wo=%x\n", st_, wk_, wo_);
+        }
         /* §1706 `[ppc]` 已删：码环结论已定（库投递过 301/305/310/312/313/30a/30b），
          * 格式串+printf 占的 DRAM 反复把 .bss 顶过栈界。 */
         { extern u32 g_c6os_ticks;
@@ -4808,6 +4816,14 @@ void s3_scan_iter(u32 i)
         s3_delay_advance(100u);
         c[17] = 2u;
     }
+#endif
+#ifdef S3_YIELD_ITER
+    /* §1714 在**本函数自己的**窗口深度上让出（比在 s3_delay_advance 里浅一层）。
+     * 真板 [p2] st=1：ppTask 一直 READY 却从不被调度 ⇒ start/scan 消息永远
+     * 没人处理、MAC 从不启动。之前把让出放在被调用的 flash 助手里，
+     * 结果是从助手 retw 回调用者时返回地址被窗口溢出破坏（双重异常，
+     * depc=_win_ovf8、excvaddr=0x90119ac0）。这里换成调用者自己让出。 */
+    { extern void os_task_yield_force(void); os_task_yield_force(); }
 #endif
     c[13] = 5u;
 }
