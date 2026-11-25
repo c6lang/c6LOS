@@ -1987,6 +1987,42 @@ static int osi_ints_on(u32 mask)
     return 0;
 }
 
+/* §1644 flash 助手：把我们的 cfg 整块拷进 init 消息载荷（msg+20 起） */
+__attribute__((section(".flash.text")))
+void s3_msg_copy_cfg(void *msg)
+{
+    extern u32 g_wifi_cfg_blob[];
+    extern int s3_ets_printf(const char *, ...);
+    volatile u32 *dst = (volatile u32 *)(void *)((u8 *)msg + 20u);
+    volatile u32 *src = (volatile u32 *)g_wifi_cfg_blob;
+    u32 i;
+    for (i = 0u; i < 48u; i++) { dst[i] = src[i]; }
+    s3_ets_printf("[msgcfg] +20 rx=%u dynrx=%u\n",
+                  (unsigned)dst[12], (unsigned)dst[13]);
+}
+
+/* §1643 flash 助手：init 之前手工预填 g_wifi_menuconfig（映射见调用点注释） */
+__attribute__((section(".flash.text")))
+void s3_prefill_menuconfig(void)
+{
+    extern u32 g_wifi_cfg_blob[];
+    extern unsigned char g_wifi_menuconfig[];
+    extern int s3_ets_printf(const char *, ...);
+    volatile u32 *mc = (volatile u32 *)(void *)g_wifi_menuconfig;
+    volatile u32 *cb = (volatile u32 *)(void *)g_wifi_cfg_blob;
+    mc[0]  = cb[12];    /* +0  <- +48  static_rx_buf_num  */
+    mc[1]  = cb[13];    /* +4  <- +52  dynamic_rx_buf_num */
+    mc[2]  = cb[14];    /* +8  <- +56  tx_buf_type       */
+    mc[3]  = cb[15];    /* +12 <- +60  static_tx_buf_num */
+    mc[4]  = cb[16];    /* +16 <- +64  dynamic_tx_buf_num*/
+    mc[5]  = cb[19];    /* +20 <- +76                     */
+    mc[7]  = cb[21];    /* +28 <- +84                     */
+    mc[21] = cb[17];    /* +84 <- +68                     */
+    mc[22] = cb[18];    /* +88 <- +72                     */
+    s3_ets_printf("[mcpre] rx=%u dynrx=%u type=%u\n",
+                  (unsigned)mc[0], (unsigned)mc[1], (unsigned)mc[2]);
+}
+
 /* §1636 flash 助手：真正在硬件上使能 MAC 中断（省 IRAM，见 §1634/§1635） */
 __attribute__((section(".flash.text")))
 void s3_irq_enable_wifi_bit(void)
@@ -2707,6 +2743,16 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
               {
                   extern u32 g_wifi_cfg_blob[];
                   rm[3] = (u32)(void *)g_wifi_cfg_blob;
+#ifdef S3_CFG_INTO_MSG
+                  /* §1644 ★★★★ 库打印的 "Init static rx buffer num: 0" 读的
+                   * 不是 `g_wifi_menuconfig`（我们预填成 10/32 后日志依旧 0），
+                   * 而是这条真 init 消息的**载荷**（`[zalloc] n=4472` 那块）。
+                   * 把我们的 cfg 整块拷进 `msg+20`，让库从载荷里读到真配置。 */
+                  {
+                      extern void s3_msg_copy_cfg(void *msg);
+                      s3_msg_copy_cfg((void *)g_s3_first_msg);
+                  }
+#endif
               }
               ri = wifi_init_process((void *)g_s3_first_msg);
 #ifdef S3_POISON_USED_MSG
@@ -3799,6 +3845,9 @@ int __wrap_wifi_menuconfig_init(void *cfg)
             int mr = wifi_menuconfig_init((const void *)g_wifi_cfg_blob);
             s3_ets_printf("[mcinit] r=%d\n", mr);
         }
+#endif
+#ifdef S3_PREFILL_MENUCONFIG
+        { extern void s3_prefill_menuconfig(void); s3_prefill_menuconfig(); }
 #endif
         irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
         s3_ets_printf("[wifi] init 后的库状态 @%08x = %u\n",

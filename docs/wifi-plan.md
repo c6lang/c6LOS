@@ -36949,3 +36949,24 @@ g_ic[1] = 0x3fcd5bc8       ← 非空
 - 库日志却打印 `Init static rx buffer num: 0`、`Init dynamic rx buffer num: 0`，
   并有 `esf_buf_setup_static: alloc eb fail(0)`
 - `irq=0`、`[eb]` 全 0、`[tx]` 计数 0 ⇒ MAC 仍一次中断都不产生
+
+## §1643–§1644 RX 缓冲一个都没建：预填 menuconfig 无效，消息载荷拷贝会崩
+
+### 已验证的事实
+1. **TX 缓冲是有的**：`g_eb_list_desc_ptr = 0x3fcbb508`，而
+   `g_eb_list_desc+32/+48/+64`（idx 2/3/4）= `3fcc9008 / 3fcc98d8 / 3fcc9bc8`
+   ⇒ 我们的播种（每索引 2 块）确实生效。
+2. `TxRxCxt`/`pTxRx` 结构基本为 0，`g_eb_list_desc+0`（idx 0）为 0。
+3. 库日志 `Init static rx buffer num: 0` **不是**读 `g_wifi_menuconfig`：
+   §1643 在 `esp_wifi_init_internal` **之前**手工把 menuconfig 预填成
+   `[mcpre] rx=10 dynrx=32 type=1`，日志**依旧**是 0。
+4. §1644 把 cfg 整块拷进 init 消息载荷（`msg+20`）会让固件在 104 行崩掉
+   ⇒ 那条消息的布局和我们假设的不一样，不能盲拷。
+
+### ⇒ 现在的定位
+**RX 缓冲从未被分配**（TX 有、RX 没有），所以 `wDev_AppendRxBlocks` 恒 0、
+MAC 从不产生 RX 中断、一帧收不到。接下来必须找到**谁负责建 RX 池**：
+在 IDF 里是 `hal_rx_setup`/`ic_init` 里按 `static_rx_buf_num` 调
+`_wifi_malloc` 建 RX 描述符环；应反汇编 `ic_init` 的 RX 分支，确认它的
+配置来源与失败点（日志里 `esf_buf_setup_static: alloc eb fail(0)` 就是
+同一处的早期失败）。
