@@ -3008,6 +3008,7 @@ __attribute__((section(".flash.text")))
 int s3_phy_rssi(void)
 {
     extern int phy_get_rssi(void);
+
     return phy_get_rssi();
 }
 
