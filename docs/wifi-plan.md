@@ -36712,3 +36712,31 @@ g_scan = 0x3fcd5bb8 (非空)     gScanStruct: 0x00040000
 ### 仍未打通
 `perform scan: ss_state=0x0, chan<0,0>, dur<0,0>` ⇒ 扫描很快结束、没有结果。
 而当前环境**又没有 AP**（§1614），所以即使打通也无法验证四项验收。
+
+## §1623 `wifi_set_scan_params_process` 的门控链（参数为何不生效）
+
+反汇编 `wifi_set_scan_params_process(msg)`：
+```
+if ((*(u8*)g_wifi_nvs & 0xFD) != 1) return 0x106
+if (*(u32*)(g_ic + 16) == 0) { log; ... }
+if (*(u8*)(msg + 8) != 0) scan_reset_default_app_params()
+else                       wifi_sta_set_scan_default_params(msg + 20)   ← 我们走这条
+```
+再往下 `wifi_sta_set_scan_default_params(params)` 还有三道门：
+```
+if (*(u8*)(gScanStruct + 70) & 1) → 直接 log 返回
+if (*(u32*)(g_ic + 16) == 0)      → 返回
+if (*(u8*)(g_ic + 0x154) != 1)    → 返回
+```
+⇒ 我们的参数"传进去了但没被采纳"，卡在这几道门上（真板日志
+`home_channel_dwell_time=0`、`active=<0,0>` 为证）。
+
+### 顺带修掉自己引入的一个真 bug
+§1613 曾把扫描默认参数写进 **scan cfg 的 +32**，而 `msg+20` 起的
+44 字节就是从那份 cfg 复制的 ⇒ **把扫描配置本身写花了**。
+§1623 改为在助手内部自建参数（完全不碰 cfg）。
+
+## 本阶段净收益
+- 扫描**第一次真正进入库内部**并**发出了 probe request**（`[tx] tx=1 probe=1`）；
+- 明确了库的两条消息布局（码 5 / 码 102）与截获点（OSI `_queue_send`）；
+- 修掉自己引入的 cfg 破坏 bug。

@@ -2992,10 +2992,8 @@ int s3_phy_rssi(void)
 __attribute__((section(".flash.text")))
 void s3_set_scan_params(void *buf)
 {
-    extern int esp_wifi_set_scan_parameters(const void *p);
-    u32 *sp = (u32 *)(void *)((u8 *)buf + 32u);
-    sp[0] = 100u | (150u << 16);      /* active_min=100, active_max=150 */
-    sp[1] = 500u | (30u << 16);       /* passive=500,    home_dwell=30  */
+    (void)buf;
+    u32 *sp;
     /* §1622 ★★★★★ 反汇编 `esp_wifi_set_scan_parameters`：它同样是**投递消息**
      * （码 102、处理函数 `wifi_set_scan_params_process`、参数在 msg+20 起
      * 44 字节），而消息没人处理 ⇒ 我们的调用虽然返回 0，**参数并未生效**
@@ -3008,7 +3006,11 @@ void s3_set_scan_params(void *buf)
         for (k = 0u; k < 64u; k++) { msg[k] = 0u; }
         msg[0] = 102u;
         *(u32 *)(void *)(msg + 4) = (u32)(void *)&wifi_set_scan_params_process;
-        for (k = 0u; k < 8u; k++) { msg[20u + k] = ((u8 *)sp)[k]; }
+        /* §1623 ★ 参数**自建**，不再借用 scan cfg 的尾部 ——
+         * 那会破坏扫描配置本身（`msg+20` 的 44 字节就是从 cfg 复制的）。 */
+        *(u32 *)(void *)(msg + 20) = 100u | (150u << 16);
+        *(u32 *)(void *)(msg + 24) = 500u | (30u << 16);
+        (void)sp;
         (void)wifi_set_scan_params_process((void *)msg);
     }
 }
