@@ -37302,3 +37302,43 @@ WB=9  WS=0xaa02  depc=0x403783fb (_win_ovf8)
 即：切换调用是 windowed（`call8`）、`port_task_yield` 里整圈 spill 正常执行、
 日志与之前最好基线**完全同级**。`S3_SWITCH_SPILL` 代码保留在 `#ifdef` 后面
 （默认关），等 IRAM 回收后配合"入口窗口布局"的修法再开。
+
+### §1732 隔离实验：spill 在切换点**无论如何都做不成**，但在 yield 壳里可以
+
+两个新变体都试了（真板，每次都先确认 `esptool` 写了 3 块、手数日志行数）：
+
+| 变体 | 形态 | 结果 |
+|---|---|---|
+| `S3_SWITCH_SPILL` | 壳：`entry a1,64` + 帧链 + ring + `call8` 本体 | 26 行死 |
+| 同上但 `S3_SWITCH_RING` 关 | 壳：`entry a1,64` + 帧链 + `call8` 本体 | **仍然 26 行死** |
+| `S3_BODY_SPILL` | 保留尾跳，ring 放进本体（16 寄存器已存帧之后） | 26 行死 |
+| `S3_SPILL_SHELL`（yield 壳里） | `entry a1,64` + 帧链 + ring + `call0`→`call8` 本体 | **7579 行，正常** |
+
+⇒ 三条结论：
+1. **不是 ring 的错**：`S3_SWITCH_RING` 关掉也死 ⇒ 是"壳的形态"（多一层轮转后
+   本体算出的 EPC/WINDOWBASE 与被恢复任务要回到的那条指令所在窗口差一格）。
+2. **也不只是壳的错**：`S3_BODY_SPILL`（尾跳、形态与已知可用版本完全一致，
+   只多一段 ring）同样 26 行死 ⇒ **`S3_SPILL_ALL` 在切换点执行不了**。
+3. **同一个宏在 yield 壳里 100% 正常** ⇒ 宏本身没问题，差别在入口处的
+   窗口布局：yield 由我们自己的 windowed C 用 `call8` 调进来（窗口连续），
+   而调度器那条路是 `-mlongcalls` 的 `callx8`（§891 实测不轮转窗口），
+   WINDOWSTART 有洞 ⇒ ring 的第 4 圈拿不到合法的"上一帧 sp"。
+
+### §1733 IRAM 零余量的真实代价：连一次实验都塞不进去
+
+- ring 的代码 ≈ 80–84 字节；三处尝试都不够：
+  - 新壳放 `.flash.text`：`l32r`/`call8` **重定位超出范围**（flash 0x42… ↔ IRAM 0x4037…，40+MB）。
+  - 把 `port_task_ctx_check`（92 字节）挪 flash：链接过，但**基线 7579 → 334 行**（已回退）。
+  - 为腾地方给 `S3_BODY_SPILL`，把两处**只记录不修正**的切换守卫
+    （§454 ctx 合法性、§451 恢复前 sp 界检查）包进 `#ifndef S3_NO_SWITCH_GUARDS`
+    （默认保留，行为不变）→ 这次链接过了，但结论仍是 26 行死。
+
+⇒ 后续想再试切换点 spill，必须先做一次**真正的 IRAM 回收**（删诊断、或把
+非切换期函数整体搬 flash），不能靠"挪一个函数"糊过去。
+
+### §1734 当前可用组合（板子健康，7579 行）
+
+```
+-DS3_YIELD_CALL8 -DS3_SPILL_SHELL
+```
+`S3_SWITCH_SPILL` / `S3_SWITCH_RING` / `S3_BODY_SPILL` 的代码都留在 `#ifdef` 后（默认关）。

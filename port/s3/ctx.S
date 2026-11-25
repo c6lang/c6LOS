@@ -595,7 +595,26 @@ port_task_switch_c0:
     addi    a10, a1, 128
     WIN_CHAIN_FIX a10, a8
 #endif
-    /* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
+    #ifdef S3_BODY_SPILL
+    /* §1732 ★★★★★ **整圈 spill 放进切换本体**（而不是壳里）。
+     *
+     * 上一版把 spill 放在新写的 windowed 壳里（`entry a1,64` + `call8` 本体），
+     * 结果**连去掉 ring 都死**（26 行）⇒ 壳的形态本身有毒：本体算 EPC 用的是
+     * 它自己的 a0（= 壳的 call8 返回地址），而 EPC 应当是被切走任务的
+     * **调用者返回地址**。多一层轮转会让"保存的 WINDOWBASE"与"恢复后要回到的
+     * 那条指令所在窗口"差一格 —— 恢复后 `retw` 立刻踩空。
+     *
+     * ⇒ 保留已知可用的**尾跳**形态（a0 = 内核带标签的返回地址、a2 = ctx），
+     * 把 spill 放到本体里。此时 16 个寄存器**已经存进帧**（偏移 0..56），
+     * spill 会毁的 a4/a8/a10/a11/a12 后面都会从帧里重新取 ⇒ 无害；
+     * a1 下面是自由栈（帧区 [a1, a1+128)），帧链 [a1-12] = 调用者 sp = a1+128。 */
+    addi    a10, a1, 128
+    addi    a8, a1, -12
+    s32i    a10, a8, 0
+    mov     a9, a1
+    S3_SPILL_ALL
+#endif
+/* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
      *
      * 原来 RESTORE_FRAME 结尾写死 `addi a1, a1, 80`，而 §361 把中断帧改成了
      * 128 字节并且 `port_irq_fill` 恰好把 c->sp 记成那个中断帧 —— 于是任何
@@ -705,6 +724,7 @@ port_task_switch_c0:
     s32i    a1, a14, 0
     l32i    a4, a1, 4               /* 目标任务 ctx（参数先前存在帧里） */
     s32i    a4, a14, 4
+#ifndef S3_NO_SWITCH_GUARDS
     /* §454：写 `g_s3_cur` 之前校验 `a4` 是个像样的 ctx 指针。
      *
      * §453 证明 `port_task_yield` 里的 `a4` 只可能来自 `g_s3_cur[core]`
@@ -738,6 +758,7 @@ port_task_switch_c0:
     movi    a6, 0x450C
     s32i    a6, a8, 44              /* 标志 */
 7:
+#endif /* !S3_NO_SWITCH_GUARDS */
     l32r    a3, .Lg_cur
     slli    a5, a12, 2
     add     a3, a3, a5
@@ -757,6 +778,7 @@ port_task_switch_c0:
     s32i    a1, a15, 4              /* 从它恢复出来的 sp */
     addi    a10, a10, 1
     s32i    a10, a9, 0
+#ifndef S3_NO_SWITCH_GUARDS
     /* §451 恢复前校验：比 yield 那道闸门更靠前，能抓到**第一次越界恢复**。
      *
      * §450 的 yield 闸门第一次命中时 sp 已经是 `0x3fcc2300`，说明在这次 yield
@@ -787,6 +809,7 @@ port_task_switch_c0:
     s32i    a1, a8, 24
     movi    a6, 0x450B
     s32i    a6, a8, 28
+#endif /* !S3_NO_SWITCH_GUARDS */
 8:
     RESTORE_FRAME
 
@@ -844,8 +867,10 @@ port_task_switch:
     addi    a10, a1, 64
     addi    a8, a1, -12
     s32i    a10, a8, 0          /* 帧链（entry 已写过，这里再确认一次） */
+#ifdef S3_SWITCH_RING
     mov     a9, a1
     S3_SPILL_ALL
+#endif
     l32i    a2, a1, 0           /* ctx -> a2（c0 体的入参约定） */
     call8   port_task_switch_c0
     retw
