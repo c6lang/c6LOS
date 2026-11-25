@@ -37027,3 +37027,30 @@ TX 缓冲靠手工播种存在；**RX 缓冲一个都没有** ⇒ `wDev_AppendRx
 **诊断优先级：固件自打印 > RTC 慢存 > GDB**。
 需要看 DRAM 内容时，**必须让固件自己打印**（或写 RTC 慢存），不要相信 GDB 的
 DRAM 读；GDB 只用来读**外设寄存器**和取栈回溯。
+
+## §1651–§1653 RX 池建不起来：本轮用运行时证据排除了 4 个错误假设
+
+本轮全部改用**固件自打印**（不再依赖 GDB 读 DRAM，见 §1647），逐条验证：
+
+| 假设 | 验证方式 | 结论 |
+|---|---|---|
+| OSI 表缺 4 个字段（`_phy_common_clock_*`、`_regdma_*`/`_sleep_retention_*`） | 读 IDF 6.0.1 `wifi_os_adapter.h` 的条件编译块 | **假设错误**：这 4 个字段在 `#if CONFIG_IDF_TARGET_ESP32\|\|S2` 与 `#if C6\|\|C5\|\|C61` 内，**S3 不成立**；`_magic@0x1DC` 还有 `l32i a12,a2,0x1dc` 对比 `0xdeadbeaf` 佐证 ⇒ 我们的 120 字段表**正确** |
+| `esf_buf_alloc_dynamic` 把 OSI 表 `+88` 槽当分配器调用，而它是 `_mutex_unlock` | 自打印 `t88=4037cc80`（= `osi_mutex_unlock`）+ 重读反汇编 | **假设错误**：`+84` 加锁 / `+88` 解锁是**成对**调用（`callx8` 前后成对出现），属正常用法 |
+| 库用字面量基址 `0x3fcbb500`，与 `g_eb_list_desc`(0x3fcbb508) 差 8 字节 | 用**当次构建**的 ELF 重新反汇编 | **假设错误**：字面量就是 `0x3fcbb544` = `g_eb_list_desc`，**完全一致**；先前是跨构建比较的假象 |
+| `esf_buf_setup()` 返回 257 是"已初始化"守卫，清掉 `g_eb_list_desc_ptr` 即可重建 | 清零后重调 | **无变化**，仍 257 |
+
+### 仍然确定的硬事实（固件自打印，可信）
+```
+[mc] rx=10 d0=4                       ← menuconfig 的 static_rx=10 正确，描述符 idx0 计数=4 正确
+[v3]wifi|Init static rx buffer num: 0  ← 库仍按 0 建池（IDF 为 10）
+[v2]wifi|esf_buf_setup_static: alloc eb fail(0)
+[esfsetup] r=257
+```
+⇒ 配置与描述符计数都正确，**失败发生在 `esf_buf_alloc_dynamic` 内部**；
+`esf_buf_setup` 因此返回 0x101 ⇒ RX 池为空 ⇒ `wDev_AppendRxBlocks=0`
+⇒ MAC 无 RX 中断 ⇒ 收不到任何帧（AP 在场也收不到）。
+
+### 下一步（唯一未验证的方向）
+把 `esf_buf_alloc_dynamic`（**IRAM 0x4038_xxxx 是库的真实现**，不是 ROM 桩）
+整段反汇编完（约 0x1A0 字节），对照它读写的 `desc+8/+12/+14/+16/+60` 与
+`g_lmac_cnt` 字段，找出返回 NULL 的那个分支条件；再决定要补哪个初始化。

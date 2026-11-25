@@ -2860,6 +2860,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                         *(volatile unsigned short *)(void *)(d9 + 16u) = 32u;
                     }
                 }
+#ifdef S3_RESET_EBPTR
+                /* §1653 ★ 实验：`esf_buf_setup` 一直返回 257(0x101 INVALID_STATE)，
+                 * 即使 menuconfig/描述符计数都已正确。怀疑是"已初始化"守卫
+                 * —— 失败的那一次把守卫置上了。先清掉指针再重建。 */
+                {
+                    extern unsigned char *g_eb_list_desc_ptr;
+                    g_eb_list_desc_ptr = 0;
+                }
+#endif
                 int rb = esf_buf_setup();
                 s3_ets_printf("[esfsetup] r=%d\n", rb);
                 /* §§1212：验证池子可用性——直接分一个试试。 */
@@ -4241,9 +4250,19 @@ void s3_timer_sweep(void)
           { extern unsigned char g_wifi_menuconfig[];
             /* §1591 ★ 库内部的配置计数（`esf_buf_setup` 也读它）。
              * 若这里也是 0 ⇒ 我们那块 cfg **根本没被库接收**。 */
-            s3_ets_printf("[mc] mc0=%u mc4=%u\n",
+            /* §1651 ★ 第二个值改成 eb 描述符 idx0 的计数（`desc+16`，步长 20）：
+             * `esf_buf_alloc_dynamic` 读它为 0 就直接返回 NULL。
+             * 同一处打印、同样两个参数 ⇒ 不增加 IRAM/BSS。 */
+            { extern unsigned char g_eb_list_desc[];
+              /* §1652 ★ 第二个值改成 OSI 表 `+88` 槽的运行时指针 ——
+               * `esf_buf_alloc_dynamic`(ROM 0x403833d0) 在
+               *   l32i a5, a10, 88 ; callx8 a5
+               * 处把它**当分配函数调用**。若它指向 `_mutex_unlock`，
+               * 就证明 ROM 侧的 osi 结构与我们的对不上。 */
+              { extern wifi_osi_funcs_t g_wifi_osi_funcs;
+                s3_ets_printf("[mc] rx=%u t88=%x\n",
                           (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
-                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 4u)); }
+                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 88u)); } } }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
