@@ -1705,8 +1705,18 @@ static void osi_log_write(u32 level, const char *tag, const char *fmt, const cha
      * 这里把它装成一个临时参数数组交给 `c6_log_fmt`。 */
     if (level < 2u) {
         s3_ets_printf("[w%u]%s|", level, c6_ok_str((u32)(void *)tag) ? tag : "?");
+        /* §1678 ★★★★★ 原来在这里直接 `s3_ets_printf(fmt, arg)`：当库传来的
+         * 格式串里有**两个以上**转换符时，第二个会去读没人写的寄存器/栈，
+         * 真板上就表现为 `[w1] wifi|` 之后**再也不返回**（日志本身把
+         * 扫描路径打断在半路）。改成走我们自己的安全格式化器，它逐字符
+         * 解析并且对 %s 指针做有效性检查。 */
         if (c6_ok_str((u32)(void *)fmt)) {
-            s3_ets_printf(fmt, arg);
+            /* §1679 只打**格式串原文**：不消费任何可变参数 ⇒ 既不会因
+             * 转换符数量不匹配读到垃圾，也照样能看出是哪条库消息
+             * （`%s` 一眼就能认出。IRAM 已零余量，不能引 c6_log_fmt）。 */
+            s3_ets_printf("%s", fmt);
+        } else {
+            s3_ets_printf("(fmt=%08x)", (u32)(void *)fmt);
         }
         s3_ets_printf("\n");
     }
@@ -3835,6 +3845,15 @@ int s3_wifi_wait_connected(int ms)
             cd[2]++;
         }
 #endif
+#ifdef S3_TIMER_DISPATCH
+        /* §1681 ★★★★★ 扫描 FSM 靠 100/150ms 的 osi 定时器推进
+         * （真板 `[tarm] ms=100 fn=4202dd6c` / `ms=150`），但这些定时器
+         * 只在**有人调 `s3_ets_timer_dispatch()`** 时才会到期触发。
+         * 原来这个等待循环里没有任何驱动（`S3_DRIVE_TOP`/`S3_CONNECT_DRIVE`
+         * 都没开），于是 `[tfir]` 一次都不打印、`d33` 停在 5、
+         * 扫描停在 `perform scan` 之后再无进展。这里每轮驱动一次。 */
+        s3_ets_timer_dispatch();
+#endif
         r = esp_wifi_sta_get_ap_info((void *)ap);
 #ifdef S3_REAL_ASSOC_GATE
         /* §856: sta_get_ap_info()==0 只是 ioctl 入队成功的假阳性。只有库自己的
@@ -4537,7 +4556,14 @@ void s3_scan_iter(u32 i)
         __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
     }
     c[13] = 2u;
-#ifdef S3_ETS_TIMER_DISPATCH
+#if defined(S3_TIMER_DISPATCH) || defined(S3_ETS_TIMER_DISPATCH)
+    /* §1683 ★★★★★ **宏名不一致的致命后果。**
+     * 这里原来写的是 `#ifdef S3_ETS_TIMER_DISPATCH`，而整个工程实际
+     * 定义/使用的是 `S3_TIMER_DISPATCH`（console.c 的 tick 路径、
+     * build-wifi.sh 的前沿开关都是后者）⇒ **扫描轮询循环里从来没
+     * 驱动过定时器分发**。真板表现就是：库 arm 了 100/150ms 的扫描
+     * 定时器（`[tarm] ms=100 fn=4202dd6c`），但 `[tfir]` 一次都不打印、
+     * `d33` 停在 5、扫描停在 `perform scan` 之后再无进展。 */
     { extern void s3_ets_timer_dispatch(void); s3_ets_timer_dispatch(); }
 #endif
     c[13] = 3u;
@@ -4582,12 +4608,20 @@ void s3_scan_iter(u32 i)
 }
 
 __attribute__((section(".flash.text")))
-void __wrap_ieee80211_timer_process(u32 a1, u32 a2, u32 a3, u32 a4,
-                                   u32 a5, u32 a6, u32 a7, u32 a8)
+void __wrap_ieee80211_timer_process(u32 a1, u32 a2, u32 a3)
 {
-    extern void __real_ieee80211_timer_process(u32, u32, u32, u32, u32, u32, u32, u32);
+    /* §1684 ★★★★★ **真实签名只有 3 个参数。**
+     *
+     * 库里的定时器回调是个跳板（0x4202dd70）：
+     *     a10 = 7; a11 = 8; a12 = arg;  call8 ieee80211_timer_process
+     * 即 `ieee80211_timer_process(7, 8, arg)`。
+     * 我们原来按 **8 个 u32** 透传，a4..a8 是当时的垃圾寄存器值 ——
+     * 在 windowed ABI 下这会让包装函数的窗口/栈参数区与真实原型不一致，
+     * 真板表现就是：回调进入后打印到 `[scanp] leave r=0`、`[give] sem`、
+     * 再两个点之后**整个应用停住**。改成 3 参数后与库的原型完全一致。 */
+    extern void __real_ieee80211_timer_process(u32, u32, u32);
     g_s3_diag[30]++;
-    __real_ieee80211_timer_process(a1, a2, a3, a4, a5, a6, a7, a8);
+    __real_ieee80211_timer_process(a1, a2, a3);
 }
 
 /* §§1429：**ppTask 到底跑不跑**。它是库的消息循环，
@@ -5231,18 +5265,30 @@ int __wrap_scan_bitmap_to_channel_list(unsigned bitmap, unsigned arg)
     int r;
     unsigned in = bitmap;
     unsigned argin = arg;
+    /* §1682 ★★★★★ **2G 信道位图的 bit0 是"信道 0"，非法。**
+     *
+     * 反汇编 0x4202fe74 起：
+     *   bbci a2, 0, 0x4202fe95   ; bit0 为 0 才继续
+     *   …wifi_log(bit0 非法)…
+     *   movi a2, 0                ; ← 把**整个位图**清零
+     * 所以传 0x3FFF（含 bit0）会被整条清零 ⇒ 扫描 0 个信道
+     * （真板 `first chan=0`、`perform scan: chan<0,0>`）。
+     * 正确写法是 bits 1..14 = 信道 1..14 ⇒ 0x7FFE。 */
     if (bitmap == 0u) {
-        bitmap = 0x3FFFu;
+        bitmap = 0x7FFEu;
     }
-/* §1555 ★ 默认开启：`arg==0` 时给输出缓冲。 */
-#if 1
-    /* §1555 ★★★★ 真板 `[bmp] in=3fff arg=0 r=-1` ⇒ 位图本来就对，
-     * 失败原因是**第二个参数是 0**（它就是输出信道列表的缓冲）。
-     * 给它一块自己的缓冲。 */
-    if (arg == 0u) {
-        arg = (unsigned)(void *)s_chbuf;
-    }
-#endif
+    bitmap = bitmap & ~1u;
+    /* §1680 ★★★★★ **原来这里把 `arg==0` 替换成自己的缓冲，是错的。**
+     *
+     * 反汇编 `scan_bitmap_to_channel_list`（0x4202fe08）：
+     *   4202fe95: bbsi a3, 0 → 0x4202fe9b
+     * 即第二个参数 `a3` 被当作**第二个位图**（5G 信道位图）逐位处理，
+     * 不是"输出缓冲指针"。调用方传 0 表示"没有 5G 信道"，完全合法。
+     * 我们塞一个栈缓冲进去，低 bit 为 0 且值是个伪位图 ⇒ 函数直接返回 -1，
+     * 于是扫描拿不到任何信道（真板 `perform scan: chan<0,0>, dur<0,0>`、
+     * `first chan=0`）⇒ **扫描/关联全部卡死**。
+     * 修复：**原样透传**，一个字节都不改。 */
+    (void)s_chbuf;
     r = __real_scan_bitmap_to_channel_list(bitmap, arg);
     /* §1554 ★ 取证：打印**进来的**位图、替换后用的、以及返回值。 */
     s3_ets_printf("[bmp] in=%x arg=%x r=%d\n", in, argin, r);
