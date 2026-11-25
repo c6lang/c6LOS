@@ -2005,6 +2005,19 @@ void s3_msg_copy_cfg(void *msg)
  * `esf_buf_alloc_dynamic` 第一件事就是 `a5 = *(u16*)(desc+16); if (!a5) return NULL;`
  * ⇒ 计数为 0 时库的 `esf_buf_setup_static` 必然 `alloc eb fail`，
  * RX 缓冲池因此一个都建不起来（TX 只是靠我们手工播种顶着的）。 */
+/* §1665 ★★★★★ 把 `g_ic` 里的接口位图（+0x245/+0x246）置成 STA。
+ * 放 flash 助手：IRAM 已零余量，主流程只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_ic_mode_bits(void)
+{
+    extern unsigned char g_ic[];
+    volatile unsigned char *b;
+    b = (volatile unsigned char *)(void *)(g_ic + 0x246u);
+    if ((*b & 1u) == 0u) { *b = (unsigned char)(*b | 1u); }
+    b = (volatile unsigned char *)(void *)(g_ic + 0x245u);
+    if (*b == 0u) { *b = 1u; }
+}
+
 __attribute__((section(".flash.text")))
 void s3_prep_desc_cnt(void)
 {
@@ -2963,24 +2976,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             /* §1597：先把状态复位成 0，否则 `wifi_start_process` 第一行就返回。 */
             *(volatile u8 *)(void *)(g_ic + 0x1E9) = 0u;
 #ifdef S3_IC_MODE_BITS
-            /* §1665 ★★★★★ **把 STA 位直接置上。**
-             * `esp_wifi_set_mode(1)` 只是把消息投给 ppTask，而 ppTask 从不运行
-             * ⇒ `g_ic+0x246` 的接口位图一直是 0。反汇编 `wifi_hw_start`：
-             *   a4 = *(u8*)(g_ic+0x246)
-             *   bbc a4, a2 → 位未置就跳到 `bnez a10` ⇒ **跳过
-             *   `ic_set_interrupt_handler` 与 `chip_enable`**
-             * 而 `ic_set_interrupt_handler`(0x4201bd24) 正是安装 MAC ISR
-             * （里面才会调 `_set_isr`/`_set_intr`/`_ints_on`）的地方。
-             * 真板 OSI 统计里 95/97/98 三个槽一次都没命中，与此完全吻合。 */
-            if ((*(volatile u8 *)(void *)(g_ic + 0x246)) & 1u) {
-                /* 已经有 STA 位，不动 */
-            } else {
-                *(volatile u8 *)(void *)(g_ic + 0x246) =
-                    (u8)((*(volatile u8 *)(void *)(g_ic + 0x246)) | 1u);
-            }
-            if ((*(volatile u8 *)(void *)(g_ic + 0x245)) == 0u) {
-                *(volatile u8 *)(void *)(g_ic + 0x245) = 1u;
-            }
+            { extern void s3_ic_mode_bits(void); s3_ic_mode_bits(); }
 #endif
         }
         rs = wifi_start_process();
@@ -4350,9 +4346,7 @@ void s3_timer_sweep(void)
               { extern unsigned char g_ic[];
                 s3_ets_printf("[mc] rx=%u ic=%x\n",
                           (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
-                          ((u32)*(volatile u8 *)(void *)((u8 *)g_ic + 0x245u) << 16)
-                        | ((u32)*(volatile u8 *)(void *)((u8 *)g_ic + 0x246u) << 8)
-                        | (u32)*(volatile u8 *)(void *)((u8 *)g_ic + 0x1E9u)); } } }
+                          (u32)*(volatile u8 *)(void *)((u8 *)g_ic + 0x246u)); } } }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
