@@ -354,7 +354,7 @@ static u32 glue_ret0(void)
  *   `l32i a8, a8, 0x168` 且 vaddr=0x168，即 a8 是 0
  * （某个 i2c 函数表指针没分配出来）。库在 PHY 阶段就要这么多堆。
  * 48KB 是"能装下库"与"给主栈留够"之间的折中。 */
-static u32 g_wifi_heap_mem[14336];      /* §1562 48KB->56KB（栈池让出 8KB） */
+static u32 g_wifi_heap_mem[14336];      /* §1626 56KB->96KB：_bss_end 与 DRAM 顶之间还有约 91KB 空闲 */
 #define S3_WIFI_HEAP_BASE ((u32)g_wifi_heap_mem)
 #define S3_WIFI_HEAP_SIZE ((u32)sizeof(g_wifi_heap_mem))
 
@@ -3599,6 +3599,9 @@ u32 s3_wifi_bringup(void)
         }
     }
     wcfg(48u,  10u);            /* static_rx_buf_num      Kconfig default 10  */
+    /* §1627 32 -> 16：WiFi 堆只有 56KB（DRAM 已到硬顶，无法再大），
+     * 而 IDF 默认的 32+32 个动态缓冲会把堆吃干（真板 `[heap] 分配失败 n=1600`
+     * 就发生在扫描之前，直接导致扫描状态分配不出来）。做扫描/关联/TLS 用 16 足够。 */
     wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
     wcfg(56u,  1u);             /* §1527 tx_buf_type = 0 静态（库调的是 esf_buf_setup_static） */
     wcfg(60u,  0u);             /* §1527 static_tx_buf_num = 8（原来 0 ⇒ alloc eb fail(0)） */
