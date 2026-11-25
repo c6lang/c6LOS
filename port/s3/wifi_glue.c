@@ -3071,6 +3071,10 @@ int s3_wifi_scan(void)
     s3_ets_printf("[wifi] scan start（异步）\n");
     /* §§1288：在扫描之前才播种 TX 缓冲（此时库已完成初始化）。 */
     { extern void s3_seed_tx_buffers(void); s3_seed_tx_buffers(); }
+    /* §1616 ★★★★ 顺序修正：`esp_wifi_set_scan_parameters()` 必须在
+     * `esp_wifi_scan_start()` **之前**调用，否则对本次扫描无效
+     * （§1613 就是错放在后面 ⇒ 扫描仍按驻留 0 跑）。 */
+    { extern void s3_set_scan_params(void *buf); s3_set_scan_params(cfg); }
 #ifdef S3_FORCE_SYNC_SCAN
     /* §809: 让 current_task_is_wifi_task() 对本次调用返回真，强制
      * ieee80211_ioctl 走同步路径 (4203f620 -> ieee80211_ioctl_process -> b1)。
@@ -3095,7 +3099,6 @@ int s3_wifi_scan(void)
      * 结构 `{u16 active_min; u16 active_max; u16 passive; u8 home_dwell}`：
      * 100 / 150 / 500 / 30。缓冲**复用已有的 64 字节 scan cfg 尾部**，
      * 不新增栈（否则 BSS/栈碰撞）。 */
-    { extern void s3_set_scan_params(void *buf); s3_set_scan_params(cfg); }
     s3_ets_printf("[wifi] scan_start=%d\n", r);
     /* §§1170：直接处理扫描消息（绕开 ppTask）。
      * `g_s3_real_scan_msg` 是 `__wrap_pp_post` 里既有的捕获（`m[0]==0x305`）。

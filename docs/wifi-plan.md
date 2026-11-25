@@ -36620,3 +36620,25 @@ I (1667) wifi station: got ip:192.168.68.120
 3. `[tx] irq=` 非 0 ⇒ MAC 中断通了；
 4. 扫描出 AP 列表 ⇒ §1613 的驻留时间修复有效；
 5. 之后才是关联/DHCP/TLS。
+
+## §1616 顺序修正：扫描参数必须**在 scan_start 之前**设置
+
+`esp_wifi_set_scan_parameters()` 原先被放在 `esp_wifi_scan_start()` 之后
+⇒ 对本次扫描无效（§1613 的修复因此没起作用）。已移到前面。
+
+### 同时确认：`esp_wifi_scan_start` 的前置条件（反汇编）
+```
+call8 wifi_init_completed(); if (!a10) return 0x3001 (NOT_INIT)
+if (*(u8*)(g_ic+0x1E9) < 2) return 0x3002 (NOT_STARTED)
+...
+```
+我们返回 0 ⇒ 前置条件都满足，扫描请求已投递。
+但真板日志里 **没有** `[v4]wifi|Start wifi scan` ⇒ 扫描消息**没有被库处理**
+（ppTask 不跑，我们手工处理那条路也没拿到消息）。这是 AP 无关、仍然真实存在的缺口。
+
+## ★ 当前唯一的硬阻塞（外部环境）
+- `phy_get_rssi()` = **-94 ~ -118 dBm**（噪声底）⇒ RF 接收链正常（§1615）；
+- IDF 官方 app 连续 **6 次** `connect to the AP fail`、150 秒无 `got ip`（§1614）
+  ⇒ **AP 不可达**；
+- ⇒ 没有帧可收，扫描/关联/DHCP/TLS/body 全部无法推进，也无法验证修复。
+- **必须先恢复 AP**（用 IDF app 验证到 `got ip`），本工程的 WiFi 侧工作才有意义。
