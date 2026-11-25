@@ -36857,3 +36857,36 @@ AP 在会话中断期间恢复了（IDF app 又能在 717ms 关联、1797ms 拿 
 下一步应聚焦 PHY 的**接收增益/LNA 使能**（`register_chipv7_phy` 之后
 PHY 处于什么状态、`phy_get_modem_flag` 的值、以及 IDF 在 `esp_phy_enable`
 之后还做了哪些 RF 寄存器操作）。
+
+## §1633–§1638 中断与堆的深入排查（AP 在场）
+
+### 1. `[heap] 分配失败 n=1600` 的真正元凶（§1635）
+`s3_seed_tx_buffers` 实际是 **3 索引 × 8 块 × (320+1600)B ≈ 46KB**（注释里
+写成 28.8KB 算少了），把 56KB 的 WiFi 堆吃干。改成**每索引 2 块（≈11.5KB）**
+后 `[heap] 分配失败` 消失，且保留发管理帧的能力。
+
+### 2. 中断：库把 MAC 与 PWR 映射到**同一个** CPU 中断号（§1634）
+```
+[setintr] cpu=0 src=2 num=0 prio=1    ← PWR
+[setintr] cpu=0 src=0 num=0 prio=1    ← MAC（被上一行覆盖）
+[setisr]  n=0 fn=42021728
+[ints_on] mask=1                       ← 只记账，从不真使能
+```
+已改：PWR→CPU 中断 1、MAC→0；`ints_on` 真正使能 INTENABLE（flash 助手，
+省 IRAM）；ISR 里对 `ipend & 3` 派发并同时屏蔽两位。
+**结果：`irq=0` 依旧** —— 两种源在整个初始化期都不断言。
+
+### 3. MAC 寄存器与 IDF 逐项一致（单寄存器读取有效；PHY 区不可读）
+| 寄存器 | IDF（已连接） | 我们 |
+|---|---|---|
+| 0x60033080 | 0x1000000c | 0x1000000c |
+| 0x60033084 | 0x80000000 | 0x80000000 |
+| 0x60033060 | 0xffffffff | 0xffffffff |
+| 0x60033c3c / 0x60035118（事件） | 0 | 0 |
+（`0x6003c000` 一带读回全 0 —— PHY 走间接 I2C，非内存映射，批量 dump 无效。）
+
+### 4. 结论
+寄存器一致、中断使能已真开、堆已够，**但 MAC/PWR 一次中断都不产生**，
+TX/RX 计数全 0。下一步只能从"MAC 是否真正在运行"入手：核对
+`ic_init` 之后 MAC 的 **enable 位与 RX DMA 描述符环**（`hal_rx_setup`），
+或直接复用 IDF 走过的公开 API 路径（`esp_wifi_init/set_config/start`）。

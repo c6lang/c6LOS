@@ -1887,6 +1887,19 @@ static int osi_set_intr(u32 cpu_no, u32 source, u32 intr_num, u32 prio)
     volatile u32 *p = (volatile u32 *)(IRQ_RING_BASE + 0x50u);
 
     s3_ets_printf("[setintr] cpu=%u src=%u num=%u prio=%u\n", cpu_no, source, intr_num, prio);
+#ifdef S3_INTR_REAL
+    /* §1634 ★★★★★ **库把 MAC(源 0) 与 PWR(源 2) 都映射到同一个 CPU 中断号 0**，
+     * 后写的 PWR 把 MAC 的映射**覆盖**掉了 ⇒ MAC 中断永远到不了
+     * （`[setintr] src=2 num=0` 紧跟 `src=0 num=0`）。
+     * 真板现象完全吻合：`irq=0`、`wDev_AppendRxBlocks=0`、一帧也收不到。
+     * 这里给两者分配**不同**的中断号：MAC→0（我们的 `_vec_level1` 看 bit0），
+     * PWR→1（暂不使能，避免干扰）。 */
+    if (source == 2u) {
+        intr_num = 1u;
+    } else if (source == 0u) {
+        intr_num = 0u;
+    }
+#endif
     intr_matrix_set(cpu_no, source, intr_num);   /* §642: 真接中断矩阵 */
     p[(p[16] & 3u) * 4u] = cpu_no;
     p[(p[16] & 3u) * 4u + 1u] = source;
@@ -1926,7 +1939,32 @@ static int osi_ints_on(u32 mask)
     s3_ets_printf("[ints_on] mask=%x\n", mask);
     p[0] = p[0] + 1u;               /* 次数 */
     p[1] = mask;                    /* 最后一次 mask */
+#ifdef S3_INTR_REAL
+    /* §1634 ★★★★★ **真正在硬件上使能 MAC 中断**。
+     * §1089 当年把它禁掉，是因为库的 ISR 只被记录、没装进向量表，中断一来
+     * 就落进调试停机处理器。现在 `_vec_level1` 里已经有
+     * `if (ipend & 1) s3_wifi_isr_dispatch()`（S3_ISR_DISPATCH_WIFI）这条派发
+     * 通路，所以可以安全放行：不改向量表，只让 bit0 能进 ISR。
+     * 电平触发的中断由库的 `wDev_ProcessFiq` 清事件位；未清干净会重入，
+     * 那时 ISR 会屏蔽 bit0 交给任务上下文补派发（见 irq.c）。 */
+    {
+        extern void s3_irq_enable_wifi_bit(void);   /* flash 助手，省 IRAM */
+        s3_irq_enable_wifi_bit();
+    }
+#endif
     return 0;
+}
+
+/* §1636 flash 助手：真正在硬件上使能 MAC 中断（省 IRAM，见 §1634/§1635） */
+__attribute__((section(".flash.text")))
+void s3_irq_enable_wifi_bit(void)
+{
+    u32 old = 0;
+    __asm__ __volatile__("rsr %0, intenable" : "=r"(old));
+    /* §1637 ★★ bit0 = MAC（源 0），bit1 = PWR（源 2，我们把它改映射到 1）。
+     * 之前只开 bit0 且 MAC 从不断言 ⇒ 试一下 PWR 这条路。 */
+    old |= 3u;
+    __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(old));
 }
 
 static int osi_ints_off(u32 mask)
@@ -4373,7 +4411,11 @@ void s3_seed_tx_buffers(void)
         void *head = 0;
         void *prev = 0;
         u32 i2;
-        for (i2 = 0u; i2 < 8u; i2++) {
+        /* §1635 ★★★★★ 8 块 × 3 索引 × (320+1600)B ≈ **46KB** —— 这才是
+         * `[heap] 分配失败 n=1600` 的真正元凶（注释里的 28.8KB 算少了）。
+         * 每索引 2 块（共 ≈11.5KB）足够发探测帧/管理帧，又给堆留下
+         * 扫描状态等大块申请的空间。 */
+        for (i2 = 0u; i2 < 2u; i2++) {
             void *b = osi_malloc(320u);
             void *dt;
             if (b == 0) { break; }

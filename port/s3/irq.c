@@ -382,12 +382,11 @@ void *s3_timer_irq(u32 frame_sp)
         u32 ipend = 0;
         volatile u32 *pd = (volatile u32 *)0x50000A00u;
         __asm__ __volatile__("rsr %0, interrupt" : "=r"(ipend));
-        pd[0] = ipend;
-        pd[1] = pd[1] + 1u;
+        pd[1] = pd[1] + 1u;   /* §1638 删 pd[0]=ipend（腾 4 字节 IRAM） */
         /* §642: 把 WiFi MAC/PWR 的 level-1 中断分派给库注册的 ISR。
          * 库用 src=0/2 → intr=0，ints_on(mask=1)，所以看 bit0。
          * 只在 MAC 事件位有效时调，避免定时器中断误入。 */
-        if (ipend & 1u) {
+        if (ipend & 3u) {   /* §1637 同时看 MAC(bit0) 与 PWR(bit1) */
             u32 ie = 0;
             g_s3_diag[10]++;   /* §699: WiFi 中断挂起次数 */
             /* §705: 不能在 call0 的 ISR 里直接 call8 进 windowed 库 ISR ——
@@ -401,7 +400,7 @@ void *s3_timer_irq(u32 frame_sp)
              * 上下文跑完 wDev_ProcessFiq（它会清 MAC/PWR 事件寄存器）后再
              * 由 s3_wifi_scan 重新使能。 */
             __asm__ __volatile__("rsr %0, intenable" : "=r"(ie));
-            ie &= ~1u;
+            ie &= ~3u;   /* §1637 两个都屏蔽，避免电平中断风暴 */
             __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
             g_wifi_isr_pending = 1u;
             pd[2] = pd[2] + 1u;
