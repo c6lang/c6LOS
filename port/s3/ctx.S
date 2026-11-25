@@ -43,6 +43,8 @@
     .literal .Lareg_magic, 0x41524547
     .literal .Lyl_cnt,  g_yl_cnt
     .literal .Lwt_diag, 0x50001E00
+    /* §1735：切换点帧链取证区（8 项 × 8 字节 + 尾 WS/WB）。 */
+    .literal .Lchaindump, 0x50001F60
 
 
 /* §934: 手写帧补 [sp-12]=上一帧 sp（_win_unf8 用），a9=当前 sp。 */
@@ -595,7 +597,34 @@ port_task_switch_c0:
     addi    a10, a1, 128
     WIN_CHAIN_FIX a10, a8
 #endif
-    #ifdef S3_BODY_SPILL
+    #ifdef S3_CHAIN_DUMP
+    /* §1735 ★★★★★ **把切换点的帧链整条打出来**。
+     *
+     * 整圈 spill 只在"每一级窗口的 `[sp-12]` 都是合法调用者 sp"时才成立。
+     * §1723 真板已证 `entry` 会写这一格，但同一次运行里也读到过
+     * `c6a50001` 这种垃圾 ⇒ 必须看**切换这一刻**这条链到底长什么样。
+     * 从本帧沿链向上走 8 步写 RTC 0x50001F60（崩溃后 GDB 跨复位可读）。 */
+    l32r    a8, .Lchaindump
+    mov     a9, a1
+    movi    a10, 0
+1:
+    s32i    a9, a8, 0
+    l32i    a11, a9, -12
+    s32i    a11, a8, 4
+    addi    a8, a8, 8
+    addi    a10, a10, 1
+    movi    a12, 8
+    beq     a10, a12, 2f
+    mov     a9, a11
+    j       1b
+2:
+    l32r    a8, .Lchaindump
+    rsr     a9, windowstart
+    s32i    a9, a8, 64
+    rsr     a9, windowbase
+    s32i    a9, a8, 68
+#endif
+#ifdef S3_BODY_SPILL
     /* §1732 ★★★★★ **整圈 spill 放进切换本体**（而不是壳里）。
      *
      * 上一版把 spill 放在新写的 windowed 壳里（`entry a1,64` + `call8` 本体），
