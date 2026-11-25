@@ -384,9 +384,9 @@ void s3_cap_scan_msg(u32 d)
         if (fn == (u32)(void *)&wifi_init_process &&
             *(volatile u32 *)(void *)(d + 12u) == 0u) {
             *(volatile u32 *)(void *)(d + 12u) = (u32)(void *)g_wifi_cfg_blob;
-            extern int s3_ets_printf(const char *, ...);
-            s3_ets_printf("[initmsg] patched cfg=%x\n",
-                          (unsigned)(u32)(void *)g_wifi_cfg_blob);
+            /* §1746 不再新起格式串（DRAM 零余量）：直接记 RTC 槽 0x50001218，
+             * 跨复位可读，用来确认补丁真的命中过。 */
+            *(volatile u32 *)0x50001218u = (u32)(void *)g_wifi_cfg_blob;
         }
     }
 #endif
@@ -1165,6 +1165,16 @@ void s3_timer_dispatch_guarded(void)
 __attribute__((section(".flash.text")))
 void s3_delay_advance(u32 ticks)
 {
+#ifdef S3_WIFI_ISR_POLL
+    /* §1745：每 10 tick 把库装的 WiFi ISR 调一遍（见 s3_wifi_isr_poll）。 */
+    {
+        extern void s3_wifi_isr_poll(void);
+        static u32 n = 0u;
+        n = n + 1u;
+        if ((n % 10u) == 0u) { s3_wifi_isr_poll(); }
+    }
+#endif
+
     extern void s3_tick_consume(void);
     extern void os_task_yield_force(void);
     u32 n = 0u;
@@ -2480,6 +2490,32 @@ static int osi_ints_off(u32 mask)
     p[1] = mask;
     return 0;
 }
+static u32 s_isr_poll_n;
+/* §1745 ★★★★★ **把库自己装的 WiFi ISR 真正调起来。**
+ *
+ * `osi_ints_on` 是**故意**不在硬件上开库中断的（见那里的 §1089）：
+ * 我们用自己的向量表，库的中断一旦触发只会落进 `_vec_lvl*` 的停机处理器。
+ * 于是这个移植的设计是"内核轮询派发"——`s3_timer_irq` 里置
+ * `g_wifi_isr_pending`……**但从来没有人真的去调库记录的 ISR**。
+ *
+ * 后果（真板一直如此）：`[swp] i10=0 rx=0`、`tx=0`、`irq=0`、
+ * `wDev_AppendRxBlocks=0` —— MAC 收到的帧永远没人取走，
+ * 扫描 60 轮全是 0 AP，关联自然不可能成功。
+ *
+ * 这里把库通过 `_set_isr(n, fn, arg)` 装进来的 ISR 直接调一遍。
+ * 放 flash，由 `s3_delay_advance`（每 10 tick）和扫描循环调用。 */
+__attribute__((section(".flash.text")))
+void s3_wifi_isr_poll(void)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        if (s_wifi_isr_fn[i] != 0) {
+            s_wifi_isr_fn[i](s_wifi_isr_arg[i]);
+            s_isr_poll_n++;
+        }
+    }
+}
+
 
 /* 真的关中断（§226）：IDF 这两个槽位就是 portENTER_CRITICAL/portEXIT_CRITICAL。
  * 只记账的空实现会让库以为自己在临界区里，实际上并发完全没保护（队列/链表
@@ -3351,6 +3387,32 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_HW_START_DIRECT
+    /* §1743 ★★★★★ **直接打开 MAC**，不等 ppTask。
+     *
+     * 现状：`mode : sta` 已经设好，但 `wifi_hw_start` 只在 `wifi_start_process`
+     * 里被调，而那是 ppTask 的活；ppTask 在无抢占内核里一直 READY 不被调度
+     * （§1690 `[p2] st=1 wk=0 wo=0`）。于是 MAC 从头到尾没启动 ——
+     * 真板 `[swp]` 里 `i10=0 d8=n ev=0 rx=0`（Mac/WiFi 中断一次没到）。
+     *
+     * `wifi_start_process` 的分支已经被反汇编确认：
+     *   `a3 = *(u8*)(msg+8)`；`a3==1` → `wifi_hw_start(1)`。
+     * 我们状态本来就是 STA + started ⇒ 直接调 `wifi_hw_start(1)`。 */
+    {
+        extern void wifi_hw_start(int on);
+        extern void _do_wifi_start(int mode);
+        extern void ic_enable_rx(void);
+        wifi_hw_start(1);
+        s3_ets_printf("[hw] on\n");
+        /* §1744：`wifi_start_process` 在 `wifi_hw_start` 之后还要
+         * `_do_wifi_start(mode)` 并把 `g_ic+233` 置 2 —— 那一步才真正
+         * 让 STA 状态机发出 probe/RX。这里照抄同样的顺序。 */
+        _do_wifi_start(1);
+        s3_ets_printf("[do] ok\n");
+        ic_enable_rx();
+        s3_ets_printf("[rx] ok\n");
+    }
+#endif
 #ifdef S3_START_SLEEP
     /* §1725 浅层阻塞实验：让 ppTask 在**还没进深层扫描链**时拿到 CPU，
      * 把 start 消息处理掉（MAC 启动只在 wifi_start_process 里发生）。

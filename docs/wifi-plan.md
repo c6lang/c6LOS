@@ -37478,3 +37478,39 @@ code      msg[4]         msg[12]
 `[scand] i=0 r=0 num=0 **yld=1**` ⇒ 让出第一次真的在扫描循环里生效；
 但 `num=0`、`[swp]` 里 `i10=0 d8=n ev=0 rx=0` ⇒ **MAC 仍未收到任何包**，
 AP 关联依旧 0。崩溃点始终是库里 `*(msg+12)` 写飞。
+
+### §1743–§1747 MAC 为什么不启动：四条被`#ifdef`挡住/从未实现的接线
+
+本轮把"只调库函数、不等 ppTask"这条捷径走到极限，结论很硬：
+
+**(1) `wifi_hw_start(1)` / `_do_wifi_start(1)` / `ic_enable_rx()` 都能调通、都返回。**
+真板打印 `[hw] on` `[do] ok` `[rx] ok`，行数 7582 不崩。
+但 `[swp]` 仍然是 `i10=0 rx=0 tx=0 ev=0`，`[tx] tx=0 ret=0 irq=0` ⇒ **一帧没发、一帧没收**。
+
+**(2) `osi_set_intr` 里"MAC(源0)/PWR(源2) 不能共用中断号 0"的修复一直没生效。**
+它写在 `#ifdef S3_INTR_REAL` 后面，而这个开关**从没进过构建**。
+（真板日志 `[setintr] src=2 num=0` 紧跟 `src=0 num=0` 就是覆盖现场。）
+本轮开了 `-DS3_INTR_REAL`，`intr_matrix_set` 才会把 MAC→0、PWR→1。
+
+**(3) 更要命的是 `osi_ints_on` 是"故意"不在硬件上开库中断的（§1089）**：
+我们自己的向量表里 `_vec_lvl*` 是停机处理器，库中断一旦真开就会停机。
+所以这个移植的设计是"内核轮询派发"——`s3_timer_irq` 里置
+`g_wifi_isr_pending`……**但全仓没有任何代码真的去调库登记的 ISR**。
+真板 `[setisr] n=0 fn=42021fe4 arg=0`（= `wDev_ProcessFiq`）证明库登记了，
+却从来没被调用过。本轮新增 `s3_wifi_isr_poll()`（flash）并挂到
+`s3_delay_advance`（每 10 tick）：`-DS3_WIFI_ISR_POLL`。
+
+**(4) 库状态在 init 之后就是 3**（`[wifi] init 后 ... = 3`、
+`[wifi] start 后 = 3`），而 `esp_wifi_init_internal` 返回 0。
+`wifi_hw_start` 只在这个状态机到位时才真正动作，所以上面 (1) 的三个调用
+大概是**早返回的空操作**。仓库里 `-DS3_PATCH_INIT_MSG`（§1641）就是治这个的
+（在 `_queue_send` 处给 `msg[4]==&wifi_init_process` 的消息补 `msg[12]`），
+但本轮开了它，`init 后` 仍是 3 —— 因为开 MSG_RING 后可以看到**库根本没有
+把 init 消息投进任何一个我们拦得到的队列**（环里只有 0x310/0x312/0x305 和
+事件队列的 8 字节项），说明 init 走的是**同步直调**，补丁点选错了。
+
+**下一步（顺序明确）**：
+1. 找到"同步直调 init"的那条路径（`esp_wifi_init_internal` 内部）并补 `msg[12]`，
+   或直接调 `wifi_init_process(自建消息)` 并观察状态是否变 2/4；
+2. 状态到位后再直调 `wifi_hw_start(1)`，此时才可能真启 MAC；
+3. MAC 起来后 `s3_wifi_isr_poll()` 才有意义（`wDev_ProcessFiq` 会看到真实中断）。
