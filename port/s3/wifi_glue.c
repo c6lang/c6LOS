@@ -2458,6 +2458,16 @@ void s3_ets_timer_dispatch(void)
         extern volatile u32 g_s3_diag[];
         g_s3_diag[33] = g_s3_diag[33] + 1u;
         g_s3_diag[34] = now;
+        /* §1685 分发器心跳：每 100 次打一次，确认它还在被调用。 */
+        if ((g_s3_diag[33] % 10u) == 1u) {
+            /* §1688 结论已取到：`pend=0 isr=0` —— 硬件定时器 ISR 从未触发。
+             * 打印恢复成两参数（DRAM 到顶，省一个 u32 字段）。 */
+            { u32 ps_ = 0u;
+              __asm__ __volatile__("rsr %0, ps" : "=r"(ps_));
+              s3_ets_printf("[dp] n=%u now=%u tisr=%u ps=%x\n",
+                            (u32)g_s3_diag[33], (u32)now,
+                            (u32)g_s3_diag[9], ps_); }
+        }
     }
     while (i < S3_ETS_TIMER_MAX) {
         S3EtsTimer *e = &s3_ets_timers[i];
@@ -4556,6 +4566,24 @@ void s3_scan_iter(u32 i)
         __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
     }
     c[13] = 2u;
+    /* §1687 ★★★★★ **虚拟时钟必须由我们推进。**
+     *
+     * 真板取证：`[dp] n=71/81/91/101/111 now=22` —— 定时器分发器一直在被调用，
+     * 但 `s3_w2c_tick_get()` **冻结在 22 tick**。库扫描时 arm 的
+     * `[tarm] ms=100 ticks=10` 定时器要 `expire = now + 10 = 32` 才到期，
+     * 而时钟永远停在 22 ⇒ **定时器永远不会触发**，`[tfir]` 一次都不打印，
+     * 扫描 FSM 就停在 `perform scan` 之后再无进展。
+     * 原因：内核是**按需推进**虚拟时间（`s3_tick_consume()`），而这里
+     * 之前只调分发、不推进 ⇒ 分发做了无用功。
+     * 修法：每轮扫描迭代先推进 10 tick（=100ms，正好是扫描驻留定时器的
+     * 量级），再分发 —— 到期项才会真的被触发。 */
+    /* §1689 ★★★★★ 真板取证：`pend=0 isr=0` —— **硬件定时器 ISR 从未触发过**，
+     * 于是 `s3_tick_consume()` 里的 `port_virtual_tick()` 恒为 0，
+     * 内核时间和库定时器的 expire 全部冻结（`[dp] n=121 now=22`）。
+     * 这里直接调内核的 `os_sched_tick()` 推进时间（它只维护 tick/超时表、
+     * 不做上下文切换，在任务上下文调用是安全的——`s3_tick_consume()`
+     * 自己也是这么做的）。每轮推进 10 tick = 100ms，匹配扫描驻留定时器。 */
+    { extern void os_sched_tick(void); u32 kk; for (kk = 0u; kk < 10u; kk++) { os_sched_tick(); } }
 #if defined(S3_TIMER_DISPATCH) || defined(S3_ETS_TIMER_DISPATCH)
     /* §1683 ★★★★★ **宏名不一致的致命后果。**
      * 这里原来写的是 `#ifdef S3_ETS_TIMER_DISPATCH`，而整个工程实际
@@ -4621,6 +4649,9 @@ void __wrap_ieee80211_timer_process(u32 a1, u32 a2, u32 a3)
      * 再两个点之后**整个应用停住**。改成 3 参数后与库的原型完全一致。 */
     extern void __real_ieee80211_timer_process(u32, u32, u32);
     g_s3_diag[30]++;
+    /* §1686 真板结论：这个跳板**一次都没被调用**（[tp] 从不打印），
+     * 说明挂住的是**另一个**定时器回调。[tp] 打印已删（DRAM 到顶，
+     * 要让位给 [tfir]）。 */
     __real_ieee80211_timer_process(a1, a2, a3);
 }
 
