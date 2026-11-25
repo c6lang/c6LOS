@@ -2596,7 +2596,10 @@ void s3_wifi_osi_init(void)
 /* WiFi 初始化配置块：放在 BSS 里，由 .c6 侧经桥取地址后填写。
  * 以前 .c6 里写死 0x3FCA2000，那个地址落在 .data 段内，填配置就把
  * 我们自己的全局变量覆盖了。 */
-u32 g_wifi_cfg_blob[64];
+/* §1660 ★ 只用到 148 字节（最后一个字段了 wcfg(144) magic），
+ * 原来开 64 个 u32(256B) 白占 96 字节 DRAM；DRAM 顶已到硬限
+ * （超一点就 `S3 BSS/stack collision`），缩到 40 个 u32(160B)。 */
+u32 g_wifi_cfg_blob[40];
 
 void *s3_wifi_cfg_ptr(void) { return (void *)g_wifi_cfg_blob; }
 
@@ -2826,6 +2829,18 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                   }
 #endif
               }
+              /* §1661 ★★★★★ **预填必须在直调之前！**
+               * 反汇编 `wifi_lmac_init`(0x4203b8d8) 第一件事就是
+               *   l32r a5, g_wifi_menuconfig ; l32i a4, a5, 0
+               *   a3 = a4-2; if (23 >= a3) 用 a4，否则 log + 用 10
+               * 之后又读 `+8`/`+12`/`+96`/`+100` —— 它**完全不看自己的参数**，
+               * 只读全局 `g_wifi_menuconfig`。而原来 `s3_prefill_menuconfig()`
+               * 在直调 `wifi_init_process()` **之后**才执行（line 3933），
+               * 所以库读到的是全 0 ⇒ 七项缓冲数全 0 ⇒ RX 池建不起来。
+               * 现在提前填一次（后面那次保留，无害）。 */
+#ifdef S3_PREFILL_MENUCONFIG
+              { extern void s3_prefill_menuconfig(void); s3_prefill_menuconfig(); }
+#endif
               ri = wifi_init_process((void *)g_s3_first_msg);
 #ifdef S3_POISON_USED_MSG
               /* §1642 ★★★★★ 这条消息**已经被我们处理过了**，但它还留在队列里；
@@ -2906,6 +2921,37 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                 }
             }
         }
+#ifdef S3_RXBUF_DIRECT
+        /* §1662 ★★★★★ **直接把 RX 块建起来。**
+         *
+         * 取证链（全部来自当次 ELF 反汇编）：
+         *   `ic_init`(0x4201bc88) 末尾：
+         *       4201bcaa: mov a10, a5        ; a5 = ic_init 的**第 5 个参数**
+         *       4201bcaf: call8 wDev_Rxbuf_Init
+         *   `wDev_Rxbuf_Init`(0x42021a3c) 建满 count 个块后打印
+         *       "Init static rx buffer num: %d" ← 打印的是 `a5`（**实际循环次数**）
+         *   真板打印 **0** ⇒ 一个块都没建 ⇒ `wDev_AppendRxBlocks=0`
+         *   ⇒ MAC 不产生 RX 中断（这也是"混杂模式也收不到帧"的原因）。
+         * 与其继续逆推 ic_init 那个参数从哪来，直接自己按 IDF 的
+         * `static_rx_buf_num=10` 建一遍（失败会返回非 0）。 */
+        {
+            extern int wDev_Rxbuf_Init(u32 n);
+            /* ★ 数量必须小：`wDev_Rxbuf_Init` 开头算
+             *     a10 = (a2 * 3 * 4096) & 0xFFFF   // 每个块 3 页(4KB)
+             * 传 10 ⇒ 122880 截成 57344 字节 ⇒ 堆失败并打印
+             * "Failed to init rx desc space, buffer number=10"。
+             * 传 5 ⇒ 61440，仍太大；传 4 ⇒ 49152，还是大。
+             * 先试 2 (24576) / 1 (12288) 的最小可用值。 */
+            /* §1663 真板实测：传 10 ⇒ 打印 "Failed to init rx desc space,
+             * buffer number=%d"（分配 122880&0xFFFF=57344 字节，堆不够）；
+             * 传 2 ⇒ 分配 24576 字节成功(返回 0)，但日志打印的值仍是垃圾
+             * （1070361944 = 0x3FCB7D98，像个 DRAM 指针）⇒ 怀疑我们的
+             * `wifi_log` 钩子对 2 个可变参数的传递有偏差，需要单独核对。
+             * 默认关闭，留给下一轮。 */
+            int rxr = wDev_Rxbuf_Init(2u);
+            s3_ets_printf("[rxbuf] init=%d\n", rxr);
+        }
+#endif
         /* §1597 ★★★★★ 反汇编 `wifi_start_process`（0x4203b59c）：
          *     a3 = *(u8*)(g_ic + 0x1E9)
          *     if (a3 >= 2) return 0;        ← **第一行就返回，什么都不做**
@@ -3839,7 +3885,11 @@ u32 s3_wifi_bringup(void)
      * 就发生在扫描之前，直接导致扫描状态分配不出来）。做扫描/关联/TLS 用 16 足够。 */
     wcfg(52u,  32u);            /* dynamic_rx_buf_num     default 32          */
     wcfg(56u,  1u);             /* §1527 tx_buf_type = 0 静态（库调的是 esf_buf_setup_static） */
-    wcfg(60u,  0u);             /* §1527 static_tx_buf_num = 8（原来 0 ⇒ alloc eb fail(0)） */
+    /* §1658 ★★★ **注释写 8、代码写 0 —— 这本身就是 bug。**
+     * IDF 参考 sdkconfig 里 `CONFIG_ESP_WIFI_TX_BUFFER_TYPE 1`（动态），
+     * 但动态模式下 `static_tx_buf_num` 仍要给它默认的 8 个静态 FG 缓冲，
+     * 库才会去建 TX 池。填 8 与注释/IDF 默认一致。 */
+    wcfg(60u,  8u);             /* static_tx_buf_num = 8 */
     wcfg(64u,  32u);            /* dynamic_tx_buf_num     default 32          */
     wcfg(68u,  0u);             /* rx_mgmt_buf_type       DYNAMIC_RX_MGMT_BUF default 1 */
     wcfg(72u,  5u);             /* rx_mgmt_buf_num        default 5           */
@@ -4274,25 +4324,10 @@ void s3_timer_sweep(void)
               }
           }
           { extern unsigned char g_wifi_menuconfig[];
-            /* §1591 ★ 库内部的配置计数（`esf_buf_setup` 也读它）。
-             * 若这里也是 0 ⇒ 我们那块 cfg **根本没被库接收**。 */
-            /* §1651 ★ 第二个值改成 eb 描述符 idx0 的计数（`desc+16`，步长 20）：
-             * `esf_buf_alloc_dynamic` 读它为 0 就直接返回 NULL。
-             * 同一处打印、同样两个参数 ⇒ 不增加 IRAM/BSS。 */
-            { extern unsigned char g_eb_list_desc[];
-              /* §1652 ★ 第二个值改成 OSI 表 `+88` 槽的运行时指针 ——
-               * `esf_buf_alloc_dynamic`(ROM 0x403833d0) 在
-               *   l32i a5, a10, 88 ; callx8 a5
-               * 处把它**当分配函数调用**。若它指向 `_mutex_unlock`，
-               * 就证明 ROM 侧的 osi 结构与我们的对不上。 */
-              /* §1655 打印 idx0 的"已用/上限"（desc+14 / desc+16，步长 20）。 */
-              { extern unsigned char g_eb_list_desc[];
-                volatile unsigned char *d = (volatile unsigned char *)g_eb_list_desc;
-                extern wifi_osi_funcs_t g_wifi_osi_funcs;
-                (void)d;
-                s3_ets_printf("[mc] t158=%x t168=%x\n",
-                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 0x158u),
-                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 0x168u)); } } }
+            /* §1659 只留一个最小打印（rx = menuconfig+0），把 BSS 让给
+             * 直调 `wifi_menuconfig_init` 的路径。 */
+            s3_ets_printf("[mc] rx=%u\n",
+                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u)); }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
