@@ -36560,3 +36560,35 @@ wifi_hw_start(mode); wifi_mode_set(mode); _do_wifi_start(mode)
 
 ## 四项验收
 **AP=0 DHCP=0 TLS=0 body=0**（射频一帧未收，未能推进到关联）。
+
+## §1614 ★★★★★ 环境结论：**AP 当前不可达**（推翻了"我们代码收不到帧"的部分归因）
+
+本会话末重测 IDF 官方 app（同一块板、同一根天线、同一套凭据）：
+```
+I (2947) wifi station: connect to the AP fail
+I (5367) wifi station: connect to the AP fail
+I (7777) wifi station: connect to the AP fail
+I (10187) wifi station: connect to the AP fail
+（150 秒抓取共 6 次失败，从未 got ip）
+```
+而 100 多行之前的同一构建、同一板子是：
+```
+I (627) wifi:connected with weforpay.com, aid = 2, channel 6,
+        bssid = dc:d8:7c:5a:7a:46
+I (1667) wifi station: got ip:192.168.68.120
+```
+⇒ **AP/环境已经变化**（路由器关闭、改信道/SSID、或射频链路超出范围）。
+
+### 这条结论的意义
+1. 我们固件的 `wDev_AppendRxBlocks = 0`、`[eb] 0 0 0 0`、`irq = 0`
+   **可能只是因为压根没有帧可收**（AP 不可达 ⇒ 没有 beacon）；
+2. **在 AP 恢复可达之前，任何 WiFi 侧的修复都无法被真板验证**；
+3. 下一步第一件事：**先确认 AP 可用**（用 IDF app 验证到 `got ip` 为止），
+   再回来验证 c6LOS 的各项修复（§1594 PHY 表、§1613 扫描驻留时间等）。
+
+### 复测步骤（推荐顺序）
+1. 刷 IDF app 全套（bootloader@0x0 / 分区表@0x8000 / app@0x10000，
+   用 `/tmp/bsta/` 下的产物），确认打印 `got ip:`；
+2. 若 IDF 也连不上 ⇒ 先修环境（路由器/距离/天线），不要再改代码；
+3. 环境恢复后刷 c6LOS（`bash tools/build-wifi.sh best`），
+   看 `[direct] init=0`、`[eb]` 是否非 0、`[tx] irq=` 是否非 0。
