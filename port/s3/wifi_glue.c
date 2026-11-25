@@ -2040,9 +2040,35 @@ void s3_prep_desc_cnt(void)
     for (i = 0u; i < nb; i++) {
         volatile unsigned char *b = bases[i];
         u32 k;
-        for (k = 0u; k < 21u; k++) {
+        /* ★ 只写到数组真实大小之内：`nm -S` 显示 `g_eb_list_desc`
+         * 只有 **0xDC = 220 字节 = 11 × 20**，写 21 个会越界覆盖
+         * 紧随其后的 `txopstart_index` 与 `lmacConfMib`，实测会让启动
+         * 从 197 行退化到 122 行。 */
+        for (k = 0u; k < 11u; k++) {
+            /* §1654 ★★★★★ **上限必须够大。**
+             *
+             * 反汇编 `esf_buf_alloc_dynamic`(0x403833d0)：
+             *   a8 = *(u16*)(desc+14)   ; 已用
+             *   a12 = *(u16*)(desc+16)  ; 上限
+             *   if (a8 < a12) → 0x40383418 走**真正分配**；
+             *   else          → j 0x40383565 尾部 `movi a9,0; mov a2,a9`
+             *                   **无条件返回 NULL**。
+             * 我们之前把上限填成 **4**，而库要按 `static_rx_buf_num=10`
+             * 分配 10 个 ⇒ 第 5 次就撞上限 ⇒ `alloc eb fail(0)`、RX 池建不起来。
+             * 填 64 给足余量（这只是个上限，不预分配内存）。 */
+            /* §1656 ★★★★★ **`desc+8` 是缓冲区类型，必须有效。**
+             * `esf_buf_alloc_dynamic` 用 `a6 = *(u8*)(desc+8)` 分派：
+             *   a6==1..4 或 10 → `_malloc_internal(table+0x158)`
+             *   a6==7..9        → `_wifi_malloc(table+0x168)`
+             *   其它(含 0)      → `esf_buf_alloc_dynamic_default_handler`
+             *                     (0x4201dc3c，它只是 `wifi_log(6,...)` 然后返回 NULL)
+             * 我们之前没写这一字节 ⇒ 0 ⇒ 每次都走默认处理器 ⇒ 分配永远失败
+             * ⇒ RX 池一个都建不起来 ⇒ 没有任何 RX。 */
+            /* §1657 注：`desc+8`（缓冲区类型）写成 1 会让本板在
+             * `alloc eb fail(0)` 之后**直接停住**（197 行 → 122 行），
+             * 所以这一字节先不写，保留在文档里作为待解问题。 */
             *(volatile unsigned short *)(void *)(b + k * 20u + 14u) = 0u;
-            *(volatile unsigned short *)(void *)(b + k * 20u + 16u) = 4u;
+            *(volatile unsigned short *)(void *)(b + k * 20u + 16u) = 64u;
         }
     }
 }
@@ -4259,10 +4285,14 @@ void s3_timer_sweep(void)
                *   l32i a5, a10, 88 ; callx8 a5
                * 处把它**当分配函数调用**。若它指向 `_mutex_unlock`，
                * 就证明 ROM 侧的 osi 结构与我们的对不上。 */
-              { extern wifi_osi_funcs_t g_wifi_osi_funcs;
-                s3_ets_printf("[mc] rx=%u t88=%x\n",
-                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
-                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 88u)); } } }
+              /* §1655 打印 idx0 的"已用/上限"（desc+14 / desc+16，步长 20）。 */
+              { extern unsigned char g_eb_list_desc[];
+                volatile unsigned char *d = (volatile unsigned char *)g_eb_list_desc;
+                extern wifi_osi_funcs_t g_wifi_osi_funcs;
+                (void)d;
+                s3_ets_printf("[mc] t158=%x t168=%x\n",
+                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 0x158u),
+                          (u32)*(volatile u32 *)(void *)((u8 *)&g_wifi_osi_funcs + 0x168u)); } } }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
