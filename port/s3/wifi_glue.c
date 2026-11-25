@@ -67,6 +67,17 @@ void s3_nvs_state_fix(void)
         volatile u8 *m154 = (volatile u8 *)(void *)(g_ic + 0x154);
         if (*m154 != 1u) { *m154 = 1u; }
     }
+    /* §1632 ★★★★★ **GDB 对照 IDF 连接态找到的真实寄存器差异**：
+     *   IDF  : 0x60033080 = 0x1000000c    ← 位 2、3 置起
+     *   我们 : 0x60033080 = 0x10000000    ← **缺位 2、3**
+     * 这是 MAC 的事件/中断使能寄存器，位 2/3 对应 RX 完成一类事件；
+     * 缺这两位的直接表现就是 `wDev_AppendRxBlocks` 恒 0、MAC 中断一次不来
+     * （而 TX 探测帧正常发出）。这里补上。 */
+    {
+        volatile u32 *ev = (volatile u32 *)(void *)0x60033080u;
+        u32 v = *ev;
+        if ((v & 0x0Cu) != 0x0Cu) { *ev = v | 0x0Cu; }
+    }
     if (nv == 0u) {
         s3_ets_printf("[nvs] null\n");
         return;
@@ -3011,6 +3022,19 @@ void s3_set_scan_params(void *buf)
      * （真板 `perform scan: ss_state=0x0, chan<0,0>, dur<0,0>` 为证）。
      * 这里按同一布局直接调用处理函数。 */
     {
+        /* §1628 ★★★★★ 直接写库的全局 `app_scan_params` —— 它才是扫描时
+         * 真正读驻留时间的那份数据（反汇编 `wifi_sta_set_scan_default_params`
+         * 最后打印的就是它）。消息路径（码 102）在这套环境里始终读成 0，
+         * 直接写全局最可靠。结构（反汇编确认为 32 位字段）：
+         *   +0 active_min  +4 active_max  +8 passive  +12(u8) home_dwell */
+        extern unsigned char app_scan_params[];
+        volatile u32 *ap = (volatile u32 *)(void *)app_scan_params;
+        ap[0] = 100u;
+        ap[1] = 150u;
+        ap[2] = 500u;
+        *(volatile u8 *)(void *)(app_scan_params + 12) = 30u;
+    }
+    {
         extern int wifi_set_scan_params_process(void *msg);
         u8 msg[64];
         u32 k;
@@ -4252,6 +4276,14 @@ __attribute__((section(".flash.text")))
 
 void s3_seed_tx_buffers(void)
 {
+#ifdef S3_NO_SEED_TX
+    /* §1629 ★★★★★ 不再手工播种 18×1600B = 28.8KB 的 TX 缓冲：
+     * 那是当年 `esf_buf_setup` 从不执行（`ic_init` 提前返回）时的权宜之计。
+     * 现在 IC 初始化已经成功（`[direct] init=0`），库自己会建缓冲池；
+     * 手工播种反而**吃光 WiFi 堆**，导致扫描状态等 1600 字节的申请失败
+     * （真板 `[heap] 分配失败 n=1600`）。 */
+    return;
+#endif
     extern unsigned char g_eb_list_desc[];
     extern unsigned char g_wifi_menuconfig[];
     extern void *osi_malloc(u32 n);

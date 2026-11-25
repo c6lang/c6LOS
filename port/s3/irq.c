@@ -405,6 +405,19 @@ void *s3_timer_irq(u32 frame_sp)
             __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie));
             g_wifi_isr_pending = 1u;
             pd[2] = pd[2] + 1u;
+#ifdef S3_ISR_DISPATCH_WIFI
+            /* §1630 ★★★★★ **直接派发**给库的 ISR。
+             * 之前只在 ISR 里屏蔽中断并置 `g_wifi_isr_pending`，等任务上下文
+             * 去调 `s3_wifi_isr_dispatch()`；但扫描是**同步等待 scan-done**
+             * 的，而扫描期间任务上下文正卡在那个等待里 ⇒ **死锁**
+             * （真板：`Start wifi scan` 之后再无任何输出）。
+             * 我们的 `_vec_level1` 本来就在调 windowed C（`s3_timer_irq` 自己
+             * 就是），所以从这里 call8 进库 ISR 与已有调用链同级。 */
+            {
+                extern void s3_wifi_isr_dispatch(void);
+                s3_wifi_isr_dispatch();
+            }
+#endif
         }
     }
     /* 记下被打断的主流程 ccount（陷阱帧偏移 60 = epc1）：卡死时读 mark[3]
@@ -414,6 +427,17 @@ void *s3_timer_irq(u32 frame_sp)
     /* §708: 删掉旧的"WINDOWBASE 首违例记录"块（§344）——它早已完成使命，
      * 这里腾出的 IRAM 给中断屏蔽/恢复用。 */
     jitter_sample(cc);
+#ifdef S3_TIMER_DISPATCH_IN_ISR
+    /* §1631 ★★★★★ 库的定时器必须在**本 ISR 里**驱动。
+     * 扫描是同步阻塞在库里的（`Start wifi scan` 之后再无输出 = 卡死），
+     * 它等的超时/信道切换全靠 `ieee80211_timer_process`；而那个派发
+     * 之前只在任务上下文跑 ⇒ 正好被阻塞住 ⇒ 死锁。
+     * 放进 ISR 后，任务阻塞期间超时照样推进。 */
+    {
+        extern void s3_ets_timer_dispatch(void);
+        s3_ets_timer_dispatch();
+    }
+#endif
     s3_timer_rearm();
     s3_wdt_kick();
 #ifdef S3_TICK_DEFER
