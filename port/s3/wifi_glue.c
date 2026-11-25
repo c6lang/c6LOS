@@ -329,10 +329,34 @@ int s3_chain_valid(void)
     return 1;
 }
 
+/* §1741 IRAM 零余量：本函数只做"截消息/记环"，挪 flash。 */
+__attribute__((section(".flash.text")))
 void s3_cap_scan_msg(u32 d)
 {
     extern u32 g_wifi_cfg_blob[];
     if (d == 0u) { return; }
+#ifdef S3_MSG_RING
+    /* §1741 ★★★★★ **消息环取证**：库崩溃现场是
+     *   `wifi_get_channel_process`: `a4 = *(u32*)(msg+12)`（=258=0x102）被当指针
+     *   `s8i a8, a4, 0` ⇒ 写地址 0x102 ⇒ 双重异常。
+     * 库里没有哪条正常消息会把 258 放在 +12，所以要么派发到了错的处理函数、
+     * 要么消息体被截断/复用。这里把 `_queue_send` 上每条消息的
+     * **(code, msg[12])** 记进 RTC 环（8 项，0x50001C00；该区未被其它诊断占用），
+     * 崩溃后 GDB 直接读，就能看到"最后几条消息分别是什么、谁带 0x102"。 */
+    {
+        volatile u32 *r = (volatile u32 *)0x50001C00u;
+        u32 i = r[0];
+        r[1] = i;
+        /* 每项 3 字：code / msg[4]（库自带的处理函数指针）/ msg[12]。
+         * 崩溃是 `wifi_get_channel_process`(0x4203d09c) 里 `*(msg+12)` 写飞，
+         * 而这个地址就是从 `msg[4]` 取的 ⇒ 在环里搜 0x4203d09c 就能找到
+         * 那条消息的 code 与 [12]，从而定位是谁造的消息。 */
+        r[2u + (i & 7u) * 3u] = *(volatile u32 *)(void *)d;
+        r[3u + (i & 7u) * 3u] = *(volatile u32 *)(void *)(d + 4u);
+        r[4u + (i & 7u) * 3u] = *(volatile u32 *)(void *)(d + 12u);
+        r[0] = i + 1u;
+    }
+#endif
     if (*(volatile u32 *)(void *)d == 5u) {
         g_s3_real_scan_msg = d;
     }
