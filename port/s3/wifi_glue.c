@@ -2772,9 +2772,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     /* §598: 与 IDF 参考 app 的 hs("after-wifi-start") 完全相同的寄存器快照，
      * 用来定位两边从"after-wifi-init 都是 d14=0 ca0=0"之后在哪里分叉。 */
 #ifndef S3_NO_HS_PRINT
-    s3_ets_printf("[hs] d14=%x ca0=%x PWC=%x CLK=%x\n",
-        *(volatile u32 *)0x60033d14u, *(volatile u32 *)0x60033ca0u,
-        *(volatile u32 *)0x60008090u, *(volatile u32 *)0x60026014u);
+    /* §1615 ★ RF 接收链的**不依赖 AP**的体检：`phy_get_rssi()` 直接返回
+     * PHY 当前 RSSI（没有 AP 时就是噪声底，正常应是个负值，如 -90 左右）。
+     * 若它返回 0 或正数，说明 RF 接收链根本没在工作。 */
+    {
+        extern int phy_get_rssi(void);
+        s3_ets_printf("[hs] d14=%x rssi=%d PWC=%x CLK=%x\n",
+            *(volatile u32 *)0x60033d14u, phy_get_rssi(),
+            *(volatile u32 *)0x60008090u, *(volatile u32 *)0x60026014u);
+    }
 #endif
     /* 关掉省电：modem sleep 需要 OSI 的 `_wifi_rtc_enable/disable_iso` 和定时器
      * （我们那两个是空实现），睡眠一开 RX 就可能收不到包。取一个页面不需要省电，
@@ -2940,6 +2946,13 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
  * 返回扫到的 AP 数；<0 表示失败。只打印第一个 AP 的 SSID/信道/RSSI
  * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
 /* §1613：设扫描驻留时间（100/150/500/30 ms）。放 flash，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+int s3_phy_rssi(void)
+{
+    extern int phy_get_rssi(void);
+    return phy_get_rssi();
+}
+
 __attribute__((section(".flash.text")))
 void s3_set_scan_params(void *buf)
 {
@@ -3940,11 +3953,12 @@ void s3_timer_sweep(void)
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
-          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u irq=%u til=%u mid=%x\n",
+          s3_ets_printf("[tx] n=%u tx=%u ret=%x ss=%u probe=%u irq=%u til=%u rssi=%d\n",
                         (u32)g_s3_diag[32], (u32)g_s3_diag[5],
                         (u32)g_s3_txret, (u32)g_s3_diag[6],
                         (u32)g_s3_diag[0], (u32)g_s3_diag[10],
-                        (u32)g_s3_diag[9], (u32)g_s3_diag[36]); }
+                        (u32)g_s3_diag[9],
+                        (u32)(int)s3_phy_rssi()); }
         s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
