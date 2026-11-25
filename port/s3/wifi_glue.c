@@ -2949,7 +2949,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
              * `wifi_log` 钩子对 2 个可变参数的传递有偏差，需要单独核对。
              * 默认关闭，留给下一轮。 */
             int rxr = wDev_Rxbuf_Init(2u);
-            s3_ets_printf("[rxbuf] init=%d\n", rxr);
+            (void)rxr;
         }
 #endif
         /* §1597 ★★★★★ 反汇编 `wifi_start_process`（0x4203b59c）：
@@ -4326,8 +4326,10 @@ void s3_timer_sweep(void)
           { extern unsigned char g_wifi_menuconfig[];
             /* §1659 只留一个最小打印（rx = menuconfig+0），把 BSS 让给
              * 直调 `wifi_menuconfig_init` 的路径。 */
-            s3_ets_printf("[mc] rx=%u\n",
-                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u)); }
+            { extern unsigned char wDevCtrl[];
+              s3_ets_printf("[mc] rx=%u rh=%x\n",
+                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
+                          (u32)*(volatile u32 *)(void *)((u8 *)wDevCtrl + 8u)); } }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
