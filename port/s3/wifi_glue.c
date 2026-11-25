@@ -659,6 +659,38 @@ static void sem_trace(u32 op, u32 obj, u32 ticks, u32 r)
      * 先把它变成空函数，等主流程通了再恢复。 */
     (void)op; (void)obj; (void)ticks; (void)r;
 }
+/* §1695 空闲态标记（放 flash，IRAM 只留一次调用）。
+ * `port_idle` 若进了 `waiti` 而定时器中断已死，就再也醒不过来；
+ * 这里在 `S3_IDLE_BUSY` 下用它打标记，串口上出现 'I' 就证明
+ * CPU 确实是在空闲循环里（而不是卡在某个死循环）。 */
+extern void port_putc(int ch);
+
+__attribute__((section(".flash.text")))
+void s3_idle_mark(void)
+{
+    volatile u32 *hb = (volatile u32 *)0x50000F40u;
+    hb[20] = hb[20] + 1u;
+    if (hb[20] <= 40u) { port_putc('I'); }
+}
+
+/* §1692 有限超时的**软件轮询**实现（放 flash，IRAM 零成本）。 */
+__attribute__((section(".flash.text")))
+int s3_sem_poll(void *ks, u32 n)
+{
+    extern int s3_w2c_sem_pend(void *sem, u32 ticks);
+    extern void os_sched_tick(void);
+    extern void os_task_yield_force(void);
+    u32 k = 0u;
+
+    while (k <= n) {
+        if (s3_w2c_sem_pend(ks, 0u) == 0) { return 1; }
+        os_sched_tick();            /* 推进内核时间（已证有效） */
+        os_task_yield_force();      /* 让出，给 ppTask/其它任务机会 */
+        k = k + 1u;
+    }
+    return 0;
+}
+
 static int osi_semphr_take(void *sem, u32 ticks)
 {
     WSem *s = (WSem *)sem;
@@ -668,14 +700,34 @@ static int osi_semphr_take(void *sem, u32 ticks)
                    (unsigned)((s != 0) ? s->seq : 0u), (unsigned)ticks);
     }
     int ok;
-    if (ticks == 0xFFFFFFFFu) {
-        s3_ets_printf("[take!] sem=%08x t=%u\n", (unsigned)(u32)sem, (unsigned)s3_w2c_current_task());
-    }
+    /* §1697 `[take!]` 打印已删（结论已定），腾 IRAM 给跨复位阶段标记。 */
     s3_cnt(0x50000E64u);
     HIT_OF(_semphr_take);
     if (s == 0 || s->magic != WSEM_MAGIC) { sem_trace(1u, (u32)sem, ticks, 0xEEu); return 0; }
     B_IN(1u);
+#ifdef S3_SEMPOLL
+    /* §1692 ★★★★★ **软件超时**。
+     *
+     * 真板取证：硬件 tick 中断（ccompare0）在扫描启动那一刻永久停摆，
+     * `tisr`/`now` 冻结而 `cc` 正常增长。于是**任何带超时的等待都无法到期**：
+     * 主线程最后一次阻塞就是有限超时的信号量等待，超时永远不来 ⇒ 永久阻塞；
+     * 与此同时 ppTask 也阻塞在空队列上 ⇒ **两个任务同时从 CPU 上消失**，
+     * 日志在 `[dp] n=111` / `[give] sem=... t=2` 之后彻底停止。
+     *
+     * 绕开办法：有限超时的 take 改成**轮询** —— 每次非阻塞试取，
+     * 失败就自己推进一个 tick 并让出 CPU（`os_sched_tick()` 已证能推进 now），
+     * 指数等于请求的 tick 数就放弃。这样即使 tick 中断彻底不工作，
+     * 库的超时语义仍然是正确的。无限等待保持原本的阻塞语义。 */
+    if (ticks != 0u && ticks != 0xFFFFFFFFu) {
+        /* §1693 轮询体放 flash，IRAM 只留一次调用（IRAM 已零余量）。 */
+        extern int s3_sem_poll(void *ks, u32 n);
+        ok = s3_sem_poll((void *)&s->s, w_ticks(ticks));
+    } else {
+        ok = (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
+    }
+#else
     ok = (s3_w2c_sem_pend((void *)&s->s, w_ticks(ticks)) == 0) ? 1 : 0;
+#endif
     B_OUT(1u);
     sem_trace(1u, (u32)sem, ticks, (u32)ok);
     return ok;
@@ -684,7 +736,8 @@ static int osi_semphr_give(void *sem)
 {
     WSem *s = (WSem *)sem;
     int r;
-    s3_ets_printf("[give] sem=%08x t=%u\n", (unsigned)(u32)sem, (unsigned)s3_w2c_current_task());
+    /* §1696 `[give]` 打印已删：它只用来确认"是 ppTask(t=2) 在给信号量"，
+     * 结论已定；这 20 多字节 IRAM 用来放空闲态标记助手。 */
     s3_cnt(0x50000E68u);
     HIT_OF(_semphr_give);
     if (g_dbg_sync != 0u) {
@@ -1078,11 +1131,38 @@ void s3_delay_advance(u32 ticks)
      * 最后让出一次，把 CPU 交给库任务。上一版每 tick 让出一次，
      * 虽然 d33 从 2 涨到 103，但扫描循环只跑到 n=2（原来 60）——
      * 每轮 100 次往返太依赖 ppTask 的配合。 */
-    while (n < ticks) {
-        s3_tick_consume();
-        n = n + 1u;
+    {
+        /* §§1699 细粒度子相位（RTC c[15]/c[16]），下次启动时打印：
+         *   c[15]=1  刚进入函数
+         *   c[15]=20..83  第 n 次 tick_consume 之前
+         *   c[15]=99 循环已结束
+         *   c[16]=1  即将 yield、2 已经从 yield 返回 */
+        volatile u32 *c = (volatile u32 *)0x50000F40u;
+        c[15] = 1u;
+        while (n < ticks) {
+            c[15] = 20u + (n & 0x3Fu);
+            s3_tick_consume();
+            n = n + 1u;
+        }
+        c[15] = 99u;
+        c[16] = 1u;
+#ifdef S3_ADVANCE_NOYIELD
+        /* §§1701 ★★★★★ **不让出**。
+         * 真板铁证（跨复位 RTC 标记）：
+         *   c[15]=99 / c[16]=2  ⇒ 函数体内 100 次 `s3_tick_consume()`
+         *                          和 `os_task_yield_force()` **都正常返回**；
+         *   紧接着的 `c[17]=2`（调用者侧，仅在函数返回后执行）**永远是 1**
+         *   ⇒ 卡死点精确落在"从 flash 函数 `retw` 回 IRAM 调用者"这一跳上，
+         *     而唯一的嫌疑就是把**返回地址 a0** 弄坏的上下文切换。
+         * ⇒ 这里不再让出：没有切换就不会有窗口/返回地址损坏。
+         *   配合 `S3_NO_PPTASK`（库任务根本不创建），时间推进完全由
+         *   我们自己的循环驱动，不依赖任何切换。 */
+#else
+        os_task_yield_force();
+        c[16] = 2u;
+#endif
+        return;
     }
-    os_task_yield_force();
 #endif
 }
 
@@ -1544,12 +1624,28 @@ static u32 osi_task_get_max_priority(void) { HIT_OF(_task_get_max_priority); ret
 static void osi_task_yield_from_isr(void) { s3_w2c_task_yield(); }
 static void osi_task_delay(u32 ticks)
 {
-    s3_ets_printf("[delay] ticks=%u t=%u\n", (unsigned)ticks, (unsigned)s3_w2c_current_task());
-    if (g_dbg_sync != 0u) {
-        s3_ets_printf("[delay] t=%u ticks=%u\n", (unsigned)s3_w2c_current_task(),
-                   (unsigned)ticks);
+#ifdef S3_DELAY_SOFT
+    /* §1691 ★★★★★ **软件 tick 兜底。**
+     *
+     * 真板取证：硬件 tick 中断（ccompare0，中断号 6/level1）在扫描启动那一刻
+     * **永久停摆**（`tisr` 冻结、`now` 冻结、`cc` 却在正常增长），而
+     * `intenable` 的 bit6、PS 的 INTLEVEL 都正常 ⇒ 中断根本不再被取走。
+     *
+     * 后果：所有依赖 tick 的库调用全部永久阻塞 —— `_task_delay`（ppTask 和
+     * 扫描 FSM 都用它）一旦进去就永不返回。真板就是停在
+     * `[scanp] leave r=0` + `[give] sem=... t=2` 之后。
+     *
+     * 绕开办法：库要 delay 时**我们直接推进内核时间**并让出 CPU
+     * （`s3_delay_advance` 内部就是 `os_sched_tick()` × ticks + `os_task_yield_force()`，
+     * 已证 os_sched_tick 能推进 now）。这样即使硬件 tick 中断彻底不工作，
+     * 库的定时器/超时/阻塞唤醒也能继续走。 */
+    {
+        extern void s3_delay_advance(u32 ticks);
+        s3_delay_advance(ticks != 0u ? ticks : 1u);
     }
+#else
     s3_w2c_task_delay(ticks);
+#endif
 }
 
 /* ---- PHY 使能/关闭（§228）------------------------------------------------
@@ -2111,9 +2207,32 @@ int s3_pp_dispatch(u32 d)
 
 /* §1665 ★★★★★ 把 `g_ic` 里的接口位图（+0x245/+0x246）置成 STA。
  * 放 flash 助手：IRAM 已零余量，主流程只留一次调用。 */
+/* §1696 ★★★★★ **跨复位阶段标记。**
+ * 真板每次都在同一处彻底静音、之后什么都打不出来，无法判断死在"哪一行"。
+ * RTC 慢存跨复位保留 ⇒ 这里只做一次 store（IRAM 只几条字节），
+ * 下一轮启动时在 flash 助手里把**上一次**最后到达的阶段打出来。 */
+#define S3_ST(n) do { *(volatile u32 *)0x50001FF0u = (u32)(n); } while (0)
+
 __attribute__((section(".flash.text")))
 void s3_ic_mode_bits(void *cfg)
 {
+    {
+        extern int s3_ets_printf(const char *, ...);
+        /* §§1698 一并打印 RTC 里已有的循环相位/计数，把停顿点钉到语句级：
+         *   ph = c[13] scan_iter 相位、ry = c[4] recv 让出次数、
+         *   dp = c[33] 定时器分发次数、rc = c[0] 队列接收次数。 */
+        s3_ets_printf("[prev] st=%u ph=%u ry=%u dp=%u rc=%u\n",
+                      (u32)*(volatile u32 *)0x50001FF0u,
+                      (u32)((volatile u32 *)0x50000F40u)[13],
+                      (u32)((volatile u32 *)0x50000F40u)[4],
+                      (u32)((volatile u32 *)0x50000F40u)[33],
+                      (u32)((volatile u32 *)0x50000F40u)[0]);
+        s3_ets_printf("[prev2] d=%u y=%u r=%u\n",
+                      (u32)((volatile u32 *)0x50000F40u)[15],
+                      (u32)((volatile u32 *)0x50000F40u)[16],
+                      (u32)((volatile u32 *)0x50000F40u)[17]);
+        *(volatile u32 *)0x50001FF0u = 0u;
+    }
     extern unsigned char g_ic[];
     volatile unsigned char *b;
 #ifdef S3_IC_POKE
@@ -3591,6 +3710,7 @@ int s3_wifi_scan(void)
         *wth = saved;
     }
 #else
+    { S3_ST(10u); }
     r = esp_wifi_scan_start((const void *)cfg, 0);
 #endif
     /* §1613 ★★★★★ 库日志实测：
@@ -3602,6 +3722,7 @@ int s3_wifi_scan(void)
      * 结构 `{u16 active_min; u16 active_max; u16 passive; u8 home_dwell}`：
      * 100 / 150 / 500 / 30。缓冲**复用已有的 64 字节 scan cfg 尾部**，
      * 不新增栈（否则 BSS/栈碰撞）。 */
+    { S3_ST(11u); }
     s3_ets_printf("[wifi] scan_start=%d\n", r);
     /* §§1170：直接处理扫描消息（绕开 ppTask）。
      * `g_s3_real_scan_msg` 是 `__wrap_pp_post` 里既有的捕获（`m[0]==0x305`）。
@@ -3643,7 +3764,9 @@ int s3_wifi_scan(void)
         /* §1621 ★ 完全绕开队列：按反汇编确认的布局**直接构造** scan 消息
          * 并调用处理函数（实现放 flash 助手，IRAM 侧只留一次调用）。 */
         extern int s3_direct_scan(const void *cfg);
+        { S3_ST(12u); }
         (void)s3_direct_scan((const void *)cfg);
+        { S3_ST(13u); }
     }
 #endif
     if (r != 0) {
@@ -3656,6 +3779,7 @@ int s3_wifi_scan(void)
         return -1;
 #endif
     }
+    { S3_ST(14u); }
     for (i = 0; i < 60; i++) {
         { extern void s3_scan_iter(u32 i); s3_scan_iter((u32)i); }   /* §§1486 */
 
@@ -4630,7 +4754,14 @@ void s3_scan_iter(u32 i)
      * 连 `[swp] n=1` 都到不了 —— 因为这 100 次 `s3_tick_consume()`
      * 每次都触发一次定时器分发，是**驱动库前进的引擎**，
      * 不是单纯的"睡一会儿"。 */
-    { extern void s3_delay_advance(u32 ticks); s3_delay_advance(100u); }
+    {
+        extern void s3_delay_advance(u32 ticks);
+        /* §§1700 紧贴调用两侧的标记：若 c[17] 停在 1，
+         * 就说明卡在"flash 函数返回 IRAM 调用者"这条路径上（窗口回卷）。 */
+        c[17] = 1u;
+        s3_delay_advance(100u);
+        c[17] = 2u;
+    }
 #endif
     c[13] = 5u;
 }

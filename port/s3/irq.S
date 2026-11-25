@@ -697,7 +697,19 @@ port_irq_restore:
     .section .text, "ax", @progbits
     .align  4
     .literal_position
-    .literal .Lstklo,  0x3FCA0000
-    .literal .Lstkhi,  0x3FCEF000
+    /* §1694 ★★★★★ **这个范围原来只覆盖我们自己的栈（0x3FCA0000..0x3FCEF000）。**
+     * 但闭源库的 ppTask 是**库自己分配栈**（`_task_create` → 我们的
+     * `s3_w2c_task_create`），它的 sp 完全可能落在这之外。
+     * 一旦被打断的 sp 出界，这里就走 `13: j 13b` 的死循环，而此时
+     * INTLEVEL=1 ⇒ **所有 level-1 中断（含定时器）被永久屏蔽**，CPU 再也出不来。
+     *
+     * 真板症状与此完全吻合：日志在 ppTask 接手做扫描启动的那一刻**戛然而止**
+     * （`[dp] n=111` / `[give] sem=... t=2` 之后全静音），`tisr`/`now` 冻结、
+     * 而 `ccount` 仍在增长、`intenable` 的 bit6 和 PS.INTLEVEL 都正常。
+     *
+     * 放宽到**整个 DRAM**：仍然能抓住 sp=0 / 落进 IROM 的真损坏，
+     * 但不再误杀库任务。 */
+    .literal .Lstklo,  0x3FC00000
+    .literal .Lstkhi,  0x40000000
     .literal .Lsprec,  0x500018C0
     .literal .Ltmpsp_i, g_ctx_tmp_sp   /* §460：恢复窗口寄存器时藏帧指针 */
