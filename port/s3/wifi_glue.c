@@ -315,9 +315,41 @@ u32 g_s3_real_scan_msg = 0u;
 __attribute__((section(".flash.text")))
 void s3_cap_scan_msg(u32 d)
 {
-    if (d != 0u && *(volatile u32 *)(void *)d == 5u) {
+    extern u32 g_wifi_cfg_blob[];
+    if (d == 0u) { return; }
+    if (*(volatile u32 *)(void *)d == 5u) {
         g_s3_real_scan_msg = d;
     }
+#ifdef S3_PATCH_INIT_MSG
+    /* §1641 ★★★★★ **库自己投递的那条 init 消息必须补 `msg[12]`**。
+     *
+     * 真板取证：我们直接调 `wifi_init_process(补过 msg[12] 的消息)` 成功
+     * （`[direct] init=0 state=2`），但随后稳定态读 `g_ic` **整块全 0**、
+     * `g_ic+0x1E9=0` —— 说明 IC 又被**反初始化**了。
+     * 反汇编 `wifi_init_process`：`a5 = *(u32*)(msg+12); if (a5==0) { log; return 258; }`，
+     * 而失败路径里有两处 `call8 wifi_deinit`；`wifi_deinit` 会把状态写成 3
+     * 并把 `g_ic` 清掉。日志里 `[wifi] start 后的库状态 = 3` 正是这个 3。
+     *
+     * ⇒ 成因：`esp_wifi_init_internal` 投进队列的那条真消息 `msg[12]` 是 0
+     * （它期待调用者先 `wifi_menuconfig_init(cfg)` 把 cfg 存进库全局，
+     * 而库里那条路我们没走到），ppTask 稍后处理它 ⇒ 258 ⇒ 反初始化，
+     * 把我们已经建好的 IC 冲掉。
+     *
+     * 修法：在队列投递点（`osi_queue_send`）拦下所有消息，凡是
+     * `msg[4] == &wifi_init_process` 且 `msg[12] == 0` 的，就地补成我们的
+     * cfg 指针（与 §1599 对 scan 消息做的事同理）。 */
+    {
+        extern int wifi_init_process(void *msg);
+        u32 fn = *(volatile u32 *)(void *)(d + 4u);
+        if (fn == (u32)(void *)&wifi_init_process &&
+            *(volatile u32 *)(void *)(d + 12u) == 0u) {
+            *(volatile u32 *)(void *)(d + 12u) = (u32)(void *)g_wifi_cfg_blob;
+            extern int s3_ets_printf(const char *, ...);
+            s3_ets_printf("[initmsg] patched cfg=%x\n",
+                          (unsigned)(u32)(void *)g_wifi_cfg_blob);
+        }
+    }
+#endif
 }
 
 /* §1526 ★★★★ 库在 `esp_wifi_init_internal` 里会把**真** init 消息投进队列，
@@ -2677,6 +2709,19 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
                   rm[3] = (u32)(void *)g_wifi_cfg_blob;
               }
               ri = wifi_init_process((void *)g_s3_first_msg);
+#ifdef S3_POISON_USED_MSG
+              /* §1642 ★★★★★ 这条消息**已经被我们处理过了**，但它还留在队列里；
+               * ppTask 稍后会把它再派发一次 ⇒ 第二次 `wifi_init_process`
+               * 必然失败（NVS/状态已初始化），而它的失败路径里有
+               * `call8 wifi_deinit` ⇒ 把我们已经建好的 IC 清掉
+               * （真板：稳定态 `g_ic` **整块全 0**、`g_ic+0x1E9=0`、
+               * `[wifi] start 后的库状态 = 3` 正是 deinit 写的 3）。
+               * 把码改成无效值，让第二次派发什么都不做。 */
+              if (ri == 0) {
+                  volatile u32 *pm = (volatile u32 *)g_s3_first_msg;
+                  pm[0] = 0xFFFFFFFFu;
+              }
+#endif
           } else {
               ri = wifi_init_process((void *)m);
           } }

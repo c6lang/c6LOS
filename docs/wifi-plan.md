@@ -36921,3 +36921,31 @@ TX/RX 计数全 0。下一步只能从"MAC 是否真正在运行"入手：核对
 而不是 `g_wifi_menuconfig`。下一步应把 **44/104 字节的缓冲配置字段**
 同时写进 `esp_wifi_init_internal` 投递的那条真消息的载荷里
 （`msg+20` 起），使其与 menuconfig 一致。
+
+## §1641–§1642 更正：IC 没有被反初始化（此前是 **GDB 用错地址**）
+
+### 作废的结论
+本章曾记录"稳定态 `g_ic` 整块全 0、`g_ic+0x1E9=0` ⇒ IC 被 `wifi_deinit` 清掉"。
+**这是错的**：`0x3fcd54a8` 在重新构建后已经是 `ip_data+8`，不再是 `g_ic`。
+用**当前 ELF** 的正确地址重查：
+
+```
+g_ic = 0x3fcd54c8
+g_ic+0x1E9 = 0x02          ← 运行中
+g_ic[0] = 0x3fcd6398       ← 非空
+g_ic[1] = 0x3fcd5bc8       ← 非空
+```
+
+⇒ **IC 初始化成功且处于运行态**，`[wifi] start 后的库状态 = 3` 只是启动过程中的
+瞬时值。§1641 的 `S3_PATCH_INIT_MSG` / §1642 的 `S3_POISON_USED_MSG`
+都没有解决任何问题（前者从未命中，后者无变化），可保持关闭。
+
+### 教训
+**每次重建后 `nm` 得到的符号地址都会变**，用旧地址读 GDB 会得到完全无关的
+内存（本轮的 `ip_data`）。后续取符号地址必须**当次构建后重新 `nm`**。
+
+### 仍然成立的事实
+- `g_wifi_menuconfig` 里 **mc0=10 / mc4=32**（= static_rx_buf_num / dynamic_rx_buf_num）✅
+- 库日志却打印 `Init static rx buffer num: 0`、`Init dynamic rx buffer num: 0`，
+  并有 `esf_buf_setup_static: alloc eb fail(0)`
+- `irq=0`、`[eb]` 全 0、`[tx]` 计数 0 ⇒ MAC 仍一次中断都不产生
