@@ -36524,3 +36524,39 @@ wifi_hw_start(mode); wifi_mode_set(mode); _do_wifi_start(mode)
 - 想在 flash 里加，也要注意 BSS/栈（加了 `[wifi] scan_params=%d` 就碰撞了）。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+# ======== 会话最终交接（§1608–§1613 之后）========
+
+## 本会话最后阶段完成的（都是真实修复）
+| 编号 | 内容 |
+|---|---|
+| §1593 | 校准数据里补本机 MAC（IDF 同做法） |
+| §1594 | PHY init data 换成 IDF 编译产物的**精确 128 字节**（原先差 18 字节） |
+| §1595 | 补 `phy_bbpll_en_usb(true)`（IDF 在 `ENABLE_USB=1` 时校准前会调） |
+| §1598–§1602 | 把 IC 初始化的真 bug 挖出来：`msg[12]` 是配置指针且被 `__wrap_pp_post` 漏填 ⇒ 补成 `g_wifi_cfg_blob` ⇒ **`[direct] init=0`（首次成功）** |
+| §1600 | `S3_NO_DIRECT_PPATTACH`：IC 初始化成功后不能再提前 `pp_attach` |
+| §1605–§1607 | 更正 §1604：库内部结构只有 104 字节，配置拷贝其实是**正常**的 |
+| §1608 | `state=2` 是 `wifi_start_process` 的**成功收尾值**（不是卡住） |
+| §1612 | 纠正误读：`[tx] irq=` 是 `diag[10]`（MAC 中断挂起计数），不是派发次数 |
+| §1613 | 扫描驻留时间为 0 的真实缺陷，用 `esp_wifi_set_scan_parameters` 设回 100/150/500/30 |
+
+## 现在的一致性与矛盾（留给下一次）
+- `INTENABLE = 0x41`（bit0 = MAC 已使能）、`$interrupt = 0x18041`
+  ⇒ **MAC 的挂起位确实出现**（GDB 实测）；
+- 但 `diag[10]`（ISR 里看到 bit0 的次数）**恒为 0**
+  ⇒ 那一刻中断**没有被 CPU 取走**；
+- 定时器（同属 level-1）却一直在跑（`[tk] tick` 持续增长）。
+⇒ 这是本会话最后剩下的**唯一技术矛盾**，也是最值得查的一条：
+  MAC 的中断等级/路由（`intr_matrix_set` 传的 `intr_num=0`）与
+  我们的向量表/`PS.INTLEVEL` 之间可能存在不一致。
+  下一步建议：在 IDF app 里读 `INTENABLE` / `interrupt` / `intr_matrix` 配置，
+  与本工程逐位对照。
+
+## 工程状态
+- 分支 `main`，工作树干净，**1308 个提交**，默认配置绿灯；
+- 前沿配置 **可复现**：`bash tools/build-wifi.sh best`（本次实测 724192B → 202 行）；
+- 板子当前运行 c6LOS 前沿固件；
+- 文档 36526 行（`docs/wifi-plan.md`），含本会话全部结论与更正。
+
+## 四项验收
+**AP=0 DHCP=0 TLS=0 body=0**（射频一帧未收，未能推进到关联）。
