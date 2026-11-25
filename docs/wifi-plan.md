@@ -36970,3 +36970,34 @@ MAC 从不产生 RX 中断、一帧收不到。接下来必须找到**谁负责�
 `_wifi_malloc` 建 RX 描述符环；应反汇编 `ic_init` 的 RX 分支，确认它的
 配置来源与失败点（日志里 `esf_buf_setup_static: alloc eb fail(0)` 就是
 同一处的早期失败）。
+
+## §1645–§1646 eb 描述符步长是 20、计数在 `desc+16`（`alloc eb fail` 的直接原因）
+
+### 反汇编证据
+```asm
+esf_buf_setup_static(idx, count):
+    desc = g_eb_list_desc + idx*20        ; addx4 idx,idx / addx4 desc,base
+    *(u16*)(desc+10) = count
+    loop count 次: esf_buf_alloc_dynamic(desc, 1, 0)
+    NULL -> wifi_log(... "alloc eb fail(%d)" ..., idx) ; return 0x101
+
+esf_buf_alloc_dynamic(desc, ...):
+    a5 = *(u16*)(desc+16)                 ; ← 计数
+    if (a5 == 0) return NULL              ; ← **为 0 直接返回**
+```
+⇒ **步长 20（我们之前按 16 播种，链表落在错位槽）；计数在 `desc+16`。**
+
+### 已做与结果
+- 把播种步长从 `idx*16` 改成 `idx*20`，并在播种时写 `desc+16 = 4`。
+- 新增 `s3_prep_desc_cnt()`（flash 助手，`-DS3_PREP_DESC_CNT`）：
+  在 `esp_wifi_init_internal` **之前**给 idx 0..10 的 `desc+16` 填 4
+  （直接写静态数组 `g_eb_list_desc`，不用指针，避免早期为 0）。
+- **结果：`esf_buf_setup_static: alloc eb fail(0)` 依旧**，且括号里打印的
+  是 **idx=0** ⇒ idx0 的计数虽已填 4，`esf_buf_alloc_dynamic` 仍然失败，
+  说明它失败在**更后面**（内部 `_wifi_malloc(1600)` 或 `g_lmac_cnt` 上限）。
+  下一步应单步/反汇编 `esf_buf_alloc_dynamic` 的**中段**（`0x403833f1` 之后），
+  看它在什么条件下返回 NULL。
+
+### 仍然成立
+TX 缓冲靠手工播种存在；**RX 缓冲一个都没有** ⇒ `wDev_AppendRxBlocks=0`
+⇒ MAC 无 RX 中断 ⇒ 收不到任何帧。这是当前唯一挡在验收前的硬缺口。

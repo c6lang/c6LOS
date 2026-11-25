@@ -2001,6 +2001,22 @@ void s3_msg_copy_cfg(void *msg)
                   (unsigned)dst[12], (unsigned)dst[13]);
 }
 
+/* §1646 flash 助手：init **之前**把每个 eb 描述符的计数 `desc+16` 填成非 0。
+ * `esf_buf_alloc_dynamic` 第一件事就是 `a5 = *(u16*)(desc+16); if (!a5) return NULL;`
+ * ⇒ 计数为 0 时库的 `esf_buf_setup_static` 必然 `alloc eb fail`，
+ * RX 缓冲池因此一个都建不起来（TX 只是靠我们手工播种顶着的）。 */
+__attribute__((section(".flash.text")))
+void s3_prep_desc_cnt(void)
+{
+    extern unsigned char g_eb_list_desc[];   /* 静态数组，任何时刻都有效 */
+    volatile unsigned char *b = (volatile unsigned char *)g_eb_list_desc;
+    u32 i;
+    for (i = 0u; i < 11u; i++) {
+        *(volatile unsigned short *)(void *)(b + i * 20u + 16u) = 4u;
+    }
+    (void)0;
+}
+
 /* §1643 flash 助手：init 之前手工预填 g_wifi_menuconfig（映射见调用点注释） */
 __attribute__((section(".flash.text")))
 void s3_prefill_menuconfig(void)
@@ -3819,6 +3835,9 @@ u32 s3_wifi_bringup(void)
         /* §421 实验：我们手动做了 PHY enable，库的状态机残留成 2
          * （"正在初始化"），于是 init 直接返回 0x3013。复位成 1 再进去。 */
         if (*wst != 1u) { *wst = 1u; }
+#ifdef S3_PREP_DESC_CNT
+        { extern void s3_prep_desc_cnt(void); s3_prep_desc_cnt(); }
+#endif
 /* §1640 诊断包装：库到底有没有调 `wifi_menuconfig_init`、传的什么 cfg。 */
 __attribute__((section(".flash.text")))
 int __wrap_wifi_menuconfig_init(void *cfg)
@@ -4529,10 +4548,17 @@ void s3_seed_tx_buffers(void)
          * 而我们之前一直往 `g_eb_list_desc`（`0x3fcbb354`，**根本不是列表**）里写。 */
         extern unsigned char *g_eb_list_desc_ptr;
         extern unsigned char g_ic[];
-        volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc_ptr + k * 16u;
+        /* §1645 ★★★★★ **步长是 20，不是 16！**
+         * 反汇编 `esf_buf_setup_static`：`desc = g_eb_list_desc + idx*20`
+         * （`addx4 a5,a2,a2` = idx*5，再 `addx4 a5,a5,a6` = idx*20），
+         * 它把计数写在 `desc+10`；而 `esf_buf_alloc_dynamic` 读 **`desc+16`**
+         * 当计数，**为 0 就直接返回 NULL** —— 真板 `alloc eb fail` 正是这个。
+         * 我们之前按 idx*16 播种，链表落在了错误槽位。 */
+        volatile unsigned char *dk = (volatile unsigned char *)g_eb_list_desc_ptr + k * 20u;
         void *head = 0;
         void *prev = 0;
         u32 i2;
+        *(volatile unsigned short *)(void *)(dk + 16u) = 4u;
         /* §1635 ★★★★★ 8 块 × 3 索引 × (320+1600)B ≈ **46KB** —— 这才是
          * `[heap] 分配失败 n=1600` 的真正元凶（注释里的 28.8KB 算少了）。
          * 每索引 2 块（共 ≈11.5KB）足够发探测帧/管理帧，又给堆留下
