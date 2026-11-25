@@ -1055,7 +1055,23 @@ port_task_yield:
     S3_SPILL_ALL
 #endif
     s32i    a0, a1, 0
+#ifdef S3_YIELD_CALL8
+    /* §1726 ★★★★★ **把切换调用从 call0 改成真正的 windowed call8**
+     * （目标里"上下文切换统一 windowed"的最后一块）。
+     *
+     * 现状：`port_task_yield` 是 windowed（`entry a1,64`），却用 **call0**
+     * 去调 `port_task_yield_c0`（同一文件里手写的切换体）。call0 不轮转窗口、
+     * a0 里没有 CALLINC 标签 ⇒ 切换体的帧是"call0 风格"，
+     * 这正是 §895 记的"我们的中断/切换帧是 call0 风格、没有合法 a9 链，
+     * IDF 正统 SPILL_ALL_WINDOWS 一试就死"的根源。
+     *
+     * call8 下被调者的 a1 = 调用者的 a9 ⇒ 先 `mov a9, a1` 把本帧 sp 交过去，
+     * 切换体照旧用自己的 a1 工作、`retw` 的轮转也与标签一致。 */
+    mov     a9, a1
+    call8   port_task_yield_c0
+#else
     call0   port_task_yield_c0
+#endif
     l32i    a0, a1, 0
     retw
 #endif

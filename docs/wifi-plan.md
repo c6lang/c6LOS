@@ -37188,3 +37188,54 @@ WINDOWSTART 已知连续）。
 已经不一致**。下一步必须先定位"哪一次切换把 a1 弄坏"，再谈 spill：
 用已有但未启用的 RTC 环形记录（`srail` §455：每次 switch 记 (ctx, 恢复的 sp)，
 `trail` §452：每次 yield 记 (ctx, sp)），交叉比对第一次出现非法 sp 的那一次。
+
+### §1725 ★★★★★ 切换调用从 `call0` 改成 `call8` —— spill 从此能跑
+
+`port/s3/ctx.S` 的 `port_task_yield` 是 **windowed**（`entry a1,64`），
+却一直用 **`call0`** 调同文件手写的切换体 `port_task_yield_c0`。
+call0 不轮转窗口、`a0` 里没有 CALLINC 标签 ⇒ 切换体是"call0 风格帧"，
+这正是 §895 记的"我们的切换帧没有合法 a9 链，IDF 正统 SPILL_ALL_WINDOWS
+一试就死"的直接原因。
+
+`-DS3_YIELD_CALL8` 把调用改成真正的 windowed 调用（先 `mov a9,a1` 把本帧 sp
+交给被调者，因为 call8 下被调者的 a1 = 调用者的 a9）。
+
+真板结果（同一份固件、只切这一个开关）：
+
+| 构建 | 结果 |
+|---|---|
+| 基线 | 7579 行 |
+| `S3_YIELD_CALL8` | **7579 行**（无回归） |
+| `S3_YIELD_CALL8 + S3_SPILL_SHELL` | **7579 行**（spill 整圈执行，不再死） |
+| `S3_SPILL_SHELL`（无 call8，历史） | 26 行即死 |
+
+⇒ **帧链/spill 的写法一直是对的，错的是那个 call0。** 目标里
+"上下文切换统一 windowed"这一条在此之前**没有真正完成**。
+
+### §1726 深链让出仍死，但现场改成"消息被截断"的形状
+
+带 spill 之后 `S3_YIELD_ITER` 仍 195 行即死。GDB 现场（三次一致）：
+
+```
+pc   = _vec_default（自旋）        exccause = 0
+epc1 = 0x4203d0af / 0x4203d0bf     a0 = 0x82xxxxxx（带 CALLINC 标签）
+WB=6  WS=0x54                      excvaddr = 0x102 (258)
+```
+
+`0x4203d0af` 在 `wifi_get_channel_process` 里，属于：
+```
+entry a1,32
+l32i.n a4, a2, 12        ; a4 = msg[12]
+...
+s8i    a8, a4, 0         ; ← 崩在这条：a4=0x102 被当指针
+```
+⇒ 库把 `msg[12]` 当**指针**用，而收到的是 **258**（正好是
+`wifi_init_process` 参数无效时的返回值）。结合 §1727 的队列取证，
+形状指向"消息体不完整/派发到错的消息"。
+
+### §1727 队列尺寸取证
+
+`-DS3_QUEUE_DIAG` 在 `osi_wifi_create_queue` 打 `(len,size)`：
+真板只有一条 `[q] 200 8`（事件队列，8 字节 = event_base+event_id，正确）。
+⇒ 库经 `_queue_create` 只建了一个队列，pp 队列走的是别的槽位；
+`size` 没有被我们弄错，问题更可能在**消息内容/派发**而非截断。

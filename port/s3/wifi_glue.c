@@ -970,6 +970,14 @@ static u32 osi_wifi_create_queue(u32 len, u32 size)
     WQ *q;
     u8 *buf;
     HIT_OF(_wifi_create_queue);
+#ifdef S3_QUEUE_DIAG
+    /* §1727 队列元素尺寸取证：IDF 的 `_queue_create(len,size)` 决定性参数是
+     * **size**（消息体有多大）。若库建的是 24 字节消息队列而我们按 4 字节存，
+     * 收到的消息 `msg+12` 之后全是缓冲区残留 —— 真板崩溃现场
+     * `wifi_get_channel_process` 里 `a4 = *(msg+12) = 0x102`（258，一个
+     * 返回值而不是指针）正是这个形状。 */
+    s3_ets_printf("[q] %d %d\n", (int)len, (int)size);
+#endif
     if (len == 0u || size == 0u) { return 0u; }
 #ifdef S3_QUEUE_SLACK
     /* §§1475 ★★★★★ **环形队列"满"与"空"不可区分**。
@@ -3303,6 +3311,13 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_START_SLEEP
+    /* §1725 浅层阻塞实验：让 ppTask 在**还没进深层扫描链**时拿到 CPU，
+     * 把 start 消息处理掉（MAC 启动只在 wifi_start_process 里发生）。
+     * 若这里能活，就证明"切换本身可用、深浅是关键"。 */
+    { extern int os_task_delay(u32 ticks); os_task_delay(2u);
+      s3_ets_printf("[sleep] ok\n"); }
+#endif
 #ifdef S3_DEPTH_TEST
     { extern int s3_deep(u32 n); int d = s3_deep(14u); s3_ets_printf("[deep] r=%d\n", d); }
 #endif
