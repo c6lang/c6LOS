@@ -36422,3 +36422,41 @@ cfg 逐字段拷进库内部结构**。这正是"配置不生效"的真正形态
 一堆 `invalid storage class` 错误。已补回，构建恢复。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1605–§1607 ★ 更正 §1604：配置**确实被拷贝了**，是我读错了地址
+
+一条链把 §1604 的结论推翻了：
+
+1. 反汇编 `wifi_menuconfig_init(cfg)`（0x4203b178）：
+   ```
+   memset(g_wifi_menuconfig, 0, **104**)     ← **库内部结构只有 104 字节**
+   if (cfg == 0) return 0x102
+   if (*(u32*)(cfg + 144) != 0x1F2F3F4F) return 0x102
+   ... 逐字段拷贝 ...
+   ```
+2. 查它**谁调用**：`0x4204180a` 处 `l32r a8, <__wrap_wifi_menuconfig_init>`
+   ⇒ 调用者是 `wifi_init_in_caller_task`，**而且走的是我们自己的包装器**，
+   我们的包装器是无害转发（`s3_wrap_bump` + `return __real_...(cfg)`）
+   ⇒ **它确实被调用、cfg 确实被拷贝**。
+3. 我在 §1604 读的 `g_wifi_menuconfig + 112` **超出 104 字节的结构**
+   ⇒ 读到的是相邻 BSS（当然是 0）。**那个读数毫无意义，结论作废。**
+
+⇒ 真正的事实：
+- 配置拷贝**是正常的**（+0 = 10、+4 = 32 与 IDF 默认一致也是拷贝结果）；
+- 库打印的那七行 `buffer num: 0` 读的是**结构里其它字段**（我们 cfg 里
+  那些偏移在库的 104 字节结构之外，或语义不同）
+  ⇒ 属于"版本间的结构体差异"，不影响 `wifi_lmac_init` 正常返回；
+- 因此它**不是**收不到帧的原因。
+
+## 现在真正剩下的未知
+`ic_init`/`wifi_start_process` 都跑通了（`init=0`、`state` 从 3 → 2），
+`wDev_AppendRxBlocks` 仍为 0、`irq=0`。
+⇒ 只剩"库内部 MAC/RX 的最后使能"这一步，而它完全在闭源库里。
+要继续必须能看见库内部：**在 IDF app 里给
+`wifi_lmac_init` / `wifi_start_process` / `ic_init` / `hal_init`
+下断点并记录参数与返回值**（IDF app 构建命令见 §1589，
+板子恢复命令见 §1589 末尾）。
+
+## IRAM 纪律（再记一次）
+本工程 IRAM **零余量**：连给 `[direct]` 多加一个 `%u` 参数都溢 32 字节。
+要加诊断必须先**整条删掉**另一条 IRAM printf。
