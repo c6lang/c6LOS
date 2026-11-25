@@ -821,9 +821,39 @@ port_task_switch:
      * §895: IDF 正统 SPILL_ALL_WINDOWS 试过（entry+5×rotw）：第一次切换就在
      * 第 3 个 `and a12,a12,a12` 上 exccause=0x1d（脏 a9 写飞），因为我们的
      * 中断/切换帧是 call0 风格、没有合法的 a9 链。故仍走本补丁。 */
+#ifdef S3_SWITCH_SPILL
+    /* §1729 ★★★★★ **与 yield 对称的 windowed 壳**（目标里"上下文切换
+     * 统一 windowed"的第二块）。原来的实现是"尾跳"：a0 借 a8、a2 借 a10，
+     * 直接 `j port_task_switch_c0` —— 没有 `entry` ⇒ 没有帧、没有槽位区、
+     * 更没法在自由栈上做整圈 spill。于是保存下来的 WINDOWSTART 是
+     * `0x54`（窗口 2/4/6 都标着 live），而这三个窗口的物理寄存器早已被
+     * 别的任务踩过 ⇒ 任务被切回来时库里读到的 a4 是别人的残留值
+     * （真板 = `0x102`），`s8i a8,a4,0` 写飞 ⇒ 双重异常（§1728）。
+     *
+     * 正确的 windowed 开场：`entry a1,64`
+     *   - 硬件自动把 `[a1-12]` 写成"调用者 sp"（§1723 真板实测），
+     *     溢出向量靠它找上一帧的保存区；
+     *   - a10 = ctx（call8 轮转后第一个实参，`port_task_switch(void*)` 只有一个参数）；
+     *   - a0 = 带 CALLINC 标记的返回地址（c0 体算 EPC 要用它）。
+     *
+     * ctx 必须**先落进壳帧**：S3_SPILL_ALL 用 a10 当 scratch（§945 只保 a8）。
+     * spill 完成后 WS 被归一化成 `1<<WB`，祖先窗口全部落到各自栈帧 ——
+     * 这正是 `RESTORE_FRAME` 写回"任务自己保存的 WS"所隐含的前提。 */
+    entry   a1, 64
+    s32i    a10, a1, 0          /* ctx 存进壳帧（spill 会毁 a10） */
+    addi    a10, a1, 64
+    addi    a8, a1, -12
+    s32i    a10, a8, 0          /* 帧链（entry 已写过，这里再确认一次） */
+    mov     a9, a1
+    S3_SPILL_ALL
+    l32i    a2, a1, 0           /* ctx -> a2（c0 体的入参约定） */
+    call8   port_task_switch_c0
+    retw
+#else
     mov     a0, a8
     mov     a2, a10
     j       port_task_switch_c0
+#endif
 #endif
 
 #ifdef __XTENSA_CALL0_ABI__

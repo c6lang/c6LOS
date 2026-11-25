@@ -37260,3 +37260,45 @@ live），而这三个窗口的物理寄存器早被别的任务踩过 ⇒ 恢�
 `entry a1,64` + 帧链 + `S3_SPILL_ALL` + `call8` 本体 + `retw`。
 之后保存的 WS 恒为"单窗口 live"，`RESTORE_FRAME` 写回原值才是安全的。
 （`port_task_switch_c0` 本体不动，它已经是"用 a1 工作"的形态。）
+
+### §1729 在切换入口做整圈 spill：仍然死在 ring 上（26 行）
+
+按 §1728 的思路把 `port_task_switch` 从"尾跳"改成与 yield 对称的
+`entry a1,64` + 帧链 + `S3_SPILL_ALL` + `call8` 本体 + `retw`
+（`-DS3_SWITCH_SPILL`）。真板：**第一个切换就死，日志 26 行**，现场
+
+```
+exccause=0x1d  epc1=0x40379773  excvaddr=0x90119ac0
+WB=9  WS=0xaa02  depc=0x403783fb (_win_ovf8)
+```
+
+与 §1717 三次尝试**同一个签名**（`WB=9`、`WS=0xaa..`、`excvaddr=0x90119ac0`）：
+整圈 `rotw` 到第 4 圈时溢出向量拿到的 a9/帧链仍不合契约。
+而**同一个宏**从 `port_task_yield` 的壳里做却完全正常（§1725，7579 行）
+⇒ 差别在**入口处的窗口布局**，不在宏本身：
+调度器那条路由 `-mlongcalls` 的 `callx8` 进来（§891 实测它把标签返回地址
+放在 a8、不轮转窗口），壳的 `entry` 按 CALLINC=2 把窗口搬到**没有标 live**
+的那一格里 ⇒ WS 出现洞，ring 的第 4 圈就拿不到合法的"上一帧 sp"。
+
+### §1730 IRAM 零余量：连 88 字节都腾不出来（踩了一个更深的坑）
+
+新壳让 IRAM 溢出 88 字节。两次尝试：
+
+1. **把新壳放 flash 段**：链接失败 —— `.flash.text+0x18` 的 `l32r` 字面量和
+   `call8 port_task_switch_c0` 都**超出重定位范围**（flash 0x42xxxxxx 到
+   IRAM 0x4037xxxx 相差 40+MB，汇编的 call8 没有长调用）。
+2. **把 `port_task_ctx_check`（IRAM 92 字节）挪进 flash**：链接通过、IRAM 够用，
+   但**基线从 7579 行掉到 334 行** —— 切换路径里多了一次 flash 调用会动窗口。
+   已回退（`git checkout -- port/s3/ctx.c`）。
+
+⇒ 结论：想给切换壳腾 IRAM，必须**真做一次 IRAM 回收**（删既有诊断/把
+非切换期函数搬 flash），不能动切换路径上的任何函数。
+
+### §1731 本轮确定可用的组合（板子健康）
+
+```
+-DS3_YIELD_CALL8 -DS3_SPILL_SHELL      → 7579 行、mode : sta、[p2] st=1
+```
+即：切换调用是 windowed（`call8`）、`port_task_yield` 里整圈 spill 正常执行、
+日志与之前最好基线**完全同级**。`S3_SWITCH_SPILL` 代码保留在 `#ifdef` 后面
+（默认关），等 IRAM 回收后配合"入口窗口布局"的修法再开。
