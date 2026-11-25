@@ -37514,3 +37514,47 @@ AP 关联依旧 0。崩溃点始终是库里 `*(msg+12)` 写飞。
    或直接调 `wifi_init_process(自建消息)` 并观察状态是否变 2/4；
 2. 状态到位后再直调 `wifi_hw_start(1)`，此时才可能真启 MAC；
 3. MAC 起来后 `s3_wifi_isr_poll()` 才有意义（`wDev_ProcessFiq` 会看到真实中断）。
+
+### §1748 ★★★★★ `g_ic+0x246 != 0` 会让 `wifi_hw_start` **整段跳过 MAC 初始化**
+
+反汇编 `wifi_hw_start`（0x4203b48c，真板这一版）：
+
+```
+entry a1,32
+a5 = &g_ic ; a3 = g_ic + 0x200
+a10 = *(u8*)(a3+69)   = g_ic+0x245   ; 接口位图 1
+bbc a10, a2, 0x4b4                    ; 位为 0 才继续，否则 wifi_log + 自旋死循环
+a4  = *(u8*)(a3+70)   = g_ic+0x246   ; 接口位图 2
+bbc a4, a2, 0x4d8
+0x4d8: bnez a10, 0x53d
+0x53d: **bnez a4, 0x57a**             ; ← a4 != 0 就跳到 0x57a，跳过下面整段
+0x53f..0x577: _get_isr / _semphr / pm_mac_wakeup /
+0x574:        callx8 ic_mac_init      ; ← 真正初始化 MAC 的**唯一**一处
+0x57a: ...
+```
+
+真板 GDB 读 `0x3fcd5709/570a`：`+0x245 = 0x01`、`+0x246 = 0x01`（都是库自己的
+`wifi_set_mode_process` 写的）⇒ **`bnez a4` 成立 ⇒ `ic_mac_init` 从未被调用**
+⇒ MAC 从来没初始化 ⇒ `[swp] i10=0 rx=0`、`[tx] tx=0` 全是 0。
+
+实验：调 `wifi_hw_start(1)` 前把 `g_ic+0x246` 清 0（`-DS3_HW_START_DIRECT` 里）。
+真板：`[hw] on / [do] ok / [rx] ok` 仍然正常返回，2324 行不崩，
+但 **`i10/rx/tx` 依旧 0** ⇒ 说明这条路上还有第二个门。
+
+### §1749 打印的 "Init static rx buffer num: 0" 是**假线索**
+
+八项缓冲计数日志全是 0，但同一次运行里 GDB 读
+`g_wifi_menuconfig`(`0x3fcd62d8`)：
+
+```
+0x3fcd62d8: 0x0000000a 0x00000020 0x00000000 0x00000008
+0x3fcd62e8: 0x00000020 0x00000000 0x00000000 0x00000001 ...
+```
+
+= 10 / 32 / 0 / 8 / 32 / ... **正是我们在 `s3_prefill_menuconfig` 里填的值** ⇒
+库打印时读的是**另一个结构体**（多半是 init 早期待填的临时副本），
+不能据此判断"没有缓冲"。我们自己的 `[mcpre] rx=10 dynrx=32 type=1`
+才是库里真正用的那份。
+
+⇒ 下一轮不要再围着这行日志转，应直接验证 `esf_buf_setup` 之后的
+描述符计数（`g_eb_list_desc` 那一族）是否非 0。

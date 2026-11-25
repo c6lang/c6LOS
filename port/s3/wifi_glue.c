@@ -3402,6 +3402,23 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
         extern void wifi_hw_start(int on);
         extern void _do_wifi_start(int mode);
         extern void ic_enable_rx(void);
+        extern unsigned char g_ic[];
+        /* §1748 ★★★★★ **`g_ic+0x246` 必须先清 0，MAC 才会被真正初始化。**
+         *
+         * 反汇编 `wifi_hw_start`（0x4203b48c）：
+         *   a3 = g_ic + 0x200
+         *   a10 = *(u8*)(a3+69)   = g_ic+0x245（接口位图 1）
+         *   a4  = *(u8*)(a3+70)   = g_ic+0x246（接口位图 2）
+         *   ...
+         *   4203b53d: bnez a4, 4203b57a   ← **a4 != 0 就跳过整段 MAC 初始化**
+         *   4203b53f: ... _get_isr / _semphr / pm_mac_wakeup /
+         *   4203b574: callx8 ic_mac_init  ← 真正初始化 MAC 的只有这里
+         *
+         * 真板实测（GDB 读 0x3fcd5709/570a）：`+0x245 = 0x01`、`+0x246 = 0x01`
+         * —— 都是库自己的 `wifi_set_mode_process` 写的。于是 `bnez a4` 成立，
+         * `ic_mac_init` **一次都没被调用过** ⇒ MAC 从来没初始化 ⇒
+         * `i10/rx/tx` 恒为 0。 */
+        *(volatile unsigned char *)(void *)(g_ic + 0x246u) = 0u;
         wifi_hw_start(1);
         s3_ets_printf("[hw] on\n");
         /* §1744：`wifi_start_process` 在 `wifi_hw_start` 之后还要
