@@ -36501,3 +36501,26 @@ wifi_hw_start(mode); wifi_mode_set(mode); _do_wifi_start(mode)
 [tx] irq=0                      ← MAC 中断一次没来
 ```
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
+
+## §1613 ★★★ 扫描驻留时间 = 0（真实缺陷，已修）
+
+库日志实测：
+```
+[v4]wifi|Reset scan defaults in ms : min,max,passive,chan_dwell :(0,0,0,0)
+[v4]wifi|ssid=?, channel=0, hidden=0, type=?, active=<0,0>, passive=0
+```
+⇒ **扫描驻留时间全是 0**。MAC 不会在任何信道上停留，收不到 beacon，
+扫描永远没有结果，关联也就无从谈起。
+
+修法：扫描前用公开 API `esp_wifi_set_scan_parameters()` 设回正常值
+（`{u16 active_min=100; u16 active_max=150; u16 passive=500; u8 home_dwell=30}`），
+实现放在 flash 助手 `s3_set_scan_params()`（IRAM 零余量，不能放 IRAM 侧），
+缓冲复用已有的 64 字节 scan cfg 尾部（不新增栈，否则 BSS/栈碰撞）。
+
+### 本工程的空间纪律（再记）
+- 任何**新的 printf 或格式字符串**都可能触发 `S3 BSS/stack collision`
+  或 `region IRAM overflowed`；
+- 想在 IRAM 函数里加诊断，必须先把另一条整条删掉；
+- 想在 flash 里加，也要注意 BSS/栈（加了 `[wifi] scan_params=%d` 就碰撞了）。
+
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

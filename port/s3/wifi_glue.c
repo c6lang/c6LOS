@@ -2939,6 +2939,17 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
  * 只要扫到 AP，就证明 PHY + MAC + 收发链路都活着（§215）。
  * 返回扫到的 AP 数；<0 表示失败。只打印第一个 AP 的 SSID/信道/RSSI
  * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
+/* §1613：设扫描驻留时间（100/150/500/30 ms）。放 flash，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_set_scan_params(void *buf)
+{
+    extern int esp_wifi_set_scan_parameters(const void *p);
+    u32 *sp = (u32 *)(void *)((u8 *)buf + 32u);
+    sp[0] = 100u | (150u << 16);      /* active_min=100, active_max=150 */
+    sp[1] = 500u | (30u << 16);       /* passive=500,    home_dwell=30  */
+    (void)esp_wifi_set_scan_parameters((const void *)sp);
+}
+
 int s3_wifi_scan(void)
 {
     /* wifi_scan_config_t 约 20~24 字节，给 64 字节零缓冲（同样避免库读到 bss 垃圾） */
@@ -3062,6 +3073,16 @@ int s3_wifi_scan(void)
 #else
     r = esp_wifi_scan_start((const void *)cfg, 0);
 #endif
+    /* §1613 ★★★★★ 库日志实测：
+     *   `Reset scan defaults in ms : min,max,passive,chan_dwell :(0,0,0,0)`
+     *   `ssid=?, channel=0, hidden=0, type=?, active=<0,0>, passive=0`
+     * ⇒ **扫描驻留时间全是 0**，MAC 不会在任何信道上停留，收不到 beacon，
+     * 扫描永远没结果，关联无从谈起。
+     * 用公开 API `esp_wifi_set_scan_parameters()` 设回正常值。
+     * 结构 `{u16 active_min; u16 active_max; u16 passive; u8 home_dwell}`：
+     * 100 / 150 / 500 / 30。缓冲**复用已有的 64 字节 scan cfg 尾部**，
+     * 不新增栈（否则 BSS/栈碰撞）。 */
+    { extern void s3_set_scan_params(void *buf); s3_set_scan_params(cfg); }
     s3_ets_printf("[wifi] scan_start=%d\n", r);
     /* §§1170：直接处理扫描消息（绕开 ppTask）。
      * `g_s3_real_scan_msg` 是 `__wrap_pp_post` 里既有的捕获（`m[0]==0x305`）。
