@@ -36675,3 +36675,40 @@ memcpy(msg+20, cfg, 44)           ← 44 字节扫描配置
 `phy_get_rssi()` = **-84 ~ -119 dBm**（噪声底，RF 正常）；
 IDF 官方 app 多次测试均 `connect to the AP fail` ⇒ **AP 不可达**。
 ⇒ 没有帧，验收四项无法推进；需先恢复 AP。
+
+## §1620–§1622 ★★★★ 扫描终于**真的跑起来**，并发出探测请求（TX 通路确认工作）
+
+### 关键突破：`--wrap=pp_post` 拦不到库的消息，真正的位置是 OSI 队列槽位
+库投递消息走的是 **OSI 函数表里的 `_queue_send`**（我们注册的 `osi_queue_send`），
+`--wrap=pp_post` 完全拦不到。把截获放到 `osi_queue_send` 里（§1620）之后，
+再按反汇编确认的布局**直接构造并调用**（§1621、§1622），真板首次出现：
+
+```
+[v4]wifi|Start wifi scan                                   ← **扫描真的开始了**
+[v4]wifi|clear scan ap list
+[v4]wifi|start scan: type=..., cb=0x0, arg=0x0, ss_state=0x3fcbb5e0, ...
+[v4]wifi|perform scan: ss_state=0x0, chan<0,0>, dur<0,0>
+[tx] n=1 tx=1 ret=0 ss=2 probe=1 irq=0 til=22 rssi=-87      ← **tx=1、probe=1**
+```
+⇒ **扫描进入库内部、并且发出了一帧 probe request（TX 通路工作正常）**。
+这是本会话对 WiFi 栈最实质的一次推进。
+
+### 两条消息的真实布局（反汇编确认，已用于直接调用）
+| 码 | 处理函数 | 载荷 |
+|---|---|---|
+| 5 | `wifi_scan_start_process` | `msg+20..` = 44 字节扫描配置 |
+| 102 | `wifi_set_scan_params_process` | `msg+20..` = 44 字节扫描默认参数 |
+
+两者都是"`msg[0]=码`、`msg[4]=&处理函数`、`msg[8]/[10]/[12]=0`、`msg+20` 起载荷"。
+
+### GDB 实测（说明参数其实已经进去了）
+```
+app_scan_params: 0x00000000 0x00000078 0x00000168 0x0000001e
+g_scan = 0x3fcd5bb8 (非空)     gScanStruct: 0x00040000
+```
+⇒ 120 / 360 / 30 这类默认值已经写进去了，**不是全 0**；
+`active=<0,0>` 只是活动扫描时间字段（可以被 0 表示"用被动/默认"）。
+
+### 仍未打通
+`perform scan: ss_state=0x0, chan<0,0>, dur<0,0>` ⇒ 扫描很快结束、没有结果。
+而当前环境**又没有 AP**（§1614），所以即使打通也无法验证四项验收。

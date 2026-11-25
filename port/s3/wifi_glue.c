@@ -925,7 +925,11 @@ static int osi_queue_send(void *qh, void *item, u32 ticks)
     WQ *q = wq_resolve(qh);
     int r;
     HIT_OF(_queue_send);
-    /* §§1127：临时无条件打印，确认 pp_post 是否真的进到 _queue_send。 */
+    /* §1620 ★★★★★ 这里才是库投递消息的**必经之路**（OSI 的
+     * `_queue_send` 槽位），`--wrap=pp_post` 拦不到。
+     * scan 请求消息的首字是 5（反汇编 `esp_wifi_scan_start` 确认），
+     * 截下它的指针交给直接处理路径。放 flash 助手，IRAM 只留一次调用。 */
+    { extern void s3_cap_scan_msg(u32 d); s3_cap_scan_msg((u32)(void *)item); }
 
     if (q == 0 || q->magic != WQ_MAGIC) {
         SDIAG[0] = (u32)qh;                 /* 句柄不像队列 */
@@ -2796,7 +2800,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     /* 关掉省电：modem sleep 需要 OSI 的 `_wifi_rtc_enable/disable_iso` 和定时器
      * （我们那两个是空实现），睡眠一开 RX 就可能收不到包。取一个页面不需要省电，
      * 所以显式 WIFI_PS_NONE(0)（§221）。 */
-    s3_ets_printf("[wifi] set_ps(NONE)=%d\n", esp_wifi_set_ps(0));
+    (void)esp_wifi_set_ps(0);   /* 打印已删：IRAM 零余量 */
 #ifdef S3_CNX_DIRECT
     /* §817: arm connect FSM（清 AP 列表+起 re-scan 卡住），然后用我们
      * 能用的 forced-sync scan 重新灌满 AP 列表，最后直接调
@@ -2957,6 +2961,27 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
  * 返回扫到的 AP 数；<0 表示失败。只打印第一个 AP 的 SSID/信道/RSSI
  * （wifi_ap_record_t 的结构体大小依赖 IDF 版本，只取第一个记录最稳）。 */
 /* §1613：设扫描驻留时间（100/150/500/30 ms）。放 flash，IRAM 侧只留一次调用。 */
+/* §1621：按反汇编确认的布局直接构造 scan 请求消息并处理。
+ *   msg[0] = 5（ioctl type: scan）
+ *   msg[4] = &wifi_scan_start_process
+ *   msg[8]=0, msg[10]=0, msg[12]=0
+ *   msg[20..] = 44 字节扫描配置
+ */
+__attribute__((section(".flash.text")))
+int s3_direct_scan(const void *cfg)
+{
+    extern int __real_wifi_scan_start_process(void *);
+    u8 msg[80];
+    u32 k;
+    for (k = 0u; k < 80u; k++) { msg[k] = 0u; }
+    msg[0] = 5u;
+    *(u32 *)(void *)(msg + 4) = (u32)(void *)&__real_wifi_scan_start_process;
+    if (cfg != 0) {
+        for (k = 0u; k < 44u; k++) { msg[20u + k] = ((const u8 *)cfg)[k]; }
+    }
+    return __real_wifi_scan_start_process((void *)msg);
+}
+
 __attribute__((section(".flash.text")))
 int s3_phy_rssi(void)
 {
@@ -2971,7 +2996,21 @@ void s3_set_scan_params(void *buf)
     u32 *sp = (u32 *)(void *)((u8 *)buf + 32u);
     sp[0] = 100u | (150u << 16);      /* active_min=100, active_max=150 */
     sp[1] = 500u | (30u << 16);       /* passive=500,    home_dwell=30  */
-    (void)esp_wifi_set_scan_parameters((const void *)sp);
+    /* §1622 ★★★★★ 反汇编 `esp_wifi_set_scan_parameters`：它同样是**投递消息**
+     * （码 102、处理函数 `wifi_set_scan_params_process`、参数在 msg+20 起
+     * 44 字节），而消息没人处理 ⇒ 我们的调用虽然返回 0，**参数并未生效**
+     * （真板 `perform scan: ss_state=0x0, chan<0,0>, dur<0,0>` 为证）。
+     * 这里按同一布局直接调用处理函数。 */
+    {
+        extern int wifi_set_scan_params_process(void *msg);
+        u8 msg[64];
+        u32 k;
+        for (k = 0u; k < 64u; k++) { msg[k] = 0u; }
+        msg[0] = 102u;
+        *(u32 *)(void *)(msg + 4) = (u32)(void *)&wifi_set_scan_params_process;
+        for (k = 0u; k < 8u; k++) { msg[20u + k] = ((u8 *)sp)[k]; }
+        (void)wifi_set_scan_params_process((void *)msg);
+    }
 }
 
 int s3_wifi_scan(void)
@@ -3147,13 +3186,11 @@ int s3_wifi_scan(void)
      * `msg+20..` = 44 字节扫描配置），所以**不需要自己再造一条**：
      * `__wrap_pp_post` 现在按码 5 截获真消息（§1617），直接喂给处理函数即可。
      * 为了 IRAM 零余量，这里不建缓冲、不打印。 */
-    {
-        extern int __real_wifi_scan_start_process(void *);
-        extern u32 g_s3_real_scan_msg;
-        u32 sm = g_s3_real_scan_msg;
-        if (r == 0 && sm != 0u) {
-            (void)__real_wifi_scan_start_process((void *)sm);
-        }
+    if (r == 0) {
+        /* §1621 ★ 完全绕开队列：按反汇编确认的布局**直接构造** scan 消息
+         * 并调用处理函数（实现放 flash 助手，IRAM 侧只留一次调用）。 */
+        extern int s3_direct_scan(const void *cfg);
+        (void)s3_direct_scan((const void *)cfg);
     }
 #endif
     if (r != 0) {
