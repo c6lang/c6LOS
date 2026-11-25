@@ -2008,13 +2008,43 @@ void s3_msg_copy_cfg(void *msg)
 __attribute__((section(".flash.text")))
 void s3_prep_desc_cnt(void)
 {
-    extern unsigned char g_eb_list_desc[];   /* 静态数组，任何时刻都有效 */
-    volatile unsigned char *b = (volatile unsigned char *)g_eb_list_desc;
+    /* §1649 ★★★★★ **必须写到"库真正用的那个基址"上。**
+     *
+     * 反汇编 `esf_buf_setup_static`（0x4201dc6c）里它用的是**字面量**
+     *   4201dc6f: l32r a6, 3fcbb500 <g_eb_list_desc>
+     *   4201dc72: addx4 a5, a2, a2      ; idx*5
+     *   4201dc75: addx4 a5, a5, a6      ; base + idx*20
+     * 而我们 ELF 里 `g_eb_list_desc` 的符号地址是 **0x3fcbb508**（差 8 字节）。
+     * 只写符号地址 ⇒ 计数落到了库**不读**的地方 ⇒ `esf_buf_alloc_dynamic`
+     * 仍然读到 `desc+16 == 0` ⇒ 立刻返回 NULL ⇒ `alloc eb fail(idx)`。
+     *
+     * 另一条路径（ROM 的 `esf_buf_alloc`）是**间接**的：
+     *   l32r a6, g_eb_list_desc_ptr ; l32i a6, a6, 0
+     * 所以最稳的做法：**三个候选基址都写一遍**（符号地址、指针解引用、
+     * 以及反汇编里的字面量），这样无论库走哪条路都能读到计数。
+     * 同时把 `desc+14`（已用计数）清零，保证 `已经在用 < 上限`。 */
+    extern unsigned char g_eb_list_desc[];
+    extern unsigned char *g_eb_list_desc_ptr;
+    volatile unsigned char *bases[3];
+    u32 nb = 0u;
     u32 i;
-    for (i = 0u; i < 11u; i++) {
-        *(volatile unsigned short *)(void *)(b + i * 20u + 16u) = 4u;
+
+    bases[nb++] = (volatile unsigned char *)g_eb_list_desc;
+    if (g_eb_list_desc_ptr != 0) { bases[nb++] = (volatile unsigned char *)g_eb_list_desc_ptr; }
+    /* §1650 ★ 反汇编里 `esf_buf_setup_static` 用的是字面量 0x3fcbb500，而 ELF 符号
+     * `g_eb_list_desc` 是 0x3fcbb508。§1649 曾把 0x3fcbb500 硬编码进来**也写一遍**，
+     * 真板冒烟结果：三个标记（`alloc eb fail` / `Init static rx buffer num: 0`）
+     * **完全没变**，而且启动行数从 197 掉到 122 ⇒ 那个地址很可能是**别的全局**，
+     * 写它属于破坏行为。已移除，只保留符号地址与运行时指针两个安全基址。 */
+
+    for (i = 0u; i < nb; i++) {
+        volatile unsigned char *b = bases[i];
+        u32 k;
+        for (k = 0u; k < 21u; k++) {
+            *(volatile unsigned short *)(void *)(b + k * 20u + 14u) = 0u;
+            *(volatile unsigned short *)(void *)(b + k * 20u + 16u) = 4u;
+        }
     }
-    (void)0;
 }
 
 /* §1643 flash 助手：init 之前手工预填 g_wifi_menuconfig（映射见调用点注释） */
