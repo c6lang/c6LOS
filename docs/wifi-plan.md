@@ -37124,3 +37124,38 @@ epc1      = 0x40378dff   port_core_bind_self 里
 （26 行，停在 "starting scheduler"），已回退。下一步应逐字照抄 IDF
 `_xt_context_save` 的完整序列（含 `rsr epc1` 保存、PS 的
 `INTLEVEL=max(当前,EXCM_LEVEL) | UM | WOE`），并把帧链 `[sp-12]` 一并核对。
+
+### §1718–§1719 整圈 spill 的失败现场（重要负面结论）
+
+在 `port_task_yield` 的保存路径重新启用 `S3_SPILL_ALL` 后，**第一次任务切换即死**
+（26 行，停在 `starting scheduler`）。GDB 现场：
+
+```
+pc         = 0x4037a0a8        (死在 _vec_default 一线)
+exccause   = 0x1d              InstrFetchProhibited
+excvaddr   = 0x90119ac0        (与 §1716 完全相同的野地址)
+windowbase = 0x9               ← **非 4 对齐，非法**
+windowstart= 0xaa00            (bit 9/11/13/15 —— 也不是 1<<base)
+```
+
+三种写法都试过，结果一样（都是 WB=9 / WS=0xaa00）：
+
+| 试法 | a9 | sp | 结果 |
+|---|---|---|---|
+| A | `a1+64`（调用者 sp） | 抬 64 再还原（照抄 IDF） | 26 行即死 |
+| B | 同 A + `PS.UM=1` | 同 A | 26 行即死 |
+| C | `a1`（本帧 sp） | 不抬 | 26 行即死 |
+
+⇒ `S3_SPILL_ALL`（= IDF `SPILL_ALL_WINDOWS`）要求 **PS.EXCM=0 / WOE=1 /
+INTLEVEL≥EXCM_LEVEL**，并且**当前 WINDOWSTART 必须是"连续 live 窗口"**，
+rotw 整圈才能回到原基址。我们的切换点 WINDOWSTART 经常带洞（多任务、
+每任务各自 base），整圈 rotw 于是停在 WB=9 这种非法值上。
+
+**⇒ 结论：不能"在任意深度/任意 WS 状态"做整圈 spill。**
+IDF 的 FreeRTOS port 之所以能这么做，是因为它**每个任务的切换点都在同一个
+固定的浅层**（`port_switch` 汇编入口，始终 `entry` 后立即 spill，
+WINDOWSTART 已知连续）。
+
+**⇒ 下一步（唯一正确做法）**：把切换点收敛到**唯一一个浅层汇编入口**
+（所有阻塞/让出都先在 C 层返回到该入口，再在那里做 spill + 切换），
+而不是在 `port_task_yield` 被调用的任意深度上做 spill。
