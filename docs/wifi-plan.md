@@ -36769,3 +36769,32 @@ GDB 实测的三道门：
 扫描已经能进入库内部并**发出 probe request**（`[tx] tx=1 probe=1`），
 但**驻留时间读不到** ⇒ `perform scan` 立刻结束、没有结果；
 再加上**环境里没有 AP**（§1614/§1615），四项验收无法推进。
+
+## §1625 扫描默认参数的**真实结构**是 32 位字段（之前按 u16 打包，全错）
+
+反汇编 `scan_set_default_params(params)`：
+```
+a8 = *(u32*)(params + 4);  if (a8 == 0) *(u32*)(params+4) = 120;   ← 默认 120ms
+   if (a8 > 1500) return 0x102
+a9 = *(u32*)(params + 0);  if (a9 != 0 && *(u32*)(params+4) < a9) return 0x102
+a8 = *(u32*)(params + 8);  if (a8 > 1500) return 0x102
+```
+⇒ 结构是：
+| 偏移 | 字段 | 类型 |
+|---|---|---|
+| +0 | active_min | **u32** |
+| +4 | active_max | **u32**（0 ⇒ 自动填 120）|
+| +8 | passive | **u32** |
+| +12 | home_chan_dwell | u8 |
+
+已把 §1623 的 u16 打包改成 32 位（100 / 150 / 500 / 30）。
+
+### 仍未生效
+真板仍是 `Set scan defaults in ms : ...(0,0,0,0)`、
+`active=<0,0>, passive=0`、`home_channel_dwell_time=0`
+⇒ 说明 `scan_set_default_params` 拿到的还是 0（很可能它根本没被执行，
+被 §1624 记录的多道门挡住；日志打印的是**未更新的** `app_scan_params`）。
+
+### 结论
+扫描链路已能进入库内部、能发 probe，但**驻留时间这一环仍未打通**；
+而当前环境**没有 AP**（§1614/§1615），四项验收无法验证。

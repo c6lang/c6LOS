@@ -3019,8 +3019,15 @@ void s3_set_scan_params(void *buf)
         *(u32 *)(void *)(msg + 4) = (u32)(void *)&wifi_set_scan_params_process;
         /* §1623 ★ 参数**自建**，不再借用 scan cfg 的尾部 ——
          * 那会破坏扫描配置本身（`msg+20` 的 44 字节就是从 cfg 复制的）。 */
-        *(u32 *)(void *)(msg + 20) = 100u | (150u << 16);
-        *(u32 *)(void *)(msg + 24) = 500u | (30u << 16);
+        /* §1625 ★★★★★ 反汇编 `scan_set_default_params(params)` 证明字段是
+         * **32 位**（它按 `l32i a2,0 / a2,4 / a2,8` 读，并对 0 填默认 120）：
+         *   +0  active_min   +4  active_max   +8  passive   +12 home_dwell(u8)
+         * 之前按 u16 打包（100|150<<16）⇒ 库把 active_min 读成 0x00960064 之外的
+         * 组合，实际打印一直是 0。这里改成 32 位。 */
+        *(u32 *)(void *)(msg + 20) = 100u;   /* active_min  */
+        *(u32 *)(void *)(msg + 24) = 150u;   /* active_max  */
+        *(u32 *)(void *)(msg + 28) = 500u;   /* passive     */
+        msg[32] = 30u;                       /* home_dwell  */
         (void)sp;
         (void)wifi_set_scan_params_process((void *)msg);
     }
