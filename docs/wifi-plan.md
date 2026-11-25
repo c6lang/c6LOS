@@ -37054,3 +37054,73 @@ DRAM 读；GDB 只用来读**外设寄存器**和取栈回溯。
 把 `esf_buf_alloc_dynamic`（**IRAM 0x4038_xxxx 是库的真实现**，不是 ROM 桩）
 整段反汇编完（约 0x1A0 字节），对照它读写的 `desc+8/+12/+14/+16/+60` 与
 `g_lmac_cnt` 字段，找出返回 NULL 的那个分支条件；再决定要补哪个初始化。
+
+---
+
+## §1716–§1720 本轮重大突破与 MAC 静默根因（真板）
+
+### 1) 全局静音的真正原因：`s3_delay_advance` 内的让出破坏返回地址
+用**跨复位 RTC 阶段标记**（`st/ph/d/y/r`，只 store 不打印）把停顿点从
+百万行日志钉到语句级：
+
+| 标记 | 含义 | 真板值 |
+|---|---|---|
+| `st` | 阶段（10 扫描前 / 11 后 / 12-13 直调 / 14 循环前） | 14 |
+| `ph` | `s3_scan_iter` 相位（1..5） | 4 = 延迟 |
+| `d`/`y` | `s3_delay_advance` 内 tick_consume/yield 子相位 | 99 / 2（全部正常返回） |
+| `r` | 调用者侧"函数已返回"标记 | **1（永不前进）** |
+
+⇒ 100 次 `s3_tick_consume()` 与 `os_task_yield_force()` 都正常返回，卡死点
+精确落在 **flash 函数 `retw` 回 IRAM 调用者**那一跳。
+`S3_ADVANCE_NOYIELD`：该处不再让出。**日志 216 行 → 23227 行，`[swp]` 完整跑满 60 轮。**
+
+### 2) MAC 完全静默（RX 不通的直接原因）
+`[swp]` 增加中断侧取证后，真板全 60 轮恒为：
+
+```
+i10=0   WiFi 中断从未挂起（ipend&3 一次都没有）
+d8=60   库 ISR 被调用 60 次（不是没装）
+ev=0    累计 MAC 事件位（0x60033c3c）全 0
+pwr=0   累计 PWR 事件位（0x60035118）全 0
+rx=0    wDev_AppendRxBlocks 零次
+tx=0    发送尝试零次
+```
+⇒ 不是中断矩阵/使能问题（`intr_matrix_set(cpu,src,num)` 早已真接、
+`INTENABLE` bit0 一直开着），而是 **MAC 硬件从未启动**。
+
+### 3) ppTask 一直 READY 却从不被调度
+`[p2] st=1 wk=0 wo=0` ⇒ 状态 = READY、没有等待对象。
+库投递的 start/scan 消息（码环实测 `301/305/310/312/313/30a/30b`）因此无人处理。
+
+### 4) GDB 抓到的真实现场：窗口溢出双重异常
+```
+pc        = 0x4037a154   _vec_default+0x44 的自旋（j self）
+exccause  = 0x1d         InstrFetchProhibited
+excvaddr  = 0x90119ac0
+depc      = 0x403783fb   _win_ovf8
+epc1      = 0x40378dff   port_core_bind_self 里
+帧内 a0   = 0x90119ae0
+```
+⇒ `_win_ovf8` 用 `l32e a0, a1, -12` 取"上一帧 sp"，拿到垃圾，随后
+`s32e a4, a0, -32` 写到 `0x90119ac0` → 双重异常。
+
+### 5) 对照实验：我们自己的 ABI 是对的
+`S3_DEPTH_TEST`：从 WiFi 启动处做 **14 层纯 C 递归**，最深处打印。
+真板：`[deep] ok` + `[deep] r=343`，整轮 7521 行照常跑完。
+⇒ 向量代码与 IDF `xtensa_vectors.S` 逐字一致；编译器本来就不写 `[sp-12]`
+帧链（全 ELF 只有向量自己写），这与 IDF 约定相符。
+**⇒ 崩溃只发生在"深链里跨进闭源库"这一种情况。**
+
+### 6) 下一步：任务切换必须做整圈 spill（已定位，未成功）
+`ctx.S` 的 `S3_SPILL_ALL`（= IDF `SPILL_ALL_WINDOWS`）在 §312 被**停用**，
+理由："整圈 rotw 触发溢出时溢出体拿到脏 a9"。对照 IDF `_xt_context_save`
+才发现它缺两件事：
+
+1. `a9` 必须等于**调用者 sp**（`entry a1,64` 本来设好了，但保存路径把它用掉）；
+2. spill 前要把 `sp` 临时抬回调用者帧（IDF："go back to spill register region"），
+   再 `addi sp, sp, -FRMSZ`。
+
+§1716 试过一次（补 `a9 = a1+64` + 抬 sp + 启用 spill）：**第一次任务切换就死**
+（26 行，停在 "starting scheduler"），已回退。下一步应逐字照抄 IDF
+`_xt_context_save` 的完整序列（含 `rsr epc1` 保存、PS 的
+`INTLEVEL=max(当前,EXCM_LEVEL) | UM | WOE`），并把帧链 `[sp-12]` 一并核对。
