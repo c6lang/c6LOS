@@ -56,6 +56,17 @@ void s3_nvs_state_fix(void)
     extern int s3_ets_printf(const char *, ...);
     u32 nv = *(u32 *)(void *)g_wifi_nvs;
     u8 st;
+    /* §1624 ★ 反汇编 `wifi_sta_set_scan_default_params` 的三道门：
+     *   (1) `*(u8*)(gScanStruct+70) & 1`   必须为 0（实测 0 ✓）
+     *   (2) `*(u32*)(g_ic+16) != 0`        必须非 0（实测 3fcd55e8 ✓）
+     *   (3) `*(u8*)(g_ic+0x154) == 1`      **实测 0 ⇒ 参数被直接丢弃**
+     * ⇒ 扫描默认参数（驻留时间）一直不生效的真因就是第 (3) 道门。
+     * 这里补上（放在任何提前返回之前）。 */
+    {
+        extern unsigned char g_ic[];
+        volatile u8 *m154 = (volatile u8 *)(void *)(g_ic + 0x154);
+        if (*m154 != 1u) { *m154 = 1u; }
+    }
     if (nv == 0u) {
         s3_ets_printf("[nvs] null\n");
         return;

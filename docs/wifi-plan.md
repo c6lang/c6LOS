@@ -36740,3 +36740,32 @@ if (*(u8*)(g_ic + 0x154) != 1)    → 返回
 - 扫描**第一次真正进入库内部**并**发出了 probe request**（`[tx] tx=1 probe=1`）；
 - 明确了库的两条消息布局（码 5 / 码 102）与截获点（OSI `_queue_send`）；
 - 修掉自己引入的 cfg 破坏 bug。
+
+## §1624 扫描参数"传进去但读成 0"的最后一层
+
+真板日志首次出现我们直接调用的**回显**：
+```
+[v4]wifi|Start wifi set scan parameters process
+[v4]wifi|Set scan defaults in ms : min,max,passive,chan_dwell :(0,0,0,0)
+```
+⇒ 处理函数**确实被我们调到了**，但它读到的载荷是 0。
+
+反汇编给的位置是 `msg+20`（`addi a10, a2, 20` → `wifi_sta_set_scan_default_params(a2+20)`），
+我们按这个偏移写了 `0x00960064/0x001E01F4`，仍被读成 0 ⇒ **实际读取偏移与此不符**
+（或它在读 `app_scan_params` 这份全局而不是入参）。
+
+GDB 实测的三道门：
+```
+*(u8*)(gScanStruct+70) = 0      ✓（需 bit0=0）
+*(u32*)(g_ic+16)       = 3fcd55e8 ✓（需非 0）
+*(u8*)(g_ic+0x154)     = 0      ✗（需 ==1）→ §1624 已强制置 1
+```
+
+### 顺带发现
+- `[heap] 分配失败 n=1600` 重新出现（WiFi 堆压力，可能是这次多出来的消息缓冲）；
+- 库日志依旧打印 `mode : softAP`（我们设的是 STA=1），与 §1603 同一个问题。
+
+## 现状小结（可交给下次）
+扫描已经能进入库内部并**发出 probe request**（`[tx] tx=1 probe=1`），
+但**驻留时间读不到** ⇒ `perform scan` 立刻结束、没有结果；
+再加上**环境里没有 AP**（§1614/§1615），四项验收无法推进。
