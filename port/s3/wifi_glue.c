@@ -2213,6 +2213,24 @@ int s3_pp_dispatch(u32 d)
  * 下一轮启动时在 flash 助手里把**上一次**最后到达的阶段打出来。 */
 #define S3_ST(n) do { *(volatile u32 *)0x50001FF0u = (u32)(n); } while (0)
 
+/* §1705 起始消息指针放 **RTC**（BSS 已撞栈界，一个 u32 都加不得）。 */
+#define S3_MSG_START (*(volatile u32 *)0x500011F0u)
+
+/* §1704 直调库的 `wifi_start_process`（ppTask 从不消费真消息）。 */
+__attribute__((section(".flash.text")))
+int s3_start_direct(void)
+{
+    int r = -99;
+
+    if (S3_MSG_START == 0u) {
+        s3_ets_printf("[startp] msg=0\n");
+        return r;
+    }
+    r = ((int (*)(void *))0x4203bd44u)((void *)S3_MSG_START);
+    s3_ets_printf("[startp] r=%d\n", r);
+    return r;
+}
+
 __attribute__((section(".flash.text")))
 void s3_ic_mode_bits(void *cfg)
 {
@@ -2227,10 +2245,7 @@ void s3_ic_mode_bits(void *cfg)
                       (u32)((volatile u32 *)0x50000F40u)[4],
                       (u32)((volatile u32 *)0x50000F40u)[33],
                       (u32)((volatile u32 *)0x50000F40u)[0]);
-        s3_ets_printf("[prev2] d=%u y=%u r=%u\n",
-                      (u32)((volatile u32 *)0x50000F40u)[15],
-                      (u32)((volatile u32 *)0x50000F40u)[16],
-                      (u32)((volatile u32 *)0x50000F40u)[17]);
+        /* §1706 `[prev2]` 已删（子相位使命完成）。 */
         *(volatile u32 *)0x50001FF0u = 0u;
     }
     extern unsigned char g_ic[];
@@ -3249,6 +3264,15 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_START_DIRECT
+    /* §1707 直调 `wifi_start_process`（默认关）。
+     * 真板：调用能进到库的 start 流程（打出 `mode : null` / `clear blacklist`
+     * / `clear rc list`），随后卡死在 `wifi_hw_start` 里 —— 与 §1690 当年
+     * poke `g_ic+0x245` 时观察到的 `4203b199: j 4203b199` 自旋同一处。
+     * 说明该函数在等某个 MAC/PHY 硬件状态，不是消息没投递的问题。
+     * 直调版本会让日志从 2 万多行掉到 155 行，所以默认关闭。 */
+    { extern int s3_start_direct(void); (void)s3_start_direct(); }
+#endif
 #ifdef S3_DRAIN_AFTER_START
     /* §1612 ★ 在 start 之后**无条件**跑一段 ISR 派发循环：
      * `s3_timer_irq` 只在 MAC 中断挂起时屏蔽 intenable 位并置
@@ -4619,9 +4643,16 @@ void s3_timer_sweep(void)
                         (u32)g_s3_diag[0], (u32)g_s3_diag[10],
                         (u32)g_s3_diag[9],
                         (u32)(int)s3_phy_rssi()); }
-        s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u\n",
+        /* §1702 加上中断侧取证：i10=WiFi 中断挂起次数、d8=库 ISR 实际调用次数、
+         * ev=累计 MAC 事件位、pwr=累计 PWR 事件位、rx=AppendRxBlocks 次数。
+         * 一眼就能分清"中断根本没到" / "到了但事件位是伪事件" / "事件对但没帧"。 */
+        s3_ets_printf("[swp] n=%u recv=%u yld=%u probe=%u tfir=%u d33=%u i10=%u d8=%u ev=%x pwr=%x rx=%u\n",
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
-                      (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33]);
+                      (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33],
+                      (u32)g_s3_diag[10], (u32)g_s3_diag[8],
+                      (u32)g_s3_diag[11], (u32)g_s3_pwr_or, (u32)g_s3_diag[39]);
+        /* §1706 `[ppc]` 已删：码环结论已定（库投递过 301/305/310/312/313/30a/30b），
+         * 格式串+printf 占的 DRAM 反复把 .bss 顶过栈界。 */
         { extern u32 g_c6os_ticks;
           s3_ets_printf("[tk] tick=%u\n", (u32)g_c6os_ticks); }
         /* §1502 ★ tcpip 创建成功却从没跑过 —— 把每个任务的状态字
@@ -5195,6 +5226,16 @@ int __wrap_config_is_cache_tx_buf_enabled(void)
     return 1;
 }
 
+/* §1703 库到底投递了哪些消息（码环，跨复位 RTC）。 */
+__attribute__((section(".flash.text")))
+void s3_pp_note(u32 code)
+{
+    volatile u32 *q = (volatile u32 *)0x500011D0u;
+    u32 k = q[0];
+    q[0] = k + 1u;
+    if ((k & 7u) < 8u) { q[1u + (k & 7u)] = code; }
+}
+
 u32 g_s3_msg_mode = 0u;
 u32 g_s3_msg_cfg  = 0u;
 
@@ -5207,8 +5248,15 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
      * 直接调它们的处理函数。 */
     if (ppq == 6u && data != 0u) {
         u32 c0 = *(volatile u32 *)(void *)data;
+        { extern void s3_pp_note(u32 code); s3_pp_note(c0); }
         if (c0 == 0x30Au) { g_s3_msg_mode = data; }
         else if (c0 == 0x30Bu) { g_s3_msg_cfg = data; }
+        /* §1704 ★ 认 `wifi_start_process`（地址由 `nm` 固定，库是预编译的）：
+         * 这条消息不处理 ⇒ `wifi_hw_start` 从未执行 ⇒ MAC 完全静默
+         * （真板：MAC 中断 0 次、事件寄存器全 0、TX 0 次）。 */
+        if (*(volatile u32 *)(void *)(data + 4u) == 0x4203bd44u) {
+            S3_MSG_START = data;
+        }
     }
     /* §1671 这条打印已由 flash 侧的 `[ppd]`（码/处理函数/载荷）取代，
      * 删掉它腾出 IRAM（新增 s3_apply_mode_cfg 调用需要 24 字节）。 */
