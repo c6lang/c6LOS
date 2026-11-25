@@ -4692,7 +4692,22 @@ void s3_timer_sweep(void)
                       (u32)g_s3_diag[32], (u32)c[0], (u32)c[6],
                       (u32)g_s3_diag[0], (u32)g_s3_diag[7], (u32)g_s3_diag[33],
                       (u32)g_s3_diag[10], (u32)g_s3_diag[8],
-                      (u32)g_s3_diag[11], (u32)g_s3_pwr_or, (u32)g_s3_diag[39]);
+                      (u32)g_s3_diag[11],
+                      (u32)((u32)__builtin_frame_address(0) > 0u ?
+                            *(volatile u32 *)((u8 *)__builtin_frame_address(0) - 12u) : 0u),
+                      (u32)g_s3_diag[39]);
+        /* §1723 ★★★★★ **回答一个决定性问题：`entry a1,N` 会不会自动把
+         * "调用者 sp"写到 [sp-12]？**
+         * 溢出向量 `_win_ovf8` 靠 `l32e a0, a1, -12` 找调用者帧，
+         * 所以这条链存在与否决定"整圈 spill 能不能做"。
+         * 真板直接读出来：若 chn 落在 (sp, sp+4096) 区间，说明就是调用者 sp，
+         * ABI 自动维护；若是 0/垃圾，则必须由溢出向量逐帧补。 */
+        {
+            u32 sp_ = (u32)__builtin_frame_address(0);
+            u32 chn_ = *(volatile u32 *)((u8 *)sp_ - 12u);
+            s3_ets_printf("[chn] sp=%x v=%x d=%d\n", sp_, chn_,
+                          (int)(chn_ - sp_));
+        }
         {
             /* §1713 打包打印 ppTask(id=2) 的 {state, wait_kind, core} 与队列计数，
              * 分清它到底是"阻塞在信号量"还是"在 recv 里空转"。 */
@@ -4851,7 +4866,15 @@ void s3_scan_iter(u32 i)
      * 没人处理、MAC 从不启动。之前把让出放在被调用的 flash 助手里，
      * 结果是从助手 retw 回调用者时返回地址被窗口溢出破坏（双重异常，
      * depc=_win_ovf8、excvaddr=0x90119ac0）。这里换成调用者自己让出。 */
-    { extern void os_task_yield_force(void); os_task_yield_force(); }
+    /* §1720 注意：用**普通** `os_task_yield()`，不是 `yield_force`。
+     * 真板已证：主线程在 `osi_semphr_take` 里走标准阻塞路径时，
+     * ppTask 能正常被切进来并回给信号量；而 `yield_force` 从这些深度
+     * 强切都会毁掉返回地址。先用普通让出验证。 */
+    /* §1721 既不让出也不强切，而是**走标准阻塞路径**睡 1 tick。
+     * 真板：任何 yield/yield_force 从这个深度切走都会毁掉返回地址
+     * （194 行即死），而主线程在 `osi_semphr_take` 里阻塞时 ppTask 能
+     * 正常被调度并回信号量 ⇒ 安全的是**阻塞**，不是让出。 */
+    { extern int os_task_delay(u32 ticks); (void)os_task_delay(1u); }
 #endif
     c[13] = 5u;
 }
