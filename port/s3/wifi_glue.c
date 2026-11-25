@@ -2005,6 +2005,43 @@ void s3_msg_copy_cfg(void *msg)
  * `esf_buf_alloc_dynamic` 第一件事就是 `a5 = *(u16*)(desc+16); if (!a5) return NULL;`
  * ⇒ 计数为 0 时库的 `esf_buf_setup_static` 必然 `alloc eb fail`，
  * RX 缓冲池因此一个都建不起来（TX 只是靠我们手工播种顶着的）。 */
+/* §1668 ★★★★★ **pp 消息排空器。**
+ *
+ * 真板取证（300 秒窗口）：链路走到
+ *   `[v4]wifi|Start wifi set scan parameters process`
+ *   → `[zalloc] n=68` → `[pppost] ppq=6 data=3fcc8e78` → **停滞**。
+ * 原因：库习惯把后续工作做成"投递一条消息到 pp 队列、由 ppTask 消费"，
+ * 而我们的 ppTask 从不运行 ⇒ 消息永远躺在队列里。
+ *
+ * 库的消息布局（多处证实）：`msg[0]=码`、`msg[4]=&处理函数`、`msg+20` 起载荷。
+ * 所以在这个投递点就地调用 `msg[4]` 即可，不需要队列消费者。
+ * `wifi_init_process` / `wifi_start_process` 是我们自己直接调的，
+ * 这里跳过，避免重复初始化。 */
+__attribute__((section(".flash.text")))
+int s3_pp_dispatch(u32 d)
+{
+    u32 fn;
+    extern int wifi_init_process(void *msg);
+    extern int wifi_start_process(void);
+    extern int s3_ets_printf(const char *, ...);
+
+    if (d == 0u) { return -1; }
+    fn = *(volatile u32 *)(void *)(d + 4u);
+    if (fn == 0u) { return -1; }
+    if (fn == (u32)(void *)&wifi_init_process) { return -2; }
+    if (fn == (u32)(void *)&wifi_start_process) { return -3; }
+    {
+        extern volatile u32 g_s3_diag[];
+        if (g_s3_diag[40] < 6u) {
+            g_s3_diag[40] = g_s3_diag[40] + 1u;
+            s3_ets_printf("[ppd] #%u code=%u fn=%x\n",
+                          (u32)g_s3_diag[40],
+                          (u32)*(volatile u32 *)(void *)d, fn);
+        }
+    }
+    return ((int (*)(void *))fn)((void *)d);
+}
+
 /* §1665 ★★★★★ 把 `g_ic` 里的接口位图（+0x245/+0x246）置成 STA。
  * 放 flash 助手：IRAM 已零余量，主流程只留一次调用。 */
 __attribute__((section(".flash.text")))
@@ -4900,6 +4937,12 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
         g_s3_first_msg = data;
         g_s3_diag[36] = *(volatile u32 *)data;   /* §1563: 第一条消息的 id */
     }
+#ifdef S3_PP_DISPATCH
+    if (ppq == 6u && data != 0u) {
+        extern int s3_pp_dispatch(u32 d);
+        (void)s3_pp_dispatch(data);
+    }
+#endif
     if (ppq == 6u && data != 0u) {
         extern unsigned char g_ic[];
         volatile u32 *m = (volatile u32 *)data;
