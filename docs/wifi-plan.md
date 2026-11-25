@@ -36642,3 +36642,36 @@ if (*(u8*)(g_ic+0x1E9) < 2) return 0x3002 (NOT_STARTED)
   ⇒ **AP 不可达**；
 - ⇒ 没有帧可收，扫描/关联/DHCP/TLS/body 全部无法推进，也无法验证修复。
 - **必须先恢复 AP**（用 IDF app 验证到 `got ip`），本工程的 WiFi 侧工作才有意义。
+
+## §1617–§1619 扫描消息的真实布局与截获位置（继续挖到库内部）
+
+反汇编 `esp_wifi_scan_start` 得到 scan 请求消息的**准确布局**：
+```
+call8 wifi_init_completed();      if (ret==0) return 0x3001 (NOT_INIT)
+if (*(u8*)(g_ic+0x1E9) < 2)       return 0x3002 (NOT_STARTED)
+...
+msg = ...
+msg[0] = 5                        ← **消息码是 5**（我们一直按 0x305 捕获，从未命中）
+msg[4] = &wifi_scan_start_process ← **消息自带处理函数指针**
+msg[8] = 0; msg[10] = 0; msg[12] = 0
+memcpy(msg+20, cfg, 44)           ← 44 字节扫描配置
+```
+我们返回 0 ⇒ 前置条件满足、消息已投递。
+但日志始终没有 `[v4]wifi|Start wifi scan` ⇒ 消息**没有被处理**。
+
+### 已做的修正
+1. 捕获码改成 `5`（`s3_cap_scan_msg()`，放 flash，IRAM 只留一次调用）；
+2. 捕获点从 `#ifdef S3_TRACE_SCANMSG && ppq==6` 里移出来（原来那条路径
+   **一次都不会执行**）；
+3. `S3_DIRECT_SCAN_CALL` 的处理块重写成最小形式：直接拿库自己那条消息
+   调 `wifi_scan_start_process`（不再自造 80 字节消息，省 IRAM）。
+
+### 仍未解决
+`g_s3_real_scan_msg` 仍为 0 ⇒ 说明 `esp_wifi_scan_start` 投递消息**不经过
+`pp_post`**（很可能直接 `queue_send`），所以 `--wrap=pp_post` 拦不到。
+下一步应 wrap **消息队列的 send**（或 `pp_post` 在 OSI 表里的槽位）。
+
+## ★ 环境阻塞（未变）
+`phy_get_rssi()` = **-84 ~ -119 dBm**（噪声底，RF 正常）；
+IDF 官方 app 多次测试均 `connect to the AP fail` ⇒ **AP 不可达**。
+⇒ 没有帧，验收四项无法推进；需先恢复 AP。

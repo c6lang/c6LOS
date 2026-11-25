@@ -287,6 +287,17 @@ u32 g_lra_seq = 0u;
  * §629 的手工消息布局不对（msg[0]=5、m[4]=0），FSM 立刻 cancel/end；
  * 这里保存库构造的真消息指针，交给直接调用路径用。 */
 u32 g_s3_real_scan_msg = 0u;
+
+/* §1619：截获 scan 请求消息（`esp_wifi_scan_start` 投递，码 5）。
+ * 放 flash 助手，IRAM 侧只留一次调用。 */
+__attribute__((section(".flash.text")))
+void s3_cap_scan_msg(u32 d)
+{
+    if (d != 0u && *(volatile u32 *)(void *)d == 5u) {
+        g_s3_real_scan_msg = d;
+    }
+}
+
 /* §1526 ★★★★ 库在 `esp_wifi_init_internal` 里会把**真** init 消息投进队列，
  * 那条消息里带着完整配置。ppTask 拿不到 CPU，所以它从没被处理。
  * 这里把第一条真消息截下来，直接喂给 `wifi_init_process` ——
@@ -3068,7 +3079,7 @@ int s3_wifi_scan(void)
      * 区分"射频没扫到 AP"和"scan-done 事件没送到等待者"。 */
     /* §1542 ★ 库的状态字节修正（逻辑在 flash 助手里，IRAM 只留一次调用）。 */
     { extern void s3_nvs_state_fix(void); s3_nvs_state_fix(); }
-    s3_ets_printf("[wifi] scan start（异步）\n");
+    /* 打印已删（IRAM 零余量，`[wifi] scan_start=` 已覆盖此信息）。 */
     /* §§1288：在扫描之前才播种 TX 缓冲（此时库已完成初始化）。 */
     { extern void s3_seed_tx_buffers(void); s3_seed_tx_buffers(); }
     /* §1616 ★★★★ 顺序修正：`esp_wifi_set_scan_parameters()` 必须在
@@ -3131,31 +3142,17 @@ int s3_wifi_scan(void)
         extern int s3_wrap_timer_func(void *);
         *(volatile u32 *)0x3fcef8b8u = (u32)(void *)&s3_wrap_timer_func;
     }
-    /* §629 判别实验：绕过 ppTask/队列，直接调用 scan 处理函数。
-     * 消息布局照 esp_wifi_scan_start 的反汇编：b0=5(type), b4=回调,
-     * b8=0, b10=0, b12=0, b20..=cfg(44 字节)。 */
+    /* §1618 ★ 直接用库自己构造的那条 scan 消息处理扫描（绕开 ppTask）。
+     * 消息布局已由反汇编确认（`msg[0]=5`、`msg[4]=&wifi_scan_start_process`、
+     * `msg+20..` = 44 字节扫描配置），所以**不需要自己再造一条**：
+     * `__wrap_pp_post` 现在按码 5 截获真消息（§1617），直接喂给处理函数即可。
+     * 为了 IRAM 零余量，这里不建缓冲、不打印。 */
     {
-        u8 msg[80];
-        int k;
-        for (k = 0; k < 80; k++) { msg[k] = 0; }
-        msg[0] = 5;                       /* ioctl type: scan */
-        /* 回调指针填真函数地址；这里只用真实处理函数，不依赖 wrap */
-        {
-            extern int __real_wifi_scan_start_process(void *);
-            *(u32 *)(void *)(msg + 4) = (u32)(void *)&__real_wifi_scan_start_process;
-        }
-        /* b8..b12 留 0（见反汇编 4203e5bb） */
-        for (k = 0; k < 44; k++) { msg[20 + k] = cfg[k]; }
-        {
-            extern int __real_wifi_scan_start_process(void *);
-            extern u32 g_s3_real_scan_msg;
-            u32 sm = g_s3_real_scan_msg ? g_s3_real_scan_msg : (u32)msg;
-            int rr;
-            /* §674: 优先用库造的 scan-start 消息（b0=0x305、m[4]=cfg 指针），
-             * §629 手工 msg 布局不对导致 FSM 立刻 cancel/end。 */
-            s3_ets_printf("[dirscan] msg=%x\n", sm);
-            rr = __real_wifi_scan_start_process((void *)sm);
-            s3_ets_printf("[dirscan] r=%d\n", rr);
+        extern int __real_wifi_scan_start_process(void *);
+        extern u32 g_s3_real_scan_msg;
+        u32 sm = g_s3_real_scan_msg;
+        if (r == 0 && sm != 0u) {
+            (void)__real_wifi_scan_start_process((void *)sm);
         }
     }
 #endif
@@ -4508,7 +4505,12 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
         s3_ets_printf("[scanmsg] %x: %08x %08x %08x %08x %08x %08x\n",
                       data, m[0], m[1], m[2], m[3], m[4], m[5]);
         /* §674: b0=0x305 是 scan-start；记下库构造的真消息指针 */
-        if (m[0] == 0x305u) { g_s3_real_scan_msg = data; }
+        /* §1617 ★★★★★ 反汇编 `esp_wifi_scan_start` 得到 scan 消息的**真实布局**：
+         *     msg[0] = 5                            ← 消息码是 **5**（不是 0x305）
+         *     msg[4] = &wifi_scan_start_process     ← 消息自带处理函数指针
+         *     msg[8..] = 扫描配置（memcpy，44 字节）
+         * 之前按 `m[0]==0x305` 捕获 ⇒ **一次都没匹配上** ⇒
+         * `g_s3_real_scan_msg` 恒为 0 ⇒ 扫描请求从未被处理。 */
         /* §669: 只做裸内存读取，不调用 call0 内核函数（windowed ABI 会 TRAP）。
          * OsQueue: buf0 size4 cap8 head12 tail16 count20 magic24 wg28 wp32 */
         {
@@ -4527,6 +4529,10 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
          * 强制清零，让每次 post 都真正投递。 */
         if (ppq < 18u) { ((volatile u8 *)0x3fcbbd50u)[ppq] = 0u; }
 #endif
+        /* §1619 ★ 无条件截获 scan 请求消息（码 5）。
+         * `esp_wifi_scan_start` 用哪个 ppq 不确定，原来只在
+         * `S3_TRACE_SCANMSG && ppq==6` 里捕获 ⇒ 一次都没匹配上。 */
+        { extern void s3_cap_scan_msg(u32 d); s3_cap_scan_msg(data); }
         int rr = __real_pp_post(ppq, data);
 #ifdef S3_LOOP_STAGE
         {
