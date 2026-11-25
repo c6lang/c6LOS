@@ -130,7 +130,7 @@ void s3_nvs_state_fix(void)
             u8 bv = *bm;
             if (bv != 1u) {
                 *bm = 1u;
-                s3_ets_printf("[band] %u -> 1\n", (u32)bv);
+                /* §1673 [band] 打印已删（腾 IRAM 给 s3_apply_mode_cfg 调用）。 */
             }
         }
     }
@@ -2005,6 +2005,45 @@ void s3_msg_copy_cfg(void *msg)
  * `esf_buf_alloc_dynamic` 第一件事就是 `a5 = *(u16*)(desc+16); if (!a5) return NULL;`
  * ⇒ 计数为 0 时库的 `esf_buf_setup_static` 必然 `alloc eb fail`，
  * RX 缓冲池因此一个都建不起来（TX 只是靠我们手工播种顶着的）。 */
+/* §1670 ★★★★★ **在正确时机应用 mode 与 STA 配置。**
+ *
+ * IDF 的顺序是 init → set_mode → set_config → start；我们的
+ * `s3_wifi_associate` 却是在 **init 之前** 调 set_mode/set_config，
+ * 那时 `g_ic` 还不存在，而它们又只是"投消息给 ppTask"，
+ * ppTask 从不运行 ⇒ 消息一直躺在队列里（真板抓到的
+ * `[ppd] code=30a fn=wifi_set_mode_process` / `code=30b fn=wifi_set_config_process`）。
+ * ⇒ `g_ic+0x245/+0x246` 的接口位图与 STA 配置始终是 0。
+ *
+ * 这里在 init 之后重新下发一次，并直接用截获的真消息指针调处理函数。
+ * 放 flash 助手：IRAM 已零余量。 */
+__attribute__((section(".flash.text")))
+int s3_apply_mode_cfg(void *cfg)
+{
+    extern int esp_wifi_set_mode(int mode);
+    extern int esp_wifi_set_config(int iface, void *conf);
+    extern int wifi_set_mode_process(void *msg);
+    extern int wifi_set_config_process(void *msg);
+    extern u32 g_s3_msg_mode;
+    extern u32 g_s3_msg_cfg;
+    extern int s3_ets_printf(const char *, ...);
+    int r = 0;
+
+    (void)esp_wifi_set_mode(1);              /* WIFI_MODE_STA */
+    (void)esp_wifi_set_config(0, cfg);       /* WIFI_IF_STA */
+    if (g_s3_msg_mode != 0u) {
+        int rm = wifi_set_mode_process((void *)g_s3_msg_mode);
+        s3_ets_printf("[mode] r=%d\n", rm);
+        r = rm;
+    }
+#ifndef S3_SKIP_SETCFG
+    if (g_s3_msg_cfg != 0u) {
+        int rc = wifi_set_config_process((void *)g_s3_msg_cfg);
+        s3_ets_printf("[scfg] r=%d\n", rc);
+    }
+#endif
+    return r;
+}
+
 /* §1668 ★★★★★ **pp 消息排空器。**
  *
  * 真板取证（300 秒窗口）：链路走到
@@ -2031,21 +2070,30 @@ int s3_pp_dispatch(u32 d)
     if (fn == (u32)(void *)&wifi_init_process) { return -2; }
     if (fn == (u32)(void *)&wifi_start_process) { return -3; }
     {
+        /* §1669 纯观察：先只看消息长什么样（码、处理函数、载荷前两字），
+         * 不做任何调用 —— 上一轮直接派发让启动行数从 194 掉到 94。 */
         extern volatile u32 g_s3_diag[];
-        if (g_s3_diag[40] < 6u) {
+        if (g_s3_diag[40] < 12u) {
             g_s3_diag[40] = g_s3_diag[40] + 1u;
-            s3_ets_printf("[ppd] #%u code=%u fn=%x\n",
+            s3_ets_printf("[ppd] #%u code=%x fn=%x a=%x b=%x c=%x\n",
                           (u32)g_s3_diag[40],
-                          (u32)*(volatile u32 *)(void *)d, fn);
+                          (u32)*(volatile u32 *)(void *)d, fn,
+                          (u32)*(volatile u32 *)(void *)(d + 8u),
+                          (u32)*(volatile u32 *)(void *)(d + 12u),
+                          (u32)*(volatile u32 *)(void *)(d + 16u));
         }
     }
+#ifdef S3_PP_DISPATCH_CALL
     return ((int (*)(void *))fn)((void *)d);
+#else
+    return -4;
+#endif
 }
 
 /* §1665 ★★★★★ 把 `g_ic` 里的接口位图（+0x245/+0x246）置成 STA。
  * 放 flash 助手：IRAM 已零余量，主流程只留一次调用。 */
 __attribute__((section(".flash.text")))
-void s3_ic_mode_bits(void)
+void s3_ic_mode_bits(void *cfg)
 {
     extern unsigned char g_ic[];
     volatile unsigned char *b;
@@ -2053,6 +2101,13 @@ void s3_ic_mode_bits(void)
     if ((*b & 1u) == 0u) { *b = (unsigned char)(*b | 1u); }
     b = (volatile unsigned char *)(void *)(g_ic + 0x245u);
     if (*b == 0u) { *b = 1u; }
+#ifdef S3_MSG_PROCESS
+    /* §1674 与"置 IC 位图"合并成同一个 flash 助手（同一时机：init 之后、
+     * start 之前），IRAM 只需**一个**调用点，省下 8 字节。 */
+    { extern int s3_apply_mode_cfg(void *cfg); (void)s3_apply_mode_cfg(cfg); }
+#else
+    (void)cfg;
+#endif
 }
 
 __attribute__((section(".flash.text")))
@@ -3013,7 +3068,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
             /* §1597：先把状态复位成 0，否则 `wifi_start_process` 第一行就返回。 */
             *(volatile u8 *)(void *)(g_ic + 0x1E9) = 0u;
 #ifdef S3_IC_MODE_BITS
-            { extern void s3_ic_mode_bits(void); s3_ic_mode_bits(); }
+            { extern void s3_ic_mode_bits(void *cfg); s3_ic_mode_bits((void *)cfg); }
 #endif
         }
         rs = wifi_start_process();
@@ -4376,14 +4431,8 @@ void s3_timer_sweep(void)
                                 icp != 0 ? icp[3] : 0u);
               }
           }
-          { extern unsigned char g_wifi_menuconfig[];
-            /* §1659 只留一个最小打印（rx = menuconfig+0），把 BSS 让给
-             * 直调 `wifi_menuconfig_init` 的路径。 */
-            { extern unsigned char wDevCtrl[];
-              { extern unsigned char g_ic[];
-                s3_ets_printf("[mc] rx=%u ic=%x\n",
-                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
-                          (u32)*(volatile u8 *)(void *)((u8 *)g_ic + 0x246u)); } } }
+          /* §1672 `[mc]` 打印已删：它占的 IRAM 用来放
+           * `s3_apply_mode_cfg` 的调用（实测 st_mode 位 = 0x03 已验证过）。 */
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;
             s3_ets_printf("[eb] %x %x %x %x\n", ebs[0], ebs[1], ebs[2], ebs[3]); }
@@ -4926,10 +4975,23 @@ int __wrap_config_is_cache_tx_buf_enabled(void)
     return 1;
 }
 
+u32 g_s3_msg_mode = 0u;
+u32 g_s3_msg_cfg  = 0u;
+
 int __wrap_pp_post(unsigned int ppq, unsigned int data)
 {
     s3_wrap_bump(7u);
-    s3_ets_printf("[pppost] ppq=%u data=%x\n", ppq, data);
+    /* §1670 ★★★★★ 记下库为 set_mode(0x30a) / set_config(0x30b) 投递的**真消息**。
+     * 这两个消息本来由 ppTask 处理，而 ppTask 从不运行 ⇒ 模式和 STA 配置
+     * 从来没生效过。拿到真指针后，我们可以在正确时机（init 之后、start 之前）
+     * 直接调它们的处理函数。 */
+    if (ppq == 6u && data != 0u) {
+        u32 c0 = *(volatile u32 *)(void *)data;
+        if (c0 == 0x30Au) { g_s3_msg_mode = data; }
+        else if (c0 == 0x30Bu) { g_s3_msg_cfg = data; }
+    }
+    /* §1671 这条打印已由 flash 侧的 `[ppd]`（码/处理函数/载荷）取代，
+     * 删掉它腾出 IRAM（新增 s3_apply_mode_cfg 调用需要 24 字节）。 */
     /* §§1164（无打印版）：`wifi_init_process` 需要 `msg->[12]` 非 0 且
      * `g_ic` 指向 0x2b4 字节的 IC 结构（它一进来就 memset(g_ic,0,0x2b4)）。
      * 不加任何打印，避免影响时序。 */
