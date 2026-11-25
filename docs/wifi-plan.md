@@ -36890,3 +36890,34 @@ PHY 处于什么状态、`phy_get_modem_flag` 的值、以及 IDF 在 `esp_phy_e
 TX/RX 计数全 0。下一步只能从"MAC 是否真正在运行"入手：核对
 `ic_init` 之后 MAC 的 **enable 位与 RX DMA 描述符环**（`hal_rx_setup`），
 或直接复用 IDF 走过的公开 API 路径（`esp_wifi_init/set_config/start`）。
+
+## §1639–§1640 库按 0 个缓冲建池：配置进了 menuconfig，但不是库建池时读的那份
+
+### 与 IDF 的日志对照（同一块板、同一个库）
+| 日志 | IDF（能连 AP） | 我们 |
+|---|---|---|
+| `Init static rx buffer num` | **10** | **0** |
+| `Init dynamic rx buffer num` | **32** | **0** |
+| `esf_buf_setup_static: alloc eb fail(0)` | 无 | **有** |
+
+⇒ 库**按 0 个 RX/TX 缓冲去建池**，必然失败 ⇒ 没有 RX 缓冲 ⇒
+`wDev_AppendRxBlocks` 恒 0 ⇒ MAC 一次中断都不来 ⇒ 一帧也收不到。
+这解释了这一长串现象（TX 计数 0、`irq=0`、`[eb]` 全 0）。
+
+### 已排除的
+1. **不是** `wifi_menuconfig_init` 没被调用：`--wrap` 诊断显示库**从不调用**它，
+   但我们显式打印 `g_wifi_menuconfig` 得到 **`[mc] mc0=10 mc4=32`**
+   ⇒ 值确实被拷进去了（反汇编映射：`menuconfig+0←cfg+48`、
+   `+4←cfg+52`、`+8←cfg+56`、`+12←cfg+60`、`+16←cfg+64`、`+20←cfg+76`、
+   `+28←cfg+84`、`+84←cfg+68`、`+88←cfg+72`…）。
+2. **不是** 我们的 `wifi_init_config_t` 填错：IDF app 的 sdkconfig 里
+   `STATIC_RX_BUFFER_NUM=10`、`TX_BUFFER_TYPE=1`、`DYNAMIC_TX_BUFFER_NUM=32`，
+   与我们的 `wcfg()` 一致。
+3. 提前直接调 `wifi_menuconfig_init()` 会**立刻崩**（它依赖库已初始化的
+   logging/OSI 状态），所以不能靠"补一次调用"绕过。
+
+### ⇒ 结论
+库建池时读的是**真 init 消息的载荷**（我们补 `msg[12]` 时传的那份），
+而不是 `g_wifi_menuconfig`。下一步应把 **44/104 字节的缓冲配置字段**
+同时写进 `esp_wifi_init_internal` 投递的那条真消息的载荷里
+（`msg+20` 起），使其与 menuconfig 一致。

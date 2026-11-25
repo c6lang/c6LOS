@@ -3728,6 +3728,33 @@ u32 s3_wifi_bringup(void)
         /* §421 实验：我们手动做了 PHY enable，库的状态机残留成 2
          * （"正在初始化"），于是 init 直接返回 0x3013。复位成 1 再进去。 */
         if (*wst != 1u) { *wst = 1u; }
+/* §1640 诊断包装：库到底有没有调 `wifi_menuconfig_init`、传的什么 cfg。 */
+__attribute__((section(".flash.text")))
+int __wrap_wifi_menuconfig_init(void *cfg)
+{
+    extern int __real_wifi_menuconfig_init(void *cfg);
+    extern int s3_ets_printf(const char *, ...);
+    s3_ets_printf("[mcwrap] cfg=%x\n", (unsigned)(u32)cfg);
+    return __real_wifi_menuconfig_init(cfg);
+}
+
+#ifdef S3_MENUCONFIG_INIT
+        /* §1639 ★★★★★ **显式调用 `wifi_menuconfig_init(我们的 cfg)`**。
+         * 反汇编 0x4203b330 证实这就是把 `wifi_init_config_t` 里的
+         * static_rx/dynamic_rx/... 拷进全局 `g_wifi_menuconfig`（104 字节）的
+         * 唯一入口 —— 它自己先 memset 104，再校验 cfg+144 magic 与
+         * cfg+4/+8（wpa crypto size/version），然后逐字段拷。
+         * 若它没被执行，menuconfig 就是全 0 ⇒ 库按 **0 个缓冲** 建池 ⇒
+         * `esf_buf_setup_static: alloc eb fail(0)` ⇒ 没有 RX/TX 缓冲 ⇒
+         * MAC 一次中断都不来（真板现象与 IDF 日志对照完全吻合：
+         * IDF 打印 "Init static rx buffer num: 10/dynamic rx buffer num: 32"，
+         * 我们打印 0）。 */
+        {
+            extern int wifi_menuconfig_init(const void *cfg);
+            int mr = wifi_menuconfig_init((const void *)g_wifi_cfg_blob);
+            s3_ets_printf("[mcinit] r=%d\n", mr);
+        }
+#endif
         irc = (u32)(int)esp_wifi_init_internal((const void *)g_wifi_cfg_blob);
         s3_ets_printf("[wifi] init 后的库状态 @%08x = %u\n",
                    (unsigned)(u32)(void *)wst, (unsigned)*wst);
@@ -4071,7 +4098,8 @@ void s3_timer_sweep(void)
           { extern unsigned char g_wifi_menuconfig[];
             /* §1591 ★ 库内部的配置计数（`esf_buf_setup` 也读它）。
              * 若这里也是 0 ⇒ 我们那块 cfg **根本没被库接收**。 */
-            s3_ets_printf("[mc] mc4=%u\n",
+            s3_ets_printf("[mc] mc0=%u mc4=%u\n",
+                          (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 0u),
                           (u32)*(volatile u16 *)(void *)((u8 *)g_wifi_menuconfig + 4u)); }
           { extern unsigned char eb_space[];
             volatile u32 *ebs = (volatile u32 *)(void *)eb_space;

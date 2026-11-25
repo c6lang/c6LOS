@@ -3301,7 +3301,7 @@ WIFI_WRAP := -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=misc_nvs_init \
              -Wl,--wrap=ic_create_wifi_task -Wl,--wrap=ieee80211_ioctl_init \
              -Wl,--wrap=pp_create_task -Wl,--wrap=pp_post \
              -Wl,--wrap=wifi_init_in_caller_task \
-             -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
+             -Wl,--wrap=ieee80211_ioctl_process -Wl,--wrap=wifi_menuconfig_init -Wl,--wrap=wifi_scan_start_process -Wl,--wrap=ieee80211_sta_scan \
              -Wl,--wrap=pm_offchan_ready_or_defer -Wl,--wrap=chm_acquire_lock \
              -Wl,--wrap=config_is_cache_tx_buf_enabled \
              -Wl,--wrap=ppTask -Wl,--wrap=ieee80211_timer_process -Wl,--wrap=ieee80211_send_probereq -Wl,--wrap=ieee80211_regdomain_is_active_scan -Wl,--wrap=ieee80211_regdomain_check_channel -Wl,--wrap=scan_bitmap_to_channel_list -Wl,--wrap=set_channel_rfpll_freq -Wl,--wrap=wDev_AppendRxBlocks \
