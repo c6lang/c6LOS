@@ -36460,3 +36460,44 @@ cfg 逐字段拷进库内部结构**。这正是"配置不生效"的真正形态
 ## IRAM 纪律（再记一次）
 本工程 IRAM **零余量**：连给 `[direct]` 多加一个 `%u` 参数都溢 32 字节。
 要加诊断必须先**整条删掉**另一条 IRAM printf。
+
+## §1608–§1612 又走通 3 件事，并纠正一处误读
+
+### §1608 `state=2` 是**正常值**（不是卡住）
+完整反汇编 `wifi_start_process`：
+```
+a3 = *(u8*)(g_ic+0x1E9); if (a3>=2) return 0
+adc2_wifi_acquire(); if (ret) return ret
+ieee80211_set_hmac_stop()
+mode = *(u8*)(*(u32*)g_wifi_nvs)     ← 模式来自 NVS 字节（1 = STA）
+wifi_hw_start(mode); wifi_mode_set(mode); _do_wifi_start(mode)
+*(u8*)(g_ic+0x1E9) = 2              ← **成功路径的收尾就是写 2**
+```
+⇒ 我们看到的 `state=2` 正是**成功**标志（之前的 3 是 stop/deinit 路径）。
+另外它说明"顺手复位成 0"是多余的，已改成不干预。
+
+### §1609–§1611 校准数据里的 MAC
+`esp_phy_calibration_data_t` 首字段是 `mac[6]`（IDF 也是这么做的）。
+实测我们写进去的是 `c7 02 00 00` —— 不是真 MAC：
+- ROM 的 `ets_efuse_get_mac` 没按我们的签名填缓冲；
+- 库的 `esp_phy_efuse_get_mac`（直接读 `0x60007044/48`）读回同样无效；
+- 补了 efuse 外设时钟也没用。
+⇒ 这两个 efuse 寄存器在当前配置下不可信。好在这不影响校准：
+  `register_chipv7_phy` 第一次返回 1（CHECK_FAIL）、**重试返回 0**
+  ⇒ 校准实际已完成。
+
+### §1612 纠正一处误读（重要）
+`[tx] ... irq=N` 里的 `irq` 是 **`g_s3_diag[10]`（MAC 中断挂起计数）**，
+不是 ISR 派发次数（那个是 `diag[8]`）。
+⇒ `irq=0` 的真实含义是 **MAC 从未来过中断**，而不是"派发没跑"。
+先前据此做的 `S3_DRIVE_TOP`/`S3_DRAIN_AFTER_START` 实验都无收益，
+但后者（start 之后无条件派发循环）作为**正确的结构性修复**保留在
+`S3_DRAIN_AFTER_START` 开关里。
+
+## 现状（本会话末）
+```
+[direct] init=0  state=2        ← IC 初始化 + 启动链都与 IDF 一致
+[eb] 0 0 0 0                    ← 事件缓冲一个没用
+[tx] irq=0                      ← MAC 中断一次没来
+```
+四项验收：**AP=0 DHCP=0 TLS=0 body=0**。

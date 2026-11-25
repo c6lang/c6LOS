@@ -2677,13 +2677,38 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
            * 这里打印这个指针的运行时值 —— 若为 0，就说明
            * `esp_wifi_init_internal` 根本没把它建起来。 */
           { extern u32 g_wifi_cfg_blob[];
-            s3_ets_printf("[direct] init=%d b112=%u m112=%u\n",
-                          ri, (unsigned)g_wifi_cfg_blob[28],
-                          (unsigned)*(volatile u32 *)(void *)(g_wifi_menuconfig + 112u)); }
+            { extern volatile u32 g_s3_diag[];
+              s3_ets_printf("[direct] init=%d irq=%u state=%u\n",
+                            ri, (unsigned)g_s3_diag[8],
+                            (unsigned)*(volatile u8 *)(void *)(g_ic + 0x1E9)); } }
         }
     }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_DRAIN_AFTER_START
+    /* §1612 ★ 在 start 之后**无条件**跑一段 ISR 派发循环：
+     * `s3_timer_irq` 只在 MAC 中断挂起时屏蔽 intenable 位并置
+     * `g_wifi_isr_pending`，真正的 `s3_wifi_isr_dispatch()` 必须由任务上下文
+     * 调用。此前所有派发点都在 `S3_DRIVE_TOP` 等开关里，实测 `irq=0`
+     * ⇒ 库的 RX 处理一次都没跑。这里直接把这件事做掉。 */
+    {
+        extern volatile u32 g_wifi_isr_pending;
+        extern void s3_wifi_isr_dispatch(void);
+        extern void s3_ets_timer_dispatch(void);
+        extern void s3_delay_advance(u32 ticks);
+        u32 k;
+        for (k = 0u; k < 80u; k++) {
+            u32 ie0 = 0u;
+            g_wifi_isr_pending = 0u;
+            s3_wifi_isr_dispatch();
+            __asm__ __volatile__("rsr %0, intenable" : "=r"(ie0));
+            ie0 |= 1u;
+            __asm__ __volatile__("wsr %0, intenable; rsync" : : "r"(ie0));
+            s3_ets_timer_dispatch();
+            s3_delay_advance(100u);
+        }
+    }
+#endif
     /* §§1128 ★★★★：`esp_wifi_start()` 只是把 `wifi_start_process`
      * 投进 wifi 任务的队列，真正建 `g_ic` 的是**那个任务**。
      * 我们把库任务降到优先级 20（低于初始化任务）后，
