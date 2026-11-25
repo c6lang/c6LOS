@@ -2219,6 +2219,31 @@ int s3_pp_dispatch(u32 d)
  * 指针被码值（如 0x30b）覆盖，直调时解引用小地址当场静默卡死。 */
 #define S3_MSG_START (*(volatile u32 *)0x50001210u)
 
+/* §1715 ★★★★★ **纯 C 深窗口链对照实验（S3_DEPTH_TEST）。**
+ *
+ * 真板 GDB 取证：任何"在深调用链里让出/进库"都会进 `_vec_default` 自旋，
+ * 现场是 `exccause=0x1d`、`excvaddr=0x90119ac0`、`depc=_win_ovf8`，
+ * 帧内 a0 已是垃圾 ⇒ 窗口溢出向量拿到的"上一帧 sp"是错的。
+ * 这里用一条**纯我们自己的 C 递归链**做对照：
+ *   - 能打出 `[deep] ok` ⇒ 深链本身没问题，炸在库边界/我们手写的帧上；
+ *   - 同样卡死     ⇒ 我们的向量/编译 ABI 本身就不满足溢出约定。
+ */
+#ifdef S3_DEPTH_TEST
+__attribute__((noinline, section(".flash.text")))
+int s3_deep(u32 n)
+{
+    volatile u32 pad[4];
+
+    pad[0] = n;
+    pad[1] = n + 0x11u;
+    if (n == 0u) {
+        s3_ets_printf("[deep] ok\n");
+        return 0;
+    }
+    return s3_deep(n - 1u) + (int)pad[1];
+}
+#endif
+
 /* §1704 直调库的 `wifi_start_process`（ppTask 从不消费真消息）。 */
 __attribute__((section(".flash.text")))
 int s3_start_direct(void)
@@ -3278,6 +3303,9 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
     }   /* ← §1604 补回被前面编辑吃掉的一个闭合括号（初始化块） */
     r4 = esp_wifi_start();
     s3_ets_printf("[wifi] start=%d\n", r4);
+#ifdef S3_DEPTH_TEST
+    { extern int s3_deep(u32 n); int d = s3_deep(14u); s3_ets_printf("[deep] r=%d\n", d); }
+#endif
 #ifdef S3_START_DIRECT
     /* §1707 直调 `wifi_start_process`（默认关）。
      * 真板：调用能进到库的 start 流程（打出 `mode : null` / `clear blacklist`
