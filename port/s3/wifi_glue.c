@@ -2214,7 +2214,10 @@ int s3_pp_dispatch(u32 d)
 #define S3_ST(n) do { *(volatile u32 *)0x50001FF0u = (u32)(n); } while (0)
 
 /* §1705 起始消息指针放 **RTC**（BSS 已撞栈界，一个 u32 都加不得）。 */
-#define S3_MSG_START (*(volatile u32 *)0x500011F0u)
+/* §1709 注意：码环 `s3_pp_note` 占 0x500011D0..0x500011F3（q[0..8]），
+ * 这里必须避开 —— 曾经写成 0x500011F0 正好是码环最后一格，
+ * 指针被码值（如 0x30b）覆盖，直调时解引用小地址当场静默卡死。 */
+#define S3_MSG_START (*(volatile u32 *)0x50001210u)
 
 /* §1704 直调库的 `wifi_start_process`（ppTask 从不消费真消息）。 */
 __attribute__((section(".flash.text")))
@@ -2222,11 +2225,23 @@ int s3_start_direct(void)
 {
     int r = -99;
 
-    if (S3_MSG_START == 0u) {
-        s3_ets_printf("[startp] msg=0\n");
-        return r;
+    /* §1710 全程只用跨复位阶段标记（不打印，避免打印本身影响判定）：
+     *   31 进入、32 消息为空、33 读到 msg[8]、34 写回 msg[8]=1、
+     *   35 即将调库、36 库函数已返回。 */
+    S3_ST(31u);
+    /* §1712 合法性闸门：DRAM/flash 上的指针都 ≥ 0x3f000000，
+     * 小值一律当"没抓到"处理，绝不拿垃圾指针去解引用。 */
+    if (S3_MSG_START < 0x3f000000u) { S3_ST(32u); return r; }
+    {
+        volatile u8 *m8 = (volatile u8 *)(void *)S3_MSG_START;
+        u8 old8 = m8[8];
+        (void)old8;
+        S3_ST(33u);
+        m8[8] = 1u;
     }
+    S3_ST(35u);
     r = ((int (*)(void *))0x4203bd44u)((void *)S3_MSG_START);
+    S3_ST(36u);
     s3_ets_printf("[startp] r=%d\n", r);
     return r;
 }
@@ -5246,17 +5261,20 @@ int __wrap_pp_post(unsigned int ppq, unsigned int data)
      * 这两个消息本来由 ppTask 处理，而 ppTask 从不运行 ⇒ 模式和 STA 配置
      * 从来没生效过。拿到真指针后，我们可以在正确时机（init 之后、start 之前）
      * 直接调它们的处理函数。 */
+    /* §1711 ★★★★★ **start 消息走的是 ppq=7，不是 6**（旧记录 `[pppost] ppq=7`）。
+     * 之前把它限制在 `ppq==6` 里判断，于是从来没捕获到 ⇒ RTC 里是随机值，
+     * 直调时解引用小地址当场静默卡死（跨复位标记 st=31 不再前进）。
+     * 任何队列都看一眼，按消息自带的处理函数指针认 `wifi_start_process`。 */
+    if (data != 0u &&
+        *(volatile u32 *)(void *)(data + 4u) == 0x4203bd44u) {
+        S3_MSG_START = data;
+    }
     if (ppq == 6u && data != 0u) {
         u32 c0 = *(volatile u32 *)(void *)data;
         { extern void s3_pp_note(u32 code); s3_pp_note(c0); }
         if (c0 == 0x30Au) { g_s3_msg_mode = data; }
         else if (c0 == 0x30Bu) { g_s3_msg_cfg = data; }
-        /* §1704 ★ 认 `wifi_start_process`（地址由 `nm` 固定，库是预编译的）：
-         * 这条消息不处理 ⇒ `wifi_hw_start` 从未执行 ⇒ MAC 完全静默
-         * （真板：MAC 中断 0 次、事件寄存器全 0、TX 0 次）。 */
-        if (*(volatile u32 *)(void *)(data + 4u) == 0x4203bd44u) {
-            S3_MSG_START = data;
-        }
+
     }
     /* §1671 这条打印已由 flash 侧的 `[ppd]`（码/处理函数/载荷）取代，
      * 删掉它腾出 IRAM（新增 s3_apply_mode_cfg 调用需要 24 字节）。 */
