@@ -45,6 +45,8 @@
     .literal .Lwt_diag, 0x50001E00
     /* §1735：切换点帧链取证区（8 项 × 8 字节 + 尾 WS/WB）。 */
     .literal .Lchaindump, 0x50001F60
+    /* §1736：yield 壳的链/PS 取证区。 */
+    .literal .Lydump, 0x50001F00
 
 
 /* §934: 手写帧补 [sp-12]=上一帧 sp（_win_unf8 用），a9=当前 sp。 */
@@ -636,12 +638,26 @@ port_task_switch_c0:
      * ⇒ 保留已知可用的**尾跳**形态（a0 = 内核带标签的返回地址、a2 = ctx），
      * 把 spill 放到本体里。此时 16 个寄存器**已经存进帧**（偏移 0..56），
      * spill 会毁的 a4/a8/a10/a11/a12 后面都会从帧里重新取 ⇒ 无害；
-     * a1 下面是自由栈（帧区 [a1, a1+128)），帧链 [a1-12] = 调用者 sp = a1+128。 */
-    addi    a10, a1, 128
+     * a1 下面是自由栈（帧区 [a1, a1+128)），帧链 [a1-12] = 调用者 sp = a1+128。
+     *
+     * §1737 ★★★★★ **先验链再 spill**：§1735 证明 `[sp-12]` 链只有溢出向量会补，
+     * `entry` 不维护 ⇒ 从第二跳起往往是 0。所以这里先读调用者那一跳的链，
+     * 为 0 就**整段跳过**（退回今天的行为，绝不会再写飞地址），
+     * 只有链有效时才真 spill —— 这样这个开关从"必死"变成"能安全落地"。 */
+    addi    a10, a1, 128        /* 调用者 sp = 本帧 + 128 */
+    movi    a12, 3              /* §1739：ring 要转 4 圈 ⇒ 至少验 4 跳链 */
+1:
+    l32i    a11, a10, -12       /* 这一级的链 */
+    beqz    a11, 9f             /* 断了就跳过 spill */
+    bltu    a11, a10, 9f        /* 必须递增（往高地址走） */
+    mov     a10, a11
+    addi    a12, a12, -1
+    bnez    a12, 1b
     addi    a8, a1, -12
     s32i    a10, a8, 0
     mov     a9, a1
     S3_SPILL_ALL
+9:
 #endif
 /* §372：**帧自描述** —— 偏移 76 存"恢复这个帧之后 sp 应该是多少"。
      *
@@ -795,6 +811,7 @@ port_task_switch_c0:
     l32i    a1, a4, 64
     l32r    a14, .Ldbg2
     s32i    a1, a14, 8              /* 恢复出来的目标 sp */
+#ifndef S3_NO_SWITCH_GUARDS
     /* §455：switch 轨迹（环形 8 项）。寄存器纪律同 §452：只用 a8..a10
      * 和 a15（a15 已存进帧的 56 槽，RESTORE_FRAME 会覆盖它）。 */
     l32r    a8, .Lsrail
@@ -807,6 +824,7 @@ port_task_switch_c0:
     s32i    a1, a15, 4              /* 从它恢复出来的 sp */
     addi    a10, a10, 1
     s32i    a10, a9, 0
+#endif /* !S3_NO_SWITCH_GUARDS */
 #ifndef S3_NO_SWITCH_GUARDS
     /* §451 恢复前校验：比 yield 那道闸门更靠前，能抓到**第一次越界恢复**。
      *
@@ -1044,6 +1062,7 @@ port_task_yield_c0:
     l32r    a14, .Ldbg2
     s32i    a4, a14, 16
     s32i    a1, a14, 20
+#ifndef S3_NO_SWITCH_GUARDS
     /* §452：yield 轨迹（环形 8 项）。寄存器纪律：
      *   - 不动 a11/a12（core 号）、a4/a1（闸门和保存都要用）；
      *   - 只用 a8..a10 和 **a15**（a15 已在帧的 56 槽存过，之后
@@ -1058,6 +1077,7 @@ port_task_yield_c0:
     s32i    a1, a15, 4              /* 本项：sp    */
     addi    a10, a10, 1
     s32i    a10, a9, 0              /* 计数自增（不回绕，索引取低 3 位）*/
+#endif /* !S3_NO_SWITCH_GUARDS */
     /* §450 错位闸门：刚写进 `a4` 的那个 sp，必须落在 `a4` 自己记录的栈区间里。
      *
      * §449 的真板实测：`ctx[0]`（wifi 主任务，栈 size=16384）的 `sp` 被写成了
@@ -1129,6 +1149,16 @@ port_task_yield_c0:
 port_task_yield:
     entry   a1, 64
 #ifdef S3_SPILL_SHELL
+#ifdef S3_YIELD_DUMP
+    /* §1736：yield 壳里到底有没有真的做 spill？S3_SPILL_ALL 开头就检查
+     * PS.EXCM，置位时整段**静默跳过**。这里把 a1/[a1-12]/PS 记下来。 */
+    l32r    a8, .Lydump
+    s32i    a1, a8, 0
+    l32i    a9, a1, -12
+    s32i    a9, a8, 4
+    rsr     a9, ps
+    s32i    a9, a8, 8
+#endif
     /* §937: 壳帧自己的 [sp-12] 也必须初始化 —— SPILL_ALL 溢出的第一个窗口
      * 就是当前壳，_win_ovf8 的 `l32e a0,a1,-12` 从这里取"上一帧 sp"。
      * entry a1,64 只改 a1，不写这一格；不补就是垃圾 a9/a0。 */

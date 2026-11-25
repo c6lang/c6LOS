@@ -313,6 +313,22 @@ u32 g_s3_real_scan_msg = 0u;
 /* §1619：截获 scan 请求消息（`esp_wifi_scan_start` 投递，码 5）。
  * 放 flash 助手，IRAM 侧只留一次调用。 */
 __attribute__((section(".flash.text")))
+/* §1738 帧链校验：从当前 a1 出发走两跳，每跳必须"比上一级高、且在栈区"。
+ * 只在 flash（.flash.text）里，切换路径不经过它。 */
+__attribute__((section(".flash.text")))
+int s3_chain_valid(void)
+{
+    u32 sp;
+    u32 l1;
+    u32 l2;
+    __asm__ volatile("mov %0, a1" : "=r"(sp));
+    l1 = *(volatile u32 *)(void *)(sp - 12u);
+    if (l1 <= sp || l1 >= 0x40000000u) { return 0; }
+    l2 = *(volatile u32 *)(void *)(l1 - 12u);
+    if (l2 <= l1 || l2 >= 0x40000000u) { return 0; }
+    return 1;
+}
+
 void s3_cap_scan_msg(u32 d)
 {
     extern u32 g_wifi_cfg_blob[];
@@ -4889,7 +4905,17 @@ void s3_scan_iter(u32 i)
      * 真板：任何 yield/yield_force 从这个深度切走都会毁掉返回地址
      * （194 行即死），而主线程在 `osi_semphr_take` 里阻塞时 ppTask 能
      * 正常被调度并回信号量 ⇒ 安全的是**阻塞**，不是让出。 */
-    { extern int os_task_delay(u32 ticks); (void)os_task_delay(1u); }
+    /* §1738 ★★★★★ **只在帧链有效时让出**。
+     * §1735：`[sp-12]` 链只有溢出向量补、`entry` 不维护，所以从某些深度切走时
+     * 切换器做不了整圈 spill ⇒ 无 spill 的恢复必然踩坏别的窗口（195 行即死）。
+     * 这里在让出前先走一跳链：本帧 `[a1-12]` 必须是"调用者 sp"、且它那一格
+     * 也必须是非零栈地址。链断了就**不切**（继续跑，只是不给 ppTask 机会），
+     * 链有效才真阻塞 —— 让出从此不可能把板子搞死。 */
+    {
+        extern int s3_chain_valid(void);
+        extern int os_task_delay(u32 ticks);
+        if (s3_chain_valid() != 0) { (void)os_task_delay(1u); }
+    }
 #endif
     c[13] = 5u;
 }
