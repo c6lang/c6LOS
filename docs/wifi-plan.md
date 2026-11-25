@@ -37239,3 +37239,24 @@ s8i    a8, a4, 0         ; ← 崩在这条：a4=0x102 被当指针
 真板只有一条 `[q] 200 8`（事件队列，8 字节 = event_base+event_id，正确）。
 ⇒ 库经 `_queue_create` 只建了一个队列，pp 队列走的是别的槽位；
 `size` 没有被我们弄错，问题更可能在**消息内容/派发**而非截断。
+
+### §1728 ★★★★★ 深链让出崩溃的机理已锁定：`port_task_switch` 那条路没有 spill
+
+`RESTORE_FRAME` 的策略是"被切走的任务写回它**自己保存的** WINDOWSTART 原值"，
+这个策略只有在"切走时窗口内容已全部落到栈上"时才成立。现状对比：
+
+| 入口 | 形态 | spill |
+|---|---|---|
+| `port_task_yield` | `entry a1,64` + `call8`（§1725 已改） | **有**（`S3_SPILL_SHELL`，已实测能跑） |
+| `port_task_switch` | `j port_task_switch_c0` **尾跳**（§885） | **没有** |
+
+⇒ 深链让出（`os_task_delay(1)` → `os_task_block_wait` → 调度器 → `port_task_switch`）
+走的正是**没有 spill 的那条**，于是保存下来的 WS 是 `0x54`（窗口 2/4/6 都标着
+live），而这三个窗口的物理寄存器早被别的任务踩过 ⇒ 恢复后库里读到的
+`a4` 是别人的残留值（真板 = `0x102`），`s8i a8,a4,0` 写飞 ⇒ 双重异常。
+
+**下一步（唯一正确做法）**：把 `port_task_switch` 的 windowed 壳从
+"`j port_task_switch_c0` 尾跳"改成与 yield 完全对称的
+`entry a1,64` + 帧链 + `S3_SPILL_ALL` + `call8` 本体 + `retw`。
+之后保存的 WS 恒为"单窗口 live"，`RESTORE_FRAME` 写回原值才是安全的。
+（`port_task_switch_c0` 本体不动，它已经是"用 a1 工作"的形态。）
