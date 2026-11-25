@@ -2041,6 +2041,15 @@ int s3_apply_mode_cfg(void *cfg)
         s3_ets_printf("[scfg] r=%d\n", rc);
     }
 #endif
+    /* §1676 应用 mode 之后立刻回读关键字节：`g_ic+0x245` 若变成非 0，
+     * `wifi_hw_start` 就会走进 `j 4203b199` 的自旋死循环。 */
+    {
+        extern unsigned char g_ic[];
+        s3_ets_printf("[pre] m245=%u m246=%u st=%u\n",
+                      (u32)*(volatile unsigned char *)(void *)(g_ic + 0x245u),
+                      (u32)*(volatile unsigned char *)(void *)(g_ic + 0x246u),
+                      (u32)*(volatile unsigned char *)(void *)(g_ic + 0x1E9u));
+    }
     return r;
 }
 
@@ -2097,10 +2106,25 @@ void s3_ic_mode_bits(void *cfg)
 {
     extern unsigned char g_ic[];
     volatile unsigned char *b;
+#ifdef S3_IC_POKE
+    /* §1677 实验证明：**不要**手写这两个字节。`g_ic+0x246` 置 1 会让
+     * `wifi_hw_start` 走 "log + 跳过 ic_set_interrupt_handler" 的路径
+     * （m246 为 0 才走安装 MAC ISR 的正常路径），置 `+0x245` 会进自旋死循环。
+     * 正确做法是让库自己的 `wifi_set_mode_process` 去设，这里只在
+     * `S3_IC_POKE` 打开时保留旧实验代码。 */
     b = (volatile unsigned char *)(void *)(g_ic + 0x246u);
     if ((*b & 1u) == 0u) { *b = (unsigned char)(*b | 1u); }
-    b = (volatile unsigned char *)(void *)(g_ic + 0x245u);
-    if (*b == 0u) { *b = 1u; }
+#else
+    b = (volatile unsigned char *)(void *)(g_ic + 0x246u);
+    (void)b;
+#endif
+    /* §1675 ★★★★★ **`g_ic+0x245` 绝对不能写！**
+     * 反汇编 `wifi_hw_start`：
+     *   a10 = *(u8*)(g_ic+0x245)
+     *   bbc a10, a2, 0x4203b19c   ; 该位**为 0** 才走正常路径
+     *   ……否则先 wifi_log 再 `4203b199: j 4203b199` = **自旋死循环**
+     * 真板实测：把它置 1 后启动就停在这一步（行数 196→134）。
+     * 只保留 `+0x246` 的 STA 位（那个才是决定是否安装 MAC ISR 的）。 */
 #ifdef S3_MSG_PROCESS
     /* §1674 与"置 IC 位图"合并成同一个 flash 助手（同一时机：init 之后、
      * start 之前），IRAM 只需**一个**调用点，省下 8 字节。 */
