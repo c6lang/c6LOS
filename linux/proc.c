@@ -2176,8 +2176,8 @@ u64 lx_proc_sysinfo(u64 ubuf)
      * totalswap=64 / freeswap=72；procs(u16)=80。 */
     {
         u64 uptime = port_cycles() / 1000000000ull;
-        u64 totalram = 24576ull * 1024ull;
-        u64 freeram = 12288ull * 1024ull;
+        u64 totalram = port_phys_total_kb() * 1024ull;
+        u64 freeram = port_phys_free_kb() * 1024ull;
         u64 field[3];
         u64 f;
 
@@ -2192,6 +2192,9 @@ u64 lx_proc_sysinfo(u64 ubuf)
         }
     }
     si[80] = 1u; si[81] = 0u;                   /* procs (u16) */
+    /* mem_unit (u32 @104)：sysinfo 的所有内存字段都以它为倍率；必须为 1，
+     * 否则 libc 算出来是 0 或错误值。 */
+    si[104] = 1u; si[105] = 0u; si[106] = 0u; si[107] = 0u;
     for (i = 0ull; i < 112ull; i++) {
         *(u8 *)(ubuf + i) = si[i];
     }

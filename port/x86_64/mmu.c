@@ -6,11 +6,14 @@
  * 地址空间布局（docs/linux-abi.md §3）：
  *   PML4[0]   : 低半区。0..4MB = 内核（identity, supervisor），
  *               4MB..1GB = 用户区（4KB 页，按需建表）
- *   PML4[256] : 直接映射窗口 0xFFFF8000_00000000 → 物理 0..1GB（2MB 页, NX）
+ *   PML4[256] : 直接映射窗口 0xFFFF8000_00000000 → 物理 0..8GB
+ *               （2MB 页；E820 usable 用 WB，PCI hole/MMIO 用 UC）
  *
  * 为什么需要直接映射窗口：页表自身也住在物理页里，内核必须能读写它们；
  * 而用户区会占用 4MB 以上的虚拟地址，所以不能再靠 identity 访问物理内存。
  * 直接把物理内存挂到 PML4[256]（Linux 用同样的位置）是代价最小的做法。
+ * G0：QEMU -m 3072 的一部分 RAM 在 4GB 以上的 E820 条目，DMAP 必须覆盖到
+ * 8GB，且 1GB 以上的 RAM 不能像 PCI hole 那样用 UC 映射。
  */
 
 #define PAGE_SZ   4096ull
@@ -40,8 +43,11 @@
 
 /* ---- 物理帧分配器 ------------------------------------------------------ */
 
-#define PMM_MAX_FRAMES 262144ull          /* 1GB / 4KB */
-static u8  g_bmp[PMM_MAX_FRAMES / 8u];    /* 32KB，1 = 已占用 */
+#define PMM_MAX_FRAMES (8ull * 1024ull * 1024ull * 1024ull / PAGE_SZ) /* 8GB / 4KB */
+/* 位图 256KB。内核镜像必须整体留在 0xA0000 以下，不能放 .bss，放到 1MB 处
+ * （0x100000..0x140000，落在 KERNEL_RESERVED_END=4MB 内，stage1 已 identity 映射）。 */
+#define PMM_BITMAP_PA 0x100000ull
+static u8 *g_bmp = (u8 *)PMM_BITMAP_PA;
 /* 每帧引用计数：一个页框可以同时是父子地址空间的映射、页缓存的内容，只有最后
  * 一个引用消失才能回 free list。表不能放 .bss：内核必须整体留在 0xA0000 以下
  * （0xA0000-0xFFFFF 是 VGA/BIOS 空洞，写进去就是写设备寄存器，QEMU 会直接
@@ -49,7 +55,8 @@ static u8  g_bmp[PMM_MAX_FRAMES / 8u];    /* 32KB，1 = 已占用 */
  * NULL = 表还没建好（或没放下）：此时退化为"立即回收"，早期页表页从不共享。 */
 static u8 *g_ref;
 static u64 g_ref_bytes;                   /* 表覆盖多少字节（= 1 byte/frame） */
-static u64 g_frames;                      /* 已纳入管理的帧数上界 */
+static u64 g_frames;                      /* 最高可用帧号（分配扫描上界） */
+static u64 g_total_frames;                /* E820 usable 帧总数（MemTotal 口径） */
 static u64 g_free;
 static u64 g_rover = 4ull;                /* 从 4MB 起分配 */
 
@@ -73,6 +80,7 @@ static void pmm_init(void)
     }
     g_free = 0;
     g_frames = 0;
+    g_total_frames = 0;
 
     for (i = 0; i < n; i++) {
         u64 base = E820_ENTRY(E820_TABLE, i);
@@ -86,8 +94,8 @@ static void pmm_init(void)
         }
         s = (base + PAGE_SZ - 1ull) & ~(PAGE_SZ - 1ull);
         e = base + len;
-        if (e > 0x40000000ull) {
-            e = 0x40000000ull;            /* 直接映射窗口只覆盖 1GB */
+        if (e > (PMM_MAX_FRAMES << 12)) {
+            e = PMM_MAX_FRAMES << 12;     /* 管理到 8GB；更高的 RAM 暂不纳入 */
         }
         e &= ~(PAGE_SZ - 1ull);
         while (s + PAGE_SZ <= e) {
@@ -95,6 +103,7 @@ static void pmm_init(void)
             if (f >= 4ull && f < PMM_MAX_FRAMES && bmp_get(f)) {
                 bmp_clr(f);
                 g_free++;
+                g_total_frames++;
             }
             s += PAGE_SZ;
         }
@@ -107,6 +116,9 @@ static void pmm_init(void)
         if (!bmp_get(k)) {
             bmp_set(k);
             g_free--;
+            if (g_total_frames > 0ull) {
+                g_total_frames--;
+            }
         }
     }
 
@@ -268,7 +280,7 @@ void port_phys_reserve(u64 pa, u64 bytes)
     }
 }
 
-u64 port_phys_total_kb(void) { return (g_frames * PAGE_SZ) / 1024ull; }
+u64 port_phys_total_kb(void) { return (g_total_frames * PAGE_SZ) / 1024ull; }
 u64 port_phys_free_kb(void)  { return (g_free * PAGE_SZ) / 1024ull; }
 
 /* ---- 页表 -------------------------------------------------------------- */
@@ -444,41 +456,69 @@ static u64 build_as(void)
     return pml4;
 }
 
-/* 直接映射窗口：物理 0..4GB 出现在 0xFFFF8000_00000000，NX。
- * 0..1GB 是普通内存（cache 打开）；1..4GB 是 PCI/MMIO 空洞，用 2MB 页
- * 按 UC（PCD|PWT）映射——e1000 的 BAR 落在 0xFExxxxxx，就是靠这一段访问的。 */
+/* E820 中 [pa, pa+2MB) 是否完整落在一条 usable 区间里。用于决定 DMAP
+ * 的 2MB 页是 WB（普通 RAM）还是 UC（PCI hole/MMIO）。 */
+static int dmap_page_is_ram(u64 pa)
+{
+    u32 i;
+    u32 n = E820_COUNT;
+
+    if (pa < 0x100000ull) {
+        return 1;                          /* 低 1MB：内核/BIOS 数据，按 RAM 处理 */
+    }
+    if (n > 32u) {
+        n = 32u;
+    }
+    for (i = 0u; i < n; i++) {
+        u64 base = E820_ENTRY(E820_TABLE, i);
+        u64 len  = E820_ENTRY(8u + E820_TABLE, i);
+        u32 type = (u32)E820_ENTRY(16u + E820_TABLE, i);
+
+        if (type != 1u) {
+            continue;
+        }
+        if (pa >= base && (pa + 0x200000ull) <= (base + len)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 直接映射窗口：物理 0..8GB 出现在 0xFFFF8000_00000000，NX。
+ * 每个 2MB 页按 E820 选内存类型：usable RAM 用 WB（cache 开），
+ * PCI hole/MMIO 用 UC（PCD|PWT）——e1000 的 BAR 落在 0xFExxxxxx，
+ * VBE LFB 也在这一段，靠 UC 访问；1GB 以上的 RAM 不能再按 UC 映射，否则
+ * 内核访问高内存会奇慢并与用户 WB 映射形成内存类型别名。 */
 static u64 build_dmap(void)
 {
     u64 pdpt = alloc_frame_zero();
-    u64 pd = alloc_frame_zero();
     u64 *p3;
-    u64 *p2;
     u32 i;
     u32 gb;
 
-    if (pdpt == 0ull || pd == 0ull) {
+    if (pdpt == 0ull) {
         return 0ull;
     }
     p3 = tbl(pdpt);
-    p3[0] = pd | PTE_P | PTE_W;
-    p2 = tbl(pd);
-    for (i = 0; i < 512u; i++) {
-        p2[i] = ((u64)i * 0x200000ull) | PTE_P | PTE_W | PTE_PS | PTE_NX;
-    }
-    for (gb = 1u; gb < 4u; gb++) {
+    for (gb = 0u; gb < 8u; gb++) {
         u64 pdg = alloc_frame_zero();
         u64 base;
         u64 *p2g;
 
         if (pdg == 0ull) {
-            break;
+            return 0ull;
         }
         base = (u64)gb * 0x40000000ull;
         p3[gb] = pdg | PTE_P | PTE_W;
         p2g = tbl(pdg);
         for (i = 0; i < 512u; i++) {
-            p2g[i] = (base + ((u64)i * 0x200000ull)) |
-                     PTE_P | PTE_W | PTE_PS | PTE_NX | PTE_PCD | PTE_PWT;
+            u64 pa = base + ((u64)i * 0x200000ull);
+            u64 flags = PTE_P | PTE_W | PTE_PS | PTE_NX;
+
+            if (!dmap_page_is_ram(pa)) {
+                flags |= PTE_PCD | PTE_PWT;
+            }
+            p2g[i] = pa | flags;
         }
     }
     g_dmap_pdpt = pdpt;

@@ -36,6 +36,7 @@ TLS 1.2/HTTPS 客户端）仍在推进，记录见 docs/wifi-plan.md。
 | [docs/vfs-net-design.md](docs/vfs-net-design.md) | M9/M10 设计与施工记录：VFS/romfs/ramfs/FAT、SAL/ARP/IPv4/UDP/TCP/e1000 |
 | [docs/m11-docker-iso-design.md](docs/m11-docker-iso-design.md) | M11：docker 镜像 → 可引导 ISO → 虚拟机运行（可读写数据盘、LiteOS 接口优先） |
 | [docs/oci-microvm-design.md](docs/oci-microvm-design.md) | OCI 镜像 → 微虚机 + runtime shim（变现主线：bzImage 壳、virtio、`docker run --runtime=c6r`、containerd shim v2） |
+| [docs/linux-abi-gui-chrome.md](docs/linux-abi-gui-chrome.md) | Linux ABI GUI 与 Chrome：fb0/evdev 设备层、kiosk 与最小 Wayland 合成器、Chrome 所需 syscall 缺口、G0–G8 TDD 里程碑 |
 
 ## 已知硬件（实测）
 

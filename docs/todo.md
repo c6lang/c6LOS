@@ -366,6 +366,32 @@ T 线（linux-abi-complete）决定"镜像里的程序能跑多远"，O 线决�
 | 明确不做 | **WiFi/BLE、硬件编解码(VPU)、NPU、ISP(3A)** 四项：需厂商固件与编译器，即使 Linux 侧也是闭源 `.ko` + 固件 | 写进文档，不再评估 |
 | V8/V9（可选） | Alpine 全量矩阵上板；V9 切方案 A（M-mode 内核、无 OpenSBI） | V0–V8 不退，仅 `port/sg2002` 内变化 |
 
+## Linux ABI GUI + Chrome（G0–G8，设计稿已评审）
+
+设计见 `docs/linux-abi-gui-chrome.md`。目标：在 x86_64 Linux ABI 上让未修改的
+Alpine Chromium 跑起来——先 headless（C1），再 fbdev + kiosk 上屏（C2），最后
+最小 Wayland 合成器（C3/C4）；GPU/WebGL/sandbox/X11 明确不做。
+**TDD 规则：每个里程碑第一个提交只加失败测试（RED），第二个提交实现（GREEN），
+`check-linuxabi-gN` 在实现前必须能在当前树跑出明确的 `FAIL:`；验收数字写提交信息。**
+施工分支：`feat/linux-abi-gui-chrome`（独立于 `main`，全部 G 线测试并入
+`tools/check-linuxabi-all.sh` 后才合并）。
+
+| 编号 | 任务（★ = 测试先行，必须先红） | 产出 | 验收 | 状态 |
+|---|---|---|---|---|
+| G0 运行底座 | ★G0-1 `sysinfo`/`/proc/meminfo` 真实内存（现固定 24 MB）；★G0-2 initramfs 节点 >1024（现 `FS_MAX_FILES=1024` 静默丢弃）；★G0-3 chromium rootfs 加载（现无 chromium）；实现：PMM 支持 8 GB 物理地址空间（E820 含 4 GB 以上、DMAP 按 RAM WB/MMIO UC）、`LxNode` 动态表 + 哈希、第二块 raw cpio 盘 + `os_blkdev`、512 MB `/data`、rootfs init 建 `/dev/shm`/`/run/user/0`、`x86-chrome-rootfs` 目标 | `tests/linux/g0sysinfo.c`、`g0proc.c`、`g0nodes.c`、`tools/check-linuxabi-g0.sh` | `make check-linuxabi-g0`：guest 里 `chromium --version` = 131.x；sysinfo totalram ≥ 2.9 GB；initramfs 节点 >10k | 未开始 |
+| G1 Headless Chromium | ★G1-1 futex 按地址/超时/bitset（现 `lx_futex` 唤醒所有阻塞进程）；★G1-2 memfd_create + MAP_SHARED + fork（现 ENOSYS/私有拷贝）；★G1-3 mremap/madvise（现 ENOSYS/空操作）；★G1-4 文件 mmap 零拷贝（现逐页分配+pread 拷贝）；★G1-5 1 TB PROT_NONE 保留；★G1-6 TCP/SAL 扩容；★G1-7 POSIX 记录锁；★G1-8 `--headless=new --dump-dom`；实现：重写 futex + robust list、`LxShm` + seals + `/proc/self/fd`、`mremap/madvise`、cpio 4 KB 对齐 + 直接映射、procfs 真实 meminfo/cpuinfo/maps（动态缓冲）、prctl comm、ns 级 clock、TCP/SAL socket 扩容、`fcntl` 记录锁 | `tests/linux/g1futex.c`、`g1shm.c`、`g1mremap.c`、`g1filemap.c`、`g1map.c`、`g1sock.c`、`g1fcntl.c`、`tools/check-linuxabi-g1.sh` | `make check-linuxabi-g1`：futex 16 线程/共享内存 fork/mremap 全 PASS；dump-dom 含 `<h1>` | 未开始 |
+| G2 fb0 + evdev | ★G2-1 `/dev/fb0` ioctl+mmap（现 ENOENT）；★G2-2 `/dev/input/event0` read/poll（现 ENOENT）；★G2-3 QEMU `screendump` 像素校验；★G2-4 i8042 `sendkey` 收到 KEY_A；实现：`OsFileOps`+`LxDev`、fb0（FBIOGET_VSCREENINFO/FSCREENINFO/FBIOBLANK + `C6FBIOFLUSH`）、`PTE_DEV`/UC 映射、evdev 环形队列、x86 VBE 模式、i8042 IRQ1/IRQ12 | `tests/linux/g2fb.c`、`g2evdev.c`、`tools/check-linuxabi-g2.sh`、`port/x86_64/fb.c` | `make check-linuxabi-g2`：色块像素校验 + KEY_A | 未开始 |
+| G3 kiosk：Chrome→fb0（C2） | ★G3-1 CDP NUL-JSON/base64 单元（`tests/host/t_cdp.c`）；★G3-2 JPEG 解码单元；★G3-3 端到端 screencast；实现：`user/c6chrome-display`（`--remote-debugging-pipe`、Page.startScreencast、Input.dispatch*）、evdev→CDP 输入映射、Chrome 生命周期管理 | `user/c6chrome-display.c`、`tests/host/t_cdp.c`、`tools/check-linuxabi-g3.sh` | `make check-linuxabi-g3`：screendump 页面中心为预期色；sendkey 后变色 | 未开始 |
+| G4 最小 Wayland 合成器 | ★G4-1 `wl_demo` 客户端连不上 socket（现无合成器）；★G4-2 surface commit/frame callback；★G4-3 screendump 像素；实现：`user/c6wl`（自包含 Wayland wire protocol，不链接 libwayland-server/pixman；wl_compositor/wl_shm/wl_output/wl_seat/xdg_shell）、自写 ARGB 合成、fb0 后端、evdev 输入、`XDG_RUNTIME_DIR`/socket | `user/c6wl/*`、`tests/linux/wl_demo.c`、`tools/check-linuxabi-g4.sh` | `make check-linuxabi-g4`：wl_demo 纯色 + 移动方块像素校验 | 未开始 |
+| G5 Chrome on Wayland（C3/C4） | ★G5-1 Chrome `--ozone-platform=wayland` 启动；★G5-2 sendkey/mouse 输入；★G5-3 30 min 长稳 + RSS；实现：Chrome Wayland 适配、合成器兼容、V8/renderer 内存调优 | `tools/check-linuxabi-g5.sh`、`tools/check-linuxabi-g5-long.sh` | `make check-linuxabi-g5`：窗口显示 + 输入改 DOM + 30 min 无崩溃、RSS 回基线 ±10% | 未开始 |
+| G6 性能收口 | ★G6 基线脚本先输出超标数字；实现：文件 mmap 零拷贝命中率 >90%、启动 ≤60 s、首帧 ≤30 s、Chrome 常驻 ≤1.5 GB、TCP 256 socket 压测 | `tools/perf-linuxabi-g6.sh` | `make perf-linuxabi-g6` 全阈值达标 | 未开始 |
+| G7 DRM/KMS（可选） | `/dev/dri/card0` + dumb buffer + ADDFB2/SETCRTC/PAGE_FLIP；只作为合成器后端，不做 Chrome ozone-drm/GBM/EGL | `user/c6wl` DRM 后端、`tools/check-linuxabi-g7.sh` | `make check-linuxabi-g7`：page-flip 不撕裂 | 未开始 |
+| G8 S3/MaixCam 复用（可选） | 把 fb0/evdev 的 `OsFileOps` 接到 `port/s3/panel.c`（RGB565、`C6FBIOFLUSH`）；仅裸机 GUI / MaixCam rv64 ABI，Chrome 不上 S3 | `port/s3/fb.c`、`tests/linux`（板级） | 屏上 fb0 写像素 + `t_s3_gui` 等价用例 | 未开始 |
+
+依赖：G0 → G1；G2 可与 G1 并行；G3 依赖 G1+G2；G4 依赖 G2；G5 依赖 G4；
+G6 在 G1/G3/G5 之后；G7/G8 独立可砍。详细任务拆分、ABI 结构、代码证据见
+`docs/linux-abi-gui-chrome.md` §3–§8。
+
 ## 风险与依赖
 
 | 风险 | 影响 | 缓解 |

@@ -13,11 +13,11 @@
  * 任何 Linux 都能生成（`find | cpio -o -H newc`），L4 的 ld.so/libc.so 直接
  * 从宿主拷进来即可。目录语义只做只读 + 扁平表，L5 的写路径留给 tmpfs。 */
 
-/* 全量 Alpine minirootfs 有 518 个 cpio 成员（目录 + 文件 + 符号链接），
- * 原来的 64 只够放一个小镜像；1024 给发行版根文件系统留够余量。
- * LxNode 88 字节，1024 项 = 88KB，全部落在 .bss 里（不占载荷）。 */
-#define FS_MAX_FILES 1024u
-#define FS_NAME      96u
+/* 全量 Alpine minirootfs 有 518 个 cpio 成员（目录 + 文件 + 符号链接）；
+ * Chromium rootfs 预计 >10k 个节点。节点表从 1024 起步、按需翻倍，
+ * 不再有 FS_MAX_FILES 编译期硬上限（旧实现超过 1024 会静默丢弃）。 */
+#define FS_INIT_NODES 1024u
+#define FS_NAME       96u
 /* 符号链接最多跟几层。Alpine 的 /etc/ssl1.1/certs -> /etc/ssl/certs 与
  * /etc/ssl/certs 之间互相指向，必须有上限，否则解析会转圈。 */
 #define FS_LINK_MAX  8u
@@ -30,8 +30,41 @@ typedef struct {
     u8  *ram_data;                         /* M57：运行时节点的数据（非 0 时优先于 off） */
 } LxNode;
 
-static LxNode g_node[FS_MAX_FILES];
-static u32    g_nodes;
+static LxNode *g_node;
+static u32     g_node_cap;
+static u32     g_nodes;
+
+/* 保证节点表至少有 need 个槽；保留已有内容，失败返回 -1。 */
+static int node_reserve_(u32 need)
+{
+    u32 ncap;
+    u32 i;
+    LxNode *p;
+
+    if (need <= g_node_cap) {
+        return 0;
+    }
+    ncap = (g_node_cap == 0u) ? FS_INIT_NODES : g_node_cap;
+    while (ncap < need) {
+        if (ncap > 0x40000000u) {
+            return -1;
+        }
+        ncap <<= 1;
+    }
+    p = (LxNode *)port_kcalloc((u64)ncap, sizeof(LxNode));
+    if (p == (LxNode *)0) {
+        return -1;
+    }
+    for (i = 0u; i < g_nodes; i++) {
+        p[i] = g_node[i];
+    }
+    if (g_node != (LxNode *)0) {
+        port_kfree(g_node);
+    }
+    g_node = p;
+    g_node_cap = ncap;
+    return 0;
+}
 /* 单进程载荷（L2–L4）在 lx_proc_init 之前就会 open：那段时间用这张兜底表，
  * 进程登记后 proc.c 会 lx_fs_set_fdtab() 换成进程自己的动态表。 */
 static LxFdTab *g_fdtab;
@@ -270,7 +303,10 @@ int lx_fs_init(u64 pa, u64 len)
 #endif
                 return 0;                              /* TRAILER!!! */
             }
-            if (g_nodes < FS_MAX_FILES) {
+            if (node_reserve_(g_nodes + 1u) != 0) {
+                return -1;
+            }
+            {
                 const char *s = strip_(nm);
                 u64 n = slen_(s);
 
@@ -503,7 +539,7 @@ static int node_add_(const char *name, u32 mode, const u8 *data, u64 size)
 {
     u32 i;
 
-    if (g_nodes >= FS_MAX_FILES || name[0] == '\0') {
+    if (name[0] == '\0' || node_reserve_(g_nodes + 1u) != 0) {
         return -1;
     }
     for (i = 0u; name[i] != '\0' && i < FS_NAME - 1u; i++) {
@@ -1049,9 +1085,16 @@ static u32 pnum_(char *b, u32 off, u64 v)
 static u32 proc_meminfo_(char *b)
 {
     u32 o = 0u;
+    u64 total = port_phys_total_kb();
+    u64 freekb = port_phys_free_kb();
 
-    o = pcat_(b, o, "MemTotal:       24576 kB\nMemFree:        12288 kB\n"
-                    "MemAvailable:   16384 kB\nBuffers:            0 kB\n"
+    o = pcat_(b, o, "MemTotal:       ");
+    o = pnum_(b, o, total);
+    o = pcat_(b, o, " kB\nMemFree:        ");
+    o = pnum_(b, o, freekb);
+    o = pcat_(b, o, " kB\nMemAvailable:   ");
+    o = pnum_(b, o, freekb);
+    o = pcat_(b, o, " kB\nBuffers:            0 kB\n"
                     "Cached:          2048 kB\nSwapTotal:             0 kB\n"
                     "SwapFree:              0 kB\n");
     return o;
@@ -1083,10 +1126,10 @@ static u32 proc_cpuinfo_(char *b)
 
     o = pcat_(b, o, "processor\t: 0\nvendor_id\t: c6os\n"
                     "model name\t: c6os x86-64 Linux ABI\n"
-                    "cpu MHz\t\t: 1000.000\nflags\t\t: fpu tsc\n"
-                    "processor\t: 1\nvendor_id\t: c6os\n"
-                    "model name\t: c6os x86-64 Linux ABI\n"
-                    "cpu MHz\t\t: 1000.000\nflags\t\t: fpu tsc\n");
+                    "cpu MHz\t\t: 1000.000\n"
+                    "flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep "
+                    "mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss "
+                    "syscall nx lm constant_tsc pni ssse3 sse4_1 sse4_2\n");
     return o;
 }
 

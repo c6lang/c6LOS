@@ -1069,7 +1069,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf g0 g0n fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -1124,7 +1124,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf g0 g0n fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1403,6 +1403,31 @@ APP_ELF := $(X86)/app.elf
 $(APP_ELF): $(APP_C)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+# ---- G0：真实内存/procfs（TDD 先红；-m 3072 下 totalram ≥ 2.9GB）----
+G0_SRC := tests/linux/g0sysinfo.c
+G0_ELF := $(X86)/g0sysinfo.elf
+
+$(G0_ELF): $(G0_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# G0-3：1500 个 initramfs 节点（超过旧 1024 上限）
+G0N_SRC  := tests/linux/g0nodes.c
+G0N_ELF  := $(X86)/g0nodes.elf
+G0N_ROOT := $(X86)/g0nroot
+G0N_IMG  := $(X86)/g0n.img
+
+$(G0N_ELF): $(G0N_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(G0N_IMG): $(G0N_ELF) tools/mk-initramfs.py
+	@rm -rf $(G0N_ROOT)
+	@mkdir -p $(G0N_ROOT)/bin
+	@cp $(G0N_ELF) $(G0N_ROOT)/bin/g0nodes
+	@i=0; while [ $$i -lt 1500 ]; do : > $(G0N_ROOT)/f`printf '%04d' $$i`; i=$$((i+1)); done
+	python3 tools/mk-initramfs.py $@ $(G0N_ROOT)
 
 # ---- L3：initramfs（newc cpio）+ 文件语义 ----
 LS_SRC := tests/linux/ls.c
@@ -2688,6 +2713,14 @@ x86-elf: caps-check-x86
 	X86S_NAME=elf X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
 		$(MAKE) $(X86)/elf-disk.img
 
+x86-g0: caps-check-x86
+	X86S_NAME=g0 X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/g0-disk.img
+
+x86-g0n: caps-check-x86
+	X86S_NAME=g0n X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/g0n-disk.img
+
 run-x86-elf: x86-elf
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
@@ -2700,6 +2733,23 @@ check-linuxabi-l2: x86-elf
 		| grep -q "hi from an unmodified Linux x86-64 ELF" \
 	  && echo "PASS: linux-abi L2（未修改的 Linux 静态 ELF 在 ring3 跑通）" \
 	  || { echo "FAIL: linux-abi L2"; exit 1; }
+
+# G0：PMM 8GB / DMAP E820 / sysinfo / procfs / 动态节点表
+check-linuxabi-g0: x86-g0 x86-g0n
+	@set -e; \
+	 log=$$(mktemp /tmp/check-g0.XXXXXX.log); \
+	 timeout 120 qemu-system-x86_64 -m 3072 \
+		-drive format=raw,file=$(X86)/g0-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $$log || true; \
+	 grep -q "^PASS: g0sysinfo" $$log || { echo "FAIL: linuxabi-g0 (sysinfo)"; tail -30 $$log; exit 1; }; \
+	 log2=$$(mktemp /tmp/check-g0n.XXXXXX.log); \
+	 timeout 120 qemu-system-x86_64 -m 512M \
+		-drive format=raw,file=$(X86)/g0n-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $$log2 || true; \
+	 grep -q "^PASS: g0nodes" $$log2 || { echo "FAIL: linuxabi-g0 (nodes)"; tail -30 $$log2; exit 1; }; \
+	 echo "PASS: linuxabi-g0（sysinfo/procfs 真实内存 + 1500 节点；-m 3072）"
 
 $(X86S_DIR)/stage2.elf: $(X86)/stage2.o $(X86S_OBJ) port/x86_64/stage2.ld
 	ld -m elf_x86_64 -static -T port/x86_64/stage2.ld -o $@ \
@@ -2726,6 +2776,15 @@ ifeq ($(X86S_NAME),elf)
 DISK_DEPS  := $(APP_ELF)
 DISK_MB    := 4
 DISK_APP   = dd if=$(APP_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),g0)
+DISK_DEPS  := $(G0_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(G0_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),g0n)
+DISK_DEPS  := $(G0N_ELF) $(G0N_IMG)
+DISK_MB    := 8
+DISK_APP   = dd if=$(G0N_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none; \
+             dd if=$(G0N_IMG) of=$@ bs=512 seek=4096 conv=notrunc status=none
 else ifeq ($(X86S_NAME),fs)
 DISK_DEPS  := $(LS_ELF) $(FS_IMG)
 DISK_MB    := 16
