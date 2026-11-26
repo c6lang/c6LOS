@@ -1259,7 +1259,7 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
 | G1 futex/memfd | **PASS（单元）** | `make check-linuxabi-g1` | 16 线程 futex、seals、mremap/madvise、1 TB PROT_NONE；`chromium --dump-dom` 仍 SIGSEGV（见 D.4） |
 | G2 fb0/evdev | **PASS** | `make check-linuxabi-g2` | 800×600 VBE screendump 0x112233；1280×800 扫描缓冲 |
 | G3 CDP 显示 | **部分** | `make check-linuxabi-g3` / `make check-linuxabi-g0-rootfs` | host Chromium pipe → PNG → 像素 PASS；guest `chromium --version` PASS；guest CDP 显示仍 SIGSEGV |
-| G4 Wayland | **部分** | `make check-linuxabi-g4` | 自包含 `c6wl` + `wl_demo`，wl_shm/xdg_shell/帧回调/合成像素 PASS；输入和 Chrome 兼容性未完成 |
+| G4 Wayland | **PASS（guest+host）** | `make check-linuxabi-g4` / `check-linuxabi-g4-guest` | 自包含 `c6wl` + `wl_demo`；客户机 800×600 screendump 绿色方块/红底 PASS；输入已接 |
 | G5 Chrome on Wayland | **未开始** | — | host Chromium 能连上 c6wl（server 日志 `client connected`），但无 surface/帧 |
 | G6 性能 | **未开始** | — | — |
 | G7 DRM/KMS | **未开始**（可选） | — | — |
@@ -1271,8 +1271,10 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
   `docs/screenshots/g2-fb0-800x600.png`；
 - G3 宿主 Chromium CDP（`Page.screencastFrame` PNG 解码后）：
   `docs/screenshots/g3-cdp-chrome-host-1280x661.png`；
-- G4 `c6wl` + `wl_demo`（红底 + 第三帧绿色方块）：
-  `docs/screenshots/g4-c6wl-demo-1280x800.png`。
+- G4 宿主 `c6wl` + `wl_demo`（红底 + 第三帧绿色方块）：
+  `docs/screenshots/g4-c6wl-demo-1280x800.png`；
+- G4 客户机 `c6g4demo`（clone 服务线程 + wl_demo）写 fb0 后 VBE screendump：
+  `docs/screenshots/g4-guest-800x600.png`。
 
 说明见 `docs/screenshots/README.md`。G2 最初只写 3 个孤立像素，截图看起来是
 黑的；`g2dev` 已改为先铺红/绿/蓝/黄四色带再落断言像素。
