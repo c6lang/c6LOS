@@ -123,6 +123,9 @@ static const char kScript[] =
  * 脚本刻意覆盖六件事：往终端写、读内核信息、遍历目录、写 /data 再读回、
  * 挂载点 chdir（cd /data，cd 以前只认 initramfs 扁平表）、df -h 列出 /data。 */
 static const char kScript[] =
+    "mkdir -p /run/user/0 /dev/shm; "
+    "chmod 700 /run/user/0; "
+    "export XDG_RUNTIME_DIR=/run/user/0; "
     "echo alpine-M12-alive; "
     "uname -a; "
     "ls /; "

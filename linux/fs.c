@@ -304,6 +304,10 @@ int lx_fs_init(u64 pa, u64 len)
                 if (LOS_FsMount("", "/tmp", "ramfs", (VOID *)0) != 0) {
                     return -1;
                 }
+                /* Chrome / Wayland 的硬前置：/dev/shm 与 XDG_RUNTIME_DIR 必须
+                 * 存在且可写；都挂 ramfs，目录由 rootfs init 建。 */
+                (void)LOS_FsMount("", "/dev/shm", "ramfs", (VOID *)0);
+                (void)LOS_FsMount("", "/run", "ramfs", (VOID *)0);
 #endif
                 return 0;                              /* TRAILER!!! */
             }
