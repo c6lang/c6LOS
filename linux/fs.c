@@ -33,6 +33,9 @@ typedef struct {
     u32  hidden;                           /* 1 = 不参与路径查找（memfd） */
     u32  seals;                            /* memfd 的 F_SEAL_* 集合 */
     u64  cap;                              /* ram_data 的容量（按页/8 对齐） */
+    u64  ram_pa;                           /* 页对齐物理基址（ram_data 的 DMAP 源） */
+    u32  ram_pages;
+    u32  ram_pad;
     u8  *ram_data;                         /* M57：运行时节点的数据（非 0 时优先于 off） */
 } LxNode;
 
@@ -436,6 +439,28 @@ static int norm_(const char *in, char *out, u64 cap)
     return 0;
 }
 
+/* mmap(MAP_SHARED) 用：返回 memfd/ramfs 节点数据的页对齐物理基址。 */
+int lx_fs_shared_pa(u64 fd, u64 off, u64 len, u64 *out_pa, u64 *out_pages)
+{
+    LxFile *f = lx_fdtab_get(lx_cur_proc() ? lx_cur_proc()->fd : (LxFdTab *)0, fd);
+
+    if (f == (LxFile *)0 || f->kind != LX_FD_FILE || f->node >= (u64)g_nodes) {
+        return -1;
+    }
+    if (g_node[f->node].ram_pa == 0ull || (off & 4095ull) != 0ull) {
+        return -1;
+    }
+    if (len == 0ull) {
+        len = 4096ull;
+    }
+    if (off + len > g_node[f->node].cap) {
+        return -1;
+    }
+    *out_pa = g_node[f->node].ram_pa + off;
+    *out_pages = (len + 4095ull) >> 12;
+    return 0;
+}
+
 /* M57：节点数据统一访问 —— 运行时节点用 ram_data，固件 cpio 节点走物理映射。 */
 static const u8 *node_data_(u32 i);
 
@@ -561,10 +586,21 @@ static int node_add_(const char *name, u32 mode, const u8 *data, u64 size)
     g_node[g_nodes].name[i] = '\0';
     g_node[g_nodes].mode = mode;
     g_node[g_nodes].size = size;
-    g_node[g_nodes].ram_data = (u8 *)port_kmalloc(size > 0ull ? size : 1ull);
-    if (g_node[g_nodes].ram_data == (u8 *)0) {
-        g_node[g_nodes].name[0] = '\0';
-        return -1;
+    {
+        u64 np = (size + 4095ull) >> 12;
+        u64 pa = 0ull;
+        if (np == 0ull) np = 1ull;
+        pa = port_phys_alloc_pages(np);
+        if (pa == 0ull) {
+            g_node[g_nodes].name[0] = '\0';
+            return -1;
+        }
+        g_node[g_nodes].ram_pa = pa;
+        g_node[g_nodes].ram_pages = (u32)np;
+        g_node[g_nodes].ram_data = (u8 *)port_phys_map(pa);
+        for (u64 k = 0ull; k < np * 4096ull; k++) {
+            g_node[g_nodes].ram_data[k] = 0u;
+        }
     }
     g_node[g_nodes].cap = size;
     g_node[g_nodes].writable = 0u;
@@ -596,18 +632,26 @@ static int node_ram_grow_(u32 idx, u64 need)
         }
         ncap <<= 1;
     }
-    p = (u8 *)port_kcalloc(ncap, 1ull);
-    if (p == (u8 *)0) {
-        return -1;
-    }
-    if (g_node[idx].ram_data != (u8 *)0 && g_node[idx].size != 0ull) {
-        u64 k;
-        u64 n = (g_node[idx].size < ncap) ? g_node[idx].size : ncap;
-
-        for (k = 0ull; k < n; k++) {
-            p[k] = g_node[idx].ram_data[k];
+    {
+        u64 np = (ncap + 4095ull) >> 12;
+        u64 pa = port_phys_alloc_pages(np);
+        if (pa == 0ull) {
+            return -1;
         }
-        port_kfree(g_node[idx].ram_data);
+        p = (u8 *)port_phys_map(pa);
+        for (u64 k = 0ull; k < np * 4096ull; k++) p[k] = 0u;
+        if (g_node[idx].ram_data != (u8 *)0 && g_node[idx].size != 0ull) {
+            u64 k;
+            u64 n = (g_node[idx].size < ncap) ? g_node[idx].size : ncap;
+            for (k = 0ull; k < n; k++) p[k] = g_node[idx].ram_data[k];
+        }
+        if (g_node[idx].ram_pa != 0ull) {
+            for (u64 k = 0ull; k < (u64)g_node[idx].ram_pages; k++) {
+                port_phys_put(g_node[idx].ram_pa + k * 4096ull);
+            }
+        }
+        g_node[idx].ram_pa = pa;
+        g_node[idx].ram_pages = (u32)np;
     }
     g_node[idx].ram_data = p;
     g_node[idx].cap = ncap;

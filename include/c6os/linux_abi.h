@@ -460,6 +460,7 @@ u64  lx_fs_lseek(u64 fd, u64 off, u64 whence);
 u64  lx_fs_fstat(u64 fd, u64 ustat);
 u64  lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags);
 u64  lx_fs_statx(u64 dirfd, u64 upath, u64 flags, u64 ustatx);
+int  lx_fs_shared_pa(u64 fd, u64 off, u64 len, u64 *out_pa, u64 *out_pages);
 u64  lx_fs_copy_file_range(u64 fd_in, u64 uoff_in, u64 fd_out,
                            u64 uoff_out, u64 len, u64 flags);
 u64  lx_fs_fallocate(u64 fd, u64 mode, u64 off, u64 len);

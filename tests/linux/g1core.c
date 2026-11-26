@@ -77,6 +77,7 @@ static void fill(unsigned char *p, int n, int seed)
 int main(void)
 {
     int fd;
+    int fd2;
     unsigned char buf[64];
     unsigned char *p;
     int i;
@@ -84,6 +85,8 @@ int main(void)
     void *huge;
     void *m;
     void *m2;
+    unsigned char *sh1;
+    unsigned char *sh2;
 
     fd = memfd_create("g1memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     CHECK(fd >= 0);
@@ -122,6 +125,27 @@ int main(void)
         CHECK(pread(fd, buf, 1, 0) == 1);
         CHECK(buf[0] == 7);                /* 私有映射不反写文件 */
         CHECK(munmap(p, 4096) == 0);
+    }
+
+    /* 两个独立的 MAP_SHARED mmap 必须看到同一批物理页（Wayland wl_shm /
+     * Chrome 共享内存的最小语义）。此前 sys_mmap2 对文件一律私有拷贝。 */
+    fd2 = memfd_create("g1shm", 0);
+    CHECK(fd2 >= 0);
+    if (fd2 >= 0) {
+        CHECK(ftruncate(fd2, 4096) == 0);
+        sh1 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0);
+        sh2 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0);
+        CHECK(sh1 != MAP_FAILED);
+        CHECK(sh2 != MAP_FAILED);
+        if (sh1 != MAP_FAILED && sh2 != MAP_FAILED) {
+            sh1[0] = 0x5a;
+            sh2[4095] = 0xa5;
+            CHECK(sh2[0] == 0x5a);
+            CHECK(sh1[4095] == 0xa5);
+            CHECK(munmap(sh1, 4096) == 0);
+            CHECK(munmap(sh2, 4096) == 0);
+        }
+        close(fd2);
     }
 
     /* 1TB PROT_NONE：只占地址空间，不占物理页；munmap 必须快速返回。 */

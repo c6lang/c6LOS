@@ -345,6 +345,24 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
             return (u64)rc;
         }
         dev_map = 1;
+    } else if ((vf & LX_VM_SHARED) != 0u &&
+               (flags & LX_MAP_ANONYMOUS) == 0ull) {
+        u64 spa = 0ull;
+        u64 spages = 0ull;
+        /* MAP_SHARED 的 memfd：直接映射同一批页；以前按 MAP_PRIVATE 拷一份，
+         * Wayland/Chrome 的 shm 客户端写像素服务端永远看不到。 */
+        if (lx_fs_shared_pa(fd, off, n, &spa, &spages) == 0) {
+            u64 k;
+            for (k = 0ull; k < spages; k++) {
+                if (port_as_map(g_as, at + k * 4096ull, spa + k * 4096ull,
+                                4096ull, perm | C6OS_PROT_SHARED) != 0) {
+                    return neg(LX_ENOMEM);
+                }
+                port_phys_ref(spa + k * 4096ull);
+            }
+        } else {
+            return neg(LX_EINVAL);
+        }
     } else if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
         /* 惰性：只记账，第一次访问由 #PF 补零页（M13-2b-3）。malloc 的 arena、
          * 线程栈这类大 mmap 不再一上来就把物理页吃光。 */
