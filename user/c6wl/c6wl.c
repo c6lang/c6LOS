@@ -55,6 +55,7 @@ static int g_input_fd = -1;
 static uint32_t g_pointer_id;
 static uint32_t g_keyboard_id;
 static uint32_t g_surface_id;
+static int g_fd_pending = -1;
 static int g_ptr_x = 640;
 static int g_ptr_y = 400;
 static int g_fd = -1;
@@ -478,9 +479,15 @@ static void dispatch(uint32_t oid, uint16_t opcode, Reader *r, int fd)
             uint32_t id = r_u32(r);
             uint32_t size = r_u32(r);
             WlObj *p = obj_new(id, C6WL_T_SHM_POOL, o->id);
+            if (fd < 0 && g_fd_pending >= 0) {
+                fd = g_fd_pending;
+                g_fd_pending = -1;
+            }
             if (p) {
                 p->fd = fd;
                 p->fd_size = size;
+            } else if (fd >= 0) {
+                close(fd);
             }
         }
         break;
@@ -736,6 +743,7 @@ static int client_read_(void)
     for (cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
         if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
             memcpy(&fd, CMSG_DATA(cm), sizeof(int));
+            g_fd_pending = fd;
         }
     }
     {

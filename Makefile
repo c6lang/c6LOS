@@ -1069,7 +1069,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf g0 g0n g1 g1f g2 fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome,$(X86S_NAME)),)
+ifneq ($(filter user elf g0 g0n g1 g1f g2 fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome g4,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -1082,7 +1082,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome g4,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o $(X86S_DIR)/obj/fwcfg.o
@@ -1125,7 +1125,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf g0 g0n g1 g1f g2 fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw chrome,$(X86S_NAME)),)
+ifneq ($(filter elf g0 g0n g1 g1f g2 fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw chrome g4,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1466,6 +1466,37 @@ $(G4_ELF): $(G4_SRC) user/c6wl/wire.h
 $(WL_DEMO_ELF): $(WL_DEMO_SRC) user/c6wl/wire.h
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+C6G4_SRC := user/c6g4demo.c
+C6G4_ELF := $(X86)/c6g4demo.elf
+G4_ROOT := $(X86)/g4root
+G4_CPIO := $(X86)/g4.cpio
+G4_ISO  := $(X86)/g4.iso
+G4_KER  := $(X86)/g4/flat.bin
+
+$(C6G4_ELF): $(C6G4_SRC) $(G4_SRC) $(WL_DEMO_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -fno-stack-protector -pthread -Dmain=c6wl_main -c -o $(X86)/c6wl_srv.o $(G4_SRC)
+	gcc -static -Os -fno-stack-protector -pthread -Dmain=wl_main -c -o $(X86)/wl_cli.o $(WL_DEMO_SRC)
+	gcc -static -Os -fno-stack-protector -pthread -o $@ $(C6G4_SRC) $(X86)/c6wl_srv.o $(X86)/wl_cli.o -lpthread
+
+$(G4_ROOT)/bin/busybox: $(ALPINE_ROOT)/bin/busybox $(C6G4_ELF)
+	@rm -rf $(G4_ROOT)
+	@mkdir -p $(G4_ROOT)
+	cp -a $(ALPINE_ROOT)/. $(G4_ROOT)/
+	cp $(C6G4_ELF) $(G4_ROOT)/usr/bin/c6g4demo
+	@touch $(G4_ROOT)/bin/busybox
+
+$(G4_CPIO): $(G4_ROOT)/bin/busybox tools/mk-initramfs.py
+	python3 tools/mk-initramfs.py $@ $(G4_ROOT)
+
+x86-g4guest: caps-check-x86 $(CD0_BIN) $(G4_CPIO)
+	@rm -rf $(X86)/g4
+	@mkdir -p $(X86)/g4
+	$(MAKE) X86S_NAME=g4 X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 \
+		C6OS_VFS=1 C6OS_NET=0 C6_DEFS=-DC6OS_G4=1 $(G4_KER)
+	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(G4_KER) \
+		--rootfs $(G4_CPIO) --rootfs-dst 0x02000000 -o $(G4_ISO)
 
 # ---- G3：CDP 显示客户端（普通静态 Linux ELF；宿主 gcc 链接 zlib）----
 G3_SRC := user/c6chrome-display.c
@@ -2901,6 +2932,9 @@ check-linuxabi-g3:
 
 check-linuxabi-g4:
 	@bash tools/check-linuxabi-g4.sh
+
+check-linuxabi-g4-guest:
+	@bash tools/check-linuxabi-g4-guest.sh
 
 check-linuxabi-g0: x86-g0 x86-g0n
 	@set -e; \

@@ -15,6 +15,7 @@ check-linuxabi-g1
 check-linuxabi-g2
 check-linuxabi-g3
 check-linuxabi-g4
+check-linuxabi-g4-guest
 check-linuxabi-g0-rootfs
 check-linuxabi-l2
 check-linuxabi-l4

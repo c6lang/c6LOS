@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -183,7 +184,14 @@ int main(int argc, char **argv)
     memset(&a, 0, sizeof(a));
     a.sun_family = AF_UNIX;
     strncpy(a.sun_path, sockpath, sizeof(a.sun_path) - 1u);
-    if (connect(g_fd, (struct sockaddr *)&a, sizeof(a)) != 0) die("connect");
+    {
+        int try;
+        for (try = 0; try < 2000; try++) {
+            if (connect(g_fd, (struct sockaddr *)&a, sizeof(a)) == 0) break;
+            sched_yield();
+        }
+        if (try == 2000) die("connect");
+    }
 
     /* 1. registry */
     o = 0; put_u32(b, &o, 2u);

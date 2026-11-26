@@ -310,6 +310,28 @@ static const OsFileOps g_fb_ops = {
     (void (*)(struct LxOsFile *))0,
 };
 
+static void vbe_bringup_(void)
+{
+    u16 id;
+
+    __asm__ __volatile__("outw %0, %1" : : "a"((u16)0u), "Nd"((u16)0x1CEu));
+    __asm__ __volatile__("inw %1, %0" : "=a"(id) : "Nd"((u16)0x1CFu));
+    if (id < 0xB0C0u || id > 0xB0C5u) return;
+#define VBE_SET(I, V) do { \
+        u16 __i = (u16)(I); u16 __v = (u16)(V); \
+        __asm__ __volatile__("outw %0, %1" : : "a"(__i), "Nd"((u16)0x1CEu)); \
+        __asm__ __volatile__("outw %0, %1" : : "a"(__v), "Nd"((u16)0x1CFu)); \
+    } while (0)
+    VBE_SET(1u, 800u); VBE_SET(2u, 600u); VBE_SET(3u, 32u);
+    VBE_SET(6u, 800u); VBE_SET(7u, 600u); VBE_SET(4u, 0x41u);
+    *(volatile u32 *)0x7080u = 0x42463643u;
+    *(volatile u32 *)0x7084u = 0xFD000000u;
+    *(volatile u32 *)0x7088u = 800u;
+    *(volatile u32 *)0x708Cu = 600u;
+    *(volatile u32 *)0x7090u = 32u;
+    *(volatile u32 *)0x7094u = 3200u;
+}
+
 void lx_fb_init(void)
 {
     u64 pa;
@@ -318,6 +340,7 @@ void lx_fb_init(void)
     if (g_fb.pa != 0ull) {
         return;                            /* 已初始化（幂等） */
     }
+    vbe_bringup_();
     /* boot16.S 的 VBE 探测结果（0x7080）：magic 'C6FB' + PA/宽/高/bpp/行跨度。
      * 有真实 LFB 只用于 C6FBIOFLUSH 的屏幕 blit；fb0 的 ABI 尺寸保持
      * 1280x800（Chrome/Wayland 的稳定目标），不随 QEMU 显示模式变化。 */
