@@ -1069,7 +1069,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf g0 g0n fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf g0 g0n g1 g1f fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -1124,7 +1124,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf g0 g0n fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf g0 g0n g1 g1f fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1411,6 +1411,21 @@ G0_ELF := $(X86)/g0sysinfo.elf
 $(G0_ELF): $(G0_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+# ---- G1：futex 作用域 / memfd+seals / mremap / madvise / 1TB PROT_NONE ----
+G1_SRC := tests/linux/g1core.c
+G1_ELF := $(X86)/g1core.elf
+
+$(G1_ELF): $(G1_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+G1F_SRC := tests/linux/g1futex.c
+G1F_ELF := $(X86)/g1futex.elf
+
+$(G1F_ELF): $(G1F_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $< -lpthread
 
 # G0-3：1500 个 initramfs 节点（超过旧 1024 上限）
 G0N_SRC  := tests/linux/g0nodes.c
@@ -2721,6 +2736,14 @@ x86-g0n: caps-check-x86
 	X86S_NAME=g0n X86S_MAIN=tests/t_x86_fs.c6 LINUX_ABI=1 \
 		$(MAKE) $(X86)/g0n-disk.img
 
+x86-g1: caps-check-x86
+	X86S_NAME=g1 X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/g1-disk.img
+
+x86-g1f: caps-check-x86
+	X86S_NAME=g1f X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/g1f-disk.img
+
 run-x86-elf: x86-elf
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
@@ -2735,16 +2758,32 @@ check-linuxabi-l2: x86-elf
 	  || { echo "FAIL: linux-abi L2"; exit 1; }
 
 # G0：PMM 8GB / DMAP E820 / sysinfo / procfs / 动态节点表
+check-linuxabi-g1: x86-g1 x86-g1f
+	@set -e; \
+	 log=$$(mktemp /tmp/check-g1.XXXXXX.log); \
+	 timeout 30 qemu-system-x86_64 -m 512M \
+		-drive format=raw,file=$(X86)/g1-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $$log || true; \
+	 grep -q "^PASS: g1core" $$log || { echo "FAIL: linuxabi-g1 (core)"; tail -40 $$log; exit 1; }; \
+	 log2=$$(mktemp /tmp/check-g1f.XXXXXX.log); \
+	 timeout 30 qemu-system-x86_64 -m 512M \
+		-drive format=raw,file=$(X86)/g1f-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $$log2 || true; \
+	 grep -q "^PASS: g1futex" $$log2 || { echo "FAIL: linuxabi-g1 (futex)"; tail -40 $$log2; exit 1; }; \
+	 echo "PASS: linuxabi-g1（futex 作用域 + memfd/seals/mremap/madvise/1TB）"
+
 check-linuxabi-g0: x86-g0 x86-g0n
 	@set -e; \
 	 log=$$(mktemp /tmp/check-g0.XXXXXX.log); \
-	 timeout 120 qemu-system-x86_64 -m 3072 \
+	 timeout 30 qemu-system-x86_64 -m 3072 \
 		-drive format=raw,file=$(X86)/g0-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
 		| tr -d '\r' > $$log || true; \
 	 grep -q "^PASS: g0sysinfo" $$log || { echo "FAIL: linuxabi-g0 (sysinfo)"; tail -30 $$log; exit 1; }; \
 	 log2=$$(mktemp /tmp/check-g0n.XXXXXX.log); \
-	 timeout 120 qemu-system-x86_64 -m 512M \
+	 timeout 30 qemu-system-x86_64 -m 512M \
 		-drive format=raw,file=$(X86)/g0n-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
 		| tr -d '\r' > $$log2 || true; \
@@ -2780,6 +2819,14 @@ else ifeq ($(X86S_NAME),g0)
 DISK_DEPS  := $(G0_ELF)
 DISK_MB    := 4
 DISK_APP   = dd if=$(G0_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),g1)
+DISK_DEPS  := $(G1_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(G1_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),g1f)
+DISK_DEPS  := $(G1F_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(G1F_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 else ifeq ($(X86S_NAME),g0n)
 DISK_DEPS  := $(G0N_ELF) $(G0N_IMG)
 DISK_MB    := 8

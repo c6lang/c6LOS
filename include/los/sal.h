@@ -25,7 +25,7 @@
 #define LOS_SAL_IPPROTO_TCP      6
 #define LOS_SAL_IPPROTO_UDP      17
 
-#define LOS_SAL_MAX_SOCKETS      16
+#define LOS_SAL_MAX_SOCKETS      64
 #define LOS_SAL_MAX_PROTOS       4
 
 /* 错误码（与 Linux/POSIX 数值一致，Linux ABI 侧可以直接透传） */

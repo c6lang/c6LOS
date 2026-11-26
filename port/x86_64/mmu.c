@@ -887,6 +887,8 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
     if (as == 0ull) {
         return -1;
     }
+    /* 1TB 的 PROT_NONE 映射 munmap 时不能逐 4KB 空转 2.6 亿次。
+     * 按页表层级跳：PML4/PDPT/PD 缺项时整段（512GB/1GB/2MB）跳过。 */
     while (off < bytes) {
         u64 va = vaddr + off;
         u64 *p4 = tbl(as);
@@ -894,29 +896,51 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
         u64 *p2;
         u64 *p1;
         u64 e;
+        u64 next;
         u32 i;
         int empty = 1;
 
-        off += PAGE_SZ;
-        /* munmap 允许范围里有洞：没有映射就跳过，不算错 */
         if ((p4[IDX4(va)] & PTE_P) == 0ull) {
+            next = (va | ((1ull << 39) - 1ull)) + 1ull;
+            off = next - vaddr;
             continue;
         }
         p3 = tbl(p4[IDX4(va)]);
         if ((p3[IDX3(va)] & PTE_P) == 0ull) {
+            next = (va | ((1ull << 30) - 1ull)) + 1ull;
+            off = next - vaddr;
             continue;
         }
         p2 = tbl(p3[IDX3(va)]);
         if ((p2[IDX2(va)] & (PTE_P | PTE_PS)) != PTE_P) {
+            next = (va | ((1ull << 21) - 1ull)) + 1ull;
+            off = next - vaddr;
             continue;
         }
         p1 = tbl(p2[IDX2(va)]);
-        e = p1[IDX1(va)];
-        if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
-            port_phys_put(e & PTE_ADDR);
+        /* 只处理这个 2MB 窗口里属于 [vaddr,vaddr+bytes) 的 4KB 页。 */
+        {
+            u64 end = vaddr + bytes;
+            u64 win = (va | ((1ull << 21) - 1ull)) + 1ull;
+            u32 last;
+
+            if (win > end) {
+                win = end;
+            }
+            last = IDX1(win - 1ull);
+            for (i = IDX1(va); i <= last; i++) {
+                e = p1[i];
+                if (e == 0ull) {
+                    continue;
+                }
+                if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+                    port_phys_put(e & PTE_ADDR);
+                }
+                p1[i] = 0ull;
+                invlpg((va & ~((1ull << 21) - 1ull)) + ((u64)i << 12));
+            }
+            off = win - vaddr;
         }
-        p1[IDX1(va)] = 0ull;
-        invlpg(va);
         /* 整张 PT 空了就还掉：长期进程反复 mmap/munmap 也不漏页表页 */
         for (i = 0u; i < 512u; i++) {
             if (p1[i] != 0ull) {

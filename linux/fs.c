@@ -27,6 +27,10 @@ typedef struct {
     u64  off;                              /* 数据在 initramfs 物理映像内的偏移 */
     u64  size;
     u32  mode;
+    u32  writable;                         /* 1 = ram_data 可写（memfd/ramfs 节点） */
+    u32  hidden;                           /* 1 = 不参与路径查找（memfd） */
+    u32  seals;                            /* memfd 的 F_SEAL_* 集合 */
+    u64  cap;                              /* ram_data 的容量（按页/8 对齐） */
     u8  *ram_data;                         /* M57：运行时节点的数据（非 0 时优先于 off） */
 } LxNode;
 
@@ -432,7 +436,7 @@ static int fs_find_raw(const char *path)
     u32 i;
 
     for (i = 0; i < g_nodes; i++) {
-        if (seq_(g_node[i].name, path)) {
+        if (g_node[i].hidden == 0u && seq_(g_node[i].name, path)) {
             return (int)i;
         }
     }
@@ -553,6 +557,10 @@ static int node_add_(const char *name, u32 mode, const u8 *data, u64 size)
         g_node[g_nodes].name[0] = '\0';
         return -1;
     }
+    g_node[g_nodes].cap = size;
+    g_node[g_nodes].writable = 0u;
+    g_node[g_nodes].hidden = 0u;
+    g_node[g_nodes].seals = 0u;
     if (size > 0ull && data != (const u8 *)0) {
         u64 k;
         for (k = 0ull; k < size; k++) {
@@ -561,6 +569,40 @@ static int node_add_(const char *name, u32 mode, const u8 *data, u64 size)
     }
     g_node[g_nodes].off = 0ull;
     return (int)g_nodes++;
+}
+
+/* 把 ram_data 扩到至少 need 字节（按 4KB 增长，内容保留）。 */
+static int node_ram_grow_(u32 idx, u64 need)
+{
+    u64 ncap;
+    u8 *p;
+
+    if (need <= g_node[idx].cap) {
+        return 0;
+    }
+    ncap = (g_node[idx].cap == 0ull) ? 4096ull : g_node[idx].cap;
+    while (ncap < need) {
+        if (ncap > 0x40000000ull) {
+            return -1;
+        }
+        ncap <<= 1;
+    }
+    p = (u8 *)port_kcalloc(ncap, 1ull);
+    if (p == (u8 *)0) {
+        return -1;
+    }
+    if (g_node[idx].ram_data != (u8 *)0 && g_node[idx].size != 0ull) {
+        u64 k;
+        u64 n = (g_node[idx].size < ncap) ? g_node[idx].size : ncap;
+
+        for (k = 0ull; k < n; k++) {
+            p[k] = g_node[idx].ram_data[k];
+        }
+        port_kfree(g_node[idx].ram_data);
+    }
+    g_node[idx].ram_data = p;
+    g_node[idx].cap = ncap;
+    return 0;
 }
 
 /* M57：按名字找可写节点（含运行时节点），存在返回下标，否则 -1。 */
@@ -702,6 +744,98 @@ static void fd_set(u64 fd, u64 node, u32 is_dir, u32 kind, u64 flags)
     e->kind = kind;
     e->oflags = (u32)(flags & (u64)(LX_O_ACCMODE | LX_O_APPEND | LX_O_NONBLOCK));
     e->flags = ((flags & (u64)LX_O_CLOEXEC) != 0ull) ? (u32)LX_FD_CLOEXEC : 0u;
+}
+
+/* memfd_create(2)：匿名可写内存文件。节点 hidden=1，没有路径；fd 指向它，
+ * mmap/read/write/pread/pwrite/ftruncate 都按普通文件处理。 */
+u64 lx_fs_memfd_create(const char *name, u32 flags)
+{
+    u64 fd;
+    u32 i;
+    u32 idx;
+
+    if ((flags & ~(u32)(0x0001u | 0x0002u)) != 0u) {  /* MFD_CLOEXEC|ALLOW_SEALING */
+        return (u64)0 - LX_EINVAL;
+    }
+    if (node_reserve_(g_nodes + 1u) != 0) {
+        return (u64)0 - LX_ENOMEM;
+    }
+    idx = g_nodes;
+    for (i = 0u; i < FS_NAME - 1u; i++) {
+        char c = (name != (const char *)0) ? name[i] : 0;
+
+        if (c == '\0') {
+            break;
+        }
+        if (c == '/') {
+            c = '_';
+        }
+        g_node[idx].name[i] = c;
+    }
+    if (i == 0u) {
+        g_node[idx].name[0] = 'm';
+        g_node[idx].name[1] = 'e';
+        g_node[idx].name[2] = 'm';
+        g_node[idx].name[3] = 'f';
+        g_node[idx].name[4] = 'd';
+        g_node[idx].name[5] = '\0';
+        i = 5u;
+    }
+    g_node[idx].name[i] = '\0';
+    g_node[idx].off = 0ull;
+    g_node[idx].size = 0ull;
+    g_node[idx].mode = 0100600u;             /* S_IFREG | 0600 */
+    g_node[idx].writable = 1u;
+    g_node[idx].hidden = 1u;
+    g_node[idx].seals = ((flags & 0x0002u) == 0u) ? 0x0001u : 0u;
+    g_node[idx].cap = 0ull;
+    g_node[idx].ram_data = (u8 *)0;
+    g_nodes++;
+    fd = fd_alloc();
+    if (fd == LX_FD_NONE) {
+        return (u64)0 - LX_EMFILE;
+    }
+    fd_set(fd, (u64)idx, 0u, LX_FD_FILE,
+           ((flags & 0x0001u) != 0u) ? (u64)LX_O_CLOEXEC : 0ull);
+    if (g_fd != (LxFile *)0) {
+        g_fd[fd].oflags = LX_O_RDWR;
+    }
+    return fd;
+}
+
+/* fcntl(F_ADD_SEALS/F_GET_SEALS)：只对 memfd 节点生效。 */
+u64 lx_fs_seals(u64 fd, u32 cmd, u32 seals)
+{
+    LxFile *f = fd_get(fd);
+    u32 idx;
+
+    if (f == (LxFile *)0 || (u32)f->node >= g_nodes) {
+        return (u64)0 - LX_EBADF;
+    }
+    idx = (u32)f->node;
+    if (g_node[idx].hidden == 0u || g_node[idx].writable == 0u) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if (cmd == 1034u) {                      /* F_GET_SEALS */
+        return (u64)g_node[idx].seals;
+    }
+    if (cmd != 1033u) {                      /* F_ADD_SEALS */
+        return (u64)0 - LX_EINVAL;
+    }
+    if ((seals & ~0x001fu) != 0u) {
+        return (u64)0 - LX_EINVAL;
+    }
+    if ((g_node[idx].seals & 0x0001u) != 0u) {   /* F_SEAL_SEAL */
+        return (u64)0 - LX_EPERM;
+    }
+    if ((seals & 0x0001u) != 0u) {
+        g_node[idx].seals |= 0x0001u;
+    }
+    if ((seals & 0x0002u) != 0u && g_node[idx].size != 0ull) {
+        return (u64)0 - LX_EBUSY;
+    }
+    g_node[idx].seals |= seals;
+    return 0ull;
 }
 
 void lx_fs_fd_reset(void)
@@ -1805,6 +1939,45 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
         }
         return len;                                /* /dev/null 等：吞掉 */
     }
+    if (f->kind == LX_FD_FILE && f->node < (u64)g_nodes &&
+        g_node[(u32)f->node].writable != 0u) {
+        u32 idx = (u32)f->node;
+        u64 at = f->pos;
+        u64 end;
+        u64 k;
+
+        if ((f->oflags & LX_O_ACCMODE) == LX_O_RDONLY) {
+            return (u64)0 - LX_EBADF;
+        }
+        if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        if ((f->oflags & LX_O_APPEND) != 0u) {
+            at = g_node[idx].size;
+        }
+        end = at + len;
+        if (end < at) {
+            return (u64)0 - LX_EFBIG;
+        }
+        if ((g_node[idx].seals & 0x0008u) != 0u) {       /* F_SEAL_WRITE */
+            return (u64)0 - LX_EPERM;
+        }
+        if ((g_node[idx].seals & 0x0004u) != 0u &&
+            end > g_node[idx].size) {                    /* F_SEAL_GROW */
+            return (u64)0 - LX_EPERM;
+        }
+        if (node_ram_grow_(idx, end) != 0) {
+            return (u64)0 - LX_ENOMEM;
+        }
+        for (k = 0ull; k < len; k++) {
+            g_node[idx].ram_data[at + k] = *(const u8 *)(ubuf + k);
+        }
+        if (end > g_node[idx].size) {
+            g_node[idx].size = end;
+        }
+        f->pos = end;
+        return len;
+    }
     return (u64)0 - LX_EBADF;
 }
 
@@ -2518,6 +2691,28 @@ u64 lx_fs_ftruncate(u64 fd, u64 len)
 
     if (f == (LxFile *)0 || fd <= 2ull) {
         return (u64)0 - LX_EBADF;
+    }
+    if (f->kind == LX_FD_FILE && f->node < (u64)g_nodes &&
+        g_node[(u32)f->node].writable != 0u) {
+        u32 idx = (u32)f->node;
+
+        if ((g_node[idx].seals & 0x0002u) != 0u && len < g_node[idx].size) {
+            return (u64)0 - LX_EPERM;                  /* F_SEAL_SHRINK */
+        }
+        if ((g_node[idx].seals & 0x0004u) != 0u && len > g_node[idx].size) {
+            return (u64)0 - LX_EPERM;                  /* F_SEAL_GROW */
+        }
+        if (node_ram_grow_(idx, len) != 0) {
+            return (u64)0 - LX_ENOMEM;
+        }
+        if (len > g_node[idx].size) {
+            u64 k;
+            for (k = g_node[idx].size; k < len; k++) {
+                g_node[idx].ram_data[k] = 0u;
+            }
+        }
+        g_node[idx].size = len;
+        return 0ull;
     }
 #if C6OS_VFS
     if (f->kind != LX_FD_VFS || f->node >= LX_VDIR_BASE ||

@@ -17,7 +17,7 @@
 #include "c6os/port.h"
 #include "los/net.h"
 
-#define TCP_MAX_SOCKS   4u
+#define TCP_MAX_SOCKS   64u
 #define TCP_RXBUF       1024u
 #define TCP_MSS         512u
 #define TCP_RETRY_MAX   8u

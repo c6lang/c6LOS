@@ -1190,6 +1190,7 @@ static void reap_peers_(LxProc *self)
 static void thread_exit_(LxProc *c)
 {
     u64 ct = c->clear_tid;
+    u64 key = (c->as << 32) | (ct & 0xffffffffull);
     u32 i;
     int next;
 
@@ -1201,16 +1202,21 @@ static void thread_exit_(LxProc *c)
     c->pid = 0u;
     lx_fdtab_unref(c->fd);                 /* 只放自己那一份，线程组还有别的引用 */
     c->fd = (LxFdTab *)0;
-    /* 组长还持有这个 AS 的引用，所以这里不会把页表拆掉 */
-    port_as_unref(c->as);
-    c->as = 0ull;
+    /* pthread_join 在 clear_child_tid 地址上等；只叫醒这个 futex 的等待者，
+     * 不能像旧实现那样把所有 BLOCK 都改成 READY（会误醒无关的 futex）。 */
     for (i = 0u; i < g_proc_cap; i++) {
         LxProc *q = g_proc[i].p;
 
-        if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+        if (q != (LxProc *)0 && q->state == LX_P_BLOCK &&
+            ct != 0ull && q->wait_kind == LX_WAIT_FUTEX &&
+            q->futex_key == key) {
+            q->futex_key = 0ull;
             q->state = LX_P_READY;
         }
     }
+    /* 组长还持有这个 AS 的引用，所以这里不会把页表拆掉 */
+    port_as_unref(c->as);
+    c->as = 0ull;
     next = pick_next_(g_cur);
     if (next < 0) {
         port_puts("\n[lx] 所有进程都已退出，内核停在这里\n");
@@ -1907,7 +1913,8 @@ static void wake_all_(void)
     for (i = 0u; i < g_proc_cap; i++) {
         LxProc *q = g_proc[i].p;
 
-        if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+        if (q != (LxProc *)0 && q->state == LX_P_BLOCK &&
+            q->wait_kind != LX_WAIT_FUTEX) {
             q->state = LX_P_READY;
         }
     }
@@ -2462,6 +2469,112 @@ u64 lx_proc_dup3(u64 oldfd, u64 newfd, u64 flags)
     return r;
 }
 
+/* M52/G1：POSIX 记录锁。只做进程级、整段/区间冲突检测；同一进程（含线程）
+ * 之间不冲突（Linux 的 fcntl 锁归进程所有）。F_SETLKW 在冲突时先返回
+ * EAGAIN——Chrome 的 profile 锁实际走 F_SETLK + 重试。 */
+typedef struct {
+    u32 used;
+    u32 node;
+    u32 tgid;
+    u32 type;
+    i64 start;
+    i64 len;
+} LxLock;
+
+static LxLock g_locks[128];
+
+static int lock_range_(const LxLock *l, i64 start, i64 len)
+{
+    i64 a0 = l->start;
+    i64 a1 = (l->len == 0) ? (i64)0x7fffffffffffffffLL : l->start + l->len;
+    i64 b1 = (len == 0) ? (i64)0x7fffffffffffffffLL : start + len;
+
+    return (a0 < b1 && start < a1);
+}
+
+static void lock_set_(u32 node, u32 tgid, u32 type, i64 start, i64 len)
+{
+    u32 i;
+
+    for (i = 0u; i < 128u; i++) {
+        if (g_locks[i].used != 0u && g_locks[i].node == node &&
+            g_locks[i].tgid == tgid && lock_range_(&g_locks[i], start, len)) {
+            g_locks[i].used = 0u;
+        }
+    }
+    if (type == 2u) {                         /* F_UNLCK */
+        return;
+    }
+    for (i = 0u; i < 128u; i++) {
+        if (g_locks[i].used == 0u) {
+            g_locks[i].used = 1u;
+            g_locks[i].node = node;
+            g_locks[i].tgid = tgid;
+            g_locks[i].type = type;
+            g_locks[i].start = start;
+            g_locks[i].len = len;
+            return;
+        }
+    }
+}
+
+static u64 fcntl_lock_(LxProc *p, LxFile *fe, u64 cmd, u64 arg)
+{
+    u8 fl[32];
+    u32 i;
+    u32 node = (u32)fe->node;
+    i64 start;
+    i64 len;
+    u32 type;
+
+    if (lx_user_ok(arg, 32ull, (cmd == 5ull) ? C6OS_PROT_W : C6OS_PROT_R) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    if (cmd != 5ull && lx_user_ok(arg, 32ull, C6OS_PROT_W) == 0) {
+        return n_((u64)LX_EFAULT);
+    }
+    for (i = 0u; i < 32u; i++) {
+        fl[i] = *(const u8 *)(arg + i);
+    }
+    type = (u32)(fl[0] | ((u32)fl[1] << 8));
+    start = *(const i64 *)(fl + 8);
+    len = *(const i64 *)(fl + 16);
+    if (cmd == 5ull) {                        /* F_GETLK：只报告别人的锁 */
+        for (i = 0u; i < 128u; i++) {
+            if (g_locks[i].used != 0u && g_locks[i].node == node &&
+                g_locks[i].tgid != p->tgid &&
+                (type == 2u || g_locks[i].type == type) &&
+                lock_range_(&g_locks[i], start, len)) {
+                *(u16 *)(arg + 0ull) = (u16)g_locks[i].type;
+                *(u16 *)(arg + 2ull) = 0u;
+                *(i64 *)(arg + 8ull) = g_locks[i].start;
+                *(i64 *)(arg + 16ull) = g_locks[i].len;
+                *(u32 *)(arg + 24ull) = g_locks[i].tgid;
+                return 0ull;
+            }
+        }
+        *(u16 *)(arg + 0ull) = 2u;            /* F_UNLCK */
+        *(u16 *)(arg + 2ull) = 0u;
+        *(i64 *)(arg + 8ull) = start;
+        *(i64 *)(arg + 16ull) = len;
+        return 0ull;
+    }
+    if (type > 2u) {
+        return n_((u64)LX_EINVAL);
+    }
+    if (type != 2u) {
+        for (i = 0u; i < 128u; i++) {
+            if (g_locks[i].used != 0u && g_locks[i].node == node &&
+                g_locks[i].tgid != p->tgid &&
+                lock_range_(&g_locks[i], start, len)) {
+                return n_((u64)LX_EACCES);
+            }
+        }
+    }
+    lock_set_(node, p->tgid, type, start, len);
+    return 0ull;
+}
+
 /* fcntl：以前一律返回 0（假成功），后果是 O_NONBLOCK / FD_CLOEXEC 全部被丢掉，
  * socketpair 与管道上的非阻塞语义静默失效。这里按 Linux 的 5 条常用命令做真语义。 */
 u64 lx_proc_fcntl(u64 fd, u64 cmd, u64 arg)
@@ -2523,6 +2636,20 @@ u64 lx_proc_fcntl(u64 fd, u64 cmd, u64 arg)
         }
         return r;
     }
+    case 1033ull:                               /* F_ADD_SEALS */
+    case 1034ull:                               /* F_GET_SEALS */
+        if (lx_fdtab_get(p->fd, fd) == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        return lx_fs_seals(fd, (u32)cmd, (u32)arg);
+    case 5ull:                                  /* F_GETLK */
+    case 6ull:                                  /* F_SETLK */
+    case 7ull:                                  /* F_SETLKW */
+        fe = lx_fdtab_get(p->fd, fd);
+        if (fe == (LxFile *)0) {
+            return n_((u64)LX_EBADF);
+        }
+        return fcntl_lock_(p, fe, cmd, arg);
     default:
         return n_((u64)LX_EINVAL);
     }
@@ -4167,14 +4294,31 @@ u64 lx_proc_set_tid_address(u64 ptr)
 /* futex：只用得到 WAIT/WAKE（pthread 的 join/mutex 全靠它）。
  * 协作式调度下"唤醒"一律走全表扫；WAIT 时如果已经没有别的可运行任务就直接
  * 返回（否则会死等一个永远不会来的唤醒，等于把自己挂死）。 */
+/* futex 键：私有映射按"地址空间 + 用户地址"区分，不同进程的同名地址不能
+ * 互相唤醒；同一进程的线程共享 AS，pthread mutex/cond 仍然命中。
+ * 共享映射（MAP_SHARED）本该按物理页做键，当前先退化为 AS+VA —— 等
+ * G1 的 /dev/shm 用例需要跨进程唤醒时再接 port_as_translate。 */
+static u64 futex_key_(LxProc *p, u64 uaddr)
+{
+    return (p->as << 32) | (uaddr & 0xffffffffull);
+}
+
 u64 lx_futex(u64 uaddr, u32 op, u32 val, u64 utime)
 {
     u32 cmd = op & 0x7fu;
     LxProc *p = cur_();
+    u64 key;
 
     (void)utime;
     if (p == (LxProc *)0) {
         return 0ull;
+    }
+    /* FUTEX_WAIT_BITSET(9) / FUTEX_WAKE_BITSET(10) 在 glibc 的 condvar
+     * 实现里会出现；bitset 先按全集处理，val3 不参与匹配。 */
+    if (cmd == 9u) {
+        cmd = 0u;
+    } else if (cmd == 10u) {
+        cmd = 1u;
     }
     if (cmd == 0u) {                       /* FUTEX_WAIT */
         if (lx_user_ok(uaddr, 4ull, C6OS_PROT_R) == 0) {
@@ -4186,17 +4330,24 @@ u64 lx_futex(u64 uaddr, u32 op, u32 val, u64 utime)
         if (!others_live_(g_cur)) {
             return 0ull;
         }
+        key = futex_key_(p, uaddr);
+        p->futex_key = key;
+        lx_proc_set_wait(LX_WAIT_FUTEX);
         lx_proc_block();
+        p->futex_key = 0ull;
         return 0ull;
     }
     if (cmd == 1u) {                       /* FUTEX_WAKE */
         u64 n = 0ull;
         u32 i;
 
+        key = futex_key_(p, uaddr);
         for (i = 0u; i < g_proc_cap && n < (u64)val; i++) {
             LxProc *q = g_proc[i].p;
 
-            if (q != (LxProc *)0 && q->state == LX_P_BLOCK) {
+            if (q != (LxProc *)0 && q->state == LX_P_BLOCK &&
+                q->futex_key == key) {
+                q->futex_key = 0ull;
                 q->state = LX_P_READY;
                 n++;
             }

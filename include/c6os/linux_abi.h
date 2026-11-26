@@ -42,6 +42,20 @@
 #define LX_SYS_mmap            9
 #define LX_SYS_mprotect       10
 #define LX_SYS_munmap         11
+#define LX_SYS_mremap         25
+#define LX_SYS_madvise        28
+#define LX_SYS_memfd_create  319
+/* mremap(2) 标志 */
+#define LX_MREMAP_MAYMOVE      1ull
+#define LX_MREMAP_FIXED        2ull
+/* memfd_create(2) 标志与 F_SEAL_* */
+#define LX_MFD_CLOEXEC         0x0001u
+#define LX_MFD_ALLOW_SEALING   0x0002u
+#define LX_F_SEAL_SEAL         0x0001u
+#define LX_F_SEAL_SHRINK       0x0002u
+#define LX_F_SEAL_GROW         0x0004u
+#define LX_F_SEAL_WRITE        0x0008u
+#define LX_F_SEAL_FUTURE_WRITE 0x0010u
 #define LX_SYS_brk            12
 #define LX_SYS_ioctl          16
 #define LX_SYS_pipe           22
@@ -338,6 +352,7 @@
 
 /* errno（负值返回） */
 #define LX_EPERM   1
+#define LX_EPERM   1
 #define LX_ENOENT  2
 #define LX_EBADF   9
 #define LX_EFAULT  14
@@ -345,6 +360,7 @@
 #define LX_EINVAL  22
 #define LX_ENOSYS  38
 #define LX_ENOTTY  25
+#define LX_EFBIG   27
 #define LX_ENOEXEC 8
 #define LX_ECHILD  10
 #define LX_EAGAIN  11

@@ -370,6 +370,124 @@ static u64 sys_mmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     return sys_mmap2(addr, len, prot, flags, fd, off);
 }
 
+/* mremap(2)：先支持私有匿名映射的缩小/搬移。Chrome 的 allocator 用它扩
+ * malloc arena；真正的原地扩展先保守地走"新映射 + 拷贝 + 撤旧"。 */
+static u64 sys_mremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags,
+                      u64 new_addr)
+{
+    LxVma *v;
+    u64 osz = (old_len + 4095ull) & ~4095ull;
+    u64 nsz = (new_len + 4095ull) & ~4095ull;
+    u64 vf;
+    u32 prot;
+    u64 target;
+    u64 i;
+
+    if (osz == 0ull || nsz == 0ull ||
+        (old_addr & 4095ull) != 0ull) {
+        return neg(LX_EINVAL);
+    }
+    if ((flags & ~(LX_MREMAP_MAYMOVE | LX_MREMAP_FIXED)) != 0ull) {
+        return neg(LX_EINVAL);
+    }
+    if ((flags & LX_MREMAP_FIXED) != 0ull) {
+        if (new_addr == 0ull) {
+            return neg(LX_EINVAL);
+        }
+        new_addr &= ~4095ull;
+    } else if (new_addr != 0ull) {
+        return neg(LX_EINVAL);
+    }
+    v = lx_vma_find(g_as, old_addr);
+    if (v == (LxVma *)0 || old_addr + osz > v->end ||
+        osz > v->end - old_addr) {
+        return neg(LX_EFAULT);
+    }
+    prot = v->prot;
+    vf = v->flags;
+    {
+        u64 old_off = v->file_off;
+
+        if (nsz <= osz) {
+            u64 keep_end = old_addr + nsz;
+
+            if (nsz < osz) {
+                (void)port_as_unmap(g_as, keep_end, osz - nsz);
+            }
+            lx_vma_remove(g_as, old_addr, old_addr + osz);
+            if (lx_vma_add(g_as, old_addr, keep_end, prot, (u32)vf,
+                           old_off) != 0) {
+                return neg(LX_ENOMEM);
+            }
+            return old_addr;
+        }
+    }
+    if ((vf & LX_VM_SHARED) != 0u || (vf & LX_VM_FILE) != 0u) {
+        return neg(LX_ENOMEM);             /* 共享/文件映射暂不搬移 */
+    }
+    if ((flags & LX_MREMAP_MAYMOVE) == 0ull) {
+        return neg(LX_ENOMEM);             /* 没有原地扩展路径 */
+    }
+    if (osz > 0x40000000ull || nsz > 0x40000000ull) {
+        return neg(LX_ENOMEM);             /* 防内核逐字节拷贝把机器拖死 */
+    }
+    target = (flags & LX_MREMAP_FIXED) ? new_addr : 0ull;
+    if (target != 0ull &&
+        !(target + nsz <= old_addr || target >= old_addr + osz)) {
+        return neg(LX_ENOMEM);             /* 重叠：先不支持 */
+    }
+    {
+        u64 at = sys_mmap2(target, nsz, prot, LX_MAP_PRIVATE | LX_MAP_ANONYMOUS |
+                           ((target != 0ull) ? LX_MAP_FIXED : 0ull), ~0ull, 0ull);
+
+        if ((i64)at < 0) {
+            return at;
+        }
+        target = at;
+    }
+    if (lx_vma_fault_range(g_as, target, target + osz,
+                           C6OS_PROT_R | C6OS_PROT_W) != 0) {
+        return neg(LX_ENOMEM);
+    }
+    for (i = 0ull; i < osz; i++) {
+        *(u8 *)(target + i) = *(const u8 *)(old_addr + i);
+    }
+    (void)port_as_unmap(g_as, old_addr, osz);
+    lx_vma_remove(g_as, old_addr, old_addr + osz);
+    return target;
+}
+
+/* madvise(2)：MADV_DONTNEED/MADV_FREE 把私有匿名页还掉并保留 VMA；
+ * 下次访问由缺页处理补零页（VMA 带 LX_VM_LAZY）。 */
+static u64 sys_madvise(u64 addr, u64 len, u64 advice)
+{
+    u64 n = (len + 4095ull) & ~4095ull;
+    LxVma *v;
+
+    if ((addr & 4095ull) != 0ull) {
+        return neg(LX_EINVAL);
+    }
+    if (n == 0ull) {
+        return 0ull;
+    }
+    if (addr + n < addr) {
+        return neg(LX_EINVAL);
+    }
+    v = lx_vma_find(g_as, addr);
+    if (v == (LxVma *)0) {
+        return neg(LX_ENOMEM);
+    }
+    if (advice == 4ull || advice == 8ull) {   /* DONTNEED / FREE */
+        if ((v->flags & LX_VM_SHARED) != 0u ||
+            (v->flags & LX_VM_FILE) != 0u) {
+            return neg(LX_EINVAL);
+        }
+        (void)port_as_unmap(g_as, addr, n > (v->end - addr) ? (v->end - addr) : n);
+        return 0ull;
+    }
+    return 0ull;                              /* NORMAL/WILLNEED/RANDOM/SEQUENTIAL */
+}
+
 static 
 void lx_syscall_do(LxRegs *r)
 {
@@ -1427,6 +1545,21 @@ void lx_syscall_do(LxRegs *r)
         return;
 
     case LX_SYS_madvise:
+        r->rax = sys_madvise(a0, a1, a2);
+        return;
+
+    case LX_SYS_mremap:
+        r->rax = sys_mremap(a0, a1, a2, a3, a4);
+        return;
+
+    case LX_SYS_memfd_create:
+        if (a0 == 0ull || lx_user_ok(a0, 1ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EFAULT);
+        } else {
+            r->rax = lx_fs_memfd_create((const char *)a0, (u32)a1);
+        }
+        return;
+
     case LX_SYS_prctl:
         r->rax = 0ull;                     /* 只影响性能/命名，忽略 */
         return;

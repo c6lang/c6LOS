@@ -177,6 +177,7 @@ typedef struct LxProc {
     u64 fs_base;              /* TLS 基址：切进程时必须跟着换（MSR_FS_BASE 是全局的） */
     u64 set_tid;              /* set_tid_address / clone 的 CLEARTID 地址 */
     u64 clear_tid;
+    u64 futex_key;            /* 阻塞时等的是哪个 futex（地址空间 + 用户地址） */
     u64 sig_mask;                 /* 屏蔽字（bit sig-1） */
     u64 sig_pending;              /* 挂起（bit sig-1） */
     u64 alt_sp;                   /* sigaltstack */
@@ -375,6 +376,8 @@ u64  lx_fs_unlinkat(u64 dirfd, u64 upath, u64 flags);
 u64  lx_fs_renameat(u64 odirfd, u64 oldpath, u64 ndirfd, u64 newpath);
 u64  lx_fs_ftruncate(u64 fd, u64 len);
 u64  lx_fs_truncate(u64 upath, u64 len);
+u64  lx_fs_memfd_create(const char *name, u32 flags);
+u64  lx_fs_seals(u64 fd, u32 cmd, u32 seals);
 u64  lx_fs_chmod(u64 upath, u64 mode);
 u64  lx_fs_chmod_pathat(u64 dirfd, u64 upath, u64 mode);
 u64  lx_fs_statfs(u64 upath, u64 ubuf);          /* x86-64 struct statfs, 120B */
