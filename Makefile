@@ -2526,7 +2526,8 @@ check-linuxabi-g0-rootfs: x86-chrome $(CHROME_DISK)
 	@set -e; \
 	 log=$$(mktemp /tmp/check-chrome.XXXXXX.log); \
 	 set +e; \
-	 timeout 180 qemu-system-x86_64 -m 3072 -cdrom $(CHROME_ISO) -boot d \
+	 accel=""; if [ -r /dev/kvm ]; then accel="-accel kvm -cpu host"; fi; \
+	 timeout 180 qemu-system-x86_64 $$accel -m 3072 -cdrom $(CHROME_ISO) -boot d \
 		-fw_cfg name=opt/c6rootfs,file=$(CHROME_DISK) \
 		-nographic -serial stdio -monitor none -no-reboot 2>&1 | tr -d '\r' > $$log; \
 	 rc=$$?; set -e; \
