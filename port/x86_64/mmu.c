@@ -27,6 +27,8 @@
 /* 软件位：COW 共享页。bit 9-11 硬件不用，正好用来标记"父子共享、写时复制"。
  * 置 COW 时一定同时清 W：写触发 #PF，由 port_pf_resolve 复制出新页。 */
 #define PTE_COW   (1ull << 9)
+#define PTE_DEV   (1ull << 10)   /* MMIO 设备页：不参与 PMM 引用计数/COW */
+#define PTE_SHARED (1ull << 11)  /* 普通共享页：unmap 仍 put，但不 COW */
 #define PTE_ADDR  0x000ffffffffff000ull
 
 #define DMAP_BASE 0xffff800000000000ull
@@ -797,7 +799,8 @@ static void unmap_leaf_(u64 as, u64 va)
     }
     p1 = tbl(e);
     e = p1[IDX1(va)];
-    if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+    if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U) &&
+        (e & PTE_DEV) == 0ull) {
         port_phys_put(e & PTE_ADDR);
     }
     p1[IDX1(va)] = 0ull;
@@ -829,6 +832,12 @@ int port_as_map(u64 as, u64 vaddr, u64 paddr, u64 bytes, u32 prot)
         }
         if ((prot & C6OS_PROT_X) == 0u) {
             leaf |= PTE_NX;
+        }
+        if ((prot & C6OS_PROT_DEV) != 0u) {
+            leaf |= PTE_DEV | PTE_PCD | PTE_PWT;
+        }
+        if ((prot & C6OS_PROT_SHARED) != 0u) {
+            leaf |= PTE_SHARED;
         }
         /* MAP_FIXED：先还掉旧页框，再装新页（否则旧帧永远漏掉） */
         unmap_leaf_(as, va);
@@ -933,7 +942,8 @@ int port_as_unmap(u64 as, u64 vaddr, u64 bytes)
                 if (e == 0ull) {
                     continue;
                 }
-                if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U)) {
+                if ((e & (PTE_P | PTE_U)) == (PTE_P | PTE_U) &&
+                    (e & PTE_DEV) == 0ull) {
                     port_phys_put(e & PTE_ADDR);
                 }
                 p1[i] = 0ull;
@@ -1152,7 +1162,7 @@ int port_as_copy(u64 dst_as, u64 src_as)
                     va = (i4 << 39) | (i3 << 30) | (i2 << 21) | (i1 << 12);
                     pa = e & PTE_ADDR;
                     nf = e;
-                    if ((e & PTE_W) != 0ull) {
+                    if ((e & PTE_DEV) == 0ull && (e & PTE_W) != 0ull) {
                         nf = (e & ~PTE_W) | PTE_COW;
                         p1[i1] = nf;              /* 父进程也变成只读 */
                         invlpg(va);
@@ -1161,7 +1171,9 @@ int port_as_copy(u64 dst_as, u64 src_as)
                               (nf & 0xfffull) | (nf & PTE_NX)) != 0) {
                         return -3;
                     }
-                    port_phys_ref(pa);
+                    if ((e & PTE_DEV) == 0ull) {
+                        port_phys_ref(pa);
+                    }
                 }
             }
         }

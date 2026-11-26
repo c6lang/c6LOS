@@ -72,5 +72,7 @@ i64     lx_dev_mmap(OsFile *f, struct LxVma *vma);
 /* 各设备自己的注册入口；由 lx_dev_init 调用。 */
 void lx_fb_init(void);
 void lx_evdev_init(void);
+/* 真输入驱动（i8042）向 event0 注入事件；无设备构建里由 irq.c 提供弱符号。 */
+void lx_evdev_push(u16 type, u16 code, i32 value);
 
 #endif

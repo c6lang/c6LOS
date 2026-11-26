@@ -178,6 +178,93 @@ void x86_irq_init(void)
     __asm__ __volatile__("sti");
 }
 
+/* ---- i8042 键盘轮询（G2 真输入路径） ------------------------------------
+ * PIC 目前只开 IRQ0；不额外开 IRQ1，而是在 200Hz 定时器里轮询 i8042 的
+ * 输出缓冲。QEMU monitor 的 sendkey 也走同一颗 8042，所以测试既能注入
+ * C6EVIOCINJECT，也能走真实扫描码路径。鼠标字节（status bit5）暂时丢弃。 */
+__attribute__((weak)) void lx_evdev_push(u16 type, u16 code, i32 value)
+{
+    (void)type;
+    (void)code;
+    (void)value;
+}
+
+static u8 g_kbd_shift;
+
+static u16 kbd_map_(u8 sc)
+{
+    switch (sc) {
+    case 0x1C: return 28u;   /* Enter */
+    case 0x1E: return 30u;   /* A */
+    case 0x1F: return 31u;   /* S */
+    case 0x20: return 32u;   /* D */
+    case 0x21: return 33u;   /* F */
+    case 0x22: return 34u;   /* G */
+    case 0x23: return 35u;   /* H */
+    case 0x24: return 36u;   /* J */
+    case 0x25: return 37u;   /* K */
+    case 0x26: return 38u;   /* L */
+    case 0x2C: return 44u;   /* Z */
+    case 0x2D: return 45u;   /* X */
+    case 0x2E: return 46u;   /* C */
+    case 0x2F: return 47u;   /* V */
+    case 0x30: return 48u;   /* B */
+    case 0x31: return 49u;   /* N */
+    case 0x32: return 50u;   /* M */
+    case 0x39: return 57u;   /* Space */
+    case 0x10: return 16u;   /* Q */
+    case 0x11: return 17u;   /* W */
+    case 0x12: return 18u;   /* E */
+    case 0x13: return 19u;   /* R */
+    case 0x14: return 20u;   /* T */
+    case 0x15: return 21u;   /* Y */
+    case 0x16: return 22u;   /* U */
+    case 0x17: return 23u;   /* I */
+    case 0x18: return 24u;   /* O */
+    case 0x19: return 25u;   /* P */
+    default: return 0u;
+    }
+}
+
+void x86_kbd_poll(void)
+{
+    u32 n = 0u;
+
+    while (n < 16u) {
+        u8 st = inb(0x64u);
+        u8 sc;
+
+        if ((st & 0x01u) == 0u) {
+            break;
+        }
+        sc = inb(0x60u);
+        n++;
+        if ((st & 0x20u) != 0u) {
+            continue;                  /* PS/2 鼠标字节 */
+        }
+        if (sc == 0x2Au || sc == 0x36u) {
+            g_kbd_shift = 1u;
+            continue;
+        }
+        if (sc == 0xAAu || sc == 0xB6u) {
+            g_kbd_shift = 0u;
+            continue;
+        }
+        if (sc == 0xE0u || sc == 0xE1u) {
+            continue;                  /* 扩展前缀：第一版忽略 */
+        }
+        {
+            u8 code = (u8)(sc & 0x7Fu);
+            u16 key = kbd_map_(code);
+
+            if (key != 0u) {
+                lx_evdev_push(1u, key, (sc & 0x80u) != 0u ? 0 : 1);
+                lx_evdev_push(0u, 0u, 0);   /* EV_SYN/SYN_REPORT */
+            }
+        }
+    }
+}
+
 u32 port_in_isr(void)
 {
     return g_in_isr;

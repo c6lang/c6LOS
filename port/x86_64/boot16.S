@@ -39,73 +39,95 @@ e820_skip:
     jmp e820_loop
 e820_done:
 
+    /* 单 DAP 循环：每趟 127 扇区（约 63.5KB），从 LBA1 装到 0x10000，
+     * 连续 10 趟覆盖到 0xA0000。以前固定 11 个 DAP 只到 0x4FA00，镜像
+     * 一过 320KB，.data 尾部（g_cur 等）就悄悄没装进来。 */
+    movb $0x10, 0x6000
+    movb $0, 0x6001
+    movw $127, 0x6002
+    movw $0, 0x6004
+    movw $0x1000, 0x6006
+    movl $1, 0x6008
+    movl $0, 0x600C
+    movw $9, 0x6010
+load_loop:
+    movw $0x6000, %si
     movb $0x42, %ah
     movb $0x80, %dl
-    movw $dap1, %si
+    int $0x13
+    jc 1f
+    addw $0x0FE0, 0x6006
+    addl $127, 0x6008
+    decw 0x6010
+    jnz load_loop
+    /* 最后一趟：9 扇区，正好补到 0xA0000（9*127+9=1152 扇区 = 0x90000B）。 */
+    movw $9, 0x6002
+    movw $0x9EE0, 0x6006
+    movl $1144, 0x6008
+    movw $0x6000, %si
+    movb $0x42, %ah
+    movb $0x80, %dl
     int $0x13
     jc 1f
 
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap2, %si
-    int $0x13
-    jc 1f
-
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap3, %si
-    int $0x13
-    jc 1f
-
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap4, %si
-    int $0x13
-    jc 1f
-
-    /* dap5：stage2 增长后镜像越过 0x3FC00（前 4 个 DAP 的上限）。
-     * 继续从 LBA383 读到 0x3FC00，覆盖到 0x4FA00 —— 给 stage2 留出余量。 */
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap5, %si
-    int $0x13
-    jc 1f
-
-    /* dap6..dap11：继续按 64KB 分段装到 0xA0000。内核 .bss 只允许长到
-     * 0xA0000（VGA/BIOS 空洞），引导器也必须真的把镜像送上去；以前只装
-     * 到 0x4FA00，镜像一过 320KB，.data 尾部（g_cur 等）就悄悄没装进来，
-     * 表现为"全局变量变成 0 / 进程表坏了"。 */
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap6, %si
-    int $0x13
-    jc 1f
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap7, %si
-    int $0x13
-    jc 1f
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap8, %si
-    int $0x13
-    jc 1f
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap9, %si
-    int $0x13
-    jc 1f
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap10, %si
-    int $0x13
-    jc 1f
-    movb $0x42, %ah
-    movb $0x80, %dl
-    movw $dap11, %si
-    int $0x13
-    jc 1f
-
+    /* ---- QEMU std VGA 的 Bochs VBE 扩展：设 800x600x32 LFB ----
+     * 0x1CE=index, 0x1CF=data；ID 0xB0C0..0xB0C5 表示支持。失败不致命：
+     * magic 保持 0，内核 /dev/fb0 只做 RAM 扫描缓冲。 */
+    movw $0x1CE, %dx
+    xorw %ax, %ax
+    outw %ax, %dx
+    incw %dx
+    inw %dx, %ax
+    cmpw $0xB0C0, %ax
+    jb vbe_none
+    cmpw $0xB0C5, %ax
+    ja vbe_none
+    movw $1, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $800, %ax
+    outw %ax, %dx
+    movw $2, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $600, %ax
+    outw %ax, %dx
+    movw $3, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $32, %ax
+    outw %ax, %dx
+    movw $6, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $800, %ax
+    outw %ax, %dx
+    movw $7, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $600, %ax
+    outw %ax, %dx
+    movw $4, %ax
+    movw $0x1CE, %dx
+    outw %ax, %dx
+    incw %dx
+    movw $0x41, %ax              /* ENABLED | LFB */
+    outw %ax, %dx
+    movl $0x42463643, 0x7080     /* 'C6FB' */
+    movl $0xFD000000, 0x7084
+    movl $800, 0x7088
+    movl $600, 0x708C
+    movl $32, 0x7090
+    movl $3200, 0x7094
+    jmp vbe_done
+vbe_none:
+    movl $0, 0x7080
+vbe_done:
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -123,64 +145,6 @@ next32:
 1:
     hlt
     jmp 1b
-
-.align 4
-dap1:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x1000
-    .quad 1
-dap2:
-    .byte 0x10, 0
-    .word 120
-    .word 0x0000, 0x1FE0
-    .quad 128
-dap3:
-    .byte 0x10, 0
-    .word 8
-    .word 0x0000, 0x2EE0
-    .quad 248
-dap4:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x2FE0
-    .quad 256
-
-dap5:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x3FC0
-    .quad 383
-dap6:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x4FA0
-    .quad 510
-dap7:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x5F80
-    .quad 637
-dap8:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x6F00
-    .quad 764
-dap9:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x7EE0
-    .quad 891
-dap10:
-    .byte 0x10, 0
-    .word 127
-    .word 0x0000, 0x8DE0
-    .quad 1018
-dap11:
-    .byte 0x10, 0
-    .word 33
-    .word 0x0000, 0x9BE0
-    .quad 1145
 
 .align 8
 gdt:

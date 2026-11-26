@@ -2803,17 +2803,7 @@ check-linuxabi-g1: x86-g1 x86-g1f
 # G2：/dev/fb0（1280x800 XRGB8888，mmap 共享扫描缓冲）+ /dev/input/event0
 # （24B input_event + 注入 + poll）。判定只看串口里测试自己打的 PASS 行。
 check-linuxabi-g2: x86-g2
-	@set -e; \
-	 log=$$(mktemp /tmp/check-g2.XXXXXX.log); \
-	 set +e; \
-	 timeout 60 qemu-system-x86_64 -m 512M \
-		-drive format=raw,file=$(X86)/g2-disk.img,if=ide \
-		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
-		| tr -d '\r' > $$log; \
-	 rc=$$?; \
-	 set -e; \
-	 grep -q "^PASS: g2dev" $$log || { echo "FAIL: linuxabi-g2 (qemu rc=$$rc)"; tail -60 $$log; exit 1; }; \
-	 echo "PASS: linuxabi-g2（fb0 1280x800 XRGB8888 + evdev 动态注入；-m 512M）"
+	@bash tools/check-linuxabi-g2.sh
 
 check-linuxabi-g0: x86-g0 x86-g0n
 	@set -e; \

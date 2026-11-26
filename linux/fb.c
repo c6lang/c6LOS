@@ -105,9 +105,23 @@ typedef struct {
     u64 pa;
     u64 size;
     u8 *kmap;                  /* 直接映射窗口里的内核视图 */
+    u32 is_dev;                /* 1 = MMIO LFB（PTE_DEV），0 = RAM 扫描缓冲 */
+    u32 line;                  /* bytes per scanline */
 } LxFb;
 
+/* boot16 VBE 面板（真实屏幕）。fb0 始终是 1280x800 的 RAM 扫描缓冲；
+ * C6FBIOFLUSH 把脏矩形缩放到这块 LFB 上。 */
+typedef struct {
+    u64 pa;
+    u32 w;
+    u32 h;
+    u32 line;
+    u32 bpp;
+    u8 *kmap;
+} LxPanel;
+
 static LxFb g_fb;
+static LxPanel g_panel;
 
 static void bytes_zero_(u8 *p, u64 n)
 {
@@ -203,11 +217,26 @@ static i64 fb_ioctl_(struct OsFile *f, u32 req, u64 arg)
             return -(i64)LX_EFAULT;
         }
         r = *(const FbRect *)arg;
-        if (r.x >= FB_W || r.y >= FB_H ||
-            r.w > FB_W - r.x || r.h > FB_H - r.y) {
+        if (r.x >= fb->var.xres || r.y >= fb->var.yres ||
+            r.w > fb->var.xres - r.x || r.h > fb->var.yres - r.y) {
             return -(i64)LX_EINVAL;
         }
-        /* 内存帧缓冲没有 GDMA/面板要 blit；S3 驱动在这里调 s3_lcd_blit_rect。 */
+        /* 有 VBE 面板就做一次 32bpp 缩放 blit；没有面板就是纯 RAM 帧缓冲，
+         * flush 是合法的空操作（G2 测试在无显示环境下也走这条）。 */
+        if (g_panel.pa != 0ull && g_panel.bpp == 32u && g_panel.kmap != (u8 *)0) {
+            u32 dy;
+            u32 dx;
+
+            for (dy = 0u; dy < g_panel.h; dy++) {
+                u32 sy = (u32)(((u64)dy * (u64)fb->var.yres) / (u64)g_panel.h);
+                u32 *src = (u32 *)(fb->kmap + (u64)sy * (u64)fb->line);
+                u8 *dst = g_panel.kmap + (u64)dy * (u64)g_panel.line;
+                for (dx = 0u; dx < g_panel.w; dx++) {
+                    u32 sx = (u32)(((u64)dx * (u64)fb->var.xres) / (u64)g_panel.w);
+                    ((u32 *)dst)[dx] = src[sx];
+                }
+            }
+        }
         return 0;
     }
     return -(i64)LX_ENOTTY;
@@ -237,6 +266,20 @@ static i64 fb_mmap_(struct OsFile *f, struct LxVma *vma)
         return -(i64)LX_EINVAL;
     }
     pages = len >> 12;
+    if (fb->is_dev != 0u) {
+        /* MMIO LFB：PTE_DEV 页不参与 PMM 引用计数，unmap 也不 put。 */
+        for (i = 0ull; i < pages; i++) {
+            if (port_as_map(as, vma->start + (i << 12),
+                            fb->pa + (i << 12), 4096ull,
+                            vma->prot | C6OS_PROT_DEV) != 0) {
+                for (j = 0ull; j < i; j++) {
+                    (void)port_as_unmap(as, vma->start + (j << 12), 4096ull);
+                }
+                return -(i64)LX_ENOMEM;
+            }
+        }
+        return 0;
+    }
     /* 先给每页加一份"用户映射"引用：port_as_unmap/AS 销毁时的 put 正好抵消。
      * 驱动自己那一份引用在 lx_fb_init 里由 alloc_pages 建立，永不归还。 */
     for (i = 0ull; i < pages; i++) {
@@ -244,7 +287,8 @@ static i64 fb_mmap_(struct OsFile *f, struct LxVma *vma)
     }
     for (i = 0ull; i < pages; i++) {
         if (port_as_map(as, vma->start + (i << 12),
-                        fb->pa + (i << 12), 4096ull, vma->prot) != 0) {
+                        fb->pa + (i << 12), 4096ull,
+                        vma->prot | C6OS_PROT_SHARED) != 0) {
             for (j = 0ull; j < i; j++) {
                 (void)port_as_unmap(as, vma->start + (j << 12), 4096ull);
             }
@@ -274,6 +318,35 @@ void lx_fb_init(void)
     if (g_fb.pa != 0ull) {
         return;                            /* 已初始化（幂等） */
     }
+    /* boot16.S 的 VBE 探测结果（0x7080）：magic 'C6FB' + PA/宽/高/bpp/行跨度。
+     * 有真实 LFB 只用于 C6FBIOFLUSH 的屏幕 blit；fb0 的 ABI 尺寸保持
+     * 1280x800（Chrome/Wayland 的稳定目标），不随 QEMU 显示模式变化。 */
+    if (*(volatile u32 *)(u64)0x7080u == 0x42463643u) {
+        u32 pw = *(volatile u32 *)(u64)0x7088u;
+        u32 ph = *(volatile u32 *)(u64)0x708Cu;
+        u32 pb = *(volatile u32 *)(u64)0x7090u;
+        u32 pl = *(volatile u32 *)(u64)0x7094u;
+
+        if ((*(volatile u32 *)(u64)0x7084u) != 0u && pw >= 640u && ph >= 480u &&
+            pb == 32u && pl >= pw * 4u) {
+            g_panel.pa = (u64)*(volatile u32 *)(u64)0x7084u;
+            g_panel.w = pw;
+            g_panel.h = ph;
+            g_panel.bpp = pb;
+            g_panel.line = pl;
+            g_panel.kmap = (u8 *)port_phys_map(g_panel.pa);
+            port_puts("fb: VBE panel ");
+            port_putc((int)('0' + (int)(pw / 100u)));
+            port_putc((int)('0' + (int)((pw / 10u) % 10u)));
+            port_putc((int)('0' + (int)(pw % 10u)));
+            port_puts("x");
+            port_putc((int)('0' + (int)(ph / 100u)));
+            port_putc((int)('0' + (int)((ph / 10u) % 10u)));
+            port_putc((int)('0' + (int)(ph % 10u)));
+            port_puts("（C6FBIOFLUSH 缩放输出）\n");
+        }
+    }
+
     pa = port_phys_alloc_pages((u64)FB_PAGES);
     if (pa == 0ull) {
         port_puts("fb: FAIL 扫描缓冲分配失败（需要 4MB 连续物理页）\n");
@@ -282,6 +355,8 @@ void lx_fb_init(void)
     g_fb.pa = pa;
     g_fb.size = (u64)FB_SIZE;
     g_fb.kmap = (u8 *)port_phys_map(pa);
+    g_fb.is_dev = 0u;
+    g_fb.line = FB_LINE;
     /* 分配器不清零：第一次映射不能把上一个进程的残留当像素暴露给用户。 */
     bytes_zero_(g_fb.kmap, (u64)FB_SIZE);
 

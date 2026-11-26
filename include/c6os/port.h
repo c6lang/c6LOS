@@ -154,5 +154,7 @@ u64  port_user_get_fsbase(void);
 #define C6OS_PROT_R 0x1u
 #define C6OS_PROT_W 0x2u
 #define C6OS_PROT_X 0x4u
+#define C6OS_PROT_DEV    0x100u   /* MMIO：PTE_DEV，unmap 不 put、不 COW */
+#define C6OS_PROT_SHARED 0x200u   /* 普通共享页：unmap 仍 put，但不 COW */
 
 #endif

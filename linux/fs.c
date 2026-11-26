@@ -278,6 +278,9 @@ int lx_fs_init(u64 pa, u64 len)
     const u8 *img = (const u8 *)port_phys_map(pa);
     u64 off = 0;
 
+    /* 设备节点（/dev/fb0、/dev/input/event0）与 initramfs 无关，但必须在
+     * 用户程序第一次 open 之前注册好；放在这里保证所有装载路径都覆盖。 */
+    lx_dev_init();
     g_fs_pa = pa;
     g_nodes = 0;
     while (off + 110ull <= len) {

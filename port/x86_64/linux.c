@@ -281,6 +281,10 @@ void x86_timer_dispatch(LxRegs *r)
 {
     (void)r;
     outb_(0x20u, 0x20u);
+    {
+        extern void x86_kbd_poll(void);
+        x86_kbd_poll();
+    }
     lx_sched_preempt();
 }
 

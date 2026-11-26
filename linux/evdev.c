@@ -159,6 +159,24 @@ static u16 ev_poll_(struct OsFile *f, u16 events)
     return 0u;
 }
 
+void lx_evdev_push(u16 type, u16 code, i32 value)
+{
+    LxInputEvent ev;
+
+    if (g_ev.count >= EV_QMAX) {
+        return;
+    }
+    ev.sec = port_wallclock_sec();
+    ev.usec = (port_cycles() / 1000ull) % 1000000ull;
+    ev.type = type;
+    ev.code = code;
+    ev.value = value;
+    g_ev.q[g_ev.tail] = ev;
+    g_ev.tail = (g_ev.tail + 1u) % EV_QMAX;
+    g_ev.count++;
+    lx_proc_wake_all();
+}
+
 static i64 ev_inject_(LxEvdev *e, u64 uarg)
 {
     LxInputEvent ev;
