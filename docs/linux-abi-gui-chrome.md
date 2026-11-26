@@ -1324,6 +1324,8 @@ read-only”，所以验收不再挂那块盘。
 `wl_buffer`/`wl_surface`/`wl_callback`/`wl_output`/`wl_seat`/`wl_pointer`/
 `wl_keyboard`（含 SCM_RIGHTS keymap fd）/`xdg_wm_base`/`xdg_surface`/
 `xdg_toplevel`/`wl_subcompositor`/`wl_data_device_manager` 的最小面。
+输入路径已接：`c6wl` 轮询 `/dev/input/event0`，`EV_REL/EV_KEY` 转成
+`wl_pointer.motion/button`、`wl_keyboard.key`（keymap fd 走 SCM_RIGHTS）。
 为 Chrome 预置了后两个 global，但 Chrome 仍未创建 surface，属于 G5 待办；
 不要把“client connected”当成 C3 通过。
 
