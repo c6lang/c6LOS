@@ -104,6 +104,22 @@ int main(void)
         CHECK(munmap(huge, 1ULL << 40) == 0);
     }
 
+    /* V8 的 32 GB pointer cage 会落在高地址并真实访问；只 mmap 不触碰会漏掉
+     * "高地址 VMA 补页"这条路径。Chrome 崩溃现场就在这种区间里。 */
+    huge = mmap(NULL, 32ULL << 30, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    CHECK(huge != MAP_FAILED);
+    if (huge != MAP_FAILED) {
+        volatile unsigned char *hp = (volatile unsigned char *)huge;
+        hp[0] = 0x5a;
+        hp[1ULL << 30] = 0xa5;
+        hp[(32ULL << 30) - 1ULL] = 0x3c;
+        CHECK(hp[0] == 0x5a);
+        CHECK(hp[1ULL << 30] == 0xa5);
+        CHECK(hp[(32ULL << 30) - 1ULL] == 0x3c);
+        CHECK(munmap(huge, 32ULL << 30) == 0);
+    }
+
     m = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECK(m != MAP_FAILED);
