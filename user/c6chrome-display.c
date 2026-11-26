@@ -691,12 +691,26 @@ static pid_t spawn_chrome(const char *chrome, const char *url,
         return -1;
     }
     if (p == 0) {
-        dup2(cmd[0], 3);
-        dup2(resp[1], 4);
+        /* pipe() 拿到的 fd 很可能就是 3/4；直接 dup2(cmd[0],3) 后在
+         * close(cmd[0]) 里把刚装好的 fd3 关掉，Chrome 会报
+         * "Remote debugging pipe file descriptors are not open"。
+         * 先把两端复制到高位，再装到 3/4。 */
+        int r = fcntl(cmd[0], F_DUPFD, 10);
+        int w = fcntl(resp[1], F_DUPFD, 10);
+        if (r < 0 || w < 0) {
+            _exit(126);
+        }
+        /* 先关原始 pipe fd 再装 3/4：原始 fd 很可能就占着 4，先装后关
+         * 会把刚 dup 到 4 的写端又关掉。 */
         close(cmd[0]); close(cmd[1]); close(resp[0]); close(resp[1]);
+        dup2(r, 3);
+        dup2(w, 4);
+        close(r); close(w);
         execl(chrome, chrome, "--headless=new", "--no-sandbox",
               "--disable-gpu", "--hide-scrollbars",
               "--remote-debugging-pipe", "--remote-allow-origins=*",
+              "--disable-crash-reporter", "--disable-breakpad",
+              "--user-data-dir=/tmp/c6chrome-profile",
               "--window-size=1280,800", url, (char *)NULL);
         _exit(127);
     }
@@ -782,6 +796,7 @@ int main(int argc, char **argv)
     const char *output = NULL;
     int width = 1280, height = 800;
     int self = 0;
+    int max_frames = 0;
     int i;
     int cmd[2], resp[2];
     pid_t child;
@@ -800,6 +815,7 @@ int main(int argc, char **argv)
         else if (strncmp(argv[i], "--output=", 9) == 0) { output = argv[i] + 9; fbpath = ""; }
         else if (strncmp(argv[i], "--width=", 8) == 0) width = atoi(argv[i] + 8);
         else if (strncmp(argv[i], "--height=", 9) == 0) height = atoi(argv[i] + 9);
+        else if (strncmp(argv[i], "--frames=", 9) == 0) max_frames = atoi(argv[i] + 9);
     }
     if (self) {
         uint8_t out[64];
@@ -812,7 +828,7 @@ int main(int argc, char **argv)
         return 0;
     }
     memset(&fb, 0, sizeof(fb));
-    if (fb_open(&fb, fbpath, width, height) != 0 || !fb.mem == 0) {
+    if (fb_open(&fb, fbpath, width, height) != 0) {
         /* fb 打开失败时仍允许 --output 运行 */
         if (!output) {
             die("open fb");
@@ -909,7 +925,8 @@ int main(int argc, char **argv)
                 input_event(&in, &ev[k / (ssize_t)sizeof(ev[0])]);
             }
         }
-        if (frame_count >= 1 && output) {
+        if ((output && frame_count >= 1) ||
+            (max_frames > 0 && frame_count >= max_frames)) {
             break;
         }
     }

@@ -542,6 +542,12 @@ u64 lx_sock_setsockopt(u64 fd, u64 level, u64 optname, u64 uval, u64 optlen)
     if (level != LX_SOL_SOCKET) {
         return (u64)0 - LX_ENOPROTOOPT;
     }
+    /* AF_UNIX 的 fd->node 是内核 Unix 对象 id，不是 SAL socket id；
+     * 不能拿它去调 SalSetSockOpt（会 EBADF）。Crashpad 启动时对
+     * socketpair 设 SO_PASSCRED，这里按“选项存在但不生效”返回成功。 */
+    if (f->kind == LX_FD_UNIX) {
+        return 0ull;
+    }
     (void)optname;                            /* SAL 目前只有一个通用 setopt */
     return lxs_err_(SalSetSockOpt((int)f->node, 0, (const void *)&val, 4u));
 }

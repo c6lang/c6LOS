@@ -44,6 +44,10 @@
 #define LX_SYS_munmap         11
 #define LX_SYS_mremap         25
 #define LX_SYS_madvise        28
+#define LX_SYS_get_mempolicy 239
+#define LX_SYS_rt_tgsigqueueinfo 297
+#define LX_SYS_membarrier    324
+#define LX_SYS_landlock_create_ruleset 444
 #define LX_SYS_memfd_create  319
 /* mremap(2) 标志 */
 #define LX_MREMAP_MAYMOVE      1ull

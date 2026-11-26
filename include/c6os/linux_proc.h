@@ -189,6 +189,7 @@ typedef struct LxProc {
     u32 sig_code[LX_NSIG];
     LxSigAction sa[LX_NSIG];
     char cwd[96];                 /* 当前目录（不带前导 '/'，空串=根）：必须跟进程走 */
+    char exe[128];                /* /proc/self/exe：execve 的真实路径 */
     LxFdTab *fd;                  /* 动态 fd 表：线程组共享，fork 时复制 */
     u32 pgid;                     /* 进程组（B1：以前 setpgid 跟 chdir 共用一个 case） */
     u32 sid;                      /* 会话 */
@@ -210,6 +211,7 @@ typedef struct LxProc {
 
 /* 进程表与调度（linux/proc.c） */
 void     lx_proc_attach(u64 as, u64 brk);      /* 把当前上下文登记成 0 号进程 */
+u64      lx_proc_exe(char *out, u64 cap);      /* /proc/self/exe 当前路径 */
 LxProc  *lx_cur_proc(void);
 u32      lx_proc_list(u32 *out, u32 cap);        /* M58：活进程 pid 列表，给 /proc 目录用 */
 void     lx_proc_yield(void);                  /* 系统调用末尾让出一次 */

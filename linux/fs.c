@@ -988,6 +988,14 @@ static int is_at_fdcwd_(u64 dirfd)
     return (dirfd == LX_AT_FDCWD) || ((dirfd & 0xffffffffull) == 0xffffff9cull);
 }
 
+static void proc_u32_(u32 v, char *out);
+
+/* proc 虚拟目录 node 区段（定义在后面的 procfs 段；dirfd_base_ 先用）。 */
+#define LX_PROC_PIDDIR_BASE  0x10000u
+#define LX_PROC_NETDIR_BASE  0x20000u
+#define LX_PROC_FDDIR_BASE   0x30000u
+#define LX_PROC_TASKDIR_BASE 0x40000u
+
 static int dirfd_base_(u64 dirfd, char *base, u64 cap)
 {
     LxFile *f;
@@ -1030,6 +1038,46 @@ static int dirfd_base_(u64 dirfd, char *base, u64 cap)
         return 0;
     }
 #endif
+    /* procfs 目录 fd：fstatat(proc_fd, "self/task") 相对路径要拼回
+     * "proc/..." 前缀（Crashpad/sandbox 依赖这个相对路径）。 */
+    if (f->kind == LX_FD_PROC) {
+        u64 n = 0ull;
+        const char *pfx = "proc";
+        u32 i;
+        for (i = 0u; pfx[i] != '\0' && n + 1ull < cap; i++) {
+            base[n++] = pfx[i];
+        }
+        if (f->node >= LX_PROC_PIDDIR_BASE && f->node < LX_PROC_PIDDIR_BASE + 0x10000u) {
+            u32 pid = (u32)(f->node - LX_PROC_PIDDIR_BASE);
+            char num[12];
+            proc_u32_(pid, num);
+            for (i = 0u; num[i] != '\0' && n + 1ull < cap; i++) {
+                base[n++] = num[i];
+            }
+        } else if (f->node >= LX_PROC_TASKDIR_BASE && f->node < LX_PROC_TASKDIR_BASE + 0x10000u) {
+            u32 pid = (u32)(f->node - LX_PROC_TASKDIR_BASE);
+            char num[12];
+            const char *sfx = "/task";
+            proc_u32_(pid, num);
+            base[n++] = '/';
+            for (i = 0u; num[i] != '\0' && n + 1ull < cap; i++) base[n++] = num[i];
+            for (i = 0u; sfx[i] != '\0' && n + 1ull < cap; i++) base[n++] = sfx[i];
+        } else if (f->node >= LX_PROC_FDDIR_BASE && f->node < LX_PROC_FDDIR_BASE + 0x10000u) {
+            u32 pid = (u32)(f->node - LX_PROC_FDDIR_BASE);
+            char num[12];
+            const char *sfx = "/fd";
+            proc_u32_(pid, num);
+            base[n++] = '/';
+            for (i = 0u; num[i] != '\0' && n + 1ull < cap; i++) base[n++] = num[i];
+            for (i = 0u; sfx[i] != '\0' && n + 1ull < cap; i++) base[n++] = sfx[i];
+        } else if (f->node == LX_PROC_NETDIR_BASE) {
+            const char *sfx = "/net";
+            for (i = 0u; sfx[i] != '\0' && n + 1ull < cap; i++) base[n++] = sfx[i];
+        }
+        base[n] = '\0';
+        if (n + 1ull < cap) { base[n++] = '/'; base[n] = '\0'; }
+        return 0;
+    }
     if (f->node == LX_FD_ROOT) {
         base[0] = '\0';
         return 0;
@@ -1468,6 +1516,10 @@ static u32 proc_id_(const char *s, u32 *pid)
 #define LX_PROC_PIDDIR_BASE 0x10000u
 /* /proc/net 目录（里面只有 dev），和 pid 目录用不同 node 区段。 */
 #define LX_PROC_NETDIR_BASE 0x20000u
+/* /proc/self/fd（Crashpad 启动时 opendir 它来枚举自己的 fd）。 */
+#define LX_PROC_FDDIR_BASE 0x30000u
+/* /proc/self/task：Chromium sandbox 的 thread_helpers 必须 fstat 到它。 */
+#define LX_PROC_TASKDIR_BASE 0x40000u
 
 static u32 proc_piddir_(const char *s, u32 *pid)
 {
@@ -1489,6 +1541,59 @@ static u32 proc_piddir_(const char *s, u32 *pid)
         q++;
     }
     if (q == s + 5u || *q != '\0') {
+        return 0u;
+    }
+    *pid = p;
+    return 1u;
+}
+
+static u32 proc_fddir_(const char *s, u32 *pid)
+{
+    const char *q;
+    u32 p = 0u;
+    LxProc *cur;
+
+    if (seq_(s, "proc/self/fd") == 1) {
+        cur = lx_cur_proc();
+        *pid = (cur != (LxProc *)0) ? cur->pid : 1u;
+        return 1u;
+    }
+    if (s[0] != 'p' || s[1] != 'r' || s[2] != 'o' || s[3] != 'c' || s[4] != '/') {
+        return 0u;
+    }
+    q = s + 5u;
+    while (*q >= '0' && *q <= '9') {
+        p = p * 10u + (u32)(*q - '0');
+        q++;
+    }
+    if (q == s + 5u || q[0] != '/' || q[1] != 'f' || q[2] != 'd' || q[3] != '\0') {
+        return 0u;
+    }
+    *pid = p;
+    return 1u;
+}
+
+static u32 proc_taskdir_(const char *s, u32 *pid)
+{
+    LxProc *cur;
+    u32 p = 0u;
+    const char *q;
+
+    if (seq_(s, "proc/self/task") == 1) {
+        cur = lx_cur_proc();
+        *pid = (cur != (LxProc *)0) ? cur->pid : 1u;
+        return 1u;
+    }
+    if (s[0] != 'p' || s[1] != 'r' || s[2] != 'o' || s[3] != 'c' || s[4] != '/') {
+        return 0u;
+    }
+    q = s + 5u;
+    while (*q >= '0' && *q <= '9') {
+        p = p * 10u + (u32)(*q - '0');
+        q++;
+    }
+    if (q == s + 5u || q[0] != '/' || q[1] != 't' || q[2] != 'a' ||
+        q[3] != 's' || q[4] != 'k' || q[5] != '\0') {
         return 0u;
     }
     *pid = p;
@@ -1560,6 +1665,26 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
                 return (u64)0 - LX_EMFILE;
             }
             fd_set(fd, LX_FD_ROOT, 1u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        /* /proc/self/task：Chromium sandbox 检查线程数，fstat 失败直接 FATAL。 */
+        if (proc_taskdir_(s, &pid) != 0u) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, LX_PROC_TASKDIR_BASE + (u64)pid, 1u, LX_FD_PROC, flags);
+            g_fd[fd].pos = 0ull;
+            return fd;
+        }
+        /* /proc/self/fd 目录：列当前进程 fd 编号（没有它 Crashpad 直接退出）。 */
+        if (proc_fddir_(s, &pid) != 0u) {
+            fd = fd_alloc();
+            if (fd == LX_FD_NONE) {
+                return (u64)0 - LX_EMFILE;
+            }
+            fd_set(fd, LX_PROC_FDDIR_BASE + (u64)pid, 1u, LX_FD_PROC, flags);
             g_fd[fd].pos = 0ull;
             return fd;
         }
@@ -2498,6 +2623,7 @@ u64 lx_fs_statat(u64 dirfd, u64 upath, u64 ustat, u64 flags)
         char *b;
 
         if (s[4] == '\0' || proc_piddir_(s, &pid) != 0u ||
+            proc_taskdir_(s, &pid) != 0u || proc_fddir_(s, &pid) != 0u ||
             seq_(s, "proc/net") == 1) {
             return (fill_stat(ustat, 0u, 0ull, 0040755u) != 0) ?
                    (u64)0 - LX_EFAULT : 0ull;
@@ -3165,6 +3291,42 @@ static void proc_dent_(const LxFile *f, u64 pos, char *nm, u32 *dtype)
             proc_u32_(pids[pos], nm);
             *dtype = 4u;                    /* pid 项是目录 */
             return;
+        }
+        *dtype = 0u;
+        return;
+    }
+
+    /* /proc/self/task：最小实现只列组长 tid。 */
+    if (f->node >= LX_PROC_TASKDIR_BASE && f->node < LX_PROC_TASKDIR_BASE + 0x10000u) {
+        if (pos == 0ull) {
+            proc_u32_((u32)(f->node - LX_PROC_TASKDIR_BASE), nm);
+            *dtype = 4u;
+        } else {
+            *dtype = 0u;
+        }
+        return;
+    }
+
+    /* /proc/self/fd：按当前 fd 表枚举还活着的槽位。 */
+    if (f->node >= LX_PROC_FDDIR_BASE && f->node < LX_PROC_FDDIR_BASE + 0x10000u) {
+        LxProc *cur = lx_cur_proc();
+        u64 seen = 0ull;
+        u32 i;
+
+        if (cur == (LxProc *)0 || cur->fd == (LxFdTab *)0) {
+            *dtype = 0u;
+            return;
+        }
+        for (i = 0u; i < cur->fd->cap; i++) {
+            if (cur->fd->ent[i].node == LX_FD_NONE) {
+                continue;
+            }
+            if (seen == pos) {
+                proc_u32_(i, nm);
+                *dtype = 8u;
+                return;
+            }
+            seen++;
         }
         *dtype = 0u;
         return;

@@ -115,14 +115,23 @@ static const char kScript[] =
     "tar -cf /data/a.tar /data/a.txt && echo apps-tar-ok; "
     "echo apps-done";
 #elif defined(C6OS_CHROME)
-/* G0-4：Chrome rootfs 从第二块 IDE 盘装载；只验二进制/loader 能起来。 */
+/* G0-4/G3：Chrome rootfs 从第二块盘/fw_cfg 装载，先验版本，再跑 CDP
+ * 显示客户端把一帧写到 /dev/fb0。--frames=1 让客户端拿到第一帧后退出，
+ * 验收脚本再用 QEMU screendump 看 VBE 面板。 */
 static const char kScript[] =
-    "mkdir -p /run/user/0 /dev/shm; "
-    "chmod 700 /run/user/0; "
-    "export XDG_RUNTIME_DIR=/run/user/0; "
+    "export XDG_RUNTIME_DIR=/tmp; "
     "echo chrome-version-start; "
     "/usr/lib/chromium/chromium --version; "
     "echo chrome-version-done; "
+    "echo chrome-dump-start; "
+    "/usr/lib/chromium/chromium --headless=new --no-sandbox --disable-gpu "
+    "--disable-dev-shm-usage --dump-dom 'data:text/html,<h1>hi</h1>'; "
+    "echo chrome-dump-done; "
+    "echo chrome-display-start; "
+    "/usr/bin/c6chrome-display --chrome=/usr/lib/chromium/chromium "
+    "--url='data:text/html,%3Cbody%20style%3D%22background%3A%23ff0000%22%3Ehello%3C/body%3E' "
+    "--fb=/dev/fb0 --frames=1; "
+    "echo chrome-display-done; "
     "echo chrome-done";
 #else
 /* 交给 Alpine /bin/sh 的脚本，作为 `sh -c` 的第三个 argv。
@@ -247,11 +256,51 @@ static u32 rootfs_load_slave(void)
 {
     u64 len = 0ull;
     u64 pa = 0ull;
+    u64 fsz = 0ull;
+    u16 fsel = 0u;
     u32 sec = 0u;
     u32 off = 0u;
     u32 chunk = 0u;
     u32 i = 0u;
     u8 *p = 0;
+
+    /* 调试/验收快路径：QEMU -fw_cfg name=opt/c6rootfs,file=rootfs.img。
+     * fw_cfg DMA 由 hypervisor 直接写 guest 物理地址，617MB 几秒完成；
+     * 没有该条目时回退到第二块 IDE 盘（生产路径）。 */
+    {
+        INT32 fwrc = (INT32)port_fwcfg_find("opt/c6rootfs", &fsel, &fsz);
+        if (fwrc == 0 && fsz > 512ull && fsz <= 0x60000000ull) {
+        pa = port_phys_alloc_pages((fsz + 4095ull) >> 12);
+        if (pa == 0ull) {
+            port_puts("FAIL: fw_cfg rootfs 连续物理页分配失败\n");
+            return 0u;
+        }
+        {
+            INT32 fr = (INT32)port_fwcfg_read(fsel, pa, fsz);
+            if (fr != 0) {
+                port_puts("FAIL: fw_cfg rootfs DMA 读失败 rc=");
+                put_u32((u32)fr);
+                port_puts("\n");
+                return 0u;
+            }
+        }
+        p = (u8 *)port_phys_map(pa);
+        for (i = 0u; i < 8u; i++) {
+            len |= ((u64)p[i]) << (u8)(8u * i);
+        }
+        if (len < 64ull || len > 0x60000000ull) {
+            port_puts("FAIL: fw_cfg rootfs 长度前缀不合理\n");
+            return 0u;
+        }
+        g_rootfs_len = (u32)len;
+        port_puts("  rootfs: fw_cfg DMA ");
+        put_u32((u32)(fsz / 1024u));
+        port_puts(" KB（跳过 IDE PIO）\n");
+        /* fw_cfg 文件是整块 disk image：LBA0 长度 + LBA1 cpio；调用者
+         * 只接受 cpio 起始地址。 */
+            return (u32)pa + 512u;
+        }
+    }
 
     if (port_ata_read_dev(1u, 0u, 1u, 0x70000u) != 0) {
         port_puts("FAIL: 读第二块盘 rootfs 长度失败\n");

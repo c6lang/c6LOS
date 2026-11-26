@@ -273,6 +273,12 @@ void lx_proc_attach(u64 as, u64 brk)
             port_panic_halt();
         }
     }
+    if (p->exe[0] == '\0') {
+        const char *d = "/hello";
+        u32 di;
+        for (di = 0u; di < 6u; di++) { p->exe[di] = d[di]; }
+        p->exe[6] = '\0';
+    }
     lx_fs_set_fdtab(p->fd);                /* fd 表从此跟着进程走 */
     lx_fs_set_cwd(p->cwd);
     {
@@ -293,6 +299,22 @@ void lx_proc_attach(u64 as, u64 brk)
     p->tgid = p->pid;
     p->started = 1u;
     port_user_set_kstack(p->kstack_top);
+}
+
+u64 lx_proc_exe(char *out, u64 cap)
+{
+    LxProc *p = lx_cur_proc();
+    u64 n = 0ull;
+
+    if (p == (LxProc *)0 || out == (char *)0 || cap == 0ull) {
+        return 0ull;
+    }
+    while (n + 1ull < cap && p->exe[n] != '\0') {
+        out[n] = p->exe[n];
+        n++;
+    }
+    out[n] = '\0';
+    return n;
 }
 
 /* ---- L7：线程 -------------------------------------------------------------
@@ -1849,6 +1871,13 @@ u64 lx_proc_execve(u64 upath, u64 uargv, u64 uenvp, LxRegs *r)
     buf = (char *)0;
     argv = (char **)0;
     envp = (char **)0;
+    {
+        u32 ei;
+        for (ei = 0u; ei + 1u < (u32)sizeof(cur_()->exe) && path[ei] != '\0'; ei++) {
+            cur_()->exe[ei] = path[ei];
+        }
+        cur_()->exe[ei] = '\0';
+    }
     cloexec_close_(cur_());               /* Linux：跨 exec 只保留非 CLOEXEC 的 fd */
     {
         u64 old_as = cur_()->as;

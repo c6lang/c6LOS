@@ -141,6 +141,8 @@ u32  port_net_tx_packets(void);
 u32  port_net_rx_dropped(void);
 
 int  port_ata_read(u32 lba, u32 count, u64 dst_pa);
+int  port_fwcfg_find(const char *name, u16 *sel, u64 *size);
+int  port_fwcfg_read(u16 sel, u64 dst_pa, u64 size);
 int  port_ata_read_dev(u32 dev, u32 lba, u32 count, u64 dst_pa);
 int  port_ata_write(u32 lba, u32 count, u64 src_pa);
 

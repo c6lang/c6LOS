@@ -1064,13 +1064,14 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_readlink:
         /* readlink(path, buf, bufsiz) == readlinkat(AT_FDCWD, ...) */
         if (user_streq(a0, "/proc/self/exe") != 0) {
-            static const char p[] = "/hello";
-            u64 i;
+            char p[128];
+            u64 n = lx_proc_exe(p, sizeof(p));
 
-            if (a2 < 6ull) { r->rax = neg(LX_EINVAL); return; }
-            if (lx_user_ok(a1, 6ull, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
-            for (i = 0; i < 6ull; i++) { *(u8 *)(a1 + i) = (u8)p[i]; }
-            r->rax = 6ull;
+            if (n == 0ull) { r->rax = neg(LX_ENOENT); return; }
+            if (a2 < n) { r->rax = neg(LX_EINVAL); return; }
+            if (lx_user_ok(a1, n, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            for (u64 i = 0; i < n; i++) { *(u8 *)(a1 + i) = (u8)p[i]; }
+            r->rax = n;
             return;
         }
         /* M56：真实 initramfs 符号链接（/proc/self/exe 特例上面已处理）。 */
@@ -1079,21 +1080,14 @@ void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_readlinkat:
         if (user_streq(a1, "/proc/self/exe") != 0) {
-            static const char p[] = "/hello";
-            u64 i;
+            char p[128];
+            u64 n = lx_proc_exe(p, sizeof(p));
 
-            if (a3 < 6ull) {
-                r->rax = neg(LX_EINVAL);
-                return;
-            }
-            if (lx_user_ok(a2, 6ull, C6OS_PROT_W) == 0) {
-                r->rax = neg(LX_EFAULT);
-                return;
-            }
-            for (i = 0; i < 6ull; i++) {
-                *(u8 *)(a2 + i) = (u8)p[i];
-            }
-            r->rax = 6ull;
+            if (n == 0ull) { r->rax = neg(LX_ENOENT); return; }
+            if (a3 < n) { r->rax = neg(LX_EINVAL); return; }
+            if (lx_user_ok(a2, n, C6OS_PROT_W) == 0) { r->rax = neg(LX_EFAULT); return; }
+            for (u64 i = 0; i < n; i++) { *(u8 *)(a2 + i) = (u8)p[i]; }
+            r->rax = n;
             return;
         }
         /* M56：真实 initramfs 符号链接（dirfd 版本）。 */
@@ -1202,6 +1196,39 @@ void lx_syscall_do(LxRegs *r)
         } else {
             r->rax = neg(LX_ESRCH);
         }
+        return;
+
+    case LX_SYS_rt_tgsigqueueinfo:         /* (tgid, tid, sig, siginfo, ...) */
+        if (a2 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a2 != 0ull && lx_proc_find((i64)(i32)a1) == (LxProc *)0) {
+            r->rax = neg(LX_ESRCH);
+            return;
+        }
+        if (a2 != 0ull) {
+            lx_sig_send_one(lx_proc_find((i64)(i32)a1), (u32)a2, 0);
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_membarrier:
+        /* 内存屏障是性能提示；单核 + 顺序一致的 x86 直接成功。 */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_get_mempolicy:
+        /* Chrome/V8 启动时探测 NUMA；没有 NUMA，回 MPOL_DEFAULT。 */
+        if (a0 != 0ull && lx_user_ok(a0, 4ull, C6OS_PROT_W) != 0) {
+            *(u32 *)a0 = 0u;
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_landlock_create_ruleset:
+        /* 没实现 Landlock；ENOSYS 让沙箱走 fallback，而不是误判为有权限。 */
+        r->rax = neg(LX_ENOSYS);
         return;
 
     case LX_SYS_tgkill:                    /* tgkill(tgid, tid, sig) */

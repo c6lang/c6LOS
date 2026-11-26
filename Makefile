@@ -1085,7 +1085,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
 ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
-X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
+X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o $(X86S_DIR)/obj/fwcfg.o
 endif
 endif
 # M10：SAL/协议栈只在 C6OS_NET=1 时编（默认 0 时对象列表完全不变）。
@@ -1130,7 +1130,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
               $(X86S_MMU_OBJ) $(X86S_DIR)/obj/linux.o \
-              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o \
+              $(X86S_DIR)/obj/user_entry.o $(X86S_DIR)/obj/ata.o $(X86S_DIR)/obj/fwcfg.o \
               $(X86S_DIR)/obj/sys.o $(X86S_DIR)/obj/elf64.o \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o \
@@ -1308,6 +1308,10 @@ $(X86S_DIR)/obj/userblob.o: port/x86_64/userblob.S
 	clang $(X86CFLAGS) -c -o $@ $<
 
 $(X86S_DIR)/obj/ata.o: port/x86_64/ata.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/fwcfg.o: port/x86_64/fwcfg.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
@@ -2522,8 +2526,8 @@ check-linuxabi-g0-rootfs: x86-chrome $(CHROME_DISK)
 	@set -e; \
 	 log=$$(mktemp /tmp/check-chrome.XXXXXX.log); \
 	 set +e; \
-	 timeout 900 qemu-system-x86_64 -m 3072 -cdrom $(CHROME_ISO) -boot d \
-		-drive format=raw,file=$(CHROME_DISK),if=ide,index=1,readonly=on \
+	 timeout 180 qemu-system-x86_64 -m 3072 -cdrom $(CHROME_ISO) -boot d \
+		-fw_cfg name=opt/c6rootfs,file=$(CHROME_DISK) \
 		-nographic -serial stdio -monitor none -no-reboot 2>&1 | tr -d '\r' > $$log; \
 	 rc=$$?; set -e; \
 	 grep -q "chrome-version-done" $$log || { echo "FAIL: linuxabi-g0 rootfs（chromium --version 未完成，qemu rc=$$rc）"; tail -40 $$log; exit 1; }; \

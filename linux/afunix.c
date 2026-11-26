@@ -363,7 +363,9 @@ u64 lx_unix_socketpair(u64 type, u64 uvec)
     u64 base = type & ~(u64)(0x80000ull | 0x800ull);
     u64 a, b, fa, fb;
 
-    if (p == (LxProc *)0 || (base != 1u && base != 2u)) {
+    /* SOCK_SEQPACKET(5)：Chromium 的 UnixDomainSocket 用它。内核没有
+     * 消息边界实现，按 SOCK_STREAM 处理（IPC 自己带长度前缀，消息不会混）。 */
+    if (p == (LxProc *)0 || (base != 1u && base != 2u && base != 5u)) {
         return (u64)0 - LX_EINVAL;
     }
     if (lx_user_ok(uvec, 8ull, C6OS_PROT_W) == 0) {
