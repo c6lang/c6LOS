@@ -291,6 +291,8 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     LxFile *mf = (LxFile *)0;
     LxProc *mp = lx_cur_proc();
     int dev_map = 0;
+    u64 shm_pa = 0ull;
+    u64 shm_pages = 0ull;
 
     if (n == 0ull) {
         return neg(LX_EINVAL);
@@ -346,22 +348,17 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         }
         dev_map = 1;
     } else if ((vf & LX_VM_SHARED) != 0u &&
-               (flags & LX_MAP_ANONYMOUS) == 0ull) {
-        u64 spa = 0ull;
-        u64 spages = 0ull;
+               (flags & LX_MAP_ANONYMOUS) == 0ull &&
+               lx_fs_shared_pa(fd, off, n, &shm_pa, &shm_pages) == 0) {
         /* MAP_SHARED 的 memfd：直接映射同一批页；以前按 MAP_PRIVATE 拷一份，
          * Wayland/Chrome 的 shm 客户端写像素服务端永远看不到。 */
-        if (lx_fs_shared_pa(fd, off, n, &spa, &spages) == 0) {
-            u64 k;
-            for (k = 0ull; k < spages; k++) {
-                if (port_as_map(g_as, at + k * 4096ull, spa + k * 4096ull,
-                                4096ull, perm | C6OS_PROT_SHARED) != 0) {
-                    return neg(LX_ENOMEM);
-                }
-                port_phys_ref(spa + k * 4096ull);
+        u64 k;
+        for (k = 0ull; k < shm_pages; k++) {
+            if (port_as_map(g_as, at + k * 4096ull, shm_pa + k * 4096ull,
+                            4096ull, perm | C6OS_PROT_SHARED) != 0) {
+                return neg(LX_ENOMEM);
             }
-        } else {
-            return neg(LX_EINVAL);
+            port_phys_ref(shm_pa + k * 4096ull);
         }
     } else if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
         /* 惰性：只记账，第一次访问由 #PF 补零页（M13-2b-3）。malloc 的 arena、
@@ -1152,6 +1149,38 @@ void lx_syscall_do(LxRegs *r)
             }
             if (a3 != 0ull && lx_user_ok(a3, 4ull, C6OS_PROT_W) != 0) {
                 *(u32 *)a3 = 0u;
+            }
+        }
+        return;
+
+    case LX_SYS_clone3:
+        {
+            u64 ca[11];
+            u64 cf;
+            u64 stk;
+            u64 ssz;
+            u64 ptid;
+            u64 ctid;
+            u64 tls;
+            u32 k;
+
+            if (lx_user_ok(a0, 88ull, C6OS_PROT_R) == 0) {
+                r->rax = neg(LX_EFAULT);
+                return;
+            }
+            for (k = 0u; k < 11u; k++) {
+                ca[k] = *(const u64 *)(a0 + (u64)k * 8ull);
+            }
+            cf = ca[0];
+            ctid = ca[2];
+            ptid = ca[3];
+            stk = ca[5];
+            ssz = ca[6];
+            tls = ca[7];
+            if ((cf & LX_CLONE_VM) != 0ull) {
+                r->rax = lx_proc_clone_thread(r, cf, stk + ssz, ptid, ctid, tls);
+            } else {
+                r->rax = lx_proc_fork(r);
             }
         }
         return;

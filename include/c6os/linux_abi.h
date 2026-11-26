@@ -68,6 +68,7 @@
 #define LX_SYS_rt_sigaction   13
 #define LX_SYS_rt_sigprocmask 14
 #define LX_SYS_clone          56
+#define LX_SYS_clone3         435
 #define LX_SYS_fork           57
 #define LX_SYS_vfork          58
 #define LX_SYS_execve         59
