@@ -1256,7 +1256,7 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
 |---|---|---|---|
 | G0 底座 | **PASS** | `make check-linuxabi-g0`（3072 MB） | PMM 0–8 GB、DMAP WB/UC、procfs；1500 节点 |
 | G0-4 Chrome rootfs | **PASS** | `make check-linuxabi-g0-rootfs` | 第二块 IDE 盘 raw cpio（验收走 fw_cfg DMA 快路径，~20 s）；`Chromium 131.0.6778.108` |
-| G1 futex/memfd | **PASS** | `make check-linuxabi-g1` | 16 线程 futex、seals、mremap/madvise、1 TB PROT_NONE |
+| G1 futex/memfd | **PASS（单元）** | `make check-linuxabi-g1` | 16 线程 futex、seals、mremap/madvise、1 TB PROT_NONE；`chromium --dump-dom` 仍 SIGSEGV（见 D.4） |
 | G2 fb0/evdev | **PASS** | `make check-linuxabi-g2` | 800×600 VBE screendump 0x112233；1280×800 扫描缓冲 |
 | G3 CDP 显示 | **部分** | `make check-linuxabi-g3` / `make check-linuxabi-g0-rootfs` | host Chromium pipe → PNG → 像素 PASS；guest `chromium --version` PASS；guest CDP 显示仍 SIGSEGV |
 | G4 Wayland | **部分** | `make check-linuxabi-g4` | 自包含 `c6wl` + `wl_demo`，wl_shm/xdg_shell/帧回调/合成像素 PASS；输入和 Chrome 兼容性未完成 |
@@ -1326,3 +1326,24 @@ read-only”，所以验收不再挂那块盘。
 `xdg_toplevel`/`wl_subcompositor`/`wl_data_device_manager` 的最小面。
 为 Chrome 预置了后两个 global，但 Chrome 仍未创建 surface，属于 G5 待办；
 不要把“client connected”当成 C3 通过。
+
+
+### D.4 客户机内 Chrome 真实浏览器模式的已知阻塞
+
+`chromium --version` 已通过；但任何**真实浏览器模式**（`--headless=new`、
+`--headless=old`、`--single-process`、`--js-flags=--jitless`、CDP pipe/screencast）
+都会在浏览器初始化早期 SIGSEGV。已排除的层：
+
+- CDP 管道：fd 3/4 的 `dup2`/关闭顺序、`Page.getTargets/attach`、NUL 残留缓冲、
+  `Page.startScreencast` 重试都已修；**宿主 Chromium 139** 上同一客户端能出帧。
+- 内核 syscall：已补 `socketpair(SOCK_SEQPACKET)`、AF_UNIX `setsockopt`、
+  `rt_tgsigqueueinfo`、`membarrier`、`get_mempolicy`、`/proc/self/task`、
+  `/proc/self/fd`、proc 目录 fd 的相对 `fstatat`、真实 `/proc/self/exe`。
+- 现象：浏览器主进程/子进程在 `open/stat/close` 之后触发 `#PF`，`cr2` 可落在
+  `0x118000c4600` 这类 V8 沙箱高地址；`rip` 落在 Chrome 映像内。
+- 未排除：V8 沙箱 ~1.34 TB 保留地址的 VMA 记账/`mprotect` 语义，以及 Chrome
+  对 musl/静态 PIE 的 mmap hint 依赖。下一步优先做 **`/proc/self/maps` +
+  mmap hint 日志**，拿 Chrome 的保留区间与首次访问地址对照。
+
+因此 G3 的“host CDP 显示”已绿，但“客户机内 Chrome 页面显示到 fb0”未绿；
+不要把 host 截图当成 G3 客户机验收。
