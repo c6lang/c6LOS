@@ -1255,10 +1255,10 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
 | 里程碑 | 状态 | 证据/命令 | 备注 |
 |---|---|---|---|
 | G0 底座 | **PASS** | `make check-linuxabi-g0`（3072 MB） | PMM 0–8 GB、DMAP WB/UC、procfs；1500 节点 |
-| G0-4 Chrome rootfs | **PASS** | `make check-linuxabi-g0-rootfs` | 第二块 IDE 盘 raw cpio；`Chromium 131.0.6778.108` |
+| G0-4 Chrome rootfs | **PASS** | `make check-linuxabi-g0-rootfs` | 第二块 IDE 盘 raw cpio（验收走 fw_cfg DMA 快路径，~20 s）；`Chromium 131.0.6778.108` |
 | G1 futex/memfd | **PASS** | `make check-linuxabi-g1` | 16 线程 futex、seals、mremap/madvise、1 TB PROT_NONE |
 | G2 fb0/evdev | **PASS** | `make check-linuxabi-g2` | 800×600 VBE screendump 0x112233；1280×800 扫描缓冲 |
-| G3 CDP 显示 | **部分** | `make check-linuxabi-g3` | host Chromium pipe → PNG → 像素 PASS；guest `chromium --version` PASS；guest 显示尚未接 |
+| G3 CDP 显示 | **部分** | `make check-linuxabi-g3` / `make check-linuxabi-g0-rootfs` | host Chromium pipe → PNG → 像素 PASS；guest `chromium --version` PASS；guest CDP 显示仍 SIGSEGV |
 | G4 Wayland | **部分** | `make check-linuxabi-g4` | 自包含 `c6wl` + `wl_demo`，wl_shm/xdg_shell/帧回调/合成像素 PASS；输入和 Chrome 兼容性未完成 |
 | G5 Chrome on Wayland | **未开始** | — | host Chromium 能连上 c6wl（server 日志 `client connected`），但无 surface/帧 |
 | G6 性能 | **未开始** | — | — |
@@ -1281,6 +1281,30 @@ LBA 1..      cpio 正文（从 cpio 文件偏移 512 开始），尾部补 0 到
 PMM 标记 used，重复 reserve 会覆盖分配器的 free 计数）。这是对 §4.3
 “boot info 带 rootfs_pa、PMM 预留”的落地修正：Chrome 617 MB 连续页在
 3 GB 启动早期一次分配即可，比让 BIOS 搬 30 万次可靠。
+
+### D.1.1 fw_cfg DMA 快路径（调试/验收用）
+
+第二块 IDE 盘是生产路径；617 MB PIO 在 QEMU TCG/KVM 下都要数分钟，调试 Chrome
+无法迭代。`port/x86_64/fwcfg.c` 读 QEMU fw_cfg 文件目录，找到
+`opt/c6rootfs` 后把整块 disk image 用 fw_cfg DMA 一次写入连续物理页：
+
+- 目录项 64 B（size/select/name），数据端口 0x511 顺序读；
+- DMA 结构全 big-endian `{control,length,address}`；
+- IOport DMA 地址寄存器布局是 **0x514 高 32 位 + 0x518 低 32 位**，写低半
+  触发；control 必须同时置 `SELECT(0x08)|READ(0x02)`，且 selector 在
+  高 16 位；
+- 传输完成后 QEMU 把 control 清 0；error bit 置位才算失败。
+
+QEMU 参数：
+
+```
+-fw_cfg name=opt/c6rootfs,file=build/x86/alpine/chrome/rootfs.img
+```
+
+没有该条目时 `tests/t_iso_alpine.c6` 原样回退到第二块 IDE 盘。验收脚本
+`check-linuxabi-g0-rootfs` 现在用这条快路径，启动到 `chromium --version`
+约 20 s；`-drive ...,index=1,readonly=on` 在 KVM 下会报 “Block node is
+read-only”，所以验收不再挂那块盘。
 
 ### D.2 G3 的协议选择
 
