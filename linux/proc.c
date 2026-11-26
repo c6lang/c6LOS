@@ -245,6 +245,15 @@ void lx_proc_attach(u64 as, u64 brk)
             port_panic_halt();
         }
         g_cur = s;
+        /* Chrome 启动会瞬时创建几十个线程/进程；进程表在启动早期一次性扩到
+         * 512 槽，避免运行中 heap 紧张时 slot_grow_ 失败导致 pthread_create
+         * 返回 EAGAIN（BrowserThread:IO 起不来）。 */
+        {
+            u32 gi;
+            for (gi = 0u; gi < 6u; gi++) {
+                if (slot_grow_() != 0) break;
+            }
+        }
         p = cur_();
         p->pid = (u32)g_pid_next;
         g_pid_next++;
