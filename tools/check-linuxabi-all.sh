@@ -10,6 +10,12 @@ cd "$(dirname "$0")/.." || exit 1
 
 TESTS="
 check-linuxabi
+check-linuxabi-g0
+check-linuxabi-g1
+check-linuxabi-g2
+check-linuxabi-g3
+check-linuxabi-g4
+check-linuxabi-g0-rootfs
 check-linuxabi-l2
 check-linuxabi-l4
 check-linuxabi-l5
