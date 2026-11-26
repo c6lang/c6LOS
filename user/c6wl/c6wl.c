@@ -265,10 +265,13 @@ static void ev_configure(WlObj *xs, WlObj *tl)
 
 static void ev_seat_caps(WlObj *seat)
 {
-    uint8_t b[4];
+    uint8_t b[64];
     size_t o = 0;
     put_u32(b, &o, 3u);                           /* pointer + keyboard */
     send_msg(seat->id, 0, b, o);
+    o = 0;
+    put_str(b, &o, "seat0");
+    send_msg(seat->id, 1, b, o);                  /* wl_seat.name */
 }
 
 static void ev_output(WlObj *out)
@@ -403,6 +406,7 @@ static void on_bind(WlObj *reg, Reader *r)
     r_str(r, iface, sizeof(iface));
     ver = r_u32(r);
     id = r_u32(r);
+    if (getenv("C6WL_DEBUG")) dprintf(2, "BIND %s ver=%u id=%u\n", iface, ver, id);
     (void)reg; (void)name; (void)ver;
     if (strcmp(iface, "wl_compositor") == 0) {
         o = obj_new(id, C6WL_T_COMPOSITOR, 0);
