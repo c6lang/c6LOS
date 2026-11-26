@@ -6,6 +6,7 @@
 #include "c6os/types.h"
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
+#include "c6os/linux_dev.h"
 
 #define IMG_PA 0x04000000u          /* 64MB 处放文件映像（PMM 里先扣掉） */
 
@@ -28,6 +29,9 @@ void os_main(void)
     port_mmu_init();
     port_linux_arch_init();
     port_phys_reserve(IMG_PA, 0x00400000u);
+    /* G2：尽早注册 /dev/fb0。4MB 扫描缓冲要物理连续，必须赶在 ELF 加载、
+     * 用户栈、VMA 等零散分配把低端内存切碎之前占位。 */
+    lx_dev_init();
 
     if (port_ata_read(1024u, 8u, IMG_PA) != 0) {
         port_puts("FAIL: ata read (磁盘没挂上?)\n");

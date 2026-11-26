@@ -120,7 +120,7 @@ typedef struct LxFile {
     u32 flags;                /* FD_CLOEXEC 等 fd 标志 */
     u32 oflags;               /* O_APPEND / O_NONBLOCK / 访问模式 */
     u32 lock;                 /* M52：flock 咨询锁类型（0/SH/EX），fork/dup 共享 fd 表 */
-    u32 file_pad;
+    u32 dev;                  /* G2：LX_FD_DEV 的 LxDev id（0=非设备）；node 存 OsFile* */
 } LxFile;
 
 /* 动态 fd 表（linux/fdt.c，M13-3a）。
@@ -341,6 +341,7 @@ u32      lx_proc_tgid(void);
 u32      lx_proc_tid(void);
 LxProc  *lx_proc_find(i64 pid);
 void     lx_proc_wake(LxProc *p);
+void     lx_proc_wake_all(void);      /* G2：设备（evdev）有数据/空间时唤醒等待者 */
 
 /* L6 信号（linux/sig.c） */
 void lx_sig_reset(LxProc *p);

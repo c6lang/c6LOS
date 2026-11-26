@@ -1069,7 +1069,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf g0 g0n g1 g1f fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf g0 g0n g1 g1f g2 fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -1120,11 +1120,12 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/fdt.o \
               $(X86S_DIR)/obj/vma.o \
               $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/afunix.o \
-              $(X86S_DIR)/obj/pty.o
+              $(X86S_DIR)/obj/pty.o $(X86S_DIR)/obj/dev.o \
+              $(X86S_DIR)/obj/fb.o $(X86S_DIR)/obj/evdev.o
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf g0 g0n g1 g1f fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf g0 g0n g1 g1f g2 fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1134,7 +1135,8 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/fs.o $(X86S_DIR)/obj/sig.o \
               $(X86S_DIR)/obj/proc.o $(X86S_DIR)/obj/tty.o $(X86S_DIR)/obj/vma.o \
               $(X86S_DIR)/obj/socket.o $(X86S_DIR)/obj/afunix.o $(X86S_DIR)/obj/fdt.o \
-              $(X86S_DIR)/obj/pty.o
+              $(X86S_DIR)/obj/pty.o $(X86S_DIR)/obj/dev.o \
+              $(X86S_DIR)/obj/fb.o $(X86S_DIR)/obj/evdev.o
 endif
 
 # M13-1：页框/地址空间生命周期（只接 port 层与 MMU，不接调度器/磁盘）。
@@ -1357,6 +1359,18 @@ $(X86S_DIR)/obj/pty.o: linux/pty.c
 	@mkdir -p $(X86S_DIR)/obj
 	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
 
+$(X86S_DIR)/obj/dev.o: linux/dev.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/fb.o: linux/fb.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
+$(X86S_DIR)/obj/evdev.o: linux/evdev.c
+	@mkdir -p $(X86S_DIR)/obj
+	clang $(X86CFLAGS) -Iinclude -c -o $@ $<
+
 x86-user: caps-check-x86
 	$(MAKE) X86S_NAME=user X86S_MAIN=tests/t_x86_user.c6 LINUX_ABI=1 \
 		$(X86)/user-disk.img
@@ -1426,6 +1440,14 @@ G1F_ELF := $(X86)/g1futex.elf
 $(G1F_ELF): $(G1F_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $< -lpthread
+
+# ---- G2：设备层最小闭环（/dev/fb0 + /dev/input/event0）----
+G2_SRC := tests/linux/g2dev.c
+G2_ELF := $(X86)/g2dev.elf
+
+$(G2_ELF): $(G2_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
 
 # G0-3：1500 个 initramfs 节点（超过旧 1024 上限）
 G0N_SRC  := tests/linux/g0nodes.c
@@ -2744,6 +2766,10 @@ x86-g1f: caps-check-x86
 	X86S_NAME=g1f X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
 		$(MAKE) $(X86)/g1f-disk.img
 
+x86-g2: caps-check-x86
+	X86S_NAME=g2 X86S_MAIN=tests/t_x86_elf.c6 LINUX_ABI=1 \
+		$(MAKE) $(X86)/g2-disk.img
+
 run-x86-elf: x86-elf
 	qemu-system-x86_64 -m 256M -drive format=raw,file=$(X86)/elf-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot
@@ -2773,6 +2799,21 @@ check-linuxabi-g1: x86-g1 x86-g1f
 		| tr -d '\r' > $$log2 || true; \
 	 grep -q "^PASS: g1futex" $$log2 || { echo "FAIL: linuxabi-g1 (futex)"; tail -40 $$log2; exit 1; }; \
 	 echo "PASS: linuxabi-g1（futex 作用域 + memfd/seals/mremap/madvise/1TB）"
+
+# G2：/dev/fb0（1280x800 XRGB8888，mmap 共享扫描缓冲）+ /dev/input/event0
+# （24B input_event + 注入 + poll）。判定只看串口里测试自己打的 PASS 行。
+check-linuxabi-g2: x86-g2
+	@set -e; \
+	 log=$$(mktemp /tmp/check-g2.XXXXXX.log); \
+	 set +e; \
+	 timeout 60 qemu-system-x86_64 -m 512M \
+		-drive format=raw,file=$(X86)/g2-disk.img,if=ide \
+		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
+		| tr -d '\r' > $$log; \
+	 rc=$$?; \
+	 set -e; \
+	 grep -q "^PASS: g2dev" $$log || { echo "FAIL: linuxabi-g2 (qemu rc=$$rc)"; tail -60 $$log; exit 1; }; \
+	 echo "PASS: linuxabi-g2（fb0 1280x800 XRGB8888 + evdev 动态注入；-m 512M）"
 
 check-linuxabi-g0: x86-g0 x86-g0n
 	@set -e; \
@@ -2827,6 +2868,10 @@ else ifeq ($(X86S_NAME),g1f)
 DISK_DEPS  := $(G1F_ELF)
 DISK_MB    := 4
 DISK_APP   = dd if=$(G1F_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
+else ifeq ($(X86S_NAME),g2)
+DISK_DEPS  := $(G2_ELF)
+DISK_MB    := 4
+DISK_APP   = dd if=$(G2_ELF) of=$@ bs=512 seek=1024 conv=notrunc status=none
 else ifeq ($(X86S_NAME),g0n)
 DISK_DEPS  := $(G0N_ELF) $(G0N_IMG)
 DISK_MB    := 8

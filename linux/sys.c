@@ -3,6 +3,7 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 #include "c6os/linux_vma.h"
+#include "c6os/linux_dev.h"
 
 
 /* Linux x86-64 系统调用实现（personality 的语义层）。
@@ -77,6 +78,7 @@ void lx_brk_set(u64 v) { g_brk = v; }
 u64  lx_mmap_top_get(void) { return g_mmap_top; }
 void lx_mmap_top_set(u64 v) { g_mmap_top = v; }
 void lx_set_as(u64 as) { g_as = as; port_as_activate(as); }
+u64  lx_as_get(void) { return g_as; }
 
 /* 从用户态读一个 NUL 结尾的字符串；返回长度，<0 是 -errno。 */
 i64 lx_user_cstr(u64 upath, char *dst, u64 max)
@@ -285,6 +287,10 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     /* 文件映射要让内核把文件内容写进这些页，所以先一律给 W；
      * 真正的只读/RELRO/W^X 收窄等 mprotect 落地后再说（见 docs §6）。 */
     u64 perm = C6OS_PROT_R | C6OS_PROT_W;
+    u32 vf = ((flags & LX_MAP_ANONYMOUS) != 0ull) ? LX_VM_ANON : LX_VM_FILE;
+    LxFile *mf = (LxFile *)0;
+    LxProc *mp = lx_cur_proc();
+    int dev_map = 0;
 
     if (n == 0ull) {
         return neg(LX_EINVAL);
@@ -294,6 +300,18 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     }
     if ((prot & 4ull) != 0ull) {
         perm |= C6OS_PROT_X;              /* ld.so 映射 libc 代码段时必须有 X */
+    }
+    if ((flags & LX_MAP_SHARED) != 0ull) {
+        vf |= LX_VM_SHARED;
+    }
+    if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
+        vf |= LX_VM_LAZY;                 /* 页在第一次访问时才补 */
+    }
+    if ((flags & LX_MAP_ANONYMOUS) == 0ull) {
+        mf = lx_fdtab_get(mp != (LxProc *)0 ? mp->fd : (LxFdTab *)0, fd);
+        if (mf == (LxFile *)0) {
+            return neg(LX_EBADF);
+        }
     }
     if ((flags & LX_MAP_FIXED) != 0ull && at != 0ull) {
         at &= ~4095ull;                   /* ld.so 先探地址，再 MAP_FIXED 回来 */
@@ -310,7 +328,24 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         lx_vma_remove(g_as, at, at + n);   /* 覆盖映射：旧记账先作废 */
         (void)port_as_unmap(g_as, at, n);  /* 惰性映射下旧页不会自己消失 */
     }
-    if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
+    if (mf != (LxFile *)0 && mf->kind == LX_FD_DEV && mf->dev != 0u) {
+        /* G2：设备 mmap 走 ops（/dev/fb0 把扫描缓冲的物理页直接挂进页表）。
+         * VMA 只在这里做临时描述：设备回调不能改地址，只能映射 [start,end)。 */
+        LxVma tmp;
+        i64 rc;
+
+        tmp.start = at;
+        tmp.end = at + n;
+        tmp.prot = (u32)perm;
+        tmp.flags = vf;
+        tmp.file_off = off;
+        tmp.next = (LxVma *)0;
+        rc = lx_dev_mmap(lx_dev_of(mf->node), &tmp);
+        if (rc != 0) {
+            return (u64)rc;
+        }
+        dev_map = 1;
+    } else if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
         /* 惰性：只记账，第一次访问由 #PF 补零页（M13-2b-3）。malloc 的 arena、
          * 线程栈这类大 mmap 不再一上来就把物理页吃光。 */
     } else {
@@ -349,18 +384,11 @@ static u64 sys_mmap2(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         }
     }
     /* 记账：munmap/mprotect/栈增长都靠这条链判断"这段地址是什么"。 */
-    {
-        u32 vf = ((flags & LX_MAP_ANONYMOUS) != 0ull) ? LX_VM_ANON : LX_VM_FILE;
-
-        if ((flags & LX_MAP_SHARED) != 0ull) {
-            vf |= LX_VM_SHARED;
+    if (lx_vma_add(g_as, at, at + n, (u32)perm, vf, off) != 0) {
+        if (dev_map != 0) {               /* 设备页已经挂上：回滚用户引用 */
+            (void)port_as_unmap(g_as, at, n);
         }
-        if ((flags & LX_MAP_ANONYMOUS) != 0ull) {
-            vf |= LX_VM_LAZY;              /* 页在第一次访问时才补 */
-        }
-        if (lx_vma_add(g_as, at, at + n, (u32)perm, vf, off) != 0) {
-            return neg(LX_ENOMEM);         /* 区间冲突/记账 OOM */
-        }
+        return neg(LX_ENOMEM);            /* 区间冲突/记账 OOM */
     }
     return at;
 }
@@ -1302,6 +1330,15 @@ void lx_syscall_do(LxRegs *r)
                                       iofe->pos == 0ull ? 1u : 0u);
 
                 r->rax = (pr < 0) ? neg((u64)(-pr)) : (u64)pr;
+                return;
+            }
+            /* G2：/dev/fb0、/dev/input/event0 的 ioctl 走设备 ops。参数里的
+             * 用户指针校验在各设备的实现里做（每种请求长度不同）。 */
+            if (iofe != (LxFile *)0 && iofe->kind == LX_FD_DEV &&
+                iofe->dev != 0u) {
+                i64 dr = lx_dev_ioctl(lx_dev_of(iofe->node), (u32)a1, a2);
+
+                r->rax = (u64)dr;
                 return;
             }
         }

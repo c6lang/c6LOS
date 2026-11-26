@@ -2,6 +2,7 @@
 #include "c6os/port.h"
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
+#include "c6os/linux_dev.h"
 #if C6OS_NET
 #include "los/net.h"
 #endif
@@ -748,6 +749,7 @@ static void fd_set(u64 fd, u64 node, u32 is_dir, u32 kind, u64 flags)
     e->kind = kind;
     e->oflags = (u32)(flags & (u64)(LX_O_ACCMODE | LX_O_APPEND | LX_O_NONBLOCK));
     e->flags = ((flags & (u64)LX_O_CLOEXEC) != 0ull) ? (u32)LX_FD_CLOEXEC : 0u;
+    e->dev = 0u;
 }
 
 /* memfd_create(2)：匿名可写内存文件。节点 hidden=1，没有路径；fd 指向它，
@@ -856,10 +858,14 @@ void lx_fs_fd_reset(void)
     }
     n = (u64)g_fdtab->cap;
     for (i = 0; i < n; i++) {              /* execve：除 0/1/2 全关掉（同 Linux） */
+        if (g_fd[i].kind == LX_FD_DEV && g_fd[i].dev != 0u) {
+            lx_dev_release(lx_dev_of(g_fd[i].node));
+        }
         g_fd[i].node = LX_FD_NONE;
         g_fd[i].pos = 0ull;
         g_fd[i].is_dir = 0u;
         g_fd[i].kind = LX_FD_FILE;
+        g_fd[i].dev = 0u;
     }
     g_fd[0].node = LX_FD_CONSOLE;
     g_fd[1].node = LX_FD_CONSOLE;
@@ -1124,26 +1130,18 @@ static int at_abspath_(u64 dirfd, u64 upath, char *abspath, u64 cap)
     return 0;
 }
 
-/* M15-2：把 /dev/xxx 映射到设备节点号（node 字段的特殊值）。
- * 返回 0 表示不是设备路径。设备走 LX_FD_DEV，不占 VFS 的文件槽。 */
+/* M15-2 / G2：把 /dev/xxx 映射到设备注册表里的 LxDev id。
+ * 返回 0 表示不是设备路径；LX_DEV_PTMX 是 pty 子系统自己的特殊值（不是
+ * LxDev id，open 里必须先判断它，否则 0xfffffff3 会被当成合法 id）。 */
 static u64 dev_node_(const char *s)
 {
-    if (seq_(s, "dev/null") == 1) {
-        return LX_DEV_NULL;
-    }
-    if (seq_(s, "dev/zero") == 1) {
-        return LX_DEV_ZERO;
-    }
-    if (seq_(s, "dev/full") == 1) {
-        return LX_DEV_FULL;
-    }
-    if (seq_(s, "dev/random") == 1 || seq_(s, "dev/urandom") == 1) {
-        return LX_DEV_URANDOM;
-    }
+    LxDev *d;
+
     if (seq_(s, "dev/ptmx") == 1) {
         return LX_DEV_PTMX;
     }
-    return 0ull;
+    d = lx_dev_find(s);
+    return (d != (LxDev *)0) ? (u64)d->id : 0ull;
 }
 
 /* /dev/pts/N：返回 pty 对象 id（N），不是 dev 哨兵。返回 ~0 表示不匹配。 */
@@ -1612,11 +1610,23 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
             return fd;
         }
         if (dev != 0ull) {
+            LxDev *d;
+            OsFile *o;
+
             fd = fd_alloc();
             if (fd == LX_FD_NONE) {
                 return (u64)0 - LX_EMFILE;
             }
-            fd_set(fd, dev, 0u, LX_FD_DEV, flags);
+            d = lx_dev_by_id(dev);
+            o = lx_dev_open(d);                /* 每 open 一个引用对象 */
+            if (o == (OsFile *)0) {
+                lx_fdtab_release(&g_fd[fd]);
+                return (u64)0 - LX_ENOMEM;
+            }
+            /* node 存 OsFile*，dev 存 LxDev id：close/fork/dup 靠这两个字段
+             * 找到同一份打开实例并维护引用。 */
+            fd_set(fd, (u64)o, 0u, LX_FD_DEV, flags);
+            g_fd[fd].dev = (u32)dev;
             return fd;
         }
     }
@@ -1676,34 +1686,6 @@ u64 lx_fs_openat(u64 dirfd, u64 upath, u64 flags, u64 mode)
 }
 
 /* 从文件读，不动 fd 位置（pread64、以及 mmap 的文件内容拷贝都用它）。 */
-/* M15-2：/dev 下设备的读。node 是 LX_DEV_* 特殊值。
- * user!=0 时目标在用户空间要先校验可写；user==0 是内核缓冲（pread_k）。 */
-static u32 g_dev_seed = 0x13579bdfu;
-
-static u64 dev_read_(u64 node, u64 dst, u64 len, u32 user)
-{
-    u64 i;
-
-    if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
-        return (u64)0 - LX_EFAULT;
-    }
-    if (node == LX_DEV_ZERO) {
-        for (i = 0ull; i < len; i++) {
-            *(u8 *)(dst + i) = 0u;
-        }
-        return len;
-    }
-    if (node == LX_DEV_URANDOM) {
-        for (i = 0ull; i < len; i++) {
-            g_dev_seed = g_dev_seed * 1103515245u + 12345u;
-            *(u8 *)(dst + i) = (u8)((g_dev_seed >> 16) & 0xffu);
-        }
-        return len;
-    }
-    /* /dev/null、/dev/full 读都是 EOF */
-    return 0ull;
-}
-
 static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
 {
     LxFile *f = fd_get(fd);
@@ -1763,7 +1745,29 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         }
     }
     if (f->kind == LX_FD_DEV) {
-        return dev_read_(f->node, dst, len, user);
+        OsFile *o = lx_dev_of(f->node);
+        i64 rc;
+
+        if (o == (OsFile *)0) {
+            return (u64)0 - LX_EBADF;
+        }
+        if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        /* 空 evdev 队列返回 EAGAIN：阻塞设备在这里等，O_NONBLOCK / 内核读
+         * （mmap 预拷等）原样透传。 */
+        for (;;) {
+            rc = lx_dev_read(o, (void *)dst, len);
+            if (rc != -(i64)LX_EAGAIN || user == 0u ||
+                (f->oflags & (u32)LX_O_NONBLOCK) != 0u) {
+                return (u64)rc;
+            }
+            lx_proc_set_wait(LX_WAIT_PIPE);
+            lx_proc_block();
+            if (lx_proc_intr() != 0 && lx_proc_restart() == 0) {
+                return (u64)0 - LX_EINTR;
+            }
+        }
     }
     if (f->node == LX_FD_CONSOLE) {
         /* M12：console 节点的读以前恒为 EOF。tty 打开之后它就是真终端——
@@ -1934,14 +1938,15 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
     }
 #endif
     if (f->kind == LX_FD_DEV) {
+        OsFile *o = lx_dev_of(f->node);
+
+        if (o == (OsFile *)0) {
+            return (u64)0 - LX_EBADF;
+        }
         if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
             return (u64)0 - LX_EFAULT;
         }
-        f->pos += len;
-        if (f->node == LX_DEV_FULL) {
-            return (u64)0 - LX_ENOSPC;             /* /dev/full：写永远失败 */
-        }
-        return len;                                /* /dev/null 等：吞掉 */
+        return (u64)lx_dev_write(o, (const void *)ubuf, len);
     }
     if (f->kind == LX_FD_FILE && f->node < (u64)g_nodes &&
         g_node[(u32)f->node].writable != 0u) {
@@ -2009,8 +2014,12 @@ u64 lx_fs_write_k(u64 fd, const u8 *src, u64 len)
     }
 #endif
     if (f->kind == LX_FD_DEV) {
-        f->pos += len;
-        return (f->node == LX_DEV_FULL) ? (u64)0 - LX_ENOSPC : len;
+        OsFile *o = lx_dev_of(f->node);
+
+        if (o == (OsFile *)0) {
+            return (u64)0 - LX_EBADF;
+        }
+        return (u64)lx_dev_write(o, (const void *)src, len);
     }
     return (u64)0 - LX_EBADF;
 }
@@ -2282,10 +2291,20 @@ u64 lx_fs_close(u64 fd)
         lx_fs_release_vfs(f);
         return 0ull;
     }
+    if (f->kind == LX_FD_DEV) {
+        lx_dev_release(lx_dev_of(f->node));
+        f->node = LX_FD_NONE;
+        f->pos = 0ull;
+        f->is_dir = 0u;
+        f->kind = LX_FD_FILE;
+        f->dev = 0u;
+        return 0ull;
+    }
     f->node = LX_FD_NONE;
     f->pos = 0ull;
     f->is_dir = 0u;
     f->kind = LX_FD_FILE;
+    f->dev = 0u;
     return 0ull;
 }
 
@@ -2303,6 +2322,9 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
      * musl 的 cat 探测 stdin 时据此走错路径，动态 exec 的管道输入静默丢失。 */
     if (f->kind == LX_FD_PIPE_R || f->kind == LX_FD_PIPE_W) {
         return (u64)0 - LX_ESPIPE;
+    }
+    if (f->kind == LX_FD_DEV) {
+        return (u64)0 - LX_ESPIPE;         /* 字符设备不可定位（Linux 同） */
     }
 #if C6OS_VFS
     if (f->kind == LX_FD_VFS) {
@@ -2410,6 +2432,13 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
      * 直接不读 —— 外部命令管道（如 `echo x | cat`）静默丢数据。 */
     if (f->kind == LX_FD_PIPE_R || f->kind == LX_FD_PIPE_W) {
         if (fill_stat(ustat, 0u, 0ull, 0010600u) != 0) {
+            return (u64)0 - LX_EFAULT;
+        }
+        return 0ull;
+    }
+    /* G2：设备 fd 的 node 是 OsFile 指针，绝不能拿去索引 g_node[]。 */
+    if (f->kind == LX_FD_DEV) {
+        if (fill_stat(ustat, 0u, 0ull, 0020600u) != 0) {
             return (u64)0 - LX_EFAULT;
         }
         return 0ull;

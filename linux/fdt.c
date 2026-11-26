@@ -37,6 +37,7 @@ static void ent_reset_(LxFile *e, u32 n)
         e[i].kind = LX_FD_FILE;
         e[i].flags = 0u;
         e[i].oflags = 0u;
+        e[i].dev = 0u;
     }
 }
 
@@ -50,6 +51,7 @@ void lx_fdtab_release(LxFile *e)
     e->kind = LX_FD_FILE;
     e->flags = 0u;
     e->oflags = 0u;
+    e->dev = 0u;
 }
 
 static LxFdTab *tab_new_(u32 cap)

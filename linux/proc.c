@@ -7,6 +7,7 @@
 
 #include <c6os/linux_abi.h>
 #include <c6os/linux_proc.h>
+#include <c6os/linux_dev.h>
 #include <c6os/port.h>
 
 /* LX_ARG_MAX / LX_ARG_BYTES 见 linux_abi.h（elf64.c 压栈时也用同一份）。 */
@@ -2053,6 +2054,10 @@ static void fd_free_hook_(LxFile *fe)
         lx_fs_release_vfs(fe);
         return;
     }
+    if (fe->kind == LX_FD_DEV && fe->dev != 0u) {
+        lx_dev_release(lx_dev_of(fe->node));   /* G2：设备打开实例引用 -1 */
+        return;
+    }
     pipe_drop_(fe);
 }
 
@@ -2061,6 +2066,10 @@ static void pipe_ref_(const LxFile *fe)
 {
     LxPipe *pp;
 
+    if (fe->kind == LX_FD_DEV) {
+        lx_dev_ref(lx_dev_of(fe->node));      /* G2：设备句柄 dup/fork 共享 */
+        return;
+    }
     if (fe->kind == LX_FD_SOCK) {
         lx_sock_ref(fe->node);
         return;
@@ -2289,6 +2298,12 @@ void lx_unix_wake(void)
     wake_all_();
 }
 
+/* G2：evdev 注入事件后唤醒被 read()/poll() 阻塞的进程。 */
+void lx_proc_wake_all(void)
+{
+    wake_all_();
+}
+
 /* SCM_RIGHTS / dup：按 kind 增加 fd 携带对象的引用计数。 */
 void lx_unix_fd_acquire(u32 node, u32 kind)
 {
@@ -2376,6 +2391,14 @@ u64 lx_proc_close(u64 fd)
     /* VFS 文件（/data FAT、/tmp ramfs等）必须走 lx_fs_close 释放内核侧
      * 文件句柄（FAT_MAX_FILES 池）。以前落进下面的通用 pipe_drop_ 分支，
      * 句柄永不归还，几个 open/close 之后就 "Out of memory"。 */
+    if (fe->kind == LX_FD_DEV && fe->dev != 0u) {
+        lx_dev_release(lx_dev_of(fe->node));
+        fe->node = LX_FD_NONE;
+        fe->dev = 0u;
+        fe->kind = LX_FD_FILE;
+        wake_all_();
+        return 0ull;
+    }
     if (fe->kind == LX_FD_VFS) {
         (void)lx_fs_close(fd);
         fe->node = LX_FD_NONE;
@@ -2431,6 +2454,9 @@ u64 lx_proc_dup2(u64 oldfd, u64 newfd)
     nf = &p->fd->ent[newfd];
     if (nf->node != LX_FD_NONE && nf->kind == LX_FD_VFS) {
         lx_fs_release_vfs(nf);                 /* 覆盖前把 FAT 句柄还回去 */
+    } else if (nf->node != LX_FD_NONE && nf->kind == LX_FD_DEV &&
+               nf->dev != 0u) {
+        lx_dev_release(lx_dev_of(nf->node));   /* 覆盖前放掉旧设备引用 */
     } else if (nf->node != LX_FD_NONE && nf->kind != LX_FD_FILE) {
         pipe_drop_(nf);
     }
@@ -3854,6 +3880,14 @@ static u16 poll_events_(LxProc *p, i32 fd)
             ev = (u16)(ev | (u16)LX_POLLHUP);
         }
         return ev;
+    }
+    /* G2：设备（evdev 有事件才报 POLLIN；fb0 恒可写）。放在通用
+     * "普通文件 / console：不阻塞" 之前，否则空 event0 会误报就绪。 */
+    if (f->kind == LX_FD_DEV && f->dev != 0u) {
+        OsFile *o = lx_dev_of(f->node);
+
+        return (o != (OsFile *)0) ? lx_dev_poll(o, (u16)0xffffu)
+                                  : (u16)LX_POLLNVAL;
     }
     if (f->kind == LX_FD_PIPE_W) {
         const LxPipe *pp = pipe_at_(f->node);

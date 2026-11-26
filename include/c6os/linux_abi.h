@@ -360,6 +360,7 @@
 #define LX_EINVAL  22
 #define LX_ENOSYS  38
 #define LX_ENOTTY  25
+#define LX_ENODEV  19
 #define LX_EFBIG   27
 #define LX_ENOEXEC 8
 #define LX_ECHILD  10
@@ -482,5 +483,8 @@ void lx_syscall(LxRegs *r);
 /* 简易用户内存访问（L2：VMA 范围校验；L5 换 .extable + 缺页修复） */
 int lx_user_ok(u64 va, u64 len, u32 prot);
 u64 lx_copy_from_user(void *dst, u64 src, u64 len);
+
+/* G2：设备 mmap 回调要用当前进程的地址空间句柄（sys.c 的 g_as）。 */
+u64 lx_as_get(void);
 
 #endif
