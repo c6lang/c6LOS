@@ -128,8 +128,27 @@ int main(void)
         return 1;
     }
 
-    /* 写像素。映射里 XRGB8888 的字节序就是宿主小端，直接按 u32 存取。 */
+    /* 写像素。映射里 XRGB8888 的字节序就是宿主小端，直接按 u32 存取。
+     * 先铺四色测试图（验收截图能看见东西），再落三个断言像素。 */
     p = (unsigned int *)fb;
+    {
+        unsigned int y, x;
+        for (y = 0; y < FB_H; y++) {
+            for (x = 0; x < FB_W; x++) {
+                unsigned int v;
+                if (y < FB_H / 4u) {
+                    v = 0x00e04040u;
+                } else if (y < FB_H / 2u) {
+                    v = 0x0040e040u;
+                } else if (y < (FB_H * 3u) / 4u) {
+                    v = 0x004040e0u;
+                } else {
+                    v = 0x00e0e040u;
+                }
+                p[y * FB_W + x] = v;
+            }
+        }
+    }
     p[0] = 0x00112233u;
     p[FB_W * (FB_H / 2u) + FB_W / 2u] = 0x00445566u;
     p[FB_W * (FB_H - 1u) + (FB_W - 1u)] = 0x00778899u;

@@ -67,4 +67,5 @@ if w < 640 or h < 480:
     raise SystemExit("FAIL: linuxabi-g2（屏幕尺寸 %dx%d）" % (w, h))
 print("PASS: linuxabi-g2（fb0 像素 0x112233 已上屏；%dx%d）" % (w, h))
 PY
+if [ -n "${G2_KEEP_PPM:-}" ]; then cp "$PPM" "$G2_KEEP_PPM"; fi
 rm -f "$SER" "$PPM"
