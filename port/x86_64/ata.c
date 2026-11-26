@@ -69,34 +69,52 @@ static int ata_wait_ready(void)
     return -2;                            /* 超时 */
 }
 
-int port_ata_read(u32 lba, u32 count, u64 dst_pa)
+static int ata_read_dev_(u32 dev, u32 lba, u32 count, u64 dst_pa)
 {
     u8 *buf = (u8 *)port_phys_map(dst_pa);
-    u32 s;
+    u32 done = 0u;
 
-    for (s = 0; s < count; s++) {
-        u32 l = lba + s;
-        u8 *p = buf + (u64)s * 512ull;
-        int i;
+    while (done < count) {
+        u32 n = count - done;
+        u32 s;
 
-        outb(0x1F6u, (u8)(0xE0u | (u8)((l >> 24) & 0x0Fu)));   /* LBA 模式 */
+        if (n > 255u) {
+            n = 255u;
+        }
+        outb(0x1F6u, (u8)(0xE0u | ((dev & 1u) << 4) |
+                          (u8)(((lba + done) >> 24) & 0x0Fu)));
         outb(0x1F1u, 0x00u);
-        outb(0x1F2u, 0x01u);                                    /* 1 个扇区 */
-        outb(0x1F3u, (u8)(l & 0xFFu));
-        outb(0x1F4u, (u8)((l >> 8) & 0xFFu));
-        outb(0x1F5u, (u8)((l >> 16) & 0xFFu));
-        outb(0x1F7u, 0x20u);                                    /* READ SECTORS */
+        outb(0x1F2u, (u8)n);
+        outb(0x1F3u, (u8)((lba + done) & 0xFFu));
+        outb(0x1F4u, (u8)(((lba + done) >> 8) & 0xFFu));
+        outb(0x1F5u, (u8)(((lba + done) >> 16) & 0xFFu));
+        outb(0x1F7u, 0x20u);                            /* READ SECTORS */
+        for (s = 0u; s < n; s++) {
+            u8 *p = buf + (u64)(done + s) * 512ull;
+            int i;
 
-        if (ata_wait_ready() != 0) {
-            return -1;
+            if (ata_wait_ready() != 0) {
+                return -1;
+            }
+            for (i = 0; i < 256; i++) {
+                u16 w = inw(0x1F0u);
+                p[i * 2] = (u8)(w & 0xFFu);
+                p[i * 2 + 1] = (u8)(w >> 8);
+            }
         }
-        for (i = 0; i < 256; i++) {
-            u16 w = inw(0x1F0u);
-            p[i * 2] = (u8)(w & 0xFFu);
-            p[i * 2 + 1] = (u8)(w >> 8);
-        }
+        done += n;
     }
     return 0;
+}
+
+int port_ata_read(u32 lba, u32 count, u64 dst_pa)
+{
+    return ata_read_dev_(0u, lba, count, dst_pa);
+}
+
+int port_ata_read_dev(u32 dev, u32 lba, u32 count, u64 dst_pa)
+{
+    return ata_read_dev_(dev, lba, count, dst_pa);
 }
 
 int port_ata_write(u32 lba, u32 count, u64 src_pa)

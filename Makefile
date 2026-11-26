@@ -1069,7 +1069,7 @@ X86S_C6    := $(X86S_MAIN) kernel/task.c6 kernel/tick.c6 \
 
 # personality 的 bring-up 目标（L1 ring3 / L2 ELF）不链接调度器，
 # 免得带入 port_cur_ctx 之类的调度钩子。
-ifneq ($(filter user elf g0 g0n g1 g1f g2 fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf g0 g0n g1 g1f g2 fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome,$(X86S_NAME)),)
 X86S_C6    := $(X86S_MAIN)
 endif
 
@@ -1082,7 +1082,7 @@ X86S_C6        += kernel/vfs.c6 kernel/romfs.c6 kernel/ramfs.c6 \
                   kernel/fsapi.c6 kernel/blkdev.c6 kernel/fatfs.c6 kernel/heap.c6
 # vfs 走的是"精简对象列表"，里面本来就有 mmu.o/ata.o；只有默认完整内核目标
 # 才需要额外补这两个（重复传同一个 .o 会 multiple definition）。
-ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp,$(X86S_NAME)),)
+ifneq ($(filter user elf fs dyn mem vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw alp chrome,$(X86S_NAME)),)
 X86S_OBJ_EXTRA :=
 else
 X86S_OBJ_EXTRA := $(X86S_DIR)/obj/mmu.o $(X86S_DIR)/obj/ata.o
@@ -1125,7 +1125,7 @@ X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
 endif
 
 # L2/L3 载荷：再多带磁盘、ELF64 加载器与 initramfs。
-ifneq ($(filter elf g0 g0n g1 g1f g2 fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw,$(X86S_NAME)),)
+ifneq ($(filter elf g0 g0n g1 g1f g2 fs dyn vfs m9 m15 m16 m17 m18 m20 m21 m22 m23 m24 m25 m27 m35 m38 m39 m40 m41 m42 m43 m44 m45 m46 m47 m48 m49 m50 m51 m52 m53 m54 m55 m56 m57 m59 net ip ping udp tcp iso fatw chrome,$(X86S_NAME)),)
 X86S_OBJ   := $(addprefix $(X86S_DIR)/obj/,$(notdir $(X86S_C6:.c6=.o))) \
               $(X86S_DIR)/obj/console.o $(X86S_DIR)/obj/irq.o \
               $(X86S_DIR)/obj/irq_asm.o $(X86S_DIR)/obj/libc.o \
@@ -1448,6 +1448,33 @@ G2_ELF := $(X86)/g2dev.elf
 $(G2_ELF): $(G2_SRC)
 	@mkdir -p $(dir $@)
 	gcc -static -Os -s -o $@ $<
+
+# ---- G4：自包含 Wayland 合成器 + wl_shm/xdg_shell 演示客户端 ----
+G4_SRC := user/c6wl/c6wl.c
+G4_ELF := $(X86)/c6wl.elf
+WL_DEMO_SRC := tests/linux/wl_demo.c
+WL_DEMO_ELF := $(X86)/wl_demo.elf
+
+$(G4_ELF): $(G4_SRC) user/c6wl/wire.h
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+$(WL_DEMO_ELF): $(WL_DEMO_SRC) user/c6wl/wire.h
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $<
+
+# ---- G3：CDP 显示客户端（普通静态 Linux ELF；宿主 gcc 链接 zlib）----
+G3_SRC := user/c6chrome-display.c
+G3_ELF := $(X86)/c6chrome-display.elf
+G3_TEST := $(X86)/t_cdp
+
+$(G3_ELF): $(G3_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -s -o $@ $< -lz
+
+$(G3_TEST): tests/host/t_cdp.c $(G3_SRC)
+	@mkdir -p $(dir $@)
+	gcc -static -Os -o $@ tests/host/t_cdp.c -lz
 
 # G0-3：1500 个 initramfs 节点（超过旧 1024 上限）
 G0N_SRC  := tests/linux/g0nodes.c
@@ -2444,6 +2471,65 @@ check-alpine:
 	  && echo "PASS: alpine M12 宿主侧（数据盘里有 m12.txt）" \
 	  || { echo "FAIL: alpine M12 宿主侧"; 7z l $(ALPINE_DATA) | tail -12; exit 1; }
 
+# ---- G0-4 / Chrome rootfs：chromium 太大，走第二块 IDE 盘（raw cpio）----
+CHROME_DIR   := $(ALPINE_DIR)/chrome
+CHROME_ROOT  := $(CHROME_DIR)/root
+CHROME_CPIO  := $(CHROME_DIR)/rootfs.cpio
+CHROME_DISK  := $(CHROME_DIR)/rootfs.img
+CHROME_ISO   := $(CHROME_DIR)/chrome.iso
+CHROME_KER   := $(X86)/chrome/flat.bin
+CHROME_MARK  := $(CHROME_ROOT)/.chromium-pkgs
+
+# 解包结果用独立 stamp 标记：tar 里 busybox 的 mtime 是打包时间，直接拿
+# bin/busybox 当目标会被 2026 年下载的 tarball 一直判定为过期，导致每次
+# make 都 rm -rf root（然后 Chrome 包被抹掉）。
+$(CHROME_ROOT)/.extracted: $(ALPINE_TGZ)
+	@rm -rf $(CHROME_ROOT)
+	@mkdir -p $(CHROME_ROOT)
+	tar -xzf $(ALPINE_TGZ) -C $(CHROME_ROOT)
+	@touch $@
+
+$(CHROME_ROOT)/bin/busybox: $(CHROME_ROOT)/.extracted
+
+# fetch-apk 自己解析完整依赖闭包（约 70 个包、解包 ~640MB）；标记文件在
+# rootfs 内，tarball 更新时随目录一起消失，包变化会重新计算。
+$(CHROME_MARK): $(CHROME_ROOT)/.extracted tools/fetch-apk.py Makefile
+	@python3 tools/fetch-apk.py --root $(CHROME_ROOT) --cache $(ALPINE_PKG_CACHE) \
+		--base $(ALPINE_REPO) --marker $@ chromium
+
+$(CHROME_ROOT)/usr/bin/c6chrome-display: $(G3_ELF) $(CHROME_ROOT)/.extracted
+	@mkdir -p $(@D)
+	cp $(G3_ELF) $@
+
+$(CHROME_CPIO): $(CHROME_ROOT)/.extracted $(CHROME_MARK) \
+	$(CHROME_ROOT)/usr/bin/c6chrome-display tools/mk-initramfs.py
+	python3 tools/mk-initramfs.py $@ $(CHROME_ROOT)
+
+$(CHROME_DISK): $(CHROME_CPIO)
+	@mkdir -p $(@D)
+	# mk-initramfs 已经写了 8 字节长度 + 504 字节扇区前缀；第二块盘要
+	# 的是“LBA0 长度前缀 + LBA1 起的裸 cpio”，所以把内层前缀剥掉。
+	python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read()[512:]; b=struct.pack("<Q",len(d))+b"\0"*504+d+b"\0"*((-len(d))%512); open(sys.argv[2],"wb").write(b)' $< $@
+
+x86-chrome: caps-check-x86 $(CD0_BIN) $(CHROME_CPIO)
+	@rm -rf $(X86)/chrome
+	@mkdir -p $(X86)/chrome
+	$(MAKE) X86S_NAME=chrome X86S_MAIN=tests/t_iso_alpine.c6 LINUX_ABI=1 C6OS_VFS=1 \
+		C6OS_NET=1 C6_DEFS=-DC6OS_CHROME=1 $(CHROME_KER)
+	python3 tools/mkiso.py --boot $(CD0_BIN) --kernel $(CHROME_KER) -o $(CHROME_ISO)
+
+check-linuxabi-g0-rootfs: x86-chrome $(CHROME_DISK)
+	@set -e; \
+	 log=$$(mktemp /tmp/check-chrome.XXXXXX.log); \
+	 set +e; \
+	 timeout 900 qemu-system-x86_64 -m 3072 -cdrom $(CHROME_ISO) -boot d \
+		-drive format=raw,file=$(CHROME_DISK),if=ide,index=1,readonly=on \
+		-nographic -serial stdio -monitor none -no-reboot 2>&1 | tr -d '\r' > $$log; \
+	 rc=$$?; set -e; \
+	 grep -q "chrome-version-done" $$log || { echo "FAIL: linuxabi-g0 rootfs（chromium --version 未完成，qemu rc=$$rc）"; tail -40 $$log; exit 1; }; \
+	 grep -qi "chromium" $$log || { echo "FAIL: linuxabi-g0 rootfs（没有 Chromium 版本输出）"; tail -40 $$log; exit 1; }; \
+	 echo "PASS: linuxabi-g0 rootfs（chromium --version 从第二块 IDE 盘 rootfs 跑通）"
+
 # ---- M11-2：可读写硬盘（FAT16 写）----
 x86-fatw: caps-check-x86
 	$(MAKE) X86S_NAME=fatw X86S_MAIN=tests/t_fat_write.c6 C6OS_VFS=1 \
@@ -2804,6 +2890,12 @@ check-linuxabi-g1: x86-g1 x86-g1f
 # （24B input_event + 注入 + poll）。判定只看串口里测试自己打的 PASS 行。
 check-linuxabi-g2: x86-g2
 	@bash tools/check-linuxabi-g2.sh
+
+check-linuxabi-g3:
+	@bash tools/check-linuxabi-g3.sh
+
+check-linuxabi-g4:
+	@bash tools/check-linuxabi-g4.sh
 
 check-linuxabi-g0: x86-g0 x86-g0n
 	@set -e; \

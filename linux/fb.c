@@ -143,7 +143,7 @@ static void id_copy_(char *id, const char *s)
     id[i] = '\0';
 }
 
-static i64 fb_read_(struct OsFile *f, void *buf, u64 n)
+static i64 fb_read_(struct LxOsFile *f, void *buf, u64 n)
 {
     (void)f;
     (void)buf;
@@ -151,7 +151,7 @@ static i64 fb_read_(struct OsFile *f, void *buf, u64 n)
     return -(i64)LX_EINVAL;                 /* 帧缓冲没有 read(2) 语义 */
 }
 
-static i64 fb_write_(struct OsFile *f, const void *buf, u64 n)
+static i64 fb_write_(struct LxOsFile *f, const void *buf, u64 n)
 {
     (void)f;
     (void)buf;
@@ -159,16 +159,16 @@ static i64 fb_write_(struct OsFile *f, const void *buf, u64 n)
     return -(i64)LX_EINVAL;                 /* 像素走 mmap；写路径留给 G3 */
 }
 
-static u16 fb_poll_(struct OsFile *f, u16 events)
+static u16 fb_poll_(struct LxOsFile *f, u16 events)
 {
     (void)f;
     (void)events;
     return (u16)LX_POLLOUT;                 /* 帧缓冲永远可写 */
 }
 
-static i64 fb_ioctl_(struct OsFile *f, u32 req, u64 arg)
+static i64 fb_ioctl_(struct LxOsFile *f, u32 req, u64 arg)
 {
-    LxFb *fb = (f != (struct OsFile *)0) ? (LxFb *)f->fh : (LxFb *)0;
+    LxFb *fb = (f != (struct LxOsFile *)0) ? (LxFb *)f->fh : (LxFb *)0;
 
     if (fb == (LxFb *)0) {
         return -(i64)LX_ENODEV;
@@ -242,9 +242,9 @@ static i64 fb_ioctl_(struct OsFile *f, u32 req, u64 arg)
     return -(i64)LX_ENOTTY;
 }
 
-static i64 fb_mmap_(struct OsFile *f, struct LxVma *vma)
+static i64 fb_mmap_(struct LxOsFile *f, struct LxVma *vma)
 {
-    LxFb *fb = (f != (struct OsFile *)0) ? (LxFb *)f->fh : (LxFb *)0;
+    LxFb *fb = (f != (struct LxOsFile *)0) ? (LxFb *)f->fh : (LxFb *)0;
     u64 as;
     u64 len;
     u64 pages;
@@ -307,7 +307,7 @@ static const OsFileOps g_fb_ops = {
     fb_poll_,
     fb_ioctl_,
     fb_mmap_,
-    (void (*)(struct OsFile *))0,
+    (void (*)(struct LxOsFile *))0,
 };
 
 void lx_fb_init(void)

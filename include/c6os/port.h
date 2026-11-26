@@ -141,6 +141,7 @@ u32  port_net_tx_packets(void);
 u32  port_net_rx_dropped(void);
 
 int  port_ata_read(u32 lba, u32 count, u64 dst_pa);
+int  port_ata_read_dev(u32 dev, u32 lba, u32 count, u64 dst_pa);
 int  port_ata_write(u32 lba, u32 count, u64 src_pa);
 
 /* 特权级底座：GDT/TSS/IDT、syscall 通道、每个 CPU 的内核栈。 */

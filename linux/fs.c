@@ -1614,7 +1614,7 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
         }
         if (dev != 0ull) {
             LxDev *d;
-            OsFile *o;
+            LxOsFile *o;
 
             fd = fd_alloc();
             if (fd == LX_FD_NONE) {
@@ -1622,11 +1622,11 @@ static u64 fs_openat(u64 dirfd, u64 upath, u64 flags)
             }
             d = lx_dev_by_id(dev);
             o = lx_dev_open(d);                /* 每 open 一个引用对象 */
-            if (o == (OsFile *)0) {
+            if (o == (LxOsFile *)0) {
                 lx_fdtab_release(&g_fd[fd]);
                 return (u64)0 - LX_ENOMEM;
             }
-            /* node 存 OsFile*，dev 存 LxDev id：close/fork/dup 靠这两个字段
+            /* node 存 LxOsFile*，dev 存 LxDev id：close/fork/dup 靠这两个字段
              * 找到同一份打开实例并维护引用。 */
             fd_set(fd, (u64)o, 0u, LX_FD_DEV, flags);
             g_fd[fd].dev = (u32)dev;
@@ -1748,10 +1748,10 @@ static u64 pread_(u64 fd, u64 dst, u64 len, u64 off, u32 user)
         }
     }
     if (f->kind == LX_FD_DEV) {
-        OsFile *o = lx_dev_of(f->node);
+        LxOsFile *o = lx_dev_of(f->node);
         i64 rc;
 
-        if (o == (OsFile *)0) {
+        if (o == (LxOsFile *)0) {
             return (u64)0 - LX_EBADF;
         }
         if (user != 0u && lx_user_ok(dst, len, C6OS_PROT_W) == 0) {
@@ -1941,9 +1941,9 @@ u64 lx_fs_write(u64 fd, u64 ubuf, u64 len)
     }
 #endif
     if (f->kind == LX_FD_DEV) {
-        OsFile *o = lx_dev_of(f->node);
+        LxOsFile *o = lx_dev_of(f->node);
 
-        if (o == (OsFile *)0) {
+        if (o == (LxOsFile *)0) {
             return (u64)0 - LX_EBADF;
         }
         if (lx_user_ok(ubuf, len, C6OS_PROT_R) == 0) {
@@ -2017,9 +2017,9 @@ u64 lx_fs_write_k(u64 fd, const u8 *src, u64 len)
     }
 #endif
     if (f->kind == LX_FD_DEV) {
-        OsFile *o = lx_dev_of(f->node);
+        LxOsFile *o = lx_dev_of(f->node);
 
-        if (o == (OsFile *)0) {
+        if (o == (LxOsFile *)0) {
             return (u64)0 - LX_EBADF;
         }
         return (u64)lx_dev_write(o, (const void *)src, len);
@@ -2343,7 +2343,7 @@ u64 lx_fs_lseek(u64 fd, u64 off, u64 whence)
             return off;
         }
         /* LxFile.pos 是权威逻辑游标：pread/pwrite/copy_file_range 等位置
-         * I/O 刻意不动底层 OsFile.pos，若这里拿底层 pos 作 SEEK_CUR 基准
+         * I/O 刻意不动底层 LxOsFile.pos，若这里拿底层 pos 作 SEEK_CUR 基准
          * 就会读回过期值。统一在 Linux 层算目标，再用 SEEK_SET 同步后端。 */
         if (whence == 0ull) {
             base = 0;
@@ -2439,7 +2439,7 @@ u64 lx_fs_fstat(u64 fd, u64 ustat)
         }
         return 0ull;
     }
-    /* G2：设备 fd 的 node 是 OsFile 指针，绝不能拿去索引 g_node[]。 */
+    /* G2：设备 fd 的 node 是 LxOsFile 指针，绝不能拿去索引 g_node[]。 */
     if (f->kind == LX_FD_DEV) {
         if (fill_stat(ustat, 0u, 0ull, 0020600u) != 0) {
             return (u64)0 - LX_EFAULT;
@@ -2757,7 +2757,7 @@ u64 lx_fs_ftruncate(u64 fd, u64 len)
     }
     (void)os_str_cpy(abspath, g_vpath[(u32)f->node], (u32)sizeof abspath);
     /* POSIX：ftruncate 不改文件偏移。LxFile.pos 是权威逻辑游标，这里绝不能
-     * 动它；truncate_refresh_ 会按需要夹住底层 OsFile.pos。 */
+     * 动它；truncate_refresh_ 会按需要夹住底层 LxOsFile.pos。 */
     return vfs_errno_(LOS_FsTruncate((const CHAR *)abspath, (UINT32)len));
 #else
     (void)f; (void)len; (void)abspath;

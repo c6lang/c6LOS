@@ -111,9 +111,9 @@ static void ev_copy_in_(LxInputEvent *dst, const u8 *src)
     }
 }
 
-static i64 ev_read_(struct OsFile *f, void *buf, u64 len)
+static i64 ev_read_(struct LxOsFile *f, void *buf, u64 len)
 {
-    LxEvdev *e = (f != (struct OsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
+    LxEvdev *e = (f != (struct LxOsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
     u64 take;
     u64 max;
     u64 i;
@@ -140,7 +140,7 @@ static i64 ev_read_(struct OsFile *f, void *buf, u64 len)
     return (i64)(take * EV_SIZE);
 }
 
-static i64 ev_write_(struct OsFile *f, const void *buf, u64 len)
+static i64 ev_write_(struct LxOsFile *f, const void *buf, u64 len)
 {
     (void)f;
     (void)buf;
@@ -148,9 +148,9 @@ static i64 ev_write_(struct OsFile *f, const void *buf, u64 len)
     return -(i64)LX_EINVAL;                 /* 用户不能伪造输入事件 */
 }
 
-static u16 ev_poll_(struct OsFile *f, u16 events)
+static u16 ev_poll_(struct LxOsFile *f, u16 events)
 {
-    LxEvdev *e = (f != (struct OsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
+    LxEvdev *e = (f != (struct LxOsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
 
     (void)events;
     if (e != (LxEvdev *)0 && e->count != 0u) {
@@ -243,9 +243,9 @@ static void ev_bits_(u32 ev, u8 *bits, u32 n)
     }
 }
 
-static i64 ev_ioctl_(struct OsFile *f, u32 req, u64 arg)
+static i64 ev_ioctl_(struct LxOsFile *f, u32 req, u64 arg)
 {
-    LxEvdev *e = (f != (struct OsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
+    LxEvdev *e = (f != (struct LxOsFile *)0) ? (LxEvdev *)f->fh : (LxEvdev *)0;
     u32 nr;
     u32 len;
     u32 i;
@@ -349,8 +349,8 @@ static const OsFileOps g_ev_ops = {
     ev_write_,
     ev_poll_,
     ev_ioctl_,
-    (i64 (*)(struct OsFile *, struct LxVma *))0,
-    (void (*)(struct OsFile *))0,
+    (i64 (*)(struct LxOsFile *, struct LxVma *))0,
+    (void (*)(struct LxOsFile *))0,
 };
 
 void lx_evdev_init(void)

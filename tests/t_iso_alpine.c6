@@ -114,6 +114,16 @@ static const char kScript[] =
     "cat /data/a.txt && echo apps-cat-ok; "
     "tar -cf /data/a.tar /data/a.txt && echo apps-tar-ok; "
     "echo apps-done";
+#elif defined(C6OS_CHROME)
+/* G0-4：Chrome rootfs 从第二块 IDE 盘装载；只验二进制/loader 能起来。 */
+static const char kScript[] =
+    "mkdir -p /run/user/0 /dev/shm; "
+    "chmod 700 /run/user/0; "
+    "export XDG_RUNTIME_DIR=/run/user/0; "
+    "echo chrome-version-start; "
+    "/usr/lib/chromium/chromium --version; "
+    "echo chrome-version-done; "
+    "echo chrome-done";
 #else
 /* 交给 Alpine /bin/sh 的脚本，作为 `sh -c` 的第三个 argv。
  *
@@ -228,6 +238,66 @@ static void net_init(void)
 /* 标定出来的 TSC 频率（port/x86_64/irq.c；port_cycles 按它换算成 ns）。 */
 extern u64 port_tsc_hz(void);
 
+/* G0-4：Chrome rootfs 太大，不再塞进 ISO（BIOS int15 搬 243MB 要几十分钟），
+ * 改走第二块 IDE 盘：LBA0 是 u64 长度前缀，LBA1 起是原始 cpio。这里一次性
+ * 分配连续物理页并分块读入，和光盘 rootfs 走同一个 lx_fs_init。 */
+static u32 g_rootfs_len;
+
+static u32 rootfs_load_slave(void)
+{
+    u64 len = 0ull;
+    u64 pa = 0ull;
+    u32 sec = 0u;
+    u32 off = 0u;
+    u32 chunk = 0u;
+    u32 i = 0u;
+    u8 *p = 0;
+
+    if (port_ata_read_dev(1u, 0u, 1u, 0x70000u) != 0) {
+        port_puts("FAIL: 读第二块盘 rootfs 长度失败\n");
+        return 0u;
+    }
+    p = (u8 *)port_phys_map(0x70000u);
+    for (i = 0u; i < 8u; i++) {
+        len |= ((u64)p[i]) << (u8)(8u * i);
+    }
+    if (len < 64ull || len > 0x60000000ull) {         /* <= 1.5GB */
+        port_puts("FAIL: 第二块盘 rootfs 长度不合理\n");
+        return 0u;
+    }
+    pa = port_phys_alloc_pages((len + 4095ull) >> 12);
+    if (pa == 0ull) {
+        port_puts("FAIL: rootfs 连续物理页分配失败\n");
+        return 0u;
+    }
+    sec = (u32)((len + 511ull) / 512ull);
+    while (off < sec) {
+        chunk = sec - off;
+        if (chunk > 200u) {
+            chunk = 200u;
+        }
+        if (port_ata_read_dev(1u, 1u + off, chunk, pa + (u64)off * 512ull) != 0) {
+            port_puts("FAIL: 读第二块盘 rootfs 正文失败 off=");
+            put_u32(off);
+            port_puts(" chunk=");
+            put_u32(chunk);
+            port_puts(" pa=");
+            put_u32((u32)pa);
+            port_puts("\n");
+            return 0u;
+        }
+        if (off == 0u) {
+            port_puts("  rootfs: 首块正文读入成功\n");
+        }
+        off += chunk;
+    }
+    g_rootfs_len = (u32)len;
+    port_puts("  rootfs: 第二块 IDE 盘 cpio=");
+    put_u32((u32)(len / 1024u));
+    port_puts(" KB\n");
+    return (u32)pa;
+}
+
 void os_main(void)
 {
     volatile u32 *bi = (volatile u32 *)(u64)BOOTINFO_PA;
@@ -255,36 +325,61 @@ void os_main(void)
     magic = bi[0];
     rpa = bi[5];
     rlen = bi[6];
-    if (magic != BOOTINFO_MAGIC || rpa == 0u || rlen < 512u) {
-        port_puts("FAIL: alpine M12（引导信息块/rootfs 不对）\n");
+    if (magic != BOOTINFO_MAGIC) {
+        port_puts("FAIL: alpine M12（引导信息块不对）\n");
         return;
     }
-    port_phys_reserve((u64)rpa, (u64)rlen);
-
-    base = (const u8 *)port_phys_map((u64)rpa);
-    i = 0u;
-    while (i < 8u) {
-        fsz = fsz | ((u64)base[i] << (u64)(8u * i));
-        i++;
+    if (rlen == 0u) {
+        rpa = rootfs_load_slave();
+        if (rpa == 0u) {
+            port_puts("FAIL: alpine M12（第二块盘 rootfs 未加载）\n");
+            return;
+        }
+        /* 从磁盘读的 cpio 没有 8 字节前缀；直接从 rpa 解析。 */
+        base = (const u8 *)port_phys_map((u64)rpa);
+        rlen = 0xFFFFFFFFu;                         /* 由 cpio 自身长度决定，见下 */
+    } else {
+        port_phys_reserve((u64)rpa, (u64)rlen);
+        base = (const u8 *)port_phys_map((u64)rpa);
     }
-    port_puts("  rootfs: pa=");
-    put_u32(rpa);
-    port_puts(" len=");
-    put_u32((u32)fsz);
-    port_puts(" cpio=");
-    i = 0u;
-    while (i < 6u) {
-        port_putc((INT32)base[512u + i]);
-        i++;
-    }
-    port_puts("\n");
-    if (fsz < 64u || (u64)fsz > (u64)rlen) {
-        port_puts("FAIL: alpine M12（rootfs 长度前缀不对）\n");
-        return;
+    if (rlen == 0xFFFFFFFFu) {
+        /* 第二块盘：cpio 自身没有外层长度，按 cpio 目录遍历到最后即可；
+         * lx_fs_init 只读节点，不会越过 cpio 尾部。长度参数给 0 表示由
+         * 解析器自行按目录项推进（见 linux/fs.c 的 cpio 解析循环）。 */
+        fsz = 0ull;
+        port_puts("  rootfs: pa=");
+        put_u32(rpa);
+        port_puts("（第二块 IDE 盘，cpio 自描述）\n");
+    } else {
+        i = 0u;
+        while (i < 8u) {
+            fsz = fsz | ((u64)base[i] << (u64)(8u * i));
+            i++;
+        }
+        port_puts("  rootfs: pa=");
+        put_u32(rpa);
+        port_puts(" len=");
+        put_u32((u32)fsz);
+        port_puts(" cpio=");
+        i = 0u;
+        while (i < 6u) {
+            port_putc((INT32)base[512u + i]);
+            i++;
+        }
+        port_puts("\n");
+        if (fsz < 64u || (u64)fsz > (u64)rlen) {
+            port_puts("FAIL: alpine M12（rootfs 长度前缀不对）\n");
+            return;
+        }
     }
 
     /* 1. rootfs 交给 Linux ABI 的文件系统解析器（ld.so 要按路径从里面找） */
-    if (lx_fs_init((u64)rpa + 512ull, fsz) != 0) {
+    if (rlen == 0xFFFFFFFFu) {
+        if (lx_fs_init((u64)rpa, (u64)g_rootfs_len) != 0) {
+            port_puts("FAIL: alpine M12（cpio 解析失败）\n");
+            return;
+        }
+    } else if (lx_fs_init((u64)rpa + 512ull, fsz) != 0) {
         port_puts("FAIL: alpine M12（cpio 解析失败）\n");
         return;
     }
@@ -320,7 +415,11 @@ void os_main(void)
         return;
     }
 
-    /* 3. 可写数据盘 → /data（容器里能落盘） */
+    /* 3. 可写数据盘 → /data（容器里能落盘）
+     * Chrome rootfs 测试不接 FAT 数据盘（IDE 主盘位留给 rootfs），跳过。 */
+#ifdef C6OS_CHROME
+    port_puts("  /data: 本目标未接数据盘（跳过）\n");
+#else
     rc = (INT32)LOS_DeviceRegister("ata0", 512u, 32768u, blk_rd_cb, blk_wr_cb);
     if (rc < 0) {
         port_puts("FAIL: alpine M12（注册 ata0）\n");
@@ -335,6 +434,7 @@ void os_main(void)
         return;
     }
     port_puts("  /data = FAT16 数据盘（可写）\n");
+#endif
 
     /* 4. 串口接上行规程：0 号 fd 变真终端，sh 才会认自己交互式 */
     lx_tty_init();

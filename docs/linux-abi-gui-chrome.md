@@ -569,7 +569,7 @@ c6chrome-display --url data:text/html,... --size 800x600 --fb /dev/fb0
   ├─ CDP: Target.createTarget → Target.attachToTarget → Page.enable
   │      → Page.startScreencast {format:"jpeg", quality:70, maxWidth, maxHeight}
   ├─ 事件循环：poll([cdp_fd, evdev_fd])
-  │    Page.screencastFrame → base64 解码 → JPEG 解码（stb_image）→ RGB
+  │    Page.screencastFrame → base64 解码 → PNG 解码（zlib）→ RGB
   │    → fb0 mmap 拷贝（缩放）→ Page.screencastFrameAck
   │    evdev 事件 → Input.dispatchMouseEvent / dispatchKeyEvent
   │    （keycode→DOM code/key/windowsVirtualKeyCode 映射表至少覆盖字母数字、
@@ -586,7 +586,7 @@ c6chrome-display --url data:text/html,... --size 800x600 --fb /dev/fb0
   支持扁平对象），字符串转义/整数/布尔/数组都要支持；不引入第三方库；
 - 若目标 Chrome 版本 `Page.startScreencast` 不可用，回退到定时
   `Page.captureScreenshot`（性能差但保证 C2 可验收）；
-- JPEG 解码 vendor `stb_image.h`（public domain，单头文件）；若 rootfs 已有
+- PNG 解码只用 zlib（`inflate` + 5 种行 filter）；若 rootfs 已有
   `libjpeg-turbo` 可链接系统库，二选一在 G3 开始前定。
 
 #### 优点
@@ -819,7 +819,10 @@ PASS: linuxabi-g2（framebuffer 800x600x32；色块像素校验通过；sendkey 
 
 **实现任务**
 
-1. `user/c6chrome-display`：CDP 管道客户端、JSON、base64、JPEG、fb 写；
+1. `user/c6chrome-display`：CDP 管道客户端、JSON、base64、PNG/zlib、fb 写
+   （原计划的 JPEG/stb_image 在施工时改为 Chrome `format:"png"` + 系统 zlib：
+   静态 ELF 只多链 `-lz`，少一个 280 KB vendor 头，且 Chrome 131 的 PNG
+   screencast 已验证；见附录 D）；
 2. evdev → CDP 输入映射；
 3. Chrome 启动参数/生命周期管理（fork/exec、SIGTERM）；
 4. 端到端脚本：启动 Chrome→加载 `data:text/html,<h1 id=x>...`→截图→
@@ -848,6 +851,8 @@ PASS: linuxabi-g3（screendump 页面中心为预期色；sendkey 后页面颜�
 
 1. `user/c6wl`：自包含 Wayland wire protocol（对象 id/消息分发/AF_UNIX socket）+
    `wl_compositor`/`wl_shm`/`wl_output`/`wl_seat`/`xdg_shell`/frame callback（§5.2）；
+   实际文件 `user/c6wl/c6wl.c` + `user/c6wl/wire.h`，演示客户端
+   `tests/linux/wl_demo.c`（同样不链接 libwayland）；
 2. 自写 ARGB/XRGB 行拷贝 + alpha 混合到 fb0（32bpp/16bpp 两条路径），不引入 pixman；
 3. evdev 输入 → wl_pointer/wl_keyboard（内置 US keymap，memfd 发送）；
 4. `XDG_RUNTIME_DIR`、socket 文件、SIGCHLD 清理、软件光标。
@@ -1200,12 +1205,14 @@ QEMU 屏幕校验约定：
 
 ```sh
 # 构建带 Chrome 的 rootfs（G0 目标）
-make x86-chrome-rootfs
+make x86-chrome
+make build/x86/alpine/chrome/rootfs.img
+# 一键版本验收（第二块盘只读挂载，避免 QEMU 写锁）
+make check-linuxabi-g0-rootfs
 # 起机（3 GB、VBE、第二块 rootfs 盘）
 qemu-system-x86_64 -M pc -m 3072 -cpu max -vga std \
-  -cdrom build/x86/iso/chrome.iso \
-  -drive format=raw,file=build/x86/alpine/chrome-rootfs.img,if=ide,index=1 \
-  -drive format=raw,file=build/x86/alpine/chrome-data.img,if=ide,index=3 \
+  -cdrom build/x86/alpine/chrome/chrome.iso \
+  -drive format=raw,file=build/x86/alpine/chrome/rootfs.img,if=ide,index=1,readonly=on \
   -serial stdio -monitor unix:/tmp/c6qmp,server,nowait -no-reboot
 
 # guest 内
@@ -1237,3 +1244,61 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
 | R1-10 | TDD 只在总则和里程碑表里散落，缺独立测试设计 | 新增 §7（测试金字塔、目录、用例清单、RED/GREEN 协议、追溯矩阵） |
 
 > 本表是设计自评审，不是外部评审签署；施工前还需一次代码 owner 评审。
+
+
+## 附录 D：实现进度（2026-11-26，分支 `dsh/session-6dda0d23-12d4-4f1e-ae7e-4522a9f5`）
+
+> 口径：只有“本分支的验收命令实际跑过”的项才标 PASS。G5 需要 Chrome
+> 120 MB 二进制 + 旧式 Wayland 协议，受 QEMU TCG 与内核 syscall 覆盖限制，
+> 当前只到“连上 c6wl、拿到 global”为止，不能标绿。
+
+| 里程碑 | 状态 | 证据/命令 | 备注 |
+|---|---|---|---|
+| G0 底座 | **PASS** | `make check-linuxabi-g0`（3072 MB） | PMM 0–8 GB、DMAP WB/UC、procfs；1500 节点 |
+| G0-4 Chrome rootfs | **PASS** | `make check-linuxabi-g0-rootfs` | 第二块 IDE 盘 raw cpio；`Chromium 131.0.6778.108` |
+| G1 futex/memfd | **PASS** | `make check-linuxabi-g1` | 16 线程 futex、seals、mremap/madvise、1 TB PROT_NONE |
+| G2 fb0/evdev | **PASS** | `make check-linuxabi-g2` | 800×600 VBE screendump 0x112233；1280×800 扫描缓冲 |
+| G3 CDP 显示 | **部分** | `make check-linuxabi-g3` | host Chromium pipe → PNG → 像素 PASS；guest `chromium --version` PASS；guest 显示尚未接 |
+| G4 Wayland | **部分** | `make check-linuxabi-g4` | 自包含 `c6wl` + `wl_demo`，wl_shm/xdg_shell/帧回调/合成像素 PASS；输入和 Chrome 兼容性未完成 |
+| G5 Chrome on Wayland | **未开始** | — | host Chromium 能连上 c6wl（server 日志 `client connected`），但无 surface/帧 |
+| G6 性能 | **未开始** | — | — |
+| G7 DRM/KMS | **未开始**（可选） | — | — |
+| G8 S3/MaixCam | **未开始**（可选） | — | — |
+
+### D.1 第二块 IDE 盘 rootfs 的实际布局
+
+`mk-initramfs.py` 产出的 `rootfs.cpio` 自带 8 字节长度 + 504 字节扇区前缀。
+第二块盘不是把这个文件原样 dd：
+
+```
+LBA 0        8 字节 length（小端）+ 504 字节 0
+LBA 1..      cpio 正文（从 cpio 文件偏移 512 开始），尾部补 0 到 512
+```
+
+`tests/t_iso_alpine.c6` 先读 LBA 0 拿 length，再用
+`port_phys_alloc_pages(ceil(length/4K))` 分配**连续**物理页，分 200 扇区/批
+读正文。`lx_fs_init(pa, length)` 解析；不调用 `port_phys_reserve`（页已被
+PMM 标记 used，重复 reserve 会覆盖分配器的 free 计数）。这是对 §4.3
+“boot info 带 rootfs_pa、PMM 预留”的落地修正：Chrome 617 MB 连续页在
+3 GB 启动早期一次分配即可，比让 BIOS 搬 30 万次可靠。
+
+### D.2 G3 的协议选择
+
+- Chrome 131 `--headless=new` 不支持命令行多 URL（`Multiple targets are not
+  supported in headless mode`），所以客户端用 `Target.getTargets` 取 CLI 已建
+  的目标，再 `Target.attachToTarget(flatten)`；不要 `Target.createTarget`。
+- `Page.startScreencast` 在导航后 renderer 换页期间会返回
+  `Not attached to an active page`，实现里等 500 ms + 重试 8 次。
+- CDP 管道一次 `read` 会带回多个 NUL 消息，接收端必须保留残余缓冲；否则
+  静态页面的第一帧被应答吞掉后永远等不到第二帧。
+- 帧格式用 PNG（zlib）而非 JPEG；`Page.screencastFrameAck` 的 `sessionId`
+  是 **params 里的数字帧号**，不是 flatten 目标的字符串 session。
+
+### D.3 G4 的协议范围
+
+已实现 `wl_display`/`wl_registry`/`wl_compositor`/`wl_shm`/`wl_shm_pool`/
+`wl_buffer`/`wl_surface`/`wl_callback`/`wl_output`/`wl_seat`/`wl_pointer`/
+`wl_keyboard`（含 SCM_RIGHTS keymap fd）/`xdg_wm_base`/`xdg_surface`/
+`xdg_toplevel`/`wl_subcompositor`/`wl_data_device_manager` 的最小面。
+为 Chrome 预置了后两个 global，但 Chrome 仍未创建 surface，属于 G5 待办；
+不要把“client connected”当成 C3 通过。

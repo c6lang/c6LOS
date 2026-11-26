@@ -3884,9 +3884,9 @@ static u16 poll_events_(LxProc *p, i32 fd)
     /* G2：设备（evdev 有事件才报 POLLIN；fb0 恒可写）。放在通用
      * "普通文件 / console：不阻塞" 之前，否则空 event0 会误报就绪。 */
     if (f->kind == LX_FD_DEV && f->dev != 0u) {
-        OsFile *o = lx_dev_of(f->node);
+        LxOsFile *o = lx_dev_of(f->node);
 
-        return (o != (OsFile *)0) ? lx_dev_poll(o, (u16)0xffffu)
+        return (o != (LxOsFile *)0) ? lx_dev_poll(o, (u16)0xffffu)
                                   : (u16)LX_POLLNVAL;
     }
     if (f->kind == LX_FD_PIPE_W) {

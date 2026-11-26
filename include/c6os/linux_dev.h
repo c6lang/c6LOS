@@ -6,7 +6,7 @@
 /* G2：设备层对象模型（见 docs/linux-abi-gui-chrome.md §3.1）。
  *
  * LxDev 是设备注册表里的**设备**：名字、ops、私有数据、打开引用数。
- * OsFile 是一次 open 产生的**打开实例**：ops/dev 在 open 时固化，fh 指向
+ * LxOsFile 是一次 open 产生的**打开实例**：ops/dev 在 open 时固化，fh 指向
  * 设备的私有数据（fb0 的扫描缓冲、evdev 的队列），refs 供 dup/fork 共享。
  *
  * 约定（与 linux/ 其它层一致）：
@@ -20,15 +20,15 @@
 #endif
 
 struct LxVma;
-struct OsFile;
+struct LxOsFile;
 
 typedef struct OsFileOps {
-    i64 (*read)(struct OsFile *f, void *buf, u64 n);
-    i64 (*write)(struct OsFile *f, const void *buf, u64 n);
-    u16 (*poll)(struct OsFile *f, u16 events);
-    i64 (*ioctl)(struct OsFile *f, u32 req, u64 arg);
-    i64 (*mmap)(struct OsFile *f, struct LxVma *vma);   /* ABI 私有，见 §3.2 */
-    void (*close)(struct OsFile *f);
+    i64 (*read)(struct LxOsFile *f, void *buf, u64 n);
+    i64 (*write)(struct LxOsFile *f, const void *buf, u64 n);
+    u16 (*poll)(struct LxOsFile *f, u16 events);
+    i64 (*ioctl)(struct LxOsFile *f, u32 req, u64 arg);
+    i64 (*mmap)(struct LxOsFile *f, struct LxVma *vma);   /* ABI 私有，见 §3.2 */
+    void (*close)(struct LxOsFile *f);
 } OsFileOps;
 
 typedef struct LxDev {
@@ -39,14 +39,14 @@ typedef struct LxDev {
     u32 id;                    /* 1..LX_DEV_MAX，0 表示无效 */
 } LxDev;
 
-typedef struct OsFile {
+typedef struct LxOsFile {
     const OsFileOps *ops;
     LxDev *dev;
     void *fh;                  /* 设备私有打开状态（通常 = dev->priv） */
     u64 pos;                   /* 需要定位语义的设备用 */
     u32 refs;
     u32 pad;
-} OsFile;
+} LxOsFile;
 
 #define LX_DEV_MAX 16u
 
@@ -57,17 +57,17 @@ LxDev  *lx_dev_register(const char *name, const OsFileOps *ops, void *priv);
 LxDev  *lx_dev_find(const char *path);
 LxDev  *lx_dev_by_id(u64 id);
 
-/* fd 槽的 node 字段存的就是 OsFile*（LX_FD_DEV 专用）。 */
-OsFile *lx_dev_open(LxDev *d);
-OsFile *lx_dev_of(u64 node);
-void    lx_dev_ref(OsFile *f);
-void    lx_dev_release(OsFile *f);
+/* fd 槽的 node 字段存的就是 LxOsFile*（LX_FD_DEV 专用）。 */
+LxOsFile *lx_dev_open(LxDev *d);
+LxOsFile *lx_dev_of(u64 node);
+void    lx_dev_ref(LxOsFile *f);
+void    lx_dev_release(LxOsFile *f);
 
-i64     lx_dev_read(OsFile *f, void *buf, u64 n);
-i64     lx_dev_write(OsFile *f, const void *buf, u64 n);
-u16     lx_dev_poll(OsFile *f, u16 events);
-i64     lx_dev_ioctl(OsFile *f, u32 req, u64 arg);
-i64     lx_dev_mmap(OsFile *f, struct LxVma *vma);
+i64     lx_dev_read(LxOsFile *f, void *buf, u64 n);
+i64     lx_dev_write(LxOsFile *f, const void *buf, u64 n);
+u16     lx_dev_poll(LxOsFile *f, u16 events);
+i64     lx_dev_ioctl(LxOsFile *f, u32 req, u64 arg);
+i64     lx_dev_mmap(LxOsFile *f, struct LxVma *vma);
 
 /* 各设备自己的注册入口；由 lx_dev_init 调用。 */
 void lx_fb_init(void);

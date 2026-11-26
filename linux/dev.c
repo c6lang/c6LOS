@@ -1,6 +1,6 @@
 /* G2：设备对象模型（docs/linux-abi-gui-chrome.md §3.1）。
  *
- * 这里只做三件事：设备注册表（LxDev）、每次 open 的引用对象（OsFile）、
+ * 这里只做三件事：设备注册表（LxDev）、每次 open 的引用对象（LxOsFile）、
  * 以及 /dev 下四个老字符设备的简单 ops。真正有状态的块在 linux/fb.c 与
  * linux/evdev.c，它们通过 lx_dev_register() 把 ops 挂进来。
  *
@@ -36,7 +36,7 @@ static int same_(const char *a, const char *b)
 /* ---- /dev/null、/dev/zero、/dev/full、/dev/{u,}random --------------------
  * 以前这些路径在 linux/fs.c 里按 node 哨兵硬编码；现在走同一套 ops。
  * 语义保持不变：null/full 读 EOF，zero 读零页，random 读 LCG，full 写 ENOSPC。 */
-static i64 z_read_(struct OsFile *f, void *buf, u64 n)
+static i64 z_read_(struct LxOsFile *f, void *buf, u64 n)
 {
     u8 *p = (u8 *)buf;
     u64 i;
@@ -48,7 +48,7 @@ static i64 z_read_(struct OsFile *f, void *buf, u64 n)
     return (i64)n;
 }
 
-static i64 eof_read_(struct OsFile *f, void *buf, u64 n)
+static i64 eof_read_(struct LxOsFile *f, void *buf, u64 n)
 {
     (void)f;
     (void)buf;
@@ -56,7 +56,7 @@ static i64 eof_read_(struct OsFile *f, void *buf, u64 n)
     return 0;
 }
 
-static i64 rand_read_(struct OsFile *f, void *buf, u64 n)
+static i64 rand_read_(struct LxOsFile *f, void *buf, u64 n)
 {
     u8 *p = (u8 *)buf;
     u64 i;
@@ -69,14 +69,14 @@ static i64 rand_read_(struct OsFile *f, void *buf, u64 n)
     return (i64)n;
 }
 
-static i64 ok_write_(struct OsFile *f, const void *buf, u64 n)
+static i64 ok_write_(struct LxOsFile *f, const void *buf, u64 n)
 {
     (void)f;
     (void)buf;
     return (i64)n;
 }
 
-static i64 full_write_(struct OsFile *f, const void *buf, u64 n)
+static i64 full_write_(struct LxOsFile *f, const void *buf, u64 n)
 {
     (void)f;
     (void)buf;
@@ -85,27 +85,27 @@ static i64 full_write_(struct OsFile *f, const void *buf, u64 n)
 }
 
 static const OsFileOps g_null_ops = {
-    eof_read_, ok_write_, (u16 (*)(OsFile *, u16))0,
-    (i64 (*)(OsFile *, u32, u64))0, (i64 (*)(OsFile *, struct LxVma *))0,
-    (void (*)(OsFile *))0,
+    eof_read_, ok_write_, (u16 (*)(LxOsFile *, u16))0,
+    (i64 (*)(LxOsFile *, u32, u64))0, (i64 (*)(LxOsFile *, struct LxVma *))0,
+    (void (*)(LxOsFile *))0,
 };
 
 static const OsFileOps g_zero_ops = {
-    z_read_, ok_write_, (u16 (*)(OsFile *, u16))0,
-    (i64 (*)(OsFile *, u32, u64))0, (i64 (*)(OsFile *, struct LxVma *))0,
-    (void (*)(OsFile *))0,
+    z_read_, ok_write_, (u16 (*)(LxOsFile *, u16))0,
+    (i64 (*)(LxOsFile *, u32, u64))0, (i64 (*)(LxOsFile *, struct LxVma *))0,
+    (void (*)(LxOsFile *))0,
 };
 
 static const OsFileOps g_full_ops = {
-    eof_read_, full_write_, (u16 (*)(OsFile *, u16))0,
-    (i64 (*)(OsFile *, u32, u64))0, (i64 (*)(OsFile *, struct LxVma *))0,
-    (void (*)(OsFile *))0,
+    eof_read_, full_write_, (u16 (*)(LxOsFile *, u16))0,
+    (i64 (*)(LxOsFile *, u32, u64))0, (i64 (*)(LxOsFile *, struct LxVma *))0,
+    (void (*)(LxOsFile *))0,
 };
 
 static const OsFileOps g_rand_ops = {
-    rand_read_, ok_write_, (u16 (*)(OsFile *, u16))0,
-    (i64 (*)(OsFile *, u32, u64))0, (i64 (*)(OsFile *, struct LxVma *))0,
-    (void (*)(OsFile *))0,
+    rand_read_, ok_write_, (u16 (*)(LxOsFile *, u16))0,
+    (i64 (*)(LxOsFile *, u32, u64))0, (i64 (*)(LxOsFile *, struct LxVma *))0,
+    (void (*)(LxOsFile *))0,
 };
 
 void lx_dev_init(void)
@@ -164,16 +164,16 @@ LxDev *lx_dev_find(const char *path)
     return (LxDev *)0;
 }
 
-OsFile *lx_dev_open(LxDev *d)
+LxOsFile *lx_dev_open(LxDev *d)
 {
-    OsFile *o;
+    LxOsFile *o;
 
     if (d == (LxDev *)0 || d->ops == (const OsFileOps *)0) {
-        return (OsFile *)0;
+        return (LxOsFile *)0;
     }
-    o = (OsFile *)port_kcalloc(1ull, (u64)sizeof(OsFile));
-    if (o == (OsFile *)0) {
-        return (OsFile *)0;
+    o = (LxOsFile *)port_kcalloc(1ull, (u64)sizeof(LxOsFile));
+    if (o == (LxOsFile *)0) {
+        return (LxOsFile *)0;
     }
     o->ops = d->ops;
     o->dev = d;
@@ -183,21 +183,21 @@ OsFile *lx_dev_open(LxDev *d)
     return o;
 }
 
-OsFile *lx_dev_of(u64 node)
+LxOsFile *lx_dev_of(u64 node)
 {
-    return (OsFile *)node;
+    return (LxOsFile *)node;
 }
 
-void lx_dev_ref(OsFile *f)
+void lx_dev_ref(LxOsFile *f)
 {
-    if (f != (OsFile *)0) {
+    if (f != (LxOsFile *)0) {
         f->refs++;
     }
 }
 
-void lx_dev_release(OsFile *f)
+void lx_dev_release(LxOsFile *f)
 {
-    if (f == (OsFile *)0) {
+    if (f == (LxOsFile *)0) {
         return;
     }
     if (f->refs > 1u) {
@@ -205,7 +205,7 @@ void lx_dev_release(OsFile *f)
         return;
     }
     if (f->ops != (const OsFileOps *)0 &&
-        f->ops->close != (void (*)(OsFile *))0) {
+        f->ops->close != (void (*)(LxOsFile *))0) {
         f->ops->close(f);
     }
     if (f->dev != (LxDev *)0 && f->dev->refs > 0u) {
@@ -214,46 +214,46 @@ void lx_dev_release(OsFile *f)
     port_kfree((void *)f);
 }
 
-i64 lx_dev_read(OsFile *f, void *buf, u64 n)
+i64 lx_dev_read(LxOsFile *f, void *buf, u64 n)
 {
-    if (f == (OsFile *)0 || f->ops == (const OsFileOps *)0 ||
-        f->ops->read == (i64 (*)(OsFile *, void *, u64))0) {
+    if (f == (LxOsFile *)0 || f->ops == (const OsFileOps *)0 ||
+        f->ops->read == (i64 (*)(LxOsFile *, void *, u64))0) {
         return -(i64)LX_EINVAL;
     }
     return f->ops->read(f, buf, n);
 }
 
-i64 lx_dev_write(OsFile *f, const void *buf, u64 n)
+i64 lx_dev_write(LxOsFile *f, const void *buf, u64 n)
 {
-    if (f == (OsFile *)0 || f->ops == (const OsFileOps *)0 ||
-        f->ops->write == (i64 (*)(OsFile *, const void *, u64))0) {
+    if (f == (LxOsFile *)0 || f->ops == (const OsFileOps *)0 ||
+        f->ops->write == (i64 (*)(LxOsFile *, const void *, u64))0) {
         return -(i64)LX_EINVAL;
     }
     return f->ops->write(f, buf, n);
 }
 
-u16 lx_dev_poll(OsFile *f, u16 events)
+u16 lx_dev_poll(LxOsFile *f, u16 events)
 {
-    if (f == (OsFile *)0 || f->ops == (const OsFileOps *)0 ||
-        f->ops->poll == (u16 (*)(OsFile *, u16))0) {
+    if (f == (LxOsFile *)0 || f->ops == (const OsFileOps *)0 ||
+        f->ops->poll == (u16 (*)(LxOsFile *, u16))0) {
         return 0u;
     }
     return f->ops->poll(f, events);
 }
 
-i64 lx_dev_ioctl(OsFile *f, u32 req, u64 arg)
+i64 lx_dev_ioctl(LxOsFile *f, u32 req, u64 arg)
 {
-    if (f == (OsFile *)0 || f->ops == (const OsFileOps *)0 ||
-        f->ops->ioctl == (i64 (*)(OsFile *, u32, u64))0) {
+    if (f == (LxOsFile *)0 || f->ops == (const OsFileOps *)0 ||
+        f->ops->ioctl == (i64 (*)(LxOsFile *, u32, u64))0) {
         return -(i64)LX_ENOTTY;
     }
     return f->ops->ioctl(f, req, arg);
 }
 
-i64 lx_dev_mmap(OsFile *f, struct LxVma *vma)
+i64 lx_dev_mmap(LxOsFile *f, struct LxVma *vma)
 {
-    if (f == (OsFile *)0 || f->ops == (const OsFileOps *)0 ||
-        f->ops->mmap == (i64 (*)(OsFile *, struct LxVma *))0) {
+    if (f == (LxOsFile *)0 || f->ops == (const OsFileOps *)0 ||
+        f->ops->mmap == (i64 (*)(LxOsFile *, struct LxVma *))0) {
         return -(i64)LX_ENODEV;
     }
     return f->ops->mmap(f, vma);
