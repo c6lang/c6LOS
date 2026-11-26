@@ -199,6 +199,7 @@
 #define LX_SA_SIGINFO    4ull
 #define LX_SA_RESTORER   0x04000000ull
 #define LX_SA_NODEFER    0x40000000ull
+#define LX_SA_ONSTACK    0x08000000ull
 #define LX_SA_RESTART    0x10000000ull
 
 /* rt_sigprocmask 的 how */

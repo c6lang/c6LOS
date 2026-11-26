@@ -305,9 +305,19 @@ static int default_(LxProc *p, u32 sig)
  * 存。SF_UC 保持 8 的倍数（8），所以 base 取 8 mod 16 正好让 uc 回到 16 对齐。 */
 static void build_(LxProc *p, SigView *v, u32 sig, u32 code)
 {
-    u64 sp = *v->rsp;
+    u64 orig_sp = *v->rsp;
+    u64 sp = orig_sp;
+    u64 base;
+    /* SA_ONSTACK：handler 必须跑在 sigaltstack 上；ucontext 里的 RSP 仍保存
+     * 被中断的原始用户栈，rt_sigreturn 才能回到故障点。以前两者混用，
+     * 装过 sigaltstack 的程序（Chrome/V8 的信号 handler）会立刻踩坏。 */
+    if (((p->sa[sig].flags & LX_SA_ONSTACK) != 0ull) &&
+        ((p->alt_flags & 2u) == 0u) && p->alt_size > LX_SF_SIZE + 256ull &&
+        p->alt_sp != 0ull) {
+        sp = (p->alt_sp + p->alt_size - 8ull) & ~15ull;
+    }
     /* base 是 pretcode 的地址，也就是 handler 入口的 RSP。取 8 mod 16。 */
-    u64 base = (sp - 128ull - LX_SF_SIZE) & ~15ull;
+    base = (sp - 128ull - LX_SF_SIZE) & ~15ull;
     u64 uc;
     u64 gi;
     u64 newmask;
@@ -346,7 +356,7 @@ static void build_(LxProc *p, SigView *v, u32 sig, u32 code)
     *(u64 *)(gi + 96ull) = v->r->rdx;
     *(u64 *)(gi + 104ull) = v->r->rax;
     *(u64 *)(gi + 112ull) = v->r->rcx;                /* RCX：syscall 已覆盖成返回地址 */
-    *(u64 *)(gi + (u64)LX_GREGS_RSP * 8ull) = sp;
+    *(u64 *)(gi + (u64)LX_GREGS_RSP * 8ull) = orig_sp;
     *(u64 *)(gi + (u64)LX_GREGS_RIP * 8ull) = *v->rip;
     *(u64 *)(gi + (u64)LX_GREGS_EFL * 8ull) = *v->rfl;
 

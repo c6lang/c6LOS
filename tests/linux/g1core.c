@@ -38,6 +38,8 @@ static int failures;
 static int total;
 static sigjmp_buf g_sigjb;
 static volatile int g_sig_ok;
+static volatile int g_alt_seen;
+static volatile unsigned long g_alt_lo, g_alt_hi;
 
 static void segv_handler(int sig, siginfo_t *si, void *vuc)
 {
@@ -47,6 +49,12 @@ static void segv_handler(int sig, siginfo_t *si, void *vuc)
     (void)sig;
     /* RIP 应该落在本测试二进制里，RSP 应该是一条真用户栈；ucontext
      * 偏移错了会读到 fpregs 等指针，这里能立刻发现。 */
+    {
+        unsigned long here = (unsigned long)&rsp;
+        if (here >= g_alt_lo && here < g_alt_hi) {
+            g_alt_seen = 1;
+        }
+    }
     g_sig_ok = (si->si_addr == (void *)0) &&
                (rip >= (greg_t)0x400000) &&
                (rip < (greg_t)0x800000) &&
@@ -179,6 +187,40 @@ int main(void)
             *(volatile int *)0 = 1;          /* 故意制造 #PF */
         }
         CHECK(g_sig_ok == 1);
+    }
+
+    {
+        struct sigaction sa;
+        stack_t ss;
+        void *alt = mmap(NULL, 32768, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK(alt != MAP_FAILED);
+        if (alt != MAP_FAILED) {
+            memset(&ss, 0, sizeof(ss));
+            ss.ss_sp = alt;
+            ss.ss_size = 32768;
+            CHECK(sigaltstack(&ss, NULL) == 0);
+            g_alt_lo = (unsigned long)alt;
+            g_alt_hi = (unsigned long)alt + 32768;
+            g_alt_seen = 0;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_sigaction = segv_handler;
+            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+            sigemptyset(&sa.sa_mask);
+            CHECK(sigaction(SIGSEGV, &sa, NULL) == 0);
+            g_sig_ok = 0;
+            if (sigsetjmp(g_sigjb, 1) == 0) {
+                *(volatile int *)0 = 2;
+            }
+            CHECK(g_sig_ok == 1);
+            CHECK(g_alt_seen == 1);
+            {
+                stack_t d;
+                memset(&d, 0, sizeof(d));
+                d.ss_flags = SS_DISABLE;
+                CHECK(sigaltstack(&d, NULL) == 0);
+            }
+        }
     }
 
     close(fd);
