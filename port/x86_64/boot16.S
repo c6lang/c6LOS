@@ -71,6 +71,41 @@ e820_done:
     int $0x13
     jc 1f
 
+    /* dap6..dap11：继续按 64KB 分段装到 0xA0000。内核 .bss 只允许长到
+     * 0xA0000（VGA/BIOS 空洞），引导器也必须真的把镜像送上去；以前只装
+     * 到 0x4FA00，镜像一过 320KB，.data 尾部（g_cur 等）就悄悄没装进来，
+     * 表现为"全局变量变成 0 / 进程表坏了"。 */
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap6, %si
+    int $0x13
+    jc 1f
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap7, %si
+    int $0x13
+    jc 1f
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap8, %si
+    int $0x13
+    jc 1f
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap9, %si
+    int $0x13
+    jc 1f
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap10, %si
+    int $0x13
+    jc 1f
+    movb $0x42, %ah
+    movb $0x80, %dl
+    movw $dap11, %si
+    int $0x13
+    jc 1f
+
     lgdt gdt_desc
     movl %cr0, %eax
     orl $0x00000001, %eax
@@ -116,6 +151,36 @@ dap5:
     .word 127
     .word 0x0000, 0x3FC0
     .quad 383
+dap6:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x4FA0
+    .quad 510
+dap7:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x5F80
+    .quad 637
+dap8:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x6F00
+    .quad 764
+dap9:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x7EE0
+    .quad 891
+dap10:
+    .byte 0x10, 0
+    .word 127
+    .word 0x0000, 0x8DE0
+    .quad 1018
+dap11:
+    .byte 0x10, 0
+    .word 33
+    .word 0x0000, 0x9BE0
+    .quad 1145
 
 .align 8
 gdt:
