@@ -257,6 +257,10 @@
 #define LX_SYS_clock_settime 227
 #define LX_SYS_clock_getres  229
 #define LX_SYS_pselect6      270
+#define LX_SYS_inotify_init  253
+#define LX_SYS_inotify_init1 294
+#define LX_SYS_inotify_add_watch 254
+#define LX_SYS_inotify_rm_watch  255
 #define LX_SYS_eventfd2      290
 #define LX_SYS_epoll_create1 291
 /* M20：epoll 事件接口 */

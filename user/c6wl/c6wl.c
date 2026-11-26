@@ -51,6 +51,12 @@ typedef struct {
 static WlObj g_obj[512];
 static int g_nobj;
 static uint32_t g_serial;
+static int g_input_fd = -1;
+static uint32_t g_pointer_id;
+static uint32_t g_keyboard_id;
+static uint32_t g_surface_id;
+static int g_ptr_x = 640;
+static int g_ptr_y = 400;
 static int g_fd = -1;
 static int g_client = -1;
 static int g_running = 1;
@@ -543,6 +549,22 @@ static void dispatch(uint32_t oid, uint16_t opcode, Reader *r, int fd)
                 o->configured = 1;
             }
             if (o->has_buffer) {
+                g_surface_id = o->id;
+                if (g_pointer_id != 0u) {
+                    uint8_t pb[20]; size_t po = 0;
+                    put_u32(pb, &po, ++g_serial);
+                    put_u32(pb, &po, o->id);
+                    put_i32(pb, &po, (int32_t)(g_ptr_x << 8));
+                    put_i32(pb, &po, (int32_t)(g_ptr_y << 8));
+                    send_msg(g_pointer_id, 0, pb, po);   /* enter */
+                }
+                if (g_keyboard_id != 0u) {
+                    uint8_t kb[16]; size_t ko = 0;
+                    put_u32(kb, &ko, ++g_serial);
+                    put_u32(kb, &ko, o->id);
+                    put_array_empty(kb, &ko);
+                    send_msg(g_keyboard_id, 1, kb, ko);  /* enter */
+                }
                 composite(o);
                 {
                     int i;
@@ -578,9 +600,11 @@ static void dispatch(uint32_t oid, uint16_t opcode, Reader *r, int fd)
         if (opcode == 0) {                           /* get_pointer */
             uint32_t id = r_u32(r);
             obj_new(id, C6WL_T_POINTER, o->id);
+            g_pointer_id = id;
         } else if (opcode == 1) {                    /* get_keyboard */
             uint32_t id = r_u32(r);
             WlObj *k = obj_new(id, C6WL_T_KEYBOARD, o->id);
+            g_keyboard_id = id;
             if (k) {
                 /* 内置 US keymap：EVDEV 的 keycode 偏移 8 后映射到 XKB keycode，
                  * 这里只发一个最小 keymap，Chrome 拿它做键位解释。 */
@@ -648,6 +672,91 @@ static int open_fb(const char *path)
     return 0;
 }
 
+static void input_handle(const struct input_event *ev)
+{
+    if (ev->type == EV_REL && g_pointer_id != 0u) {
+        if (ev->code == REL_X) g_ptr_x += ev->value;
+        if (ev->code == REL_Y) g_ptr_y += ev->value;
+        if (g_ptr_x < 0) g_ptr_x = 0;
+        if (g_ptr_y < 0) g_ptr_y = 0;
+        if ((uint32_t)g_ptr_x >= g_width) g_ptr_x = (int)g_width - 1;
+        if ((uint32_t)g_ptr_y >= g_height) g_ptr_y = (int)g_height - 1;
+        {
+            uint8_t b[16]; size_t o = 0;
+            put_u32(b, &o, ++g_serial);
+            put_u32(b, &o, 0u);                  /* time */
+            put_i32(b, &o, (int32_t)(g_ptr_x << 8));
+            put_i32(b, &o, (int32_t)(g_ptr_y << 8));
+            send_msg(g_pointer_id, 2, b, o);     /* wl_pointer.motion */
+        }
+        return;
+    }
+    if (ev->type == EV_KEY && ev->code == BTN_LEFT && g_pointer_id != 0u) {
+        uint8_t b[20]; size_t o = 0;
+        put_u32(b, &o, ++g_serial);
+        put_u32(b, &o, 0u);
+        put_u32(b, &o, (uint32_t)BTN_LEFT);
+        put_u32(b, &o, ev->value ? 1u : 0u);
+        send_msg(g_pointer_id, 3, b, o);         /* wl_pointer.button */
+        return;
+    }
+    if (ev->type == EV_KEY && g_keyboard_id != 0u) {
+        uint8_t b[16]; size_t o = 0;
+        put_u32(b, &o, ++g_serial);
+        put_u32(b, &o, 0u);
+        put_u32(b, &o, (uint32_t)ev->code);
+        put_u32(b, &o, ev->value ? 1u : 0u);
+        send_msg(g_keyboard_id, 3, b, o);        /* wl_keyboard.key */
+    }
+}
+
+static int client_read_(void)
+{
+    uint8_t buf[WL_MAX_MSG * 2];
+    uint8_t cmsgbuf[CMSG_SPACE(sizeof(int) * 4)];
+    struct iovec iov = { buf, sizeof(buf) };
+    struct msghdr mh;
+    ssize_t n;
+    int fd = -1;
+    struct cmsghdr *cm;
+
+    memset(&mh, 0, sizeof(mh));
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = cmsgbuf;
+    mh.msg_controllen = sizeof(cmsgbuf);
+    n = recvmsg(g_client, &mh, 0);
+    if (n <= 0) {
+        return -1;
+    }
+    for (cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
+        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
+            memcpy(&fd, CMSG_DATA(cm), sizeof(int));
+        }
+    }
+    {
+        size_t off = 0;
+        while (off + 8u <= (size_t)n) {
+            uint32_t oid, w;
+            uint16_t op;
+            size_t msz;
+            Reader rr;
+            memcpy(&oid, buf + off, 4u);
+            memcpy(&w, buf + off + 4u, 4u);
+            op = (uint16_t)(w & 0xFFFFu);
+            msz = (size_t)(w >> 16);
+            if (msz < 8u || off + msz > (size_t)n) break;
+            rr.p = buf + off + 8u;
+            rr.n = msz - 8u;
+            rr.off = 0;
+            dispatch(oid, op, &rr, fd);
+            fd = -1;
+            off += msz;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *sockpath = NULL;
@@ -662,7 +771,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--width=", 8)) g_width = (uint32_t)atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--height=", 9)) g_height = (uint32_t)atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--frames=", 9)) g_max_frames = atoi(argv[i] + 9);
-        else if (!strncmp(argv[i], "--input=", 8)) { /* 预留：输入轮询 */ }
+        else if (!strncmp(argv[i], "--input=", 8)) g_input_fd = open(argv[i] + 8, O_RDONLY | O_NONBLOCK);
     }
     if (!sockpath) {
         const char *xdg = getenv("XDG_RUNTIME_DIR");
@@ -684,44 +793,34 @@ int main(int argc, char **argv)
     dprintf(1, "c6wl: client connected\n");
 
     while (g_running) {
-        uint8_t buf[WL_MAX_MSG * 2];
-        uint8_t cmsgbuf[CMSG_SPACE(sizeof(int) * 4)];
-        struct iovec iov = { buf, sizeof(buf) };
-        struct msghdr mh;
-        ssize_t n;
-        int fd = -1;
-        struct cmsghdr *cm;
+        struct pollfd pf[2];
+        int nf = 1;
+        int pr;
 
-        memset(&mh, 0, sizeof(mh));
-        mh.msg_iov = &iov;
-        mh.msg_iovlen = 1;
-        mh.msg_control = cmsgbuf;
-        mh.msg_controllen = sizeof(cmsgbuf);
-        n = recvmsg(g_client, &mh, 0);
-        if (n <= 0) break;
-        for (cm = CMSG_FIRSTHDR(&mh); cm; cm = CMSG_NXTHDR(&mh, cm)) {
-            if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
-                memcpy(&fd, CMSG_DATA(cm), sizeof(int));
-            }
+        pf[0].fd = g_client;
+        pf[0].events = POLLIN;
+        pf[0].revents = 0;
+        if (g_input_fd >= 0) {
+            pf[nf].fd = g_input_fd;
+            pf[nf].events = POLLIN;
+            pf[nf].revents = 0;
+            nf++;
         }
-        {
-            size_t off = 0;
-            while (off + 8u <= (size_t)n) {
-                uint32_t oid, w;
-                uint16_t op;
-                size_t msz;
-                Reader rr;
-                memcpy(&oid, buf + off, 4u);
-                memcpy(&w, buf + off + 4u, 4u);
-                op = (uint16_t)(w & 0xFFFFu);
-                msz = (size_t)(w >> 16);
-                if (msz < 8u || off + msz > (size_t)n) break;
-                rr.p = buf + off + 8u;
-                rr.n = msz - 8u;
-                rr.off = 0;
-                dispatch(oid, op, &rr, fd);
-                fd = -1;                             /* 只归第一个消息 */
-                off += msz;
+        pr = poll(pf, (nfds_t)nf, 500);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (pr == 0) continue;
+        if ((pf[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+            if (client_read_() != 0) break;
+        }
+        if (nf > 1 && (pf[1].revents & POLLIN) != 0) {
+            struct input_event ev[32];
+            ssize_t r = read(g_input_fd, ev, sizeof(ev));
+            ssize_t k;
+            for (k = 0; k + (ssize_t)sizeof(ev[0]) <= r; k += (ssize_t)sizeof(ev[0])) {
+                input_handle(&ev[k / (ssize_t)sizeof(ev[0])]);
             }
         }
     }

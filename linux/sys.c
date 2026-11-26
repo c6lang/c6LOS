@@ -869,6 +869,25 @@ void lx_syscall_do(LxRegs *r)
         r->rax = lx_proc_eventfd2(a0, a1);
         return;
 
+    case LX_SYS_inotify_init:
+        r->rax = lx_proc_eventfd2(0ull, 0ull);
+        return;
+    case LX_SYS_inotify_init1:
+        r->rax = lx_proc_eventfd2(0ull, a0);
+        return;
+    case LX_SYS_inotify_add_watch:
+        /* 没有真正的 fs notify 后端：给一个合法 watch 句柄，不产生事件。
+         * Chrome 的 file_path_watcher 在无事件时走超时轮询，不会误判。 */
+        if (lx_user_ok(a1, 1ull, C6OS_PROT_R) == 0) {
+            r->rax = neg(LX_EFAULT);
+        } else {
+            r->rax = 1ull;
+        }
+        return;
+    case LX_SYS_inotify_rm_watch:
+        r->rax = 0ull;
+        return;
+
     case LX_SYS_pselect6:
         {
             i64 to = -1;

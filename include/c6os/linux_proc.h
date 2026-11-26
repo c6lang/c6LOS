@@ -87,7 +87,10 @@
 #define LX_PROC_pidcmdline 9u
 #define LX_PROC_mounts    10u
 #define LX_PROC_netdev    11u
-#define LX_PROC_MAX       LX_PROC_netdev
+#define LX_PROC_inotify_watches 12u
+#define LX_PROC_inotify_events  13u
+#define LX_PROC_inotify_inst    14u
+#define LX_PROC_MAX       LX_PROC_inotify_inst
 
 /* 内核栈上的陷入帧：15 个通用寄存器（与 LxRegs 同序）+ 用户 RSP。
  * 顺序必须与 port/x86_64/user_entry.S 的压栈顺序逐字节一致，

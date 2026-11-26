@@ -1470,6 +1470,18 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
     case LX_PROC_pidcmdline:g_procf[id].size = proc_cmdline_(b); break;
     case LX_PROC_mounts:    g_procf[id].size = proc_mounts_(b); break;
     case LX_PROC_netdev:    g_procf[id].size = proc_netdev_(b); break;
+    case LX_PROC_inotify_watches:
+        g_procf[id].size = (u32)slen_("65536\n");
+        for (u32 k = 0u; k < g_procf[id].size; k++) b[k] = "65536\n"[k];
+        break;
+    case LX_PROC_inotify_events:
+        g_procf[id].size = (u32)slen_("16384\n");
+        for (u32 k = 0u; k < g_procf[id].size; k++) b[k] = "16384\n"[k];
+        break;
+    case LX_PROC_inotify_inst:
+        g_procf[id].size = (u32)slen_("128\n");
+        for (u32 k = 0u; k < g_procf[id].size; k++) b[k] = "128\n"[k];
+        break;
     default: return 0u;
     }
     *out = b;
@@ -1487,6 +1499,9 @@ static u32 proc_id_(const char *s, u32 *pid)
     if (seq_(s, "proc/stat") == 1)     return LX_PROC_stat;
     if (seq_(s, "proc/mounts") == 1)   return LX_PROC_mounts;
     if (seq_(s, "proc/net/dev") == 1)  return LX_PROC_netdev;
+    if (seq_(s, "proc/sys/fs/inotify/max_user_watches") == 1) return LX_PROC_inotify_watches;
+    if (seq_(s, "proc/sys/fs/inotify/max_queued_events") == 1) return LX_PROC_inotify_events;
+    if (seq_(s, "proc/sys/fs/inotify/max_user_instances") == 1) return LX_PROC_inotify_inst;
     if (seq_(s, "proc/self/status") == 1)   return LX_PROC_status;
     if (seq_(s, "proc/self/stat") == 1)     return LX_PROC_pidstat;
     if (seq_(s, "proc/self/cmdline") == 1)  return LX_PROC_cmdline;
