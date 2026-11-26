@@ -1265,6 +1265,18 @@ chromium --ozone-platform=wayland --no-sandbox --disable-gpu \
 | G7 DRM/KMS | **未开始**（可选） | — | — |
 | G8 S3/MaixCam | **未开始**（可选） | — | — |
 
+### D.0 验收截图（实跑产物）
+
+- G2 fb0（800×600 VBE screendump，四色带 + 三个断言像素）：
+  `docs/screenshots/g2-fb0-800x600.png`；
+- G3 宿主 Chromium CDP（`Page.screencastFrame` PNG 解码后）：
+  `docs/screenshots/g3-cdp-chrome-host-1280x661.png`；
+- G4 `c6wl` + `wl_demo`（红底 + 第三帧绿色方块）：
+  `docs/screenshots/g4-c6wl-demo-1280x800.png`。
+
+说明见 `docs/screenshots/README.md`。G2 最初只写 3 个孤立像素，截图看起来是
+黑的；`g2dev` 已改为先铺红/绿/蓝/黄四色带再落断言像素。
+
 ### D.1 第二块 IDE 盘 rootfs 的实际布局
 
 `mk-initramfs.py` 产出的 `rootfs.cpio` 自带 8 字节长度 + 504 字节扇区前缀。
