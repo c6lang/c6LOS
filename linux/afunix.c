@@ -729,8 +729,10 @@ u64 lx_unix_recvmsg(u64 fd, u64 umsg, u64 flags)
     }
     for (i = 0u; i < (u32)niov; i++) {
         total += *(const u64 *)(iov + (u64)i * 16ull + 8ull);
-        if (total > UNIX_MSG_MAX) { return (u64)0 - LX_EINVAL; }
     }
+    /* Wayland/CDP 常把 8KB 缓冲交给 recvmsg，而每个 Unix 消息槽只有 4KB；
+     * Linux 语义是短读而不是 EINVAL。 */
+    if (total > UNIX_MSG_MAX) { total = UNIX_MSG_MAX; }
     while (s->count == 0u) {
         LxFile *f = lx_fdtab_get(lx_cur_proc()->fd, fd);
         UnixSock *t = (s->peer != ~0ull) ? unix_at_(s->peer) : (UnixSock *)0;
