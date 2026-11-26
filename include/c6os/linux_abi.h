@@ -44,6 +44,8 @@
 #define LX_SYS_munmap         11
 #define LX_SYS_mremap         25
 #define LX_SYS_madvise        28
+#define LX_SYS_tkill         200
+#define LX_SYS_set_mempolicy 238
 #define LX_SYS_get_mempolicy 239
 #define LX_SYS_rt_tgsigqueueinfo 297
 #define LX_SYS_membarrier    324

@@ -1140,15 +1140,15 @@ void lx_syscall_do(LxRegs *r)
     case LX_SYS_clone:
         if ((a0 & LX_CLONE_VM) != 0ull) {
             r->rax = lx_proc_clone_thread(r, a0, a1, a2, a3, a4);
-            return;
-        }
-        r->rax = lx_proc_fork(r);
-        if (r->rax != 0ull && (i64)r->rax > 0) {
-            if (a2 != 0ull && lx_user_ok(a2, 4ull, C6OS_PROT_W) != 0) {
-                *(u32 *)a2 = 0u;
-            }
-            if (a3 != 0ull && lx_user_ok(a3, 4ull, C6OS_PROT_W) != 0) {
-                *(u32 *)a3 = 0u;
+        } else {
+            r->rax = lx_proc_fork(r);
+            if (r->rax != 0ull && (i64)r->rax > 0) {
+                if (a2 != 0ull && lx_user_ok(a2, 4ull, C6OS_PROT_W) != 0) {
+                    *(u32 *)a2 = 0u;
+                }
+                if (a3 != 0ull && lx_user_ok(a3, 4ull, C6OS_PROT_W) != 0) {
+                    *(u32 *)a3 = 0u;
+                }
             }
         }
         return;
@@ -1281,6 +1281,25 @@ void lx_syscall_do(LxRegs *r)
 
     case LX_SYS_membarrier:
         /* 内存屏障是性能提示；单核 + 顺序一致的 x86 直接成功。 */
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_tkill:
+        if (a1 >= (u64)LX_NSIG) {
+            r->rax = neg(LX_EINVAL);
+            return;
+        }
+        if (a1 != 0ull && lx_proc_find((i64)(i32)a0) == (LxProc *)0) {
+            r->rax = neg(LX_ESRCH);
+            return;
+        }
+        if (a1 != 0ull) {
+            lx_sig_send_one(lx_proc_find((i64)(i32)a0), (u32)a1, 0);
+        }
+        r->rax = 0ull;
+        return;
+
+    case LX_SYS_set_mempolicy:
         r->rax = 0ull;
         return;
 
