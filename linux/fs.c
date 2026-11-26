@@ -3,6 +3,7 @@
 #include "c6os/linux_abi.h"
 #include "c6os/linux_proc.h"
 #include "c6os/linux_dev.h"
+#include "c6os/linux_vma.h"
 #if C6OS_NET
 #include "los/net.h"
 #endif
@@ -1222,7 +1223,7 @@ static u64 pts_node_(const char *s)
  * 每个 proc 文件对应一个 id，内容在首次访问时一次性生成到内核堆缓冲，
  * 之后 open/read/pread/stat/getdents 都走同一套 fd 机制（kind=LX_FD_PROC）。
  * 内容常驻（条目数固定、总量 < 4KB），不需要 fd close hook，也不占 VFS 文件槽。 */
-#define PROC_BUF_MAX 4096u
+#define PROC_BUF_MAX 32768u
 
 typedef struct {
     u32 id;
@@ -1478,6 +1479,13 @@ static u32 proc_gen_(u32 id, u32 pid, char **out)
         g_procf[id].size = (u32)slen_("16384\n");
         for (u32 k = 0u; k < g_procf[id].size; k++) b[k] = "16384\n"[k];
         break;
+    case LX_PROC_self_maps: {
+        LxProc *p = lx_cur_proc();
+        if (p != (LxProc *)0) {
+            g_procf[id].size = lx_vma_maps(p->as, b, PROC_BUF_MAX - 1u);
+        }
+        break;
+    }
     case LX_PROC_inotify_inst:
         g_procf[id].size = (u32)slen_("128\n");
         for (u32 k = 0u; k < g_procf[id].size; k++) b[k] = "128\n"[k];
@@ -1502,6 +1510,7 @@ static u32 proc_id_(const char *s, u32 *pid)
     if (seq_(s, "proc/sys/fs/inotify/max_user_watches") == 1) return LX_PROC_inotify_watches;
     if (seq_(s, "proc/sys/fs/inotify/max_queued_events") == 1) return LX_PROC_inotify_events;
     if (seq_(s, "proc/sys/fs/inotify/max_user_instances") == 1) return LX_PROC_inotify_inst;
+    if (seq_(s, "proc/self/maps") == 1) return LX_PROC_self_maps;
     if (seq_(s, "proc/self/status") == 1)   return LX_PROC_status;
     if (seq_(s, "proc/self/stat") == 1)     return LX_PROC_pidstat;
     if (seq_(s, "proc/self/cmdline") == 1)  return LX_PROC_cmdline;

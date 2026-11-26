@@ -381,6 +381,49 @@ int lx_vma_protect(u64 as, u64 start, u64 end, u32 prot)
     return (found != 0) ? 0 : -1;
 }
 
+u32 lx_vma_maps(u64 as, char *buf, u32 cap)
+{
+    VmaEnt *e = ent_get(as, 0);
+    LxVma *c;
+    u32 o = 0u;
+    static const char hx[] = "0123456789abcdef";
+    u32 i;
+
+    if (e == (VmaEnt *)0) return 0u;
+    for (c = e->head; c != (LxVma *)0; c = c->next) {
+        u64 vals[2] = { c->start, c->end };
+        u32 vi;
+        for (vi = 0; vi < 2u; vi++) {
+            for (i = 0u; i < 16u && o < cap; i++) {
+                buf[o++] = hx[(vals[vi] >> (u32)((15u - i) * 4u)) & 0xFu];
+            }
+            if (vi == 0u && o < cap) buf[o++] = '-';
+        }
+        if (o + 6u < cap) {
+            buf[o++] = ' ';
+            buf[o++] = (c->prot & 1u) ? 'r' : '-';
+            buf[o++] = (c->prot & 2u) ? 'w' : '-';
+            buf[o++] = (c->prot & 4u) ? 'x' : '-';
+            buf[o++] = (c->flags & LX_VM_SHARED) ? 's' : 'p';
+            buf[o++] = ' ';
+        }
+        if (o + 7u < cap) {
+            buf[o++] = '0'; buf[o++] = '0'; buf[o++] = ':';
+            buf[o++] = '0'; buf[o++] = '0'; buf[o++] = ' ';
+        }
+        if (o + 3u < cap) {
+            buf[o++] = '0'; buf[o++] = ' '; buf[o++] = ' ';
+        }
+        {
+            const char *tag = (c->flags & LX_VM_FILE) ? "/file" : "[anon]";
+            while (*tag != '\0' && o + 1u < cap) buf[o++] = *tag++;
+        }
+        if (o + 1u < cap) buf[o++] = '\n';
+    }
+    if (o < cap) buf[o] = '\0';
+    return o;
+}
+
 void lx_vma_free_all(u64 as)
 {
     VmaEnt *e = ent_get(as, 0);

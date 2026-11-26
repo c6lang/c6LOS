@@ -51,6 +51,8 @@ int    lx_vma_add(u64 as, u64 start, u64 end, u32 prot, u32 flags, u64 off);
 void   lx_vma_remove(u64 as, u64 start, u64 end);
 /* 只改区间内的权限（必要时拆段）。返回 0；整段没有 VMA 覆盖返回 -1。 */
 int    lx_vma_protect(u64 as, u64 start, u64 end, u32 prot);
+/* 把 VMA 链格式化成 /proc/self/maps 文本；返回写入字节数。 */
+u32    lx_vma_maps(u64 as, char *buf, u32 cap);
 /* AS 销毁前调用：还掉整条链（回调里会调）。 */
 void   lx_vma_free_all(u64 as);
 
