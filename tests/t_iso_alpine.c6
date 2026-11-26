@@ -120,13 +120,10 @@ static const char kScript[] =
  * 验收脚本再用 QEMU screendump 看 VBE 面板。 */
 static const char kScript[] =
     "export XDG_RUNTIME_DIR=/tmp; "
+    "rm -rf /tmp/c6chrome-dump /tmp/c6chrome-profile; "
     "echo chrome-version-start; "
     "/usr/lib/chromium/chromium --version; "
     "echo chrome-version-done; "
-    "echo chrome-dump-start; "
-    "/usr/lib/chromium/chromium --headless=new --no-sandbox --disable-gpu "
-    "--disable-dev-shm-usage --dump-dom 'data:text/html,<h1>hi</h1>'; "
-    "echo chrome-dump-done; "
     "echo chrome-display-start; "
     "/usr/bin/c6chrome-display --chrome=/usr/lib/chromium/chromium "
     "--url='data:text/html,%3Cbody%20style%3D%22background%3A%23ff0000%22%3Ehello%3C/body%3E' "

@@ -436,7 +436,6 @@ int lx_sig_deliver_exc(LxProc *p, LxRegs *r, u64 cr2, u32 vec)
     u32 sig;
     u32 code;
 
-    (void)cr2;
     if (vec == 14u) {                       /* #PF */
         sig = (u32)LX_SIGSEGV;
         code = 1u;                          /* SEGV_MAPERR */
