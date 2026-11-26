@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <signal.h>
+#include <setjmp.h>
+#include <ucontext.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,6 +36,23 @@
 
 static int failures;
 static int total;
+static sigjmp_buf g_sigjb;
+static volatile int g_sig_ok;
+
+static void segv_handler(int sig, siginfo_t *si, void *vuc)
+{
+    ucontext_t *uc = (ucontext_t *)vuc;
+    greg_t rip = uc->uc_mcontext.gregs[REG_RIP];
+    greg_t rsp = uc->uc_mcontext.gregs[REG_RSP];
+    (void)sig;
+    /* RIP 应该落在本测试二进制里，RSP 应该是一条真用户栈；ucontext
+     * 偏移错了会读到 fpregs 等指针，这里能立刻发现。 */
+    g_sig_ok = (si->si_addr == (void *)0) &&
+               (rip >= (greg_t)0x400000) &&
+               (rip < (greg_t)0x800000) &&
+               (rsp > (greg_t)&total);
+    siglongjmp(g_sigjb, 1);
+}
 
 #define CHECK(c) do { total++; if (!(c)) { \
     failures++; dprintf(1, "FAIL: %s (line %d, errno=%d)\n", #c, __LINE__, errno); } \
@@ -145,6 +165,20 @@ int main(void)
         CHECK(((unsigned char *)m)[0] == 0);
         CHECK(((unsigned char *)m)[4096] == 0);
         CHECK(munmap(m, 8192) == 0);
+    }
+
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = segv_handler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        CHECK(sigaction(SIGSEGV, &sa, NULL) == 0);
+        g_sig_ok = 0;
+        if (sigsetjmp(g_sigjb, 1) == 0) {
+            *(volatile int *)0 = 1;          /* 故意制造 #PF */
+        }
+        CHECK(g_sig_ok == 1);
     }
 
     close(fd);

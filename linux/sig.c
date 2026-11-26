@@ -36,8 +36,8 @@
 
 /* ucontext 内偏移（相对 uc） */
 #define LX_UC_STACK      16ull
-#define LX_UC_GREGS      48ull
-#define LX_UC_SIGMASK    304ull
+#define LX_UC_GREGS      40ull
+#define LX_UC_SIGMASK    296ull
 
 /* gregs 下标（Linux x86-64） */
 #define LX_GREGS_RSP     15u
