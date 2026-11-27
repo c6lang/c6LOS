@@ -84,9 +84,9 @@ LiteOS-M 经 LX6→LX7 移植后在 ESP32-S3 上运行（`bench/liteos_m_s3`，C
 | `LOS_QueueWriteCopy` + `LOS_QueueReadCopy` | 434 |
 | `LOS_MemAlloc(32)` + `LOS_MemFree` | 622 |
 
-这是同一块板、同一 CCOUNT 口径的 LiteOS-M 基线；c6LOS 的 S3 perf 镜像本轮启动复现仍在排查（`t_perf` 只输出 boot，未输出 bench），因此**暂不能给出 c6LOS S3 同表数字**，也不能宣称“不劣于”。
+这是同一块板、同一 CCOUNT 口径的 LiteOS-M 基线；c6os 的 S3 perf 镜像本轮启动复现仍在排查（`t_perf` 只输出 boot，未输出 bench），因此**暂不能给出 c6os S3 同表数字**，也不能宣称“不劣于”。
 
-### 6.2 S3 历史数据（c6LOS，CCOUNT @40MHz）
+### 6.2 S3 历史数据（c6os，CCOUNT @40MHz）
 
 来自 M2-4 / M6-2 上板记录：
 
@@ -106,11 +106,11 @@ LiteOS-M 经 LX6→LX7 移植后在 ESP32-S3 上运行（`bench/liteos_m_s3`，C
 4. **heap**：单次分配释放是最大开销，建议改为按 size class 的空闲链表；这属于性能优化，不影响当前安全修复。
 5. **测试口径**：所有数字都是单核 host/risc6；SMP 下 `os_obj_lock` 的原子操作会增加 sem/queue/mutex 开销，需要用 `--harts 2` 单独测。
 
-## 7. 同板 c6LOS vs LiteOS-M（ESP32-S3，CCOUNT 40MHz，最终）
+## 7. 同板 c6os vs LiteOS-M（ESP32-S3，CCOUNT 40MHz，最终）
 
-同一块 ESP32-S3、同一 CCOUNT 口径、N=1000；LiteOS-M 直接调用 LOS_*/OsTickHandler，c6LOS 调用 os_* 原生 API（sem/queue/heap 在 S3 使用同语义 C 热路径）。
+同一块 ESP32-S3、同一 CCOUNT 口径、N=1000；LiteOS-M 直接调用 LOS_*/OsTickHandler，c6os 调用 os_* 原生 API（sem/queue/heap 在 S3 使用同语义 C 热路径）。
 
-| 指标 | LiteOS-M S3 | c6LOS S3 | c6LOS/LiteOS |
+| 指标 | LiteOS-M S3 | c6os S3 | c6os/LiteOS |
 |---|---:|---:|---:|
 | yield | 592 | 310 | 0.52x |
 | sem_post+pend | 141 | 95 | 0.67x |

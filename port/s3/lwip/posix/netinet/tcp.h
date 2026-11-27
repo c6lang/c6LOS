@@ -1,4 +1,4 @@
-/* netinet/tcp.h（c6LOS + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明 */
+/* netinet/tcp.h（c6os + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明 */
 #ifndef C6OS_POSIX_NETINET_TCP_H
 #define C6OS_POSIX_NETINET_TCP_H
 

@@ -151,7 +151,7 @@ u32  os_version(void);                      /* 0xMMmmpp */
 
 语义差异表（兼容层必须遵守）：
 
-| LiteOS-M | c6LOS |
+| LiteOS-M | c6os |
 |---|---|
 | `LOS_QueueCreate` 长度单位是**消息个数**，`uwMaxMsg` 为元素大小 | 同义；元素区由内核从堆/静态池分配 |
 | `LOS_SemPend` 超时单位是 tick | 同义；`LOS_WAIT_FOREVER` = `0xFFFFFFFF` |

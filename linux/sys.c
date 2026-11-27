@@ -1050,7 +1050,7 @@ void lx_syscall_do(LxRegs *r)
         r->rax = 0ull;
         return;
     case LX_SYS_sethostname:
-        /* hostname 只在 uname.nodename 里体现（c6los）；sethostname 静默接受。 */
+        /* hostname 只在 uname.nodename 里体现（c6os）；sethostname 静默接受。 */
         if (a1 > 64ull) { r->rax = neg(LX_EINVAL); return; }
         r->rax = 0ull;
         return;
@@ -1672,8 +1672,8 @@ void lx_syscall_do(LxRegs *r)
             u64 i;
 
             vals[0] = "Linux";
-            vals[1] = "c6los";
-            vals[2] = "6.1.0-c6los";
+            vals[1] = "c6os";
+            vals[2] = "6.1.0-c6os";
             vals[3] = "#1";
             vals[4] = "x86_64";
             vals[5] = "(none)";

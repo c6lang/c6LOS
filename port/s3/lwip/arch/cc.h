@@ -1,4 +1,4 @@
-/* c6LOS 的 lwIP 平台适配头（arch/cc.h）
+/* c6os 的 lwIP 平台适配头（arch/cc.h）
  *
  * lwIP 的 `lwip/arch.h` 会 `#include "arch/cc.h"` 来找这些平台相关的东西：
  * 定宽整数类型、结构体打包方式、诊断/断言钩子、随机数。

@@ -1,6 +1,6 @@
 /* user/c6chrome-display.c —— G3：把 headless Chrome 的帧显示到 /dev/fb0
  *
- * 这个程序是普通静态 Linux ELF，跑在 c6LOS 的 Linux ABI 里。它通过
+ * 这个程序是普通静态 Linux ELF，跑在 c6os 的 Linux ABI 里。它通过
  * `--remote-debugging-pipe` 和 Chrome 说话：
  *   fd3 = 命令（父 → Chrome），fd4 = 应答/事件（Chrome → 父）；
  * 每条消息是一个 NUL 结尾的 JSON 对象。

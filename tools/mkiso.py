@@ -123,7 +123,7 @@ def boot_catalog(boot_lba, sector_count=4, load_seg=0x07C0):
     val = bytearray(32)
     val[0] = 0x01
     val[1] = 0x00
-    val[4:4 + 12] = b"c6LOS  M11  "
+    val[4:4 + 12] = b"c6os   M11  "
     val[30] = 0x55
     val[31] = 0xAA
     s = 0

@@ -75,7 +75,7 @@ static int fetch(const char *host, const char *path, char *out, int cap, int ver
         printf("== 握手完成（阶段 %d，套件 0x%04x）\n", tls12_stage(&t), t.cipher);
     }
     snprintf(req, sizeof req,
-             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: c6los/1.0\r\n"
+             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: c6os/1.0\r\n"
              "Accept: */*\r\nConnection: close\r\n\r\n", path, host);
     if (tls12_write_app(&t, req, (int)strlen(req)) <= 0) {
         printf("   发送请求失败\n");

@@ -1,4 +1,4 @@
-# c6LOS —— ESP32-S3 构建
+# c6os —— ESP32-S3 构建
 # 用法：make C6_ROOT=/path/to/c6 s3
 
 C6_ROOT ?= $(HOME)/c6
@@ -1542,7 +1542,7 @@ $(FS_IMG): $(LS_ELF) tools/mk-initramfs.py
 	@rm -rf $(FSROOT)
 	@mkdir -p $(FSROOT)/bin $(FSROOT)/etc
 	printf 'c6os 1.0\n' > $(FSROOT)/etc/version
-	printf 'hello from the c6LOS initramfs\n' > $(FSROOT)/hello.txt
+	printf 'hello from the c6os initramfs\n' > $(FSROOT)/hello.txt
 	cp $(LS_ELF) $(FSROOT)/bin/ls
 	ln -sfn /hello.txt $(FSROOT)/hello-link
 	python3 tools/mk-initramfs.py $@ $(FSROOT)
@@ -2165,7 +2165,7 @@ HTTP_DIR := $(X86)/http
 
 $(HTTP_DIR)/index.html:
 	@mkdir -p $(HTTP_DIR)
-	@printf 'c6LOS M10-4\n' > $@
+	@printf 'c6os M10-4\n' > $@
 
 x86-tcp: caps-check-x86
 	$(MAKE) X86S_NAME=tcp X86S_MAIN=tests/t_tcp.c6 C6OS_NET=1 \
@@ -2860,7 +2860,7 @@ check-linuxabi-l3: x86-fs
 	@timeout 20 qemu-system-x86_64 -m 256M \
 		-drive format=raw,file=$(X86)/fs-disk.img,if=ide \
 		-boot c -nographic -serial stdio -monitor none -no-reboot 2>&1 \
-		| grep -q "hello from the c6LOS initramfs" \
+		| grep -q "hello from the c6os initramfs" \
 	  && echo "PASS: linux-abi L3（initramfs + 文件语义）" \
 	  || { echo "FAIL: linux-abi L3"; exit 1; }
 

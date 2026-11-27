@@ -46,7 +46,7 @@
 | 充电检测 | `PowerManager(GPIO_NUM_38)` | 输入脚，驱动不需要 |
 | 音频/按键 | MIC WS4/SCK5/DIN6，SPK DOUT7/BCLK15/LRCK16；BOOT=0，VOL+=40，VOL-=39 | 与 M7 无关，记录备查 |
 
-## 对 c6LOS 的影响
+## 对 c6os 的影响
 
 `port/s3/panel.c` 现有的 ST77916/QSPI 驱动是给另一块 Waveshare 1.85C 写的，
 不适用于这台 ST7789 SPI 屏；RTOS 性能/对比不受影响，但要点亮这块屏需要按

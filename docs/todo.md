@@ -808,7 +808,7 @@ G6 在 G1/G3/G5 之后；G7/G8 独立可砍。详细任务拆分、ABI 结构、
   纯色红→绿→蓝（各 1.2s）→ 8 色竖条 + `C6OS / ST7789 240X240 / BITBANG OK`
   文字（1.2s）→ 仪表盘一帧（1.6s，含 tick/tasks/DASH 字样）。串口同步打印
   `1 red 5168k-cyc … 5 dash 5814k-cyc tick=<n>`，tick 单调递增。
-  若屏幕仍全黑，问题已不在 c6LOS 这一侧的可观测项，而在这三者之一：
+  若屏幕仍全黑，问题已不在 c6os 这一侧的可观测项，而在这三者之一：
   ①面板/排线本身；②这块屏的 SDA 只做输入（回读全不出值，见 §4.4）；
   ③屏需要本驱动之外的初始化（当前已按 ST7789 手册与各家开板示例补齐延时 +
   porch/gate/VCOM/gamma 表）。
@@ -839,7 +839,7 @@ G6 在 G1/G3/G5 之后；G7/G8 独立可砍。详细任务拆分、ABI 结构、
   TX FIFO，也没有自己的 DMA 描述符寄存器**（`soc/esp32s3/register/soc/i2s_reg.h`
   里只有 CONF/CLKM/RXEOF_NUM 等，没有 OUT_LINK/AHB 寄存器）。它的数据搬运走
   **GDMA 引擎**（通用 DMA，需要在 GDMA 侧配通道 + 描述符链，再用
-  `DMA_PERI_OUT_SEL` 把通道接到 I2S0 TX）。所以在 c6LOS 里要真正出声/收声，
+  `DMA_PERI_OUT_SEL` 把通道接到 I2S0 TX）。所以在 c6os 里要真正出声/收声，
   下一步是实现 GDMA 通道 + 描述符链，而不是继续折腾 I2S 本身。
   参考现成环境：IDF v6.0.1 源码 `/media/winger/inst_26/esp/esp-idf`、工具链
   `/media/winger/inst_26/esp/tools`、上游固件 `/media/winger/inst_26/esp/xiaozhi`
@@ -926,7 +926,7 @@ G6 在 G1/G3/G5 之后；G7/G8 独立可砍。详细任务拆分、ABI 结构、
 - **mic**：同上（I2S1，SCK=5/WS=4/DIN=6）。
 - **WiFi + lwIP**：环境已就绪（IDF v6.0.1 源码 `/media/winger/inst_26/esp/esp-idf`、
   工具链 `/media/winger/inst_26/esp/tools`、上游固件 `/media/winger/inst_26/esp/xiaozhi`），
-  下一步：把 esp_wifi 闭源库 + lwIP 源码 + FreeRTOS 垫片接进 c6LOS。
+  下一步：把 esp_wifi 闭源库 + lwIP 源码 + FreeRTOS 垫片接进 c6os。
 - 内核：单核任务间 `os_sem_pend(timeout=0)` / `os_sem_post` 的唤醒路径待查
   （跨核 sem 用例是 PASS 的）。
 

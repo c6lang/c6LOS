@@ -38,7 +38,7 @@
 
 ## 一分钟看懂现在的状态
 
-- **能做到**：c6LOS 在 S3 上完整跑起来（USB-CDC 串口、背光音频、RTC 信标、USB-JTAG 调试全通）；
+- **能做到**：c6os 在 S3 上完整跑起来（USB-CDC 串口、背光音频、RTC 信标、USB-JTAG 调试全通）；
   windowed ABI 桥（能正确调用 IDF 闭源库）；libphy 的 PHY 初始化 5 步真板验证通过；
   WiFi 闭源库 + IDF 源码层**链接 0 未定义符号**；自己生成的标准 IDF app 镜像能被原厂
   bootloader 引导（`esptool image-info` 报 checksum + hash 双 valid）。
@@ -127,7 +127,7 @@ sudo -n esptool --chip esp32s3 -p /dev/ttyACM0 write-flash 0x20000 /tmp/app.bin
 > **最终目标**：真板上通过 WiFi 取到 `https://qq.com` 的页面数据。
 > 链路 = WiFi 关联 → DHCP → TCP → TLS → HTTP/1.1 GET。
 
-> 目标（待确认）：在 c6LOS 上让 S3 连上 AP 并能收发 IP 包（先 ping/HTTP GET 就算成功）。
+> 目标（待确认）：在 c6os 上让 S3 连上 AP 并能收发 IP 包（先 ping/HTTP GET 就算成功）。
 > 现状：内核已有任务/队列/信号量/互斥/定时器/tick（`include/c6os/*.h`），
 > 没有 flash 文件系统、没有 NVS、没有 TCP/IP 栈、没有 FreeRTOS API。
 
@@ -809,7 +809,7 @@ RAM-only 镜像 + 跳 entry"，没有二级 bootloader，所以 **IROM 的 MMU �
 握手与证书校验不在这里" —— 也就是说我们只需把 `tlskdf`+`x25519`+`x509`+`tlsrec`
 串成一个 **TLS 1.3 握手状态机**（几百行，纯逻辑）。
 
-### 因此 c6LOS 这边要补的只有三块
+### 因此 c6os 这边要补的只有三块
 
 1. **WiFi 链路层**（最难，依赖 IDF 闭源库）：关联 + 原始 802.3 帧收发。
    当前卡在"闭源库代码放哪"：IROM 需要 MMU+cache 初始化（`include/c6os/flash.h`
@@ -1376,7 +1376,7 @@ ROM 才会正常引导 flash 里的固件；
 
 - 音频录放（BOOT 按键录音→循环播放，已合并 main）
 - call0 ↔ windowed ABI 桥 + 寄存器窗口向量（含 12 参数递归）
-- 闭源 `libphy.a` 在 c6LOS 里执行、`phy_get_rf_cal_version()` = 0x2C7
+- 闭源 `libphy.a` 在 c6os 里执行、`phy_get_rf_cal_version()` = 0x2C7
 - 闭源库用的 `mem*` 全部改成 windowed 版（objcopy 改名 + 孤岛实现）
 - c6 标准库新增：`include/c6os/flash.h`（IROM/DROM 映射、cache 使能含
   `SHUT_CORE0_BUS` 修复）、`include/c6os/reg.h`
@@ -1503,7 +1503,7 @@ slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了
 
 - 音频：BOOT 键录音 → 循环播放（已合并 main，真板有声）
 - call0 ↔ windowed ABI 桥 + 寄存器窗口向量（含 12 参数递归）
-- 闭源 `libphy.a` 在 c6LOS 里执行（`phy_get_rf_cal_version()` = 0x2C7）
+- 闭源 `libphy.a` 在 c6os 里执行（`phy_get_rf_cal_version()` = 0x2C7）
 - 闭源库用的 `mem*` 全改 windowed 版（objcopy 改名 + 孤岛实现）
 - c6 标准库：`flash.h`（IROM/DROM 映射 + `SHUT_CORE0_BUS` 修复）、`reg.h`
 - 工具链：`flash.sh`、`usbreset.py`、`reset.py`、`cap.py`、`beacon.sh`
@@ -1540,7 +1540,7 @@ slot3 = 0xB0B0B0B0  ← port_init 的标记（说明后面的 step2 又卡住了
    + 芯片 ROM 符号 `.ld`（我们已有 `port/s3/rom/`）
 2. **~30 个函数的 OS 适配层**（`esp_wifi_os_adapter`）：`wifi_calloc/free`、
    `wifi_thread_semphr_get`、`queue_send`、`task_ms_to_tick`、`wifi_int_disable/restore`、
-   任务创建、软件定时器 —— 需要**真正的调度器**（c6LOS 有），不一定非要 FreeRTOS
+   任务创建、软件定时器 —— 需要**真正的调度器**（c6os 有），不一定非要 FreeRTOS
 3. PHY 初始化 + `esp_wifi_init` + 定时器/事件循环（Xtensa 上占用 TIMG1/TIMER0 + CCOMPARE0，单核）
 
 ## 42. 第 30 轮：PHY 表已通，卡点前移到 set_chan_freq_hw_init
@@ -1837,7 +1837,7 @@ g_espnow_user_oui, g_mt
 1. 把 `components/esp_wifi/src/*.c` 加入构建，用 `-mabi=windowed` 编译
    （它们和闭源库同 ABI；我们从 c6 侧通过 `win_bridge` 调用）
 2. 提供 **FreeRTOS 兼容层**（`freertos/FreeRTOS.h` 等最小头 + 队列/信号量/任务/定时器实现，
-   内部直接用 c6LOS 的 `os_*` API）
+   内部直接用 c6os 的 `os_*` API）
 3. 提供 `esp_log`、`esp_timer`、`esp_event`、`heap_caps_*`、`nvs_*` 的最小实现
 4. 然后按 §48 的顺序填 `wifi_osi_funcs_t`
 
@@ -2195,7 +2195,7 @@ WiFi 栈就能装进 image，`esp_wifi_init_internal()` 就能真板跑起来。
 | 环节 | 状态 |
 |---|---|
 | windowed ABI 桥 + 窗口向量 | ✅ 真板验证 |
-| libphy 在 c6LOS 内执行 | ✅ 真板验证（5 步全返回） |
+| libphy 在 c6os 内执行 | ✅ 真板验证（5 步全返回） |
 | PHY 之后串口失联的原因 | ✅ 定位（USB 时钟被清） |
 | USB-JTAG 调试通道（无 UART） | ✅ 打通（断点/单步/读寄存器） |
 | WiFi 闭源库 + IDF 源码层链接 | ✅ 0 个未定义符号 |
@@ -2231,7 +2231,7 @@ slot2 = 0x00004010   （MMU 表项 valid ✓）
 | 环节 | 状态 | 证据 |
 |---|---|---|
 | windowed ABI 桥 + 窗口溢出/欠载向量 | ✅ | 真板 deep=11 / deep12=074 |
-| libphy 在 c6LOS 里执行（PHY 初始化） | ✅ | JTAG 逐步：5 步全返回，s3_trap 未命中 |
+| libphy 在 c6os 里执行（PHY 初始化） | ✅ | JTAG 逐步：5 步全返回，s3_trap 未命中 |
 | PHY 之后串口失联的原因 | ✅ | USB 时钟/复位/RTC_USB_CONF 被清零（实测寄存器） |
 | 无 UART 的调试通道 | ✅ | USB-JTAG + openocd + gdb（断点/单步/读寄存器） |
 | WiFi 闭源库 + IDF esp_wifi 源码层链接 | ✅ | 0 个未定义符号 |
@@ -5242,7 +5242,7 @@ M2 bringup returned
 * `0x600080c0 (= slot0 = rc)` = **0x00000000 = ESP_OK**
 * RTC 回调计数 `0x50000200` = **0x98 = 152 次**（修好之前只有 22 次就挂）
 
-也就是说：IDF 闭源 WiFi 协议栈在我们的 c6LOS 上完成初始化，OSI 适配层被
+也就是说：IDF 闭源 WiFi 协议栈在我们的 c6os 上完成初始化，OSI 适配层被
 回调了 152 次（内存/队列/信号量/互斥/事件组/任务/日志/时间全都有），
 `wifi_menuconfig_init`、`pm_funcs_init`、`wdev_funcs_init`、
 `net80211_funcs_init`、`wifi_init_in_caller_task` 全部走通。
@@ -17637,7 +17637,7 @@ I (1599) wifi station: got ip:192.168.68.120
 ### 官方固件运行态 vs 我们的运行态（同一块板）
 
 ```
-寄存器          官方 IDF            我们 c6LOS
+寄存器          官方 IDF            我们 c6os
 0x60033d14     0x00000001          0x00000000   ← hal_init 等的握手位
 0x6002600c     0x10000004          0x10000002   (BB_CFG)
 0x60026014     0xff87d850          0xfffce7bf   (WIFI_CLK_EN)
@@ -17654,10 +17654,10 @@ A/B：JTAG 在 hal_init 停住时把上述 IDF 值全部写进去，bit0 仍然�
 
 ### 下一步
 
-方向转为：**让 c6LOS 经过 IDF 二级 bootloader 启动**（已有
+方向转为：**让 c6os 经过 IDF 二级 bootloader 启动**（已有
 `/tmp/idf_station/build/bootloader/bootloader.bin`），即构造一个合法的 ESP
 app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替我们完成
-全部模拟/RF 初始化，再跳到 c6LOS。
+全部模拟/RF 初始化，再跳到 c6os。
 
 目标未达成，goal 保持 active。
 
@@ -17665,7 +17665,7 @@ app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替�
 
 ## §527 经 IDF bootloader 启动仍然 0 AP；跳过时钟覆写导致不开机
 
-- 用 `esptool elf2image` 把 c6LOS ELF 转成合法 ESP app image，配 IDF
+- 用 `esptool elf2image` 把 c6os ELF 转成合法 ESP app image，配 IDF
   二级 bootloader 启动：**成功启动并跑完整流程**（OPTIONS0 已和官方一致
   =0x1c008080），但 `0x60033d14` 仍是 0、扫描仍是 0 AP。
 - 发现我们的 `s3_win_phy_clock_enable()` 把 bootloader 配好的
@@ -17689,7 +17689,7 @@ app image 头把现有 c6os 二进制挂到 0x10000；这样 bootloader 会替�
 `libusb_get_string_descriptor_ascii() failed with -1`、4444 端口拒绝连接。
 与之前 `S3_AUTO_WDT` 事故同类的 USB  PHY/枚举死锁。
 
-**当前板上镜像**：IDF 二级 bootloader + skip-clock 版 c6LOS（不开机）。
+**当前板上镜像**：IDF 二级 bootloader + skip-clock 版 c6os（不开机）。
 标准固件源码已恢复到无该宏的默认配置并重新编译
 （`build/wifi/c6os.bin` 是好的），但需要用户断电重插后才能重新烧录。
 
@@ -17720,9 +17720,9 @@ I (10371) https: HTTP status=200 content_length=132932 BODY(600):
 ⇒ **硬件、路由器、2.4G 天线、DNS、TLS 证书、HTTP 全部正常**；
 qq.com 返回真实腾讯网首页 132932 字节。
 
-注意：这是 **IDF 官方 app** 的成果，不是 c6LOS，因此目标仍未达成。
-c6LOS 侧需补齐 IDF app 启动阶段的模拟/RF 初始化，才能让同样的
-WiFi + HTTPS 流程在 c6LOS 上跑通。goal 保持 active。
+注意：这是 **IDF 官方 app** 的成果，不是 c6os，因此目标仍未达成。
+c6os 侧需补齐 IDF app 启动阶段的模拟/RF 初始化，才能让同样的
+WiFi + HTTPS 流程在 c6os 上跑通。goal 保持 active。
 
 附：本轮发现 `esptool --no-stub` 写 app image 会让 bootloader 报
 `Image hash failed`（虽然 esptool 自校验通过）；必须用 stub 模式
@@ -17770,7 +17770,7 @@ I (371) wifi:connected with weforpay.com ...
 `wifi_reset_mac`（OSI `_wifi_reset_mac` + `0x60033084 &= 0x7fffffff`）
 → `ic_mac_init`(ROM) → `ic_set_interrupt_handler` → `chip_enable`。
 
-对照：c6LOS 的 `esp_wifi_start` 返回 0，但 bit0 始终 0；我们的
+对照：c6os 的 `esp_wifi_start` 返回 0，但 bit0 始终 0；我们的
 `_wifi_reset_mac` 只脉冲 `0x60026018 bit2`，而 IDF 的
 `periph_ll_reset(PERIPH_WIFI_MODULE)` 也是脉冲同一位，差异可能在
 DPORT 写保护 / 复位释放时序，或库内部的 `ic_mac_init` 前置状态。
@@ -17781,7 +17781,7 @@ DPORT 写保护 / 复位释放时序，或库内部的 `ic_mac_init` 前置状�
 
 ## §533 双次 MAC 复位脉冲仍不能置起 ready 位（已回退）
 
-IDF 在 `hal_init` 前后各调用一次 `_wifi_reset_mac`；c6LOS 日志只出现一次。
+IDF 在 `hal_init` 前后各调用一次 `_wifi_reset_mac`；c6os 日志只出现一次。
 试着在 shim 里连发两次脉冲（各 assert 400 圈 + 间隔 1000 圈），真板结果：
 ```
 [wifi] reset_mac pulse x2 done hs=00000000
@@ -17799,7 +17799,7 @@ IDF 在 `hal_init` 前后各调用一次 `_wifi_reset_mac`；c6LOS 日志只出�
 [wifi] reset_mac pulse done cfg=80000000 hs=00000000
 ```
 写入后立即读回仍是 `0x80000000` —— 与 `0x60033d14` 一样，这两个 MAC
-寄存器位在 c6LOS 当前状态下是只读/被硬件强制的。说明 MAC 仍被某个
+寄存器位在 c6os 当前状态下是只读/被硬件强制的。说明 MAC 仍被某个
 上游状态（时钟/电源/复位域）卡住，并非软件没写。
 
 改动已回退，目标未达成，goal 保持 active。
@@ -17820,7 +17820,7 @@ I (321) HS: after-wifi-start: 00000001
 ⇒ bit0 是在 `esp_wifi_start()` 内 `ic_mac_init`(ROM) 阶段被硬件置起，
 而不是 PHY 校准阶段（校准在 281 ms 已完成而 bit 仍为 0）。
 
-c6LOS 侧 `esp_wifi_start()` 返回 0，但 ROM `ic_mac_init` 没能产生同样
+c6os 侧 `esp_wifi_start()` 返回 0，但 ROM `ic_mac_init` 没能产生同样
 的硬件效果；其输入 (`g_ic` / 时钟状态 / MAC 电源域) 仍与 IDF 有差异。
 目标未达成，goal 保持 active。
 
@@ -17840,7 +17840,7 @@ hal_mac_init:
 ```
 ⇒ ROM 会用 `pm_get_tx_blocks_retention_mask()` 的返回值去清
 `0x60033ca0` 的位，这正是 MAC ready 前的最后一步硬件写。
-若 c6LOS 侧该函数返回值不同（或 `0x60033ca0` 初值不同），MAC 就
+若 c6os 侧该函数返回值不同（或 `0x60033ca0` 初值不同），MAC 就
 一直不 ready。下一步可对比两侧 `pm_get_tx_blocks_retention_mask`
 返回值及 `0x60033ca0` 内容。
 
@@ -17852,14 +17852,14 @@ hal_mac_init:
 
 JTAG 对照（都 halt 在 CPU）：
 ```
-                 官方 IDF app       c6LOS
+                 官方 IDF app       c6os
 0x60033ca0       0x00ff1000        0x00000000
 0x60033d14       0x00000001        0x00000000
 0x60033084       0x80000000        0x80000000
 0x60026014       0xff87d850        0xfffce7bf
 ```
-在 c6LOS 里 CPU 写 `0x60033ca0 = 0x00ff1000` 后立即读回仍是 `0`。
-⇒ 不只是单个 bit，`0x60033c00..0x60033d14` 这一片 MAC 寄存器在 c6LOS
+在 c6os 里 CPU 写 `0x60033ca0 = 0x00ff1000` 后立即读回仍是 `0`。
+⇒ 不只是单个 bit，`0x60033c00..0x60033d14` 这一片 MAC 寄存器在 c6os
 状态下整体不可访问（读 0、写忽略），说明 **WiFi MAC 电源域或 APB 时钟
 没有真正打开**。虽然我们清了 `RTC_CNTL_DIG_PWC.WIFI_FORCE_PD(bit17)`、
 `DIG_ISO.WIFI_FORCE_ISO(bit28)` 并 OR 了 `WIFI_CLK_EN`，仍缺 IDF
@@ -17870,7 +17870,7 @@ JTAG 对照（都 halt 在 CPU）：
 
 ## §538 对齐 DIG_ISO 官方值（0x80）无效
 
-c6LOS 的 `RTC_CNTL_DIG_ISO(0x60008094)=0xaa805080`，官方 app 是
+c6os 的 `RTC_CNTL_DIG_ISO(0x60008094)=0xaa805080`，官方 app 是
 `0x00000080`。把整个寄存器写成 0x80（清掉 bit23/25/27/29/31）后真板
 依旧 `scan_get_ap_num=0`、关联超时。已回退。
 目标未达成，goal 保持 active。
@@ -17881,7 +17881,7 @@ c6LOS 的 `RTC_CNTL_DIG_ISO(0x60008094)=0xaa805080`，官方 app 是
 
 JTAG 对照（halt 状态）：
 ```
-                  官方 IDF      c6LOS
+                  官方 IDF      c6os
 0x600c0018        6100e003      e9c1e06f
 0x600c001c        00000440      00000604
 0x600c0024        00000380      000001ca
@@ -17926,7 +17926,7 @@ goal 保持 active。
 ```
 ⇒ MAC 寄存器块在 app 启动初期本来也是 0；是 `esp_wifi_start()` 内
 `ic_mac_init` 让硬件把 ca0 变成 0x00ff1000 并置起 d14 bit0。
-c6LOS 走到同一 ROM 函数却没有这个效果，说明 `hal_mac_init` 的
+c6os 走到同一 ROM 函数却没有这个效果，说明 `hal_mac_init` 的
 前置硬件状态仍不满足（不是启动早期的寄存器值差异）。
 goal 保持 active。
 
@@ -17934,12 +17934,12 @@ goal 保持 active。
 
 ## §543 JTAG 直写 `0x60033ca0` 同样无效
 
-在 c6LOS halted 状态下用 OpenOCD `mww 0x60033ca0 0x00ff2000`，
+在 c6os halted 状态下用 OpenOCD `mww 0x60033ca0 0x00ff2000`，
 随后 `mdw` 读回仍是 `0x00000000`。连 JTAG 都写不进去，确认整个 MAC
 寄存器块处于"未上电/未解锁"状态，而不是 CPU 侧写保护或软件时序问题。
 
 参考 app 侧时间线（§542）显示 ca0 在 `ic_mac_init` 后由硬件变成
-0x00ff1000；c6LOS 缺这一步硬件解锁的上游条件。goal 保持 active。
+0x00ff1000；c6os 缺这一步硬件解锁的上游条件。goal 保持 active。
 
 ---
 
@@ -17961,7 +17961,7 @@ DIG_ISO 对齐、时钟位对齐、电源域序列照搬（§533–§544 全部�
 
 唯一未解释的现象：`esp_wifi_start()` 里 ROM `hal_mac_init()` 在官方 app
 能把 `0x60033ca0` 从 0 变成 0x00ff1000 并置起 `0x60033d14 bit0`，
-在 c6LOS 里两者都始终为 0，且 CPU/JTAG 都写不进去。
+在 c6os 里两者都始终为 0，且 CPU/JTAG 都写不进去。
 下一步应直接对比 **传给 `ic_mac_init`/`hal_mac_init` 的软件状态**
 （`g_ic` 结构、`pm_get_tx_blocks_retention_mask()` 返回值、
 `g_osi_funcs_p` 表），而不是继续猜寄存器位。
@@ -17972,10 +17972,10 @@ goal 保持 active。
 
 ## §546 `pm_get_tx_blocks_retention_mask` 两侧完全一致
 
-反汇编对比（c6LOS 0x4201bc0c / IDF 0x420593a8）逐指令相同：
+反汇编对比（c6os 0x4201bc0c / IDF 0x420593a8）逐指令相同：
 都返回 `-1` 或 `0xfff1ffff`，且依赖 `g_pm+14/+15/+0x200+30` 三个标志。
 ⇒ 该函数不是造成 `hal_mac_init` 行为差异的原因。
-`g_ic` 地址不同（c6LOS 0x3fcd6754 / IDF 0x3fc9ea68）但作为参数传入，
+`g_ic` 地址不同（c6os 0x3fcd6754 / IDF 0x3fc9ea68）但作为参数传入，
 理论上无关；若后续仍无进展可检查 `g_ic` 内容是否被正确初始化。
 
 goal 保持 active。
@@ -17986,7 +17986,7 @@ goal 保持 active。
 
 JTAG dump `g_osi_funcs_p` 指向的表：
 ```
-                c6LOS              IDF
+                c6os              IDF
 version         8                  8
 slot@4          0x4037bb7c        0x403799b4
 slot@16         0x4037d070        0x4209943c
@@ -18013,7 +18013,7 @@ nonzero words   80                 80
 ## §549 `g_ic` 内容对照
 
 ```
-偏移   c6LOS                     IDF
+偏移   c6os                     IDF
 0x00   7057cd3f 586acd3f        88dac93f 6cedc93f
 0x08   00000000 01000000        00000000 01000000
 0x10   34e8cc3f 00000000        24c2ca3f 00000000
@@ -18021,7 +18021,7 @@ nonzero words   80                 80
 0x20   64000000 ...             64000000 f4c9ca3f ...
 ```
 结构基本一致，但 IDF 在 0x1c 多了 bit18（0x00040400 vs 0x00000400），
-且后续若干字段非空（c6LOS 为 0）。这些是 `ic_mac_init` 之前由
+且后续若干字段非空（c6os 为 0）。这些是 `ic_mac_init` 之前由
 `（lib 侧）ic_init` 填的，若缺关键字段可能影响 `hal_mac_init`。
 具体字段含义需对照 IDF `wifi_hw_start`/`pp` 结构体定义进一步确认。
 goal 保持 active。
@@ -18037,7 +18037,7 @@ goal 保持 active。
 
 ---
 
-## §551 更正：ic_mac_init / wifi_hw_start 在 c6LOS 里确实被调用（此前断点残留误导）
+## §551 更正：ic_mac_init / wifi_hw_start 在 c6os 里确实被调用（此前断点残留误导）
 
 用 JTAG 断点追踪时若不在 `reset halt` 后先 `rbp all` 清除残留断点，
 新断点会因 "Duplicate Breakpoint address" 设置失败，导致误判为
@@ -18057,7 +18057,7 @@ step 几条指令后 ca0 / d14 仍为 0。
 
 ## §552 hal_init / hal_mac_init 两侧实现逐指令一致
 
-IDA 对比（虽然链接地址不同：c6LOS hal_mac_init=0x40386554，
+IDA 对比（虽然链接地址不同：c6os hal_mac_init=0x40386554，
 IDF=0x40384688，hal_init c6=0x420245d4 / IDF=0x4205f354）：
 - `hal_init`：读 `0x60033d14`，OR bit1 写回，然后轮询 bit0；
   之后写 `0x60033c34=0`、`0x60033c40=-1`，`call8 mac_txrx_init`，
@@ -18067,14 +18067,14 @@ IDF=0x40384688，hal_init c6=0x420245d4 / IDF=0x4205f354）：
 
 ⇒ 排除"库版本差异导致初始化逻辑不同"。`0x60033ca0` 的初值
 （IDF 里 hal_mac_init 执行前应为 0x00ff2000，执行后 0x00ff1000）
-只能由硬件产生；c6LOS 里该寄存器一直为 0 说明 MAC 硬件模块从未上电/解锁。
+只能由硬件产生；c6os 里该寄存器一直为 0 说明 MAC 硬件模块从未上电/解锁。
 goal 保持 active。
 
 ---
 
 ## §553 在 hal_mac_init 断点处补齐官方电源/时钟值仍无效
 
-JTAG 在 c6LOS `hal_mac_init`(0x40386554) 断点处读到：
+JTAG 在 c6os `hal_mac_init`(0x40386554) 断点处读到：
 `ca0=0, d14=0, DIG_ISO(0x60008094)=0`（隔离已正确解除，不是残留问题）。
 用 `mww` 直接写成官方运行值 `0x60008094=0x80`、`0x6002600c=0x10000004`、
 `0x60026018=0x00003e08` 后恢复执行，几秒后 `ca0` 与 `d14` 仍全为 0。
@@ -18103,16 +18103,16 @@ goal 保持 active。
 IDF 里 `esp_mac_bb_power_up()`（phy_init.c:569）会调用
 `esp_wifi_bt_power_domain_on()`，并在 `SOC_PM_MODEM_RETENTION_BY_BACKUPDMA=1`
 时额外做 `phy_freq_mem_backup(false, ...)` 恢复 MAC/BB 寄存器影子。
-c6LOS 目前只做了前者的等价物，后者（寄存器备份恢复）完全缺失；
+c6os 目前只做了前者的等价物，后者（寄存器备份恢复）完全缺失；
 这可能是 MAC 寄存器块始终为 0 的原因，下一步检查 ROM 是否导出该接口。
 goal 保持 active。
 
 ---
 
-## §556 phy_freq_mem_backup 在 c6LOS 里可用但未用于启动路径
+## §556 phy_freq_mem_backup 在 c6os 里可用但未用于启动路径
 
 两边都存在 `rom_phy_freq_mem_backup`（指针 0x400063d8）；
-c6LOS 的 0x420510a4 只是个转发 wrapper（把 a2 截成 8 位后 callx8 ROM）。
+c6os 的 0x420510a4 只是个转发 wrapper（把 a2 截成 8 位后 callx8 ROM）。
 它属于 PHY 省电省电上下文保存接口，需要预先有备份区
 （`s_mac_bb_pd_mem`），冷启动时没有可恢复的内容，
 因此不能直接解释 ca0 的初值差异。该假设搁置。
@@ -18125,7 +18125,7 @@ goal 保持 active。
 Makefile 的 `IDF_ROOT` 就是 `/media/winger/inst_26/esp/esp-idf`，
 `WIFI_LIBDIR = components/esp_wifi/lib/esp32s3`，与参考 app 完全同一份库；
 地址差异只是链接布局不同。⇒ 库版本差异也排除。
-剩余可能性收窄到：c6LOS 的 PHY/RF 硬件上电次序（尤其是
+剩余可能性收窄到：c6os 的 PHY/RF 硬件上电次序（尤其是
 `register_chipv7_phy` 与 `esp_wifi_start` 之间的状态）仍与 IDF app 不同。
 goal 保持 active。
 
@@ -18136,9 +18136,9 @@ goal 保持 active。
 逐项对照 `esp_phy_enable()`（phy_init.c:326）与
 `esp_phy_load_cal_and_init()`（:930）：
 - common clock → `phy_module_enable()` → `phy_bbpll_en_usb(true)` →
-  `register_chipv7_phy(init,cal,mode)`，c6LOS 的 `s3_win_phy_enable()` 全部覆盖；
+  `register_chipv7_phy(init,cal,mode)`，c6os 的 `s3_win_phy_enable()` 全部覆盖；
 - `phy_digital_regs_load()`（:368）只在**第二次及以后** enable 时调用，
-  且 c6LOS 镜像里没有这个符号；首次校准路径没有它；
+  且 c6os 镜像里没有这个符号；首次校准路径没有它；
 - `esp_mac_bb_power_up()` → `esp_wifi_bt_power_domain_on()` 的等价物
   `s3_win_phy_power_on()` 已在 PHY 初始化里调用。
 
@@ -18165,7 +18165,7 @@ goal 保持 active。
 `retry to connect to the AP` / `connect to the AP fail`，最终
 `getaddrinfo() returns 202`。而此前同一工程在同一真板上曾成功
 连上 `weforpay.com`（ch6, BSSID dc:d8:7c:5a:7a:46）并取到 qq.com。
-说明当前 AP 侧或射频环境发生了变化；这**不影响** c6LOS 侧
+说明当前 AP 侧或射频环境发生了变化；这**不影响** c6os 侧
 `ca0/d14` 恒 0 的根因判断，但会让后续真板验收更难。
 goal 保持 active。
 
@@ -18173,7 +18173,7 @@ goal 保持 active。
 
 ## §561 再次核对启动期 RTC/寄存器状态，排除若干旧差异
 
-c6LOS 真板日志（PHY 回调进入时）：
+c6os 真板日志（PHY 回调进入时）：
 `RTC_CNTL_OPTIONS0(0x60008000)=0x1c008080`，与官方 app 完全一致；
 `0x6001c08c=0x03fffa00`（该 MAC 寄存器块可读）。
 ⇒ § 早期记录里 `OPTIONS0=0x1c00a080` 是 bootloader 之前/不同阶段的瞬态值，
@@ -18251,7 +18251,7 @@ JTAG `reset halt` 后（二级 bootloader 尚未执行）读：
 `0x60033ca0=0, 0x60033d14=0, 0x60008090=0, 0x60008094=0`,
 `0x60026014=0xfffce030`（芯片复位默认值），`0x60026018=0`。
 说明 MAC 寄存器块从来就没有非零初值，必须由软件触发硬件上电后才能出现
-0x00ff2000 之类的值；c6LOS 始终没触发到那一步。goal 保持 active。
+0x00ff2000 之类的值；c6os 始终没触发到那一步。goal 保持 active。
 
 ---
 
@@ -18291,7 +18291,7 @@ SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
 `esp_mac_bb_pd_mem_init()` / `esp_wifi_mac_pd_mem_init()`。
 参考 app 的 sdkconfig 没有 `CONFIG_MAC_BB_PD`（只有 CONFIG_ESP_PHY_ENABLED=y），
 所以最后两项也不会跑；剩余是 sleep/PM 参数，与 MAC 寄存器访问无关。
-`esp_wifi_internal_set_mac_sleep` 在 c6LOS 里也存在（0x4204006c）。
+`esp_wifi_internal_set_mac_sleep` 在 c6os 里也存在（0x4204006c）。
 ⇒ 这条路径也不解释 ca0 恒 0。goal 保持 active。
 
 ---
@@ -18307,16 +18307,16 @@ SYSTEM_RW_BTMAC_REG_RST(11) | SYSTEM_BTBB_REG_RST(13) = 0x2A1F`，
 
 ## §574 参考 app 改用 esp_wifi_init_internal 后卡在 after-wifi-init
 
-把参考 app 的公开 `esp_wifi_init()` 换成 c6LOS 用的
+把参考 app 的公开 `esp_wifi_init()` 换成 c6os 用的
 `esp_wifi_init_internal()`：日志停在 `after-wifi-init`，
 此时 PWC=0x00020000 / ISO=0x10000080（WiFi 电源域**未**开启），
 后续无连接。说明公开 wrapper 里 `esp_phy_modem_init()` 等步骤
-是内部 API 调用方需要自行补齐的；c6LOS 用自己的 `_phy_enable` 回调补了
-（见 §575），所以这条不解释 c6LOS 的 ca0=0。改动已回退。
+是内部 API 调用方需要自行补齐的；c6os 用自己的 `_phy_enable` 回调补了
+（见 §575），所以这条不解释 c6os 的 ca0=0。改动已回退。
 
 ## §575 start 前电源域状态确认
 
-c6LOS 在 `esp_wifi_start()` 前读：
+c6os 在 `esp_wifi_start()` 前读：
 `PWC=0 ISO=0x80 CLK=0xfffce7bf RST=0 ca0=0 d14=0`——
 电源域已开（与参考 app 的 after-wifi-init 一致），但 MAC 寄存器仍为 0。
 诊断打印已回退。goal 保持 active。
@@ -18326,13 +18326,13 @@ c6LOS 在 `esp_wifi_start()` 前读：
 ## §576 补齐官方 esp_wifi_init 里的 power_domain_on 步骤仍无效
 
 公开 `esp_wifi_init()` 在内部 API 前会调 `esp_wifi_power_domain_on()`；
-c6LOS 此前缺这一步。在 `esp_wifi_init_internal()` 前显式调用等价的
+c6os 此前缺这一步。在 `esp_wifi_init_internal()` 前显式调用等价的
 `s3_win_phy_power_on()` 后：PWC=0（电源域本来就开），ca0 仍 0，扫描 0 AP、
 关联超时。改动已回退。goal 保持 active。
 
 ---
 
-## §577 重大更正：0x60033cxx MAC 寄存器块在 c6LOS 里并非"整片只读为 0"
+## §577 重大更正：0x60033cxx MAC 寄存器块在 c6os 里并非"整片只读为 0"
 
 在双方同一阶段（start 后）dump `0x60033c00..0x60033d40`：
 两边大量寄存器**都有正常的非零值**，例如 `0x60033c10=c00000f0`、
@@ -18366,7 +18366,7 @@ offset   IDF(after start)   c6(after start)
 把 §577 列出的 14 个差异寄存器在 start 后照官方值写一遍，
 写后立刻读回 `ca0=0 d14=0`（其它同理），扫描仍 0 AP。
 ⇒ 修正 §577 的措辞：块里**部分**寄存器（如 0x60033c10/44/90）可读，
-但真正需要初始化的那几个（含 ca0/d14）在 c6LOS 里写不进去。
+但真正需要初始化的那几个（含 ca0/d14）在 c6os 里写不进去。
 这与"对应硬件子模块未上电"一致。改动已回退。goal 保持 active。
 
 ---
@@ -18416,8 +18416,8 @@ IDF 的 esp_rom_delay_us(50) 量级）后：ca0/d14 仍 0、扫描 0 AP、关联
 420245ee  bbci a3, 0, 420245ec    ; 等硬件回 bit0（被 patch_halinit 跳过）
 ```
 ⇒ d14 bit0 不是"自动变成 1"，而是软件先写 bit1 触发、硬件再置 bit0 应答。
-c6LOS 里这条 `s32i` 执行后 d14 仍读到 0（§578 直接写 bit0 也读回 0），
-所以问题是 **d14 这个寄存器在 c6LOS 里写不进去**，而不是简单的"硬件没准备好"。
+c6os 里这条 `s32i` 执行后 d14 仍读到 0（§578 直接写 bit0 也读回 0），
+所以问题是 **d14 这个寄存器在 c6os 里写不进去**，而不是简单的"硬件没准备好"。
 这比之前的"电源/时钟未开"假设更精确地指向 MAC 寄存器接口的访问条件。
 goal 保持 active。
 
@@ -18444,7 +18444,7 @@ IDF 的 `esp_wifi_bt_power_domain_on()` 是引用计数的，我们每次 `_phy_
 
 ## §586 强制对齐 RTC_CNTL_DIG_PWC/DIG_ISO 到 IDF 值无效
 
-c6LOS 从 ROM 直跳，PWC/ISO 读回 0x00545010 / 0xaa805080（ROM 残余），
+c6os 从 ROM 直跳，PWC/ISO 读回 0x00545010 / 0xaa805080（ROM 残余），
 而 IDF 经二级 bootloader 后是 0 / 0x80。强制写成 IDF 值后诊断打印确实
 变成 PWC=0 ISO=0x80，但 ca0/d14 仍 0、扫描 0 AP、关联超时。
 ⇒ 这两个寄存器的残余值不是原因。改动已回退。goal 保持 active。
@@ -18457,7 +18457,7 @@ c6LOS 从 ROM 直跳，PWC/ISO 读回 0x00545010 / 0xaa805080（ROM 残余），
 把工作正常的 IDF 参考 app 也用 `patch_halinit.py` 同样的补丁
 （`bbci` → `j .+3`，并修正 checksum + SHA256）后真板仍：
 `d14=1 ca0=00ff1000` → 关联 → DHCP 192.168.68.120 → HTTP 200/132400 字节。
-所以 c6LOS 跳过 spin 本身不会导致 MAC 不 ready。
+所以 c6os 跳过 spin 本身不会导致 MAC 不 ready。
 
 ### §588 nvs_enable=0 会让 IDF app 关联失败
 把参考 app 的 `cfg.nvs_enable` 改成 0（其它全部默认）：
@@ -18465,8 +18465,8 @@ MAC 硬件依然 `d14=1 ca0=00ff1000`，但反复
 `connect to the AP fail`、最终 DNS 失败。说明 NVS 路径是关联的必要条件，
 与 MAC ready 是两件独立的事。
 
-### §589 c6LOS NVS 槽位改成"空分区"语义后 init 成功
-c6LOS 的 `_nvs_open` 原来返回 0x1101(NOT_INITIALIZED)，
+### §589 c6os NVS 槽位改成"空分区"语义后 init 成功
+c6os 的 `_nvs_open` 原来返回 0x1101(NOT_INITIALIZED)，
 所以 §564 打开 nvs_enable=1 时 init 返回 0x1101。现在改成：
 open/set/commit/erase 返回 0，get/get_blob 返回 0x1102(NOT_FOUND)，
 并把 `wcfg(96)` 改成 1。真板结果：`esp_wifi_init_internal -> 0`（原来 0x1101），
@@ -18924,7 +18924,7 @@ ctx.S/ctx.c 现已与 HEAD 一致。
   `scan_get_ap_num=0 num=0`。板子处于已知可复现状态。
 - 本会话保留的唯一源码改动：`kernel/task.c6` 的 `os_task_delay`
   portMAX_DELAY guard（正确但与本 bug 无关）+ 本文档 §735–§740。
-- **未达成验收**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **未达成验收**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。根因锁定在闭源库任务模型与自研 RTOS ABI 垫片的深层
   不匹配（ppTask 在 6 条配置消息后停摆、上下文 sp 跨任务污染），需要
   重写库任务/栈/窗口 ABI 层，超出局部补丁范围。
@@ -18962,7 +18962,7 @@ JTAG 实测 `g_chm@0x3fcd5908`、`g_chm[4]=0x00000001`，看似吻合，且此�
 ### 本轮最终状态
 
 - 板上当前是 build744（CHM_RESET），行为与 baseline 一致；baseline 构建不受影响。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。确定性障碍：扫描 FSM 不发 probe request（0 AP），
   根源在闭源库任务模型与自研 RTOS 的 ABI/上下文深层不匹配（ppTask 停摆 +
   ctx/SP 跨任务污染 + 全系统死锁），需重写库任务/窗口 ABI 层，非局部补丁可解。
@@ -19001,7 +19001,7 @@ g_config_func，使第 6 条 b0=0x305 scan-start 走错函数。
 ### 本轮最终状态
 
 - 板上是 build745（S3_REPATCH_CFG，源码已回退，需重编回到干净 baseline）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。确定性障碍：ppTask 在 5 条配置消息后停止消费队列，
   第 6 条 scan-start 永远不被派发 → 无 probe request → 0 AP → 无 IP/TLS/HTTP。
   根因在闭源库任务模型与自研 RTOS 的 ABI/上下文深层不匹配，需重写库任务/
@@ -19052,7 +19052,7 @@ g_config_func，使第 6 条 b0=0x305 scan-start 走错函数。
 ### 状态
 
 - 板上是干净 baseline（build 用 §740 命令行重编重刷过），源码无实验残留。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19078,7 +19078,7 @@ a0 是垃圾、第 5 条 store 就 StoreProhibited 双异常——这正是当�
 
 - 源码/板子均为干净 baseline（build738 命令行，24KB 栈，无实验宏残留；
   ctx.S/ctx.c 与 HEAD 一致）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。根因仍是闭源库任务模型与自研 RTOS ABI/上下文的深层
   不匹配（ppTask ctx.sp 跨任务污染、全系统死锁、扫描不发 probe），
   需重写库任务/窗口 ABI 层，非局部补丁可解。
@@ -19103,7 +19103,7 @@ a0 是垃圾、第 5 条 store 就 StoreProhibited 双异常——这正是当�
 ### 本轮最终状态
 
 - 源码/板子回到干净 baseline（build738 命令行）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。需重写库任务/窗口 ABI 层，非局部补丁可解。
 
 ---
@@ -19148,7 +19148,7 @@ ppTxPkt 返回 2 的具体分支：ROM 反汇编显示返回码 2 出现在
 ### 本轮最终状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19192,14 +19192,14 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
    probe response（RF/RX 路径），或 scan-done 结果回填失败。
    这与 §629（直接调 scan handler 仍 0 AP）、§637（无 RX_DONE
    事件）一致。
-4. IDF 参考 app 在同板能连 AP，硬件/天线正常；差异在 c6LOS 的
+4. IDF 参考 app 在同板能连 AP，硬件/天线正常；差异在 c6os 的
    PHY/MAC 初始化状态（cal data、时钟、reset、中断接线），
    需要对照 IDF 在同阶段的寄存器快照逐项排查（§644 下一步 #3）。
 
 ### 本轮状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19217,13 +19217,13 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
 
 要做有效对照，必须在**同一相位**（如两边都停在 scan_start 之后、
 关联之前）各抓一次快照。这是一个需要重刷 IDF 参考 app、设断点、
-再刷回 c6LOS 的多步骤实验，本轮未做。
+再刷回 c6os 的多步骤实验，本轮未做。
 
 ### 本轮状态
 
 - 源码/板子保持干净 baseline；无实验改动。
 - §747 的"TX 被拒"结论已由 §748 更正（符号地址读错，实际 txret=0=成功）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19244,7 +19244,7 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
 ### 本轮状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19268,7 +19268,7 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
 ### 本轮状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。已排除：零 MAC、TX 拒绝（§748 更正）、PM 睡眠、
   g_config_func 覆盖（§743）、CHM op_state（§742）、32KB 栈（§739）。
 
@@ -19303,7 +19303,7 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
 ### 本轮状态
 
 - 源码/板子需重编重刷回干净 baseline（当前 flash 是 cap753 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。已系统排除的假设：栈深度、yield SP guard、CHM op_state
   （扫描前/发送时）、g_config_func 覆盖、PM 睡眠、零 MAC、TX 拒绝、
   超时身份错配。剩余根因在闭源库任务/窗口 ABI 与自研 RTOS 的深层不匹配，
@@ -19317,13 +19317,13 @@ g_s3_diag[0..11] = 1 0 0 2 1 1 0 0 60 ...
 
 - IDF 参考 app：JTAG 硬件断点设在 `ieee80211_send_probereq@0x4203cf24`，
   esptool 硬复位后第 0.8s 命中，dump 现场寄存器。
-- c6LOS：临时 spin（`S3_SPIN_PROBE`，probe wrap 入口写标记 `0x50524f42`
+- c6os：临时 spin（`S3_SPIN_PROBE`，probe wrap 入口写标记 `0x50524f42`
   后死循环），注意必须有并发串口 reader（cap.py）否则板子卡在 port_putc
   到不了 probe；命中后 dump 现场寄存器。
 
 ### 同相位对比结果
 
-| 寄存器 | c6LOS(probe) | IDF(probe) | 结论 |
+| 寄存器 | c6os(probe) | IDF(probe) | 结论 |
 |---|---|---|---|
 | MAC 事件 `0x60033c3c` | `0x01004020` | `0x01004020` | **完全相同** |
 | PWR 事件 `0x60035118` | `0x00000000` | `0x00000000` | 相同 |
@@ -19345,7 +19345,7 @@ MAC/PWR 事件寄存器在 probe 瞬间**逐位相同**——这是重要结论�
 ### 结论
 
 这是本轮最有价值的对照：同相位下 MAC 事件寄存器完全相同、probe 都已
-构造且 ppTxPkt 返回成功（§748），但 c6LOS 扫到 0 AP。差异必在：
+构造且 ppTxPkt 返回成功（§748），但 c6os 扫到 0 AP。差异必在：
 (a) probe 之后 RF 是否真的发出（需空口抓包，环境无 monitor 网卡）；或
 (b) scan-done 结果回填路径（闭源库 FSM 与自研 RTOS 的状态不匹配）。
 两者都属于结构性层面，非局部寄存器/补丁可解。
@@ -19353,17 +19353,17 @@ MAC/PWR 事件寄存器在 probe 瞬间**逐位相同**——这是重要结论�
 ### 状态
 
 - 源码/板子需重编重刷回干净 baseline（当前 flash 是 cap757 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
 
 ## §755 — RX 策略对比（相同，否定）
 
-日志 `[v4]wifi|filter: set rx policy=0` 一度怀疑 c6LOS 的接收策略过滤掉
+日志 `[v4]wifi|filter: set rx policy=0` 一度怀疑 c6os 的接收策略过滤掉
 probe response。用硬件断点在 `ic_set_rx_policy` 入口抓 4 个参数：
 
-- c6LOS（`0x4201c7b4`）：`a2=0, a3=0x3fcd54dc(g_ic), a4/a5=日志串`；
+- c6os（`0x4201c7b4`）：`a2=0, a3=0x3fcd54dc(g_ic), a4/a5=日志串`；
 - IDF 参考 app（`0x42059b68`）：`a2=0, a3=0x3fc9ea68(g_ic), a4/a5=日志串`。
 
 两边策略参数**逐值相同**（都传 0）。`ic_set_rx_policy` 会把 a2..a5 各截 8
@@ -19371,7 +19371,7 @@ probe response。用硬件断点在 `ic_set_rx_policy` 入口抓 4 个参数：
 
 ### 本轮累计的同相位对照结论（§754/§755）
 
-| 项目 | c6LOS | IDF | 是否相同 |
+| 项目 | c6os | IDF | 是否相同 |
 |---|---|---|---|
 | MAC 事件 `0x60033c3c`(probe 瞬间) | 0x01004020 | 0x01004020 | ✓ |
 | PWR 事件 `0x60035118` | 0 | 0 | ✓ |
@@ -19380,14 +19380,14 @@ probe response。用硬件断点在 `ic_set_rx_policy` 入口抓 4 个参数：
 | ppTxPkt 返回 | 0（接受） | 0（接受） | ✓ |
 | WIFI_CLK_EN / RST_EN | 不同（写 IDF 值无效） | — | ✗ 但非根因 |
 
-即：在发送侧与 MAC 事件层面，两边在 probe 时刻几乎完全一致，但 c6LOS
+即：在发送侧与 MAC 事件层面，两边在 probe 时刻几乎完全一致，但 c6os
 扫到 0 AP。剩余差异只能在 (a) RF 空口（无 monitor 网卡，无法验证）或
 (b) 闭源库 scan-done 结果回填与自研 RTOS 的状态交互——均为结构性层面。
 
 ### 状态
 
-- 板上当前是 IDF 参考 app（为做对照刷的），需重刷回 c6LOS baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- 板上当前是 IDF 参考 app（为做对照刷的），需重刷回 c6os baseline。
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19396,7 +19396,7 @@ probe response。用硬件断点在 `ic_set_rx_policy` 入口抓 4 个参数：
 
 硬件断点在两边 `ieee80211_send_probereq` 入口 dump 参数：
 
-- c6LOS（`0x420112ac`）：`a2=0x3fcd5c30` → 内容 `"weforpay.com\0"`，
+- c6os（`0x420112ac`）：`a2=0x3fcd5c30` → 内容 `"weforpay.com\0"`，
   即定向 probe 的 SSID 正确；`a3=0x3fcae1a4` 前 6 字节 `ff*6`（广播 BSSID），
   后续 `00 00 01 00 00 00 00 04 00 00 08 08 00 00 10 10 10 ...`，
   尾部恰是库日志串 `"MIC mismat..."`，说明 a3 指向的是含该串的结构附近。
@@ -19417,8 +19417,8 @@ probe 时刻 MAC 事件、RX 策略、probe SSID 均一致；a3 结构差异未�
 
 ### 状态
 
-- 板上当前是 IDF 参考 app（对照用），需重刷回 c6LOS baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- 板上当前是 IDF 参考 app（对照用），需重刷回 c6os baseline。
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19435,14 +19435,14 @@ i=0..50 全是 `ev=00000000 pwr=00000000`。但这**不是**"没有事件"的证
 ### 状态
 
 - 源码/板子需重编重刷回干净 baseline（当前 flash 为 §757 诊断镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
 
 ## §758 — 全 256B 同相位寄存器 diff（未完成，记录限制）
 
-尝试把 c6LOS 在 probe 瞬间的完整 256B PHY 寄存器（`0x60035000` 起）
+尝试把 c6os 在 probe 瞬间的完整 256B PHY 寄存器（`0x60035000` 起）
 dump 出来与 IDF 的 `/tmp/idfpm_regs.bin` 逐字对比。硬件断点 +
 esptool 硬复位在与 cap.py 串口 reader 并行时反复把板子停在 ROM
 （`pc=0x40056f5c`），无法可靠命中；带 spin 的版本此前已证明能命中
@@ -19452,7 +19452,7 @@ esptool 硬复位在与 cap.py 串口 reader 并行时反复把板子停在 ROM
 `0x6001c08c`，结论（MAC 事件全同、写 IDF CLK/RST 无效）不变；
 全 256B diff 留待后续。板子已恢复到干净 baseline 并验证能正常 boot。
 
-**验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+**验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
 qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结构性不匹配。
 
 ---
@@ -19461,7 +19461,7 @@ qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结�
 
 硬件断点在两边 `ieee80211_send_probereq` 入口 dump 全部参数：
 
-| 参数 | c6LOS(wrap) | IDF(real) | 说明 |
+| 参数 | c6os(wrap) | IDF(real) | 说明 |
 |---|---|---|---|
 | a2 | 0x3fcd5c30 → `"weforpay.com"` | 0x3fc9edc0 → `"weforpay.com"` | SSID 相同 |
 | a3 | 0x3fcae1a4 (DRAM) | 0x3c0c9644 (rodata IE 表) | 不同 |
@@ -19471,7 +19471,7 @@ qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结�
 | a7 | `0x3fcc8140` (=g_s3_diag) | `6` | 差异 |
 
 反汇编 IDF 真实函数：`a7` 被 `extui a7,a7,0,8` 后用于 `s8i a7,a9,1`
-和 `ieee80211_add_rates` 的参数——语义上像 ssid/IE 长度；c6LOS 传的
+和 `ieee80211_add_rates` 的参数——语义上像 ssid/IE 长度；c6os 传的
 `0x3fcc8140 & 0xff = 0x40` 与之不同。怀疑我们的 8 参数 `--wrap` 签名
 （猜测的，§644 曾因此 TRAP）改变了参数传递。
 
@@ -19483,7 +19483,7 @@ qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结�
 ### 状态
 
 - 需重编重刷回干净 baseline（当前 flash 为 §759 no-wrap 镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19504,7 +19504,7 @@ qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结�
 
 - 源码无实验改动（该开关本就在 `#ifdef` 内）；板子是 §760 构建
   （少了 S3_TRACE_IOCTL），需重编重刷回完整 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19512,10 +19512,10 @@ qq.com 页面数据；根因为闭源库任务/窗口 ABI 与自研 RTOS 的结�
 ## §762 — 空口帧级对比：probe 只发 1 个、且停在信道 1（决定性）
 
 在 ROM `ppTxPkt`(0x4003d740) 下硬件断点，沿包描述符 +16 拿到真正的
-802.11 帧，分别 dump c6LOS 与 IDF 参考 app 的**实际发送帧**：
+802.11 帧，分别 dump c6os 与 IDF 参考 app 的**实际发送帧**：
 
 ```
-c6LOS: 40 00 00 00 ff*6 cc8da2ec99c4 ff*6 00 00  00 0c "weforpay.com"
+c6os: 40 00 00 00 ff*6 cc8da2ec99c4 ff*6 00 00  00 0c "weforpay.com"
        01 08 8b 96 82 84 0c 18 30 60  32 04 6c 12 24 48 03 01 01 ...
 IDF:   40 00 00 00 ff*6 cc8da2ec99c4 ff*6 00 00  00 0c "weforpay.com"
        01 08 8b 96 82 84 0c 18 30 60  32 04 6c 12 24 48 03 01 06 ...
@@ -19523,12 +19523,12 @@ IDF:   40 00 00 00 ff*6 cc8da2ec99c4 ff*6 00 00  00 0c "weforpay.com"
 
 前 48 字节**完全相同**（合法的 Probe Request：FC=0x0040、广播
 DA/BSSID、正确的 SA、SSID IE、Supported Rates IE）。唯一关键差异在
-**字节 56 = DS Parameter Set IE 的信道值**：c6LOS=`1`、IDF=`6`。
-AP 在信道 6 —— c6LOS 的 probe 发在信道 1，AP 当然不应答。
+**字节 56 = DS Parameter Set IE 的信道值**：c6os=`1`、IDF=`6`。
+AP 在信道 6 —— c6os 的 probe 发在信道 1，AP 当然不应答。
 
 ### 根因链（决定性）
 
-- 每次扫描 c6LOS 只构造 **1 个** probe（`g_s3_diag[0]=1`，整个 60 轮
+- 每次扫描 c6os 只构造 **1 个** probe（`g_s3_diag[0]=1`，整个 60 轮
   `[scand]` 期间不再增加），而该 probe 的 DS-IE 信道 = 1；
 - 把 `cfg[8]` 从 6 改成 11 重建再 dump，DS-IE **仍是 1** —— 配置信道
   完全没被采纳，扫描 FSM 卡在默认信道 1；
@@ -19551,16 +19551,16 @@ AP 在信道 6 —— c6LOS 的 probe 发在信道 1，AP 当然不应答。
 
 - 源码已回退（cfg[8]=6）；板子 flash 仍是 §761 的 ch11 实验镜像，
   需重编重刷回 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
 
 ## §763 — 强制信道管理器和 AP 同为信道 6（否定）
 
-§762 发现 c6LOS 的 probe DS-IE 信道=1（IDF=6，AP 在 6），且
+§762 发现 c6os 的 probe DS-IE 信道=1（IDF=6，AP 在 6），且
 `chm_get_current_channel` 反汇编读出 `g_chm+82`：
-- 实测 c6LOS `g_chm=0x3fcd5908`、`+82=1`、`+4(op_state)=1`。
+- 实测 c6os `g_chm=0x3fcd5908`、`+82=1`、`+4(op_state)=1`。
 
 在扫描前直接写 `g_chm+82=6`（`S3_FORCE_CH6`），JTAG 复核写入生效
 （`+82=6`、`+4=255`）。但 cap_ch6f：
@@ -19574,7 +19574,7 @@ probe），以及 ppTask/库任务模型的整体正确性。改动已回退。
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前为 §763 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19603,7 +19603,7 @@ cap_drv 中 `[scand]` i=0..50 全程 `num=0`、`scan_get_ap_num=0`，
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §764 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19623,26 +19623,26 @@ cap_des 中 `[scand]` i=0..50 全程 `num=0`、`scan_get_ap_num=0`。
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §765 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
 
 ## §766 — OSI 回调计数跨系统对比（不可行，记录）
 
-尝试对比 c6LOS 与 IDF 参考 app 在同相位的全部 OSI 回调调用次数，
+尝试对比 c6os 与 IDF 参考 app 在同相位的全部 OSI 回调调用次数，
 定位哪个 FSM 步骤缺回调。`g_osi_calls` 是我们 wifi_glue.c 里自加的
 诊断数组（`0x3fcc8288`），IDF 参考 app 的 ELF 里**没有这个符号**
 （只有 `g_wifi_osi_funcs@0x3fc97c84`），无法直接对比计数。
 
-c6LOS 侧 dump（早期 boot，scan 未开始）：仅 slot 43/44(malloc/free)、
+c6os 侧 dump（早期 boot，scan 未开始）：仅 slot 43/44(malloc/free)、
 70/72/73/75/77、83/84/85(log)、21/22(mutex) 等被调用；没有证据表明
 某个回调完全缺失。本方向无新增结论。
 
 ### 状态
 
 - 源码/板子保持干净 baseline（无实验改动，无需重刷）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19674,7 +19674,7 @@ c6LOS 侧 dump（早期 boot，scan 未开始）：仅 slot 43/44(malloc/free)�
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19708,7 +19708,7 @@ c6LOS 侧 dump（早期 boot，scan 未开始）：仅 slot 43/44(malloc/free)�
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19740,7 +19740,7 @@ c6LOS 侧 dump（早期 boot，scan 未开始）：仅 slot 43/44(malloc/free)�
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §769 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19774,7 +19774,7 @@ cap_bci 仍 `num=0`。手动改索引无法让 FSM 继续——它卡在别的�
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §770 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19805,7 +19805,7 @@ chan_idx、抢占开关）全部无法让扫描找到 AP。根因是结构性 AB
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19841,7 +19841,7 @@ baseline cap（cap_bci）逐条分析 ppTask 消息链：
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19878,7 +19878,7 @@ baseline cap（cap_bci）逐条分析 ppTask 消息链：
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19902,7 +19902,7 @@ g_cur_arr[0] = 0x3fcb9f1d
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19924,7 +19924,7 @@ g_cur_arr[0] = 0x3fcb9f1d
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19949,7 +19949,7 @@ g_cur_arr[0] = 0x3fcb9f1d
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §776 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -19975,7 +19975,7 @@ b1 变成合法真函数 `0x4203c660`，但 cap_noscanp 里第 6 条消息**依�
 ### 状态
 
 - 源码已回退；板子 flash 需重编重刷回 baseline（当前 §777 实验镜像）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20003,7 +20003,7 @@ b1 变成合法真函数 `0x4203c660`，但 cap_noscanp 里第 6 条消息**依�
 ### 状态
 
 - 源码/板子保持干净 baseline；无实验改动。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20020,7 +20020,7 @@ b1 变成合法真函数 `0x4203c660`，但 cap_noscanp 里第 6 条消息**依�
 ### 状态
 
 - 源码已回退；板子需重编刷回 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20065,7 +20065,7 @@ ppq=6 → 0x403823db → g_config_func（=ieee80211_ioctl_process），
 ### 状态
 
 - 本轮只读 JTAG/反汇编，无源码改动；板子保持 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20083,7 +20083,7 @@ ppq=6 → 0x403823db → g_config_func（=ieee80211_ioctl_process），
 ### 状态
 
 - 源码已回退；板子需重编刷回 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20110,7 +20110,7 @@ ppq=6 → 0x403823db → g_config_func（=ieee80211_ioctl_process），
 ### 状态
 
 - 板子保持 baseline（OpenOCD 已停）。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20185,7 +20185,7 @@ g_rc_n=6 —— 6 条消息都在队列里、第 6 次 recv 后再没被取走�
 ### 状态
 
 - 板子保持 baseline。
-- **验收仍未达成**：c6LOS 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
+- **验收仍未达成**：c6os 自身未打印 AP 关联 / DHCP 地址 / TLS 握手 /
   qq.com 页面数据。
 
 ---
@@ -20470,7 +20470,7 @@ WQ.magic@base+40=0x51554531 —— 注意 magic 出现在 base+28 而非 base+24
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20501,7 +20501,7 @@ WQ.magic@base+40=0x51554531 —— 注意 magic 出现在 base+28 而非 base+24
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20536,7 +20536,7 @@ WQ.magic@base+40=0x51554531 —— 注意 magic 出现在 base+28 而非 base+24
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20572,7 +20572,7 @@ WQ.magic@base+40=0x51554531 —— 注意 magic 出现在 base+28 而非 base+24
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20602,7 +20602,7 @@ b1 即消息里的 handler 函数指针；且它随我给 wrapper 加 12 字节�
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20633,7 +20633,7 @@ b1 即消息里的 handler 函数指针；且它随我给 wrapper 加 12 字节�
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20667,7 +20667,7 @@ b1 即消息里的 handler 函数指针；且它随我给 wrapper 加 12 字节�
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20692,7 +20692,7 @@ ioctl 能派发，差异在 `pp_default_event_handler`(0x4201cc58) 内部按 b0/
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20738,7 +20738,7 @@ ioctl 能派发，差异在 `pp_default_event_handler`(0x4201cc58) 内部按 b0/
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20765,7 +20765,7 @@ slot: b0=0x0a, 0x26, 0x0a, 0x0b, 0x01, 0x13, 0x05(scan), 0x11
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20806,7 +20806,7 @@ slot: b0=0x0a, 0x26, 0x0a, 0x0b, 0x01, 0x13, 0x05(scan), 0x11
 
 ### 状态
 
-- 板子保持 baseline；**验收仍未达成**（c6LOS 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+- 板子保持 baseline；**验收仍未达成**（c6os 从未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ---
 
@@ -20847,7 +20847,7 @@ task slot，调用后还原（宏 `S3_FORCE_SYNC_SCAN`）。编译命令在 base
 ...bu1..[wifi] scan_get_ap_num=0 num=5            ← 扫到 5 个 AP（历史首次！）
 ```
 
-**这是整个项目首次 c6LOS 自己扫到 AP**（此前 baseline 恒为 num=0）。证明：
+**这是整个项目首次 c6os 自己扫到 AP**（此前 baseline 恒为 num=0）。证明：
 扫描状态机/射频/收发链路都活着，唯一缺口就是 scan ioctl 的异步派发。
 真机射频上 `perform scan` 的 `ss_state/chan/dur` 是垃圾值（未初始化结构），但扫描
 仍能返回 5 个 AP，说明库内部容错。
@@ -20878,7 +20878,7 @@ connect 的 re-scan 必须也走同步/被派发。可试：把 ppTask jump-tabl
 
 本轮所有源码实验宏均已用 #ifdef 隔离，源码处于 baseline（仅新增受宏保护的代码）。
 板子当前刷的是 `S3_FORCE_SYNC_SCAN + S3_FORCE_SYNC_CONNECT` 实验镜像。
-**验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+**验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §810 — AP dump 修复 + connect 失败路径定位（本轮收尾）
 
@@ -20890,7 +20890,7 @@ connect 的 re-scan 必须也走同步/被派发。可试：把 ppTask jump-tabl
 [wifi] scan_get_ap_num=0 num=4
 [wifi] AP0 ssid=weforpay.com ch=6 rssi=0
 ```
-**这是决定性证据：c6LOS 自己（forced-sync scan）扫到了目标 AP，SSID/信道正确。**
+**这是决定性证据：c6os 自己（forced-sync scan）扫到了目标 AP，SSID/信道正确。**
 rssi=0 因为偏移写错：反汇编 `wifi_get_ap_info_process`(4203cb99 `s8i a2,a3,44`)
 确认 IDF 6.0.1 结构 `second` 是 s32@40、rssi@44，已把 dump 偏移从 41 改到 44。
 
@@ -20916,7 +20916,7 @@ Haven't 循环），说明控制流卡在库 connect FSM 内部；但 `esp_wifi_
   且扫描不再发生（connect 先 cancel 掉了）。
 
 ### 结论 / 下一步
-c6LOS 的扫描链路已通（forced-sync 是真修复，应考虑纳入正式构建）。
+c6os 的扫描链路已通（forced-sync 是真修复，应考虑纳入正式构建）。
 剩余缺口是 connect FSM 的 re-scan 派发：需要让 b0=0x303 之后的 pp_post(0,0)
 真正驱动 scan 状态机（jump-table[0] / ppProcessTxQ(4) / timer 三者缺一），
 或绕开 connect 自带 scan、直接用已扫到的 AP 列表调用 `ieee80211_connect_start`。
@@ -20983,7 +20983,7 @@ wifi_connect_process(b0=0x303):
   直接调底层 `ieee80211_connect_start`（需在 windowed 任务上下文）。
 
 板子恢复为 `S3_FORCE_SYNC_SCAN` 扫描可用镜像；源码宏全部 #ifdef 默认关闭。
-**验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+**验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §819（第 184 轮）：connect 链路系统排查 —— 8 个实验全败，根因收敛到 cnx 管理器 FSM
 
@@ -21019,7 +21019,7 @@ connect 缺口的本质：**cnx 连接 FSM 依赖的 OSI 定时器/事件派发�
 `[tarm]` 计数恒 0）——connect FSM 的 timeout/auth 重试很可能正卡在这里。
 
 板子恢复为 `S3_FORCE_SYNC_SCAN` 扫描可用镜像；源码实验宏全部 #ifdef 默认关闭。
-**验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+**验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §820（第 185 轮）：OSI 表审计 —— 排除定时器/event_post 假设；发现日志 varargs 被 ABI 破坏
 
@@ -21068,7 +21068,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 新增证据指向 **windowed 库多参数/可变参数调用的 ABI 破坏** 与
 **connect-era RX 帧的 windowed→ROM TRAP** 两条更深层线索。
 板子已恢复 `S3_FORCE_SYNC_SCAN` 扫描可用镜像，验证 `AP0 ssid=weforpay.com ch=6 rssi=-52`，无 TRAP。
-**验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+**验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §821（第 186 轮）：connect-era TRAP 精确定位 —— wdevProcessRxSucDataAll 里的 ROM NULL 解引用
 
@@ -21113,7 +21113,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 需要的新方向：在 windowed-safe 的 ppTask 上下文里让库自己驱动 connect FSM
   （而不是我们从外部 drive），或修复 ISR 事件进入 ppTask 的 ABI 路径。
 板子恢复 `S3_FORCE_SYNC_SCAN` 扫描可用镜像。
-**验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+**验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §822 — 轮187：wDevCtrl_ptr 假线索推翻 + cnx RC list 为空的根因链
 
@@ -21138,7 +21138,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   - `bp 0x42047f04`(cnx_add_rc)：PC 停在 idle `0x40378ea5`，**从未命中**。
   - `bp 0x4203222c`(scan_parse_beacon)：PC 停在 idle `0x40378e98`，**从未命中**。
   → 管理帧（probe response/beacon）从未送到 `sta_recv_mgmt`，
-    `scan_parse_beacon→cnx_add_rc` 整条 RC 灌入路径在 c6LOS 上是死的。
+    `scan_parse_beacon→cnx_add_rc` 整条 RC 灌入路径在 c6os 上是死的。
   → 这正是 connect 内部 scan 即使跑起来也拿不到候选 AP、永远停在 scan 态的直接原因。
 - 注：我们的 `esp_wifi_scan_get_ap_records` 能返回 AP（num=2~5、SSID/RSSI 正确），
   走的是另一条 BSS 记录表，不经过 cnx RC list；所以"能扫到"与"能关联"是两条独立通路。
@@ -21162,7 +21162,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 需要的新方向：查 `wDev_ProcessFiq` / `pm_hmac_rx_data_process` 如何把帧交给 sta_recv_mgmt，
   以及 call0 内核下这条 ROM 回调链为什么断；或让库自己的 ppTask 上下文（windowed）跑 RX 派发。
 - 板子恢复 `S3_FORCE_SYNC_SCAN` 扫描可用镜像。
-  **验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+  **验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §823 — 轮188：RC list 灌入实验全失败，cnx FSM 根因收敛到 mgmt-RX 未派发
 
@@ -21207,7 +21207,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 下一步方向不变：查 ROM RX 派发链（`wDev_ProcessFiq`/`pm_hmac_rx_data_process`→`sta_recv_mgmt`）
   在 call0 内核下为何断；或让库 ppTask 的 windowed 上下文跑 mgmt RX 派发。
 - 板子恢复 `S3_FORCE_SYNC_SCAN` 扫描可用镜像；`S3_ETS_TIMER_MAX` 复原 4。
-  **验收仍未达成**（c6LOS 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
+  **验收仍未达成**（c6os 仍未打印 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §824 — 轮189：重大纠正——"关联成功"是假阳性，根本没有真实关联
 
@@ -21244,7 +21244,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   并非完全不通——BSS 记录表有数据。查清 scan 究竟经哪条路径把帧灌进 BSS 表（§823  note：
   `scan_parse_beacon` 未命中），复用同一机制把 auth/assoc 回应喂进 `sta_recv_mgmt`/`cnx_auth_done`。
 - 即便关联打通，仍需解决：无 tcpip 线程（`tcpip_init` 曾崩/挤爆栈池 §§~）、TLS 握手、`https://qq.com` body。
-- **验收仍未达成**（c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
+- **验收仍未达成**（c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §825 — 轮190：AUTH 帧被"非 home 信道"延迟队列卡住（新根因，未解决）
 
@@ -21279,7 +21279,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   用正常路径触发它，而不是强驱 ISR。
 - 或：在 AUTH 帧构造**之前**就确保 home==current（把 home=6 提到 scan 之前/scan 期间），
   从源头避免入队。
-- **验收仍未达成**（c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
+- **验收仍未达成**（c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ### §825 勘误（轮190 补充）
 - **§825 第 2 点"send_mgmt 返回 0=未能发出"是误判**。反汇编 `ieee80211_send_mgmt` 尾部：
@@ -21288,7 +21288,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   pwrsave 成功返回 0。所以 `g_lwip_stage[4]=0` = **发送成功**，不是失败。
   → AUTH 帧其实**可能已经发出**；`g_lwip_stage[3]=0x1`（auth subtype）证明构造了 auth 帧。
 - 真 blocker 回到 §822：管理帧 RX 路径（`sta_recv_mgmt`→`scan_parse_beacon`→`cnx_add_rc`）
-  在 c6LOS 上被 JTAG 硬断点证明**从未执行**，所以 AP 的 AUTH response 就算收到也没人处理，
+  在 c6os 上被 JTAG 硬断点证明**从未执行**，所以 AP 的 AUTH response 就算收到也没人处理，
   `cnx_auth_done` 永不触发 → `g_sta_connected_flag` 恒 0。
 - §825 第 3 点"home=6 后延迟队列仍非空"：延迟队列 `0x3fccf6bc` 在所有构建里都是同一地址，
   很可能是 scan 期间 off-channel 留下的 probe 残留，不一定是那个 AUTH 帧（它可能被 pwrsave
@@ -21307,7 +21307,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 ### 2. 结果（决定性）
 - 扫描成功（`AP0 ssid=weforpay.com` num=2）的运行里，`g_lwip_stage[4]` 高 16 位 = **0**。
   → `sta_recv_mgmt` **真的从未被调用**，与 §822 的 JTAG 硬断点结论一致。
-  → 管理帧（beacon/probe response/AUTH response）的 802.11 层处理函数在 c6LOS 上是死的。
+  → 管理帧（beacon/probe response/AUTH response）的 802.11 层处理函数在 c6os 上是死的。
 - 扫描 AP 列表与 `sta_recv_mgmt` 是**两条独立通路**：AP 列表来自 BSS 队列
   （`g_ic+0x130` head / `+0x134` tail，`scannum@0x3fcd5bc2`），由别的路径灌入；
   不经过 `sta_recv_mgmt`→`scan_parse_beacon`。所以"能扫到 AP"不矛盾。
@@ -21319,11 +21319,11 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 
 ### 4. 真 blocker 链（收敛）
 - 关联需要 AP 的 AUTH/ASSOC response 走 `sta_recv_mgmt`→`cnx_auth_done`。
-  该函数在 c6LOS 上从未被调用（软件 wrap 铁证）。
+  该函数在 c6os 上从未被调用（软件 wrap 铁证）。
 - 上游：`wDev_ProcessFiq`→ppTask→`pm_on_beacon_rx`/`wdevProcessRxSucDataAll`→
   经 net80211_funcs[120] 调 `sta_recv_mgmt`——这条链在 call0 内核下没走通。
   强驱 ISR 会触发 ROM TRAP（§821/§822），不能用作 workaround。
-- **验收仍未达成**（c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
+- **验收仍未达成**（c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §861 — 轮191：wDevCtrl RX 函数表全 NULL（新证据，但未解）
 
@@ -21382,7 +21382,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 查谁把 `net80211_funcs[0]` 从 init 子表覆盖成 ROM thunk 表（可能在 mode_set / scan_connect
   重建），阻止覆盖或在覆盖后重填 recv_mgmt 槽。
 - 即便修好 mgmt-RX，后面还有 tcpip 线程（曾崩）、TLS、HTTPS 三道关。
-- **验收仍未达成**（c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
+- **验收仍未达成**（c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据）。
 
 ## §863 — 轮191：突破——AUTH 帧终于发出（诊断 home@AUTH=0 + 构造前修正）
 
@@ -21443,7 +21443,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   闭源库 RX-success 路径的根本矛盾，非本轮可解。
 
 ### 3. 验收
-- **未达成**：c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+- **未达成**：c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ### §864 补充（轮191 末）
 - 尝试在每次 ISR 派发前重填 `wDevCtrl_ptr=0x3fcbb548`（S3_RESTORE_WDECTRL）→ 仍 TRAP
@@ -21474,7 +21474,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 
 ### 4. 验收状态
 - **未达成**：本轮真正进展是 AUTH 帧已能发出（§863）；但 AP 的回应被架构性 RX TRAP 挡住，
-  c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+  c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ## §866 — 轮193：watchpoint 正面证实 wDevCtrl_ptr 只在 init 写一次（非根因）
 
@@ -21500,7 +21500,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 ### 3. 收敛的真 blocker（不变）
 - call0 内核无法安全调用 windowed 闭源库的 RX-success 分发（wdevProcessRxSucDataAll）：
   不驱 → response 帧卡住；驱 → ABI 破坏 TRAP。AUTH 请求已能发出（§863），但回应进不来。
-- **验收未达成**：c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+- **验收未达成**：c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ## §867 — 轮194：当前 cnx 节点 BSSID 正确、状态=2(AUTH)；非 BSSID 问题
 
@@ -21528,11 +21528,11 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 确认 TRAP 的唯一来源是 ppTask idx25（数据帧 RX-success）那条 ROM 路径。
 - 但 drop 掉它并不能让 AUTH response 走管理帧路径进来 —— response 帧本身就走 ppq=25
   （数据帧 RX-success），被 no-op 丢掉了。管理帧 RX 派发链（→sta_recv_mgmt）在
-  c6LOS 上仍未打通，这是比 TRAP 更底层的问题。
+  c6os 上仍未打通，这是比 TRAP 更底层的问题。
 - call0 内核跑 windowed 闭源库 RX 路径的架构性矛盾依旧（§865/§866）。
 
 ### 3. 验收
-- **未达成**：c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+- **未达成**：c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ## §869 — 轮195：post-connect drain 在 associate 上下文也 TRAP（上下文无关）
 
@@ -21547,7 +21547,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
   这是比驱动位置更底层的架构性问题。
 
 ### 2. 验收
-- **未达成**：c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+- **未达成**：c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ## §870 — 轮196：TRAP 是时序竞态（bp 捕获失败），根因层收敛
 
@@ -21566,16 +21566,16 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 - 已证：非 BSSID 问题（§867）、非 home 信道问题（home fix 只让 AUTH 发出）、
   非 RX 函数表问题（§861/§862 勘误）、非上下文问题（§869）、非 wDevCtrl_ptr 主动清零
   （§866 watchpoint）、改 thunk 只消除 TRAP 不打通 mgmt-RX（§868）。
-- 这是 c6LOS call0 内核 + IDF windowed 闭源库的结构性矛盾，非局部补丁可解。
+- 这是 c6os call0 内核 + IDF windowed 闭源库的结构性矛盾，非局部补丁可解。
 
 ### 3. 验收
-- **未达成**：c6LOS 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
+- **未达成**：c6os 仍未打印真实 AP 关联/DHCP/TLS/qq.com 数据。goal 保持 active。
 
 ## §871 — 轮196：外部调研——其他系统如何复用 IDF 闭源 windowed WiFi 库
 
 ### 1. 决定性结论
 **所有成功在 Xtensa ESP32/S3 上跑 IDF 闭源 WiFi blob 的非-IDF 系统，全部使用 windowed ABI。**
-没有一个用 call0 内核直接驱动 WiFi blob。c6LOS 的 `S3_ABI=call0`（kernel task.o ABI=1）
+没有一个用 call0 内核直接驱动 WiFi blob。c6os 的 `S3_ABI=call0`（kernel task.o ABI=1）
 而 blob `ABI=0`(windowed) 是整个项目的架构性错配，不是 OSI 桩不全。
 
 ### 2. 各生态的具体做法
@@ -21602,7 +21602,7 @@ RX policy 改变后收帧走这条 windowed→ROM 路径，call0 内核下 TRAP�
 
 ### 3. ABI 桥接技术（按可操作性）
 1. **统一 windowed**（推荐，NuttX/esp-wifi 路线）：整个系统 windowed 编译。
-   c6LOS 的 `S3_ONE_ABI` 曾试但 `start.S/irq.S/ctx.S/abi_thunk.S` 假定 call0 起不来（§365）——
+   c6os 的 `S3_ONE_ABI` 曾试但 `start.S/irq.S/ctx.S/abi_thunk.S` 假定 call0 起不来（§365）——
    这是**工程工作量问题，不是死路**，那几个文件逐个改 windowed 即可。
 2. **call4 trampoline**：windowed 调用方进 call0 前 `call4 → entry a1,16`，
    Zephyr `_xstack_call0_@` 就是这个模式。
@@ -22299,14 +22299,14 @@ s3_task_tramp 启动），`s3_win_call_wifi_main`（那个 callx8 前 rsr a9,win
 故障现场 a2=a1+0x80（DRAM 栈）符合窗口错位/帧链错位，与 a9 理论自洽。
 下轮板子在线第一优先：烧 19d3d82d，cap 40s 看是否越过 .b. 进入 AP 关联。
 
-### §954 宿主侧全链路打通（round 21）—— c6LOS 自己的 TLS 真连 qq.com 成功
+### §954 宿主侧全链路打通（round 21）—— c6os 自己的 TLS 真连 qq.com 成功
 `./tools/tls12_selftest.sh`：全部 TLS 1.2 基础件 + WPA 密钥派生自测通过（失败 0 项）。
 `./tools/tls12_live.sh` 真连 qq.com:443，用**与板子完全相同的 net/*.c6 源码**：
   - TLS 1.2 握手完成（阶段 21，套件 0xc02f = ECDHE_RSA_AES128_GCM_SHA256）
   - server Finished 校验通过
   - HTTP/1.1 200 OK，Content-Length 139390
   - 打印出真实页面 body：`<!DOCTYPE html> <html lang="zh-CN"> <title>腾讯网</title> ...`
-这是 c6LOS **自身**的 TLS/HTTP 实现（不是 IDF 参考 app），证明协议层零风险。
+这是 c6os **自身**的 TLS/HTTP 实现（不是 IDF 参考 app），证明协议层零风险。
 板上只剩：WiFi 关联（windowed ABI 窗口切换）+ lwIP DHCP + socket 替换。
 
 ## §955 真板 a2 = a1+0x80 的对齐根因：osi_queue_recv 桥帧链错位 64 字节（已修）
@@ -22546,7 +22546,7 @@ Xtensa 的 `entry a1,N` 除了 `a1 -= N`、`a9 = a1` 之外，**还会自动写
   `(const char *)ap` 从 bssid 开始，`%s` 会把 6 字节 MAC 当字符串打（遇 0 才停，输出是乱码）；
   `ap[40]` 是 `second`（次信道枚举），**不是**主信道。
 
-验收要求「c6LOS 本身输出真实 AP 关联信息」—— 这条打印正是那个证据，
+验收要求「c6os 本身输出真实 AP 关联信息」—— 这条打印正是那个证据，
 打出 MAC 乱码显然不合格。
 
 ### 修法
@@ -26409,7 +26409,7 @@ BREAK at ppTask+0x33: a1=3  a0=0  wb=2  ws=0x04
 | 真板 AP 关联 | ❌ **未取得** |
 | 真板 DHCP 获取 IP | ❌ **未取得** |
 | 真板 TLS 握手 | ❌ **未取得** |
-| c6LOS 打印 qq.com 页面 body | ❌ **未取得** |
+| c6os 打印 qq.com 页面 body | ❌ **未取得** |
 
 **阻塞点**：WiFi bringup 在 `esp_wifi_init_internal` **之前**就死在
 "ppTask 做任意 windowed 调用后 `a1` 变成常数 3"，
@@ -26606,8 +26606,8 @@ wb = 9   ws = 0xaaaa     a1 = 0x3fcd9500
 
 ## 目标
 
-把 c6LOS 全量迁移到 windowed ABI，并在真板上通过 IDF 闭源 WiFi 库完成
-**真实 AP 关联 → DHCP 获取 IP → TLS 握手 → c6LOS 自身打印 qq.com 页面 body**。
+把 c6os 全量迁移到 windowed ABI，并在真板上通过 IDF 闭源 WiFi 库完成
+**真实 AP 关联 → DHCP 获取 IP → TLS 握手 → c6os 自身打印 qq.com 页面 body**。
 
 ## 结论
 
@@ -28711,7 +28711,7 @@ PHY/RF 的同步等待）。
 
 **本次会话完成的工作（全部已提交、可复现）：**
 
-1. **c6LOS 全量 windowed ABI 迁移完成**：内核、中断、上下文切换、
+1. **c6os 全量 windowed ABI 迁移完成**：内核、中断、上下文切换、
    全部 C 代码统一 `-mabi=windowed`，编译链接通过并**真板上跑起来**。
 2. **修复了一系列 windowed ABI 的真 bug**（都记录在 §1042~§1103）：
    - §1056/§1084：五个阻塞 OSI 函数的"自由栈 + spill 祖先窗口"薄壳；
@@ -28760,7 +28760,7 @@ PHY/RF 的同步等待）。
 
 ### 会话最终交付
 
-- **c6LOS 全量 windowed ABI 迁移已完成**：内核/中断/上下文切换/全部 C 代码
+- **c6os 全量 windowed ABI 迁移已完成**：内核/中断/上下文切换/全部 C 代码
   统一 `-mabi=windowed`，编译链接通过并真板稳定运行。
 - **修复的真 bug**：§1056/§1084 五个阻塞 OSI 函数 spill 薄壳、
   §1083 `RESTORE_FRAME` 的 WS 并集泄漏、§1088 `callx8` 轮转窗口导致
@@ -28803,7 +28803,7 @@ OSI_RING_BUF[k & 63] = i;      /* 0x50000204 起 */
 ### 会话最终交付（完整）
 
 **已完成：**
-1. c6LOS 全量 windowed ABI 迁移 —— 内核/中断/上下文切换/全部 C 代码
+1. c6os 全量 windowed ABI 迁移 —— 内核/中断/上下文切换/全部 C 代码
    统一 `-mabi=windowed`，编译链接通过，真板稳定运行；
 2. 修复了一批 windowed ABI 真 bug（§1056/§1083/§1084/§1088/§1090/§1094）：
    阻塞函数 spill 薄壳、`RESTORE_FRAME` 的 WS 并集泄漏、
@@ -30513,7 +30513,7 @@ TX 缓冲池建不好 ← 绕过了 ppTask 的正常初始化序列 ← 绕过�
 → 我们绕过它 → 池子永远空 → 手动填计数只会越界损坏内存。
 
 **⇒ 这就把整条链的终点钉死了。** 要完成目标，必须让闭源库按它自己的
-完整初始化序列跑（即 ppTask 真正跑起来），而 c6LOS 当前的
+完整初始化序列跑（即 ppTask 真正跑起来），而 c6os 当前的
 windowed ABI 移植还支撑不住 ppTask 的高频 OSI 回调。
 
 ## §1253 交付终态（最终）
@@ -30647,7 +30647,7 @@ bnez.n a10, 4201ca08      ; 非 0 才算成功
 
 **本会话把真板从 79 行推进到 230 行（+151），并彻底查清了唯一剩余的闭环：**
 库的 WiFi 初始化必须在 ppTask 里按它自己的顺序跑（TX 池、`_wifi_malloc`、
-`esf_buf` 注册都在那条链上），而 c6LOS 当前的 windowed ABI 移植
+`esf_buf` 注册都在那条链上），而 c6os 当前的 windowed ABI 移植
 还支撑不住 ppTask 的高频 OSI 回调 —— 这两者互相锁死。
 **继续需要内核层面的架构重写**（把 OSI 回调层改为不跨窗口边界、
 或让 ppTask 拥有独立且可安全切换的栈/窗口上下文）。
@@ -30865,7 +30865,7 @@ for (i = 0; i < 8; i++) {
 
 **会话完整成果见 §1164/§1165/§1169/§1182/§1210/§1256/§1274**。
 **唯一剩余卡点**：库的 TX 缓冲分配 + 完整初始化序列只能在 ppTask 里跑，
-而 c6LOS 的 `S3_NO_PREEMPT` 调度 + `W2C_SPILL` 薄壳在 windowed ABI 下
+而 c6os 的 `S3_NO_PREEMPT` 调度 + `W2C_SPILL` 薄壳在 windowed ABI 下
 撑不住 ppTask 的并发运行。**需要内核层面的架构重写。**
 
 ## §1280~§1281 直接构造空闲链表（失败，已回退）
@@ -31093,7 +31093,7 @@ TX 分配链是 `ieee80211_send_probereq` → `ieee80211_getmgtframe` →
 真正的 `esf_buf` 结构由 ROM 里的 `ic_ebuf_alloc` 与库内部共同维护，
 **手工构造的缓冲（哪怕补齐 `buf+4` 数据区）也无法通过它后续的字段校验**。
 ⇒ 必须让库自己的完整初始化序列跑起来（ppTask 里 `_wifi_malloc` 预分配 TX 池），
-而那受限于 c6LOS 当前的 `S3_NO_PREEMPT` 调度 + `W2C_SPILL` 薄壳在 windowed ABI 下
+而那受限于 c6os 当前的 `S3_NO_PREEMPT` 调度 + `W2C_SPILL` 薄壳在 windowed ABI 下
 的窗口约束。**这需要内核层面的架构重写，不是单点补丁能解决的。**
 
 **下一步建议（按优先级）**：
@@ -31157,7 +31157,7 @@ s32i a2, a10, 0x18c
 **所以这条也不解决根本问题。**
 
 **⇒ 最终定性**：TX 缓冲必须由**库自己的 `_wifi_malloc` + 内部 eb 初始化**产生，
-那条路径只在 ppTask 的完整初始化序列里。c6LOS 当前撑不住 ppTask 的并发运行。
+那条路径只在 ppTask 的完整初始化序列里。c6os 当前撑不住 ppTask 的并发运行。
 
 ## §1304 交付终态（最终）
 
@@ -31188,7 +31188,7 @@ s32i a2, a10, 0x18c
 
 **⇒ 最终结论**：TX 池必须由库自己的完整初始化序列创建；
 ROM 版分配器虽真实，但依赖 ppTask 初始化时建立的内部状态。
-**c6LOS 当前的调度与窗口约束撑不住那条序列，需要内核层面重写。**
+**c6os 当前的调度与窗口约束撑不住那条序列，需要内核层面重写。**
 
 ## §1308 交付终态（最终）
 
@@ -31538,7 +31538,7 @@ bnez.n a2, <正常>          ; ★ a2（arg1）= 缓冲
 
 **剩余卡点（§1328）**：`ieee80211_send_probereq` 的第一个参数就是 TX 缓冲，
 而库内部那个调用点传了 0；它本应在 WiFi 完整初始化（`_wifi_malloc` 预分配 TX 池）
-之后才发起 probe。**c6LOS 当前的调度 + 窗口约束撑不住那条初始化序列。**
+之后才发起 probe。**c6os 当前的调度 + 窗口约束撑不住那条初始化序列。**
 
 **下一步必须先做内核层面的架构重写**（见 §1237/§1300/§1324 的建议）。
 
@@ -32385,7 +32385,7 @@ __real_ieee80211_send_probereq(a1, g_s3_probe_buf != 0u ? g_s3_probe_buf : a2, .
 # 执行摘要（Executive Summary）
 
 ## 目标（未达成）
-在真板上让 **c6LOS 自身**通过 IDF 闭源 windowed WiFi 库完成：
+在真板上让 **c6os 自身**通过 IDF 闭源 windowed WiFi 库完成：
 真实 AP 关联 → DHCP 取 IP → TLS 握手 → 打印 https://qq.com 的页面 body。
 
 **验收状态：四项全部未取得**（AP=0 DHCP=0 TLS=0 body=0）。
@@ -35705,7 +35705,7 @@ idx=2/3/4 各 8 个 head 写好），别再去动它。
 - 全部代码绿灯、工作树干净；
 - **软件侧（内核/ABI/上下文切换/中断/调度/队列/定时器/扫描状态机/信道/RX 使能）
   已全部打通并逐项留有真板证据**（§1566 的 16 道闸门表）；
-- 剩下的唯一障碍是 **PHY 收不到帧**，属于射频校准数据层面，不再是 c6LOS 的
+- 剩下的唯一障碍是 **PHY 收不到帧**，属于射频校准数据层面，不再是 c6os 的
   windowed ABI 迁移问题。
 
 四项验收：**AP=0 DHCP=0 TLS=0 body=0**。
@@ -35720,7 +35720,7 @@ idx=2/3/4 各 8 个 head 写好），别再去动它。
 ⇒ PHY 接收不通**与我们的校准注入无关**。
 
 ### 至此可以下的最终结论
-c6LOS 侧的 windowed ABI 迁移**已经完成并且可以验证**：
+c6os 侧的 windowed ABI 迁移**已经完成并且可以验证**：
 内核调度、上下文切换、窗口溢出/欠载、中断路径、WQ 壳、定时器、队列、
 wLwIP 对接、扫描状态机、信道设置、RX 使能 —— 每一项都有真板证据，
 并且修掉了 16 处真实 bug（§1566 的表）。
@@ -35787,7 +35787,7 @@ $PY /media/winger/inst_26/esp/esp-idf/tools/idf_tools.py install
 
 # ======== 总结（本会话最终）========
 
-## c6LOS 的 windowed ABI 迁移：已完成并可验证
+## c6os 的 windowed ABI 迁移：已完成并可验证
 内核调度、上下文切换、窗口溢出/欠载、中断路径、WQ 桥壳、定时器、队列、
 lwIP 对接、扫描状态机、信道设置、RX 使能 —— 全部打通，
 共修掉 **16 处真实 bug**（明细见 §1566 的表），每项都有真板证据。
@@ -35914,7 +35914,7 @@ irq=0                                        ← MAC 仍然一帧未收
 # ======== 会话终结说明 ========
 
 ## 已交付
-1. **c6LOS 的 windowed ABI 迁移**：内核调度、上下文切换、窗口溢出/欠载、
+1. **c6os 的 windowed ABI 迁移**：内核调度、上下文切换、窗口溢出/欠载、
    中断路径、WQ 桥壳、定时器、队列、lwIP 对接、扫描状态机、信道设置、
    RX 使能 —— 全部打通，共修 **16 处真实 bug**（§1566 表），项项有真板证据。
 2. **可复现的工具链**：`tools/build-wifi.sh`（`build` / `best` 两种模式，
@@ -36023,7 +36023,7 @@ esp_libc/platform_include/stdio.h:55: error: conflicting types for 'cookie_io_fu
 - 文档：`docs/wifi-plan.md`（约 3.6 万行），含 16 道闸门表、
   交接总结、下次开工命令、以及 §1565–§1588 的全部新结论。
 
-## c6LOS windowed ABI 迁移：**已完成**
+## c6os windowed ABI 迁移：**已完成**
 内核调度、上下文切换、窗口溢出/欠载、中断路径、WQ 桥壳、定时器、队列、
 lwIP 对接、扫描状态机、信道设置、RX 使能全部打通，修掉 16 处真实 bug。
 
@@ -36075,7 +36075,7 @@ Init dynamic tx buffer num: 32
 
 ### 板子恢复（务必记住）
 刷过 IDF app 后板子会**重启循环**（它的分区表把 app 放在 0x10000，
-与 c6LOS 的 0x20000 不符）。恢复办法（`tools/flashbl.sh` 的等价手写版）：
+与 c6os 的 0x20000 不符）。恢复办法（`tools/flashbl.sh` 的等价手写版）：
 ```bash
 REF=/media/winger/inst_26/esp/xiaozhi/build
 esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 --before default-reset --after hard-reset \
@@ -36133,7 +36133,7 @@ I (1667) esp_netif_handlers: sta ip:192.168.68.120, mask:255.255.255.0, gw:192.1
 **⇒ 结论（本会话最有价值的一条）：**
 - 射频硬件、天线、供电、AP、信道全部正常；
 - IDF 下 **600ms 完成关联、1.6s 拿到 DHCP 地址**；
-- ⇒ 我们 c6LOS 的差异**百分之百在 PHY/MAC 使能序列**，不是硬件。
+- ⇒ 我们 c6os 的差异**百分之百在 PHY/MAC 使能序列**，不是硬件。
 
 ### 这为下一次指明了唯一方向
 把 IDF 的 PHY 初始化流程逐句对照我们的：
@@ -36177,7 +36177,7 @@ register_chipv7_phy(init_data, cal_data, calibration_mode);
 IDF 官方 station 示例在**同一块板子**上 600ms 关联、1.6s 拿到
 `192.168.68.120` ⇒ 射频硬件/天线/供电/AP 全部正常。
 
-## c6LOS 侧已完成
+## c6os 侧已完成
 windowed ABI 全量迁移（内核/中断/上下文切换）✅，修掉 16+ 处真实 bug，
 其中包含本轮新增的两条（§1591 cfg 传到位、§1593 校准数据要带 MAC），
 并且**从头到尾可复现**：`tools/build-wifi.sh best`。
@@ -36196,7 +36196,7 @@ windowed ABI 全量迁移（内核/中断/上下文切换）✅，修掉 16+ 处
 4. `esp_wifi_start` 触发 `ic_init → hal_init → lmacInit → pp_attach →
    wDev_Rxbuf_Init → pm_attach` 这条链**是否每一步都真的执行**。
 最有效的做法：在 IDF app 里给这些函数下断点/加打印，记录**真实调用序列与参数**，
-再逐条搬到 c6LOS。
+再逐条搬到 c6os。
 
 ## §1594 ★★★ PHY 初始化数据表**与 IDF 差 18 个字节**（已修正）
 
@@ -36225,7 +36225,7 @@ IDF  .rodata.phy_init_data (128 字节):
 ## 硬件：已证明正常（§1592）
 IDF 官方 app 同板 600ms 关联、1.6s 拿到 `192.168.68.120`。
 
-## c6LOS 侧
+## c6os 侧
 - windowed ABI 全量迁移完成，累计修 **18 处**真实 bug
   （§1566 表 16 条 + §1591 cfg 传到位 + §1593 校准带 MAC + §1594 PHY 表字节）；
 - 可复现：`bash tools/build-wifi.sh best`；
@@ -36238,12 +36238,12 @@ IDF 官方 app 同板 600ms 关联、1.6s 拿到 `192.168.68.120`。
 ## 下一步（最有效）
 在 IDF app 上给 `esp_phy_load_cal_and_init` / `esp_phy_enable` /
 `ic_init` 下断点或用 `ESP_LOG` 打点，**记录真实调用序列与每个参数**，
-再逐条搬到 c6LOS（我们目前是"自己拼"这条链）。
+再逐条搬到 c6os（我们目前是"自己拼"这条链）。
 
 # ======== 会话交接（最终，务必先读这段）========
 
 ## 一句话结论
-c6LOS 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 处真实 bug）；
+c6os 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 处真实 bug）；
 四项验收（AP/DHCP/TLS/body）**仍为 0**，唯一障碍是：**我们的固件收不到任何
 802.11 帧**，而 **IDF 官方 app 在同一块板子上 600ms 关联、1.6s 拿到 IP**
 （§1592）—— 所以硬件没问题，差异在 **PHY/MAC 使能序列**。
@@ -36263,7 +36263,7 @@ c6LOS 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 �
 
 ## 下一步（唯一有效）
 在 **IDF app** 里给下列函数加日志/断点，记录**真实调用序列与参数**，
-再逐条搬到 c6LOS（我们目前是手工拼这条链）：
+再逐条搬到 c6os（我们目前是手工拼这条链）：
 1. `esp_phy_load_cal_and_init()`（含 `esp_phy_get_init_data()` 的来源与
    `phy_bbpll_en_usb`）；
 2. `esp_phy_enable()`；
@@ -36275,7 +36275,7 @@ c6LOS 的 windowed ABI 全量迁移**已完成并逐项验证**（累计修 18 �
 ## 工程状态
 - 分支 `main`，工作树干净，默认配置绿灯（1298 个提交）；
 - `tools/build-wifi.sh build|best` 可复现（best 会构建+刷板+抓取+摘要指标）；
-- 板子当前是 c6LOS 固件（刷过 IDF app 后已恢复；恢复命令见 §1589 末尾）。
+- 板子当前是 c6os 固件（刷过 IDF app 后已恢复；恢复命令见 §1589 末尾）。
 
 ## §1595–§1596 又对齐两处 IDF 步骤，并排除一个结构性问题
 
@@ -36555,7 +36555,7 @@ wifi_hw_start(mode); wifi_mode_set(mode); _do_wifi_start(mode)
 ## 工程状态
 - 分支 `main`，工作树干净，**1308 个提交**，默认配置绿灯；
 - 前沿配置 **可复现**：`bash tools/build-wifi.sh best`（本次实测 724192B → 202 行）；
-- 板子当前运行 c6LOS 前沿固件；
+- 板子当前运行 c6os 前沿固件；
 - 文档 36526 行（`docs/wifi-plan.md`），含本会话全部结论与更正。
 
 ## 四项验收
@@ -36584,13 +36584,13 @@ I (1667) wifi station: got ip:192.168.68.120
    **可能只是因为压根没有帧可收**（AP 不可达 ⇒ 没有 beacon）；
 2. **在 AP 恢复可达之前，任何 WiFi 侧的修复都无法被真板验证**；
 3. 下一步第一件事：**先确认 AP 可用**（用 IDF app 验证到 `got ip` 为止），
-   再回来验证 c6LOS 的各项修复（§1594 PHY 表、§1613 扫描驻留时间等）。
+   再回来验证 c6os 的各项修复（§1594 PHY 表、§1613 扫描驻留时间等）。
 
 ### 复测步骤（推荐顺序）
 1. 刷 IDF app 全套（bootloader@0x0 / 分区表@0x8000 / app@0x10000，
    用 `/tmp/bsta/` 下的产物），确认打印 `got ip:`；
 2. 若 IDF 也连不上 ⇒ 先修环境（路由器/距离/天线），不要再改代码；
-3. 环境恢复后刷 c6LOS（`bash tools/build-wifi.sh best`），
+3. 环境恢复后刷 c6os（`bash tools/build-wifi.sh best`），
    看 `[direct] init=0`、`[eb]` 是否非 0、`[tx] irq=` 是否非 0。
 
 ## §1615 ★★★★★ RF 接收链**是活的**（不依赖 AP 的决定性体检）

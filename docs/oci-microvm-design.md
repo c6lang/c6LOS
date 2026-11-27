@@ -14,7 +14,7 @@
 
 ## 0. 一句话与商业靶心
 
-一句话：**镜像还是 OCI 镜像，`docker run` 还是 `docker run`，只是跑它的内核不是 Linux，是 c6LOS。**
+一句话：**镜像还是 OCI 镜像，`docker run` 还是 `docker run`，只是跑它的内核不是 Linux，是 c6os。**
 
 ### 0.1 三条候选路，为什么选第三条
 
@@ -102,7 +102,7 @@ docker/containerd content store ───┘    ├─ 摘要缓存：key = sha2
                             │ bzImage 壳（port/x86_64/bzkern.S）            │
                             │   boot_params：e820 / cmdline / mem → 0x7000   │
                             │   → stage1（页表/长模式）→ stage2 → os_main    │
-                            │ c6LOS：romfs(FAT 只读卷) 挂 /，FAT 挂 /data     │
+                            │ c6os：romfs(FAT 只读卷) 挂 /，FAT 挂 /data     │
                             │   容器模式：pid1 不吞信号 + 退出即关机           │
                             │   ENTRYPOINT → ring3 → 应用                    │
                             │   退出：串口 "\nC6EXIT <code>\n" + 关机          │

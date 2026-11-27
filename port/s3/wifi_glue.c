@@ -3523,7 +3523,7 @@ u32 s3_wifi_associate(const char *ssid, const char *pass)
 #endif
 #ifdef S3_RXCB_EARLY
     /* §821: IDF 参考在 esp_wifi_connect 之前就通过 esp_netif 注册好 rxcb；
-     * c6LOS 之前推迟到关联成功后（c6_lwip_start_dhcp），导致 connect 期间
+     * c6os 之前推迟到关联成功后（c6_lwip_start_dhcp），导致 connect 期间
      * 收到数据帧时 wdevProcessRxSucDataAll 经 ppq=25 走 sta_rxcb=NULL →
      * TRAP(vaddr=0)。这里在 start 之后、connect 之前提前注册 windowed 的
      * c6_lwip_rx，避免 NULL 解引用。 */

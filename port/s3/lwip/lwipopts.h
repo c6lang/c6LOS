@@ -1,4 +1,4 @@
-/* c6LOS 的 lwIP 配置（ESP32-S3 端口，不依赖 sdkconfig.h / FreeRTOS）
+/* c6os 的 lwIP 配置（ESP32-S3 端口，不依赖 sdkconfig.h / FreeRTOS）
  *
  * 为什么要有这个文件（docs/wifi-plan.md §207）：
  *   IDF 的 `components/lwip/port/include/lwipopts.h` 第一行就 `#include "sdkconfig.h"`，

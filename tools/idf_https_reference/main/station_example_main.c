@@ -165,7 +165,7 @@ void wifi_init_sta(void)
 
 
 
-/* c6LOS 目标验证：真板取 https://qq.com 页面数据 */
+/* c6os 目标验证：真板取 https://qq.com 页面数据 */
 static char g_body[768];
 static int g_body_len = 0;
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)

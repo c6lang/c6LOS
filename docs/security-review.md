@@ -1,4 +1,4 @@
-# c6LOS 深度安全性评审
+# c6os 深度安全性评审
 
 - 评审基线：`rtos-c6@57b9ce3`（risc6 参考机 `7b83ec6`）
 - 范围：`kernel/`、`compat/los_*`、`rt/`、`port/{sim,x86_64,s3,rv32,rv32bare}`、S3 启动/链接/中断

@@ -134,7 +134,7 @@ static int https_get(const char *host, const char *path, char *out, int cap)
     printf("[https] TLS 握手完成（阶段=%d）\n", net__tls12_hs__tls12_stage(s_tls_state));
 
     snprintf(req, sizeof req,
-             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: c6los\r\n"
+             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: c6os\r\n"
              "Accept: */*\r\nConnection: close\r\n\r\n", path, host);
     if (net__tls12_hs__tls12_write_app(s_tls_state, req, (int)strlen(req)) <= 0) {
         printf("[https] 发送请求失败\n");

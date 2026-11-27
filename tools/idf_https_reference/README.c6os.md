@@ -1,8 +1,8 @@
-# c6LOS WiFi/HTTPS 真板基线（官方 IDF station 例程 + HTTPS GET）
+# c6os WiFi/HTTPS 真板基线（官方 IDF station 例程 + HTTPS GET）
 
 本目录是从 ESP-IDF v6.0.1 `examples/wifi/getting_started/station` 拷贝出的
 参考工程，仅用于**真板基线验证**：在**同一块 ESP32-S3**、同一路由器下证明
-硬件/天线/DNS/TLS/HTTP 全部正常，给 c6LOS 侧提供可对照的寄存器与日志。
+硬件/天线/DNS/TLS/HTTP 全部正常，给 c6os 侧提供可对照的寄存器与日志。
 
 `main/station_example_main.c` 增加了 `https_qq_task()`：
 连接 `https://qq.com/`（CA bundle、自动跳转、事件回调抓前 600 字节 body）。
@@ -30,4 +30,4 @@ python -m esptool --chip esp32s3 -p /dev/ttyACM0 -b 460800 \
 判为 `Image hash failed`（即便 esptool 自校验通过）。若 stub 卡在
 `Running stub flasher...`，先跑 `tools/ocboot.sh` 起 OpenOCD 再重试。
 
-本参考工程 **不是** c6LOS；c6LOS 侧扫描仍 0 AP，目标未达成。
+本参考工程 **不是** c6os；c6os 侧扫描仍 0 AP，目标未达成。

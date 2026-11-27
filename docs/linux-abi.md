@@ -73,7 +73,7 @@ elf: 段与栈就绪，进入用户态
 [ls] /etc/version:
 c6os 1.0
 [ls] /hello.txt:
-hello from the c6LOS initramfs
+hello from the c6os initramfs
 [ls] 完成
 
 [lx] exit(0) —— 用户进程正常结束
@@ -341,13 +341,13 @@ preempt: parent runs while child spins
 
 ## 1. 定位：personality，不是"移植 Linux"
 
-这不是让 c6LOS 变成 Linux，也不是跑一个 Linux 内核。它是 **personality 层**
+这不是让 c6os 变成 Linux，也不是跑一个 Linux 内核。它是 **personality 层**
 （FreeBSD linuxulator / WSL1 / NetBSD `COMPAT_LINUX` 的做法）：
 
-- 硬件仍是裸机 x86-64，c6LOS 仍是那个 32 优先级抢占内核；
+- 硬件仍是裸机 x86-64，c6os 仍是那个 32 优先级抢占内核；
 - 用户态跑的是**未经修改的 Linux ELF 二进制**（x86-64 SysV ABI）；
 - 二进制与内核之间只有一条缝：**系统调用**。兼容层负责把这 300 来个系统调用
-  映射到 c6LOS 的对象与设备上。
+  映射到 c6os 的对象与设备上。
 
 关键区别：**Linux 用户态只通过 syscall 观察内核**。只要 syscall 语义、ELF 加载、
 信号帧、`/proc` 表像、TLS 约定一致，二进制根本不知道底下不是 Linux。
