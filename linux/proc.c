@@ -233,6 +233,30 @@ static int slot_alloc_(void)
     return -1;
 }
 
+static void proc_slots_prealloc_(void)
+{
+    u32 i;
+
+    for (i = 0u; i < g_proc_cap; i++) {
+        LxProc *p;
+        u8 *ks;
+
+        if (g_proc[i].p != (LxProc *)0) {
+            continue;
+        }
+        p = (LxProc *)port_kcalloc(1ull, (u64)sizeof(*p));
+        ks = (u8 *)port_kmalloc(LX_KSTACK_SIZE);
+        if (p == (LxProc *)0 || ks == (u8 *)0) {
+            if (p != (LxProc *)0) port_kfree((void *)p);
+            if (ks != (u8 *)0) port_kfree((void *)ks);
+            break;
+        }
+        g_proc[i].p = p;
+        g_proc[i].kstk = ks;
+        p->kstack_top = (u64)ks + LX_KSTACK_SIZE;
+    }
+}
+
 void lx_proc_attach(u64 as, u64 brk)
 {
     LxProc *p;
@@ -253,6 +277,7 @@ void lx_proc_attach(u64 as, u64 brk)
             for (gi = 0u; gi < 6u; gi++) {
                 if (slot_grow_() != 0) break;
             }
+            proc_slots_prealloc_();
         }
         p = cur_();
         p->pid = (u32)g_pid_next;
