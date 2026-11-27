@@ -1,5 +1,5 @@
 #!/bin/bash
-# c6LOS WiFi 构建/上板脚本（固化 §1566 交接总结里的最优配置）
+# c6os WiFi 构建/上板脚本（固化 §1566 交接总结里的最优配置）
 # 用法：
 #   bash tools/build-wifi.sh build     只用默认配置构建
 #   bash tools/build-wifi.sh best      用当前最优（前沿）配置构建 + 上板 + 抓取

@@ -1,4 +1,4 @@
-/* c6LOS 的 lwIP sys_arch 接口（NO_SYS=0 时用）
+/* c6os 的 lwIP sys_arch 接口（NO_SYS=0 时用）
  *
  * 目的（docs/wifi-plan.md §207）：让 lwIP 跑成"有自己的 tcpip 线程 + BSD socket"
  * 的模式，这样 /home/winger/c6/std/net/tcp.c6、https.c6 那种 POSIX 薄封装

@@ -1,6 +1,6 @@
-# c6LOS —— 用 c6 重构的 LiteOS-M 语义内核（ESP32-S3）
+# c6os —— 用 c6 重构的 LiteOS-M 语义内核（ESP32-S3）
 
-`c6LOS` 是一个独立的实时操作系统仓库：内核用 **c6**（带扩展的 TinyCC 方言）编写，
+`c6os` 是一个独立的实时操作系统仓库：内核用 **c6**（带扩展的 TinyCC 方言）编写，
 目标机是 **ESP32-S3**（Xtensa LX7 双核 240MHz、8MB PSRAM、16MB flash、1.85″ SPI 屏）。
 
 - **内核对标**：LiteOS-M（任务/优先级抢占/时间片、信号量、互斥量、事件、队列、内存池、

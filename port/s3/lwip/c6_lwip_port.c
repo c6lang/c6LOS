@@ -1,4 +1,4 @@
-/* c6LOS 的 lwIP 端口层（平台钩子 + netif 粘合）
+/* c6os 的 lwIP 端口层（平台钩子 + netif 粘合）
  *
  * 位置说明：这个文件属于**将来的**"IP 栈"阶段（docs/wifi-plan.md §207），
  * 现在只保证「能编译、能归档」，还没有接进 c6os.elf —— 因为 WiFi 关联本身

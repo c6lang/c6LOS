@@ -350,7 +350,7 @@ RX FIFO 比对字节。CPU 通路做正对照（`cpuloop rx=550ff0a5…` 正确�
 
 - 通路：GPSPI3（0x60025000）+ GPIO 矩阵（SCLK=GPIO9←66、MOSI=GPIO10←68），
   CS 用普通 GPIO 常低，DC/RST/BL 普通 GPIO，**20MHz**（`CLOCK=0x00003043`）。
-- 真板实测：`tests/t_s3_gui.c6`（c6LOS 两个任务：按键 10ms 轮询 + GUI 任务
+- 真板实测：`tests/t_s3_gui.c6`（c6os 两个任务：按键 10ms 轮询 + GUI 任务
   **不节流**整屏重绘）连续跑 1~2 分钟画面一直在动，串口不接也不会卡；
   整屏一帧 ≈ 7.2M cycles ≈ 90ms（含 gfx 绘图），即 ~5fps；
   串口打印 `frame n tick=... d=60`。
@@ -415,7 +415,7 @@ RX FIFO 比对字节。CPU 通路做正对照（`cpuloop rx=550ff0a5…` 正确�
 | `t_s3_sclkdiag` | **定位 SCLK 不出脚**：传输进行中软件轮询 GPIO9/10 数跳变（含正对照） |
 | `t_s3_sclkdiag2` | 逐项对照 IDF 快照，证明 `CLKCNT_L=N` 才是时钟出脚的必要条件 |
 | `t_s3_spiwire` | **验证线序/相位**：软件当 SPI 从机，上升沿采 MOSI 拼回字节与发送图案比对 |
-| `t_s3_gui` | **GUI 连续刷新回归**：c6LOS 按键任务 + 不节流的 GUI 任务（原来会"定格"的场景） |
+| `t_s3_gui` | **GUI 连续刷新回归**：c6os 按键任务 + 不节流的 GUI 任务（原来会"定格"的场景） |
 | `t_s3_lcd_hwlive` | 硬件 SPI 整屏连续刷新长跑（帧周期 + 帧计数） |
 | `t_s3_lcdperf` | **帧预算拆解**：绘图 vs 上屏、20/40MHz 对比、分频扫描拟合每块开销 |
 | `t_s3_lcddma` | **GDMA 通路自环验证**：MISO←MOSI 比对字节、描述符链、CPU 预灌对照 |

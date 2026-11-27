@@ -1,4 +1,4 @@
-/* BSD socket 接口（c6LOS / ESP32-S3 + lwIP 端口用）
+/* BSD socket 接口（c6os / ESP32-S3 + lwIP 端口用）
  *
  * 为什么需要它（docs/wifi-plan.md §209）：
  *   c6 自带的那套 libc 头（/home/winger/c6/c6c/include/）**没有** socket 相关头：

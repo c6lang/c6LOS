@@ -1,4 +1,4 @@
-/* c6LOS 的 lwIP sys_arch 实现（NO_SYS=0）
+/* c6os 的 lwIP sys_arch 实现（NO_SYS=0）
  *
  * 全部落在内核原语上，经 port/s3/w2c.S 的 windowed 壳调用：
  *   sys_sem   → os_sem_init / os_sem_pend / os_sem_post

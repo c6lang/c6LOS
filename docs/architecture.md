@@ -1,4 +1,4 @@
-# c6LOS 架构设计（ESP32-S3）
+# c6os 架构设计（ESP32-S3）
 
 > 状态：设计定稿（施工前评审版）· 相关：[toolchain.md](toolchain.md) · [api.md](api.md) · [todo.md](todo.md)
 
@@ -6,7 +6,7 @@
 
 ## 1. 定位与目标
 
-`c6LOS` 是 **LiteOS-M 语义**的实时内核，用 c6 重写，而不是 LiteOS 源码的逐行翻译：
+`c6os` 是 **LiteOS-M 语义**的实时内核，用 c6 重写，而不是 LiteOS 源码的逐行翻译：
 
 - 对外：`LOS_*` C ABI 与 LiteOS-M 同名同义，现有 LiteOS-M 示例/移植指南可复用；
 - 对内：`os_*` c6 原生 API，用 `T!error` / `defer` / 泛型 / 切片 / `interface` 表达内核约束，

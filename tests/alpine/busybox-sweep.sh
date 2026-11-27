@@ -222,12 +222,12 @@ okeq  printf-o  abc     /usr/bin/printf 'abc\n'
 echo "# F3-system"
 okhas uname-a   Linux           /bin/uname -a
 okeq  uname-m   x86_64          /bin/uname -m
-okeq  uname-r   6.1.0-c6los     /bin/uname -r
+okeq  uname-r   6.1.0-c6os      /bin/uname -r
 okeq  id-u      0               /usr/bin/id -u
 okhas id        uid=0           /usr/bin/id
 okeq  whoami    root            /usr/bin/whoami
 okhas groups    root            /usr/bin/groups
-okeq  hostname  c6los           /bin/hostname
+okeq  hostname  c6os            /bin/hostname
 okhassh date-year '^[0-9][0-9][0-9][0-9]$' 'date +%Y'
 okhas env       PATH=           /usr/bin/env
 okhas printenv  /bin            /bin/printenv PATH

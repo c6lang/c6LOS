@@ -1,5 +1,5 @@
 /* FreeRTOSConfig.h —— 只为编译 IDF 源码层（esp_wifi/src 等）提供最小配置。
- * 真正的 OS 原语由 c6LOS 提供（见 port/s3/freertos_shim.c）。 */
+ * 真正的 OS 原语由 c6os 提供（见 port/s3/freertos_shim.c）。 */
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 

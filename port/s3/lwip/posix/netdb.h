@@ -1,4 +1,4 @@
-/* netdb.h（c6LOS + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明
+/* netdb.h（c6os + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明
  *
  * 布局照抄 lwIP 的 `lwip/netdb.h`：`std/net/tcp.c6` 用 getaddrinfo() 把
  * "host/端口"变成 sockaddr，所以这里的 addrinfo 必须是 lwIP 认得的那一份。

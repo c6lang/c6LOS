@@ -352,7 +352,7 @@ port/x86_64/      硬件：页表、CR3、#PF、PIT/RTC、ATA、e1000
 - 内核内完整 TCP（拥塞控制/大量选项）——做到能支撑 libc、wget、ssh 即可；
 - GUI、音频、GPU。
 
-> "在 c6LOS 上跑 Linux 容器"这个需求不走 T4，走另一条线：**镜像 → 微虚机 + runtime shim**
+> "在 c6os 上跑 Linux 容器"这个需求不走 T4，走另一条线：**镜像 → 微虚机 + runtime shim**
 > ——容器照旧、镜像照旧，隔离边界交给 VMM，见 [oci-microvm-design.md](oci-microvm-design.md)。
 > 本文（T 线）只负责"镜像里的程序能跑多远"。
 

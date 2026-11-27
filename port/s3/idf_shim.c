@@ -1,4 +1,4 @@
-/* ESP-IDF / 闭源 WiFi·PHY 库的适配层（c6LOS 侧）。
+/* ESP-IDF / 闭源 WiFi·PHY 库的适配层（c6os 侧）。
  *
  * IDF 的 libphy.a / libpp.a / libnet80211.a 这些闭源库会调用一批"平台胶水"
  * 符号（原版由 IDF 的 C 代码或 FreeRTOS 提供）。这个文件提供最小可用实现，

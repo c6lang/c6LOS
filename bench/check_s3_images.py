@@ -6,9 +6,9 @@ import sys
 
 XT = "/home/winger/.c6os/toolchain/xtensa-esp-elf/bin/xtensa-esp32s3-elf-"
 FILES = [
-    ("c6LOS default", "build/s3/c6os.elf", 0x403C9000),
-    ("c6LOS perf", "build/s3perf/c6os.elf", 0x403C9000),
-    ("c6LOS rt", "build/s3rt/c6os.elf", 0x403C9000),
+    ("c6os default", "build/s3/c6os.elf", 0x403C9000),
+    ("c6os perf", "build/s3perf/c6os.elf", 0x403C9000),
+    ("c6os rt", "build/s3rt/c6os.elf", 0x403C9000),
     ("LiteOS-M bench", "bench/liteos_m_s3/build/liteos_s3.elf", 0x403C9000),
 ]
 

@@ -1,4 +1,4 @@
-/* poll.h（c6LOS + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明
+/* poll.h（c6os + lwIP 端口）—— 见 port/s3/lwip/posix/sys/socket.h 的说明
  *
  * `std/net/tcp.c6` 的 tcp_connect(timeout) 是"非阻塞 connect + poll"实现的，
  * 所以 poll 是必需的（lwIP 侧对应 lwip_poll）。

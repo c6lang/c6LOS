@@ -1,4 +1,4 @@
-/* LiteOS-M 同板微基准：与 c6LOS tests/t_perf.c6 同口径（CCOUNT/op）。 */
+/* LiteOS-M 同板微基准：与 c6os tests/t_perf.c6 同口径（CCOUNT/op）。 */
 #include "los_task.h"
 #include "los_sem.h"
 #include "los_queue.h"

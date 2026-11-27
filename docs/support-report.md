@@ -7,7 +7,7 @@
 
 ## 1. 背景
 
-我们在 ESP32-S3 上移植一个自研 RTOS（c6LOS），不用 ESP-IDF 的框架，但希望复用
+我们在 ESP32-S3 上移植一个自研 RTOS（c6os），不用 ESP-IDF 的框架，但希望复用
 ESP-IDF 的闭源 WiFi 库（libphy/libpp/libnet80211/libcore/libwapi，合计约 500 KB 代码）。
 可用的 IRAM 只有约 66 KB，所以**必须让这些代码跑在 flash 上（IROM）**。
 

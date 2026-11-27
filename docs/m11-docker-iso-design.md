@@ -22,7 +22,7 @@
 | 镜像来源 | `docker pull` | `docker export/save` 落到本地 | 拉取和解包都在宿主侧做 |
 
 所以"能不能 `docker run` 一个 nginx"——不能；"能不能把 nginx 镜像的 rootfs 打成 ISO 让它在
-c6LOS 上跑起来"——这正是本里程碑要做的事（前提是它不依赖 Linux 那些我们没实现的内核设施，
+c6os 上跑起来"——这正是本里程碑要做的事（前提是它不依赖 Linux 那些我们没实现的内核设施，
 见 §8 的边界）。**先把最小可验证的闭环打通，再谈 namespace/overlay。**
 
 ---
@@ -551,7 +551,7 @@ PASS: alpine M12 宿主侧（数据盘里有 m12.txt）
 
 ```
 alpine-M12-alive
-Linux c6los 6.1.0-c6los #1 x86_64 Linux
+Linux c6os 6.1.0-c6os #1 x86_64 Linux
 bin  etc  lib  ...  usr
 m12ok
 alpine-M12-done
@@ -562,7 +562,7 @@ alpine-M12-done
 M12 一开始卡在"脚本一个字都不输出"。查下来是 busybox 拿到的 `argv[1]` 不是 `-c`：
 c6 的 LLVM IR 后端把数据段发射成一串字节，**指针槽留 0**，再靠挂在
 `llvm.global_ctors` 上的 `@__llvm_init` 在启动时补。带 C 运行时的程序看不出问题；
-c6LOS 的内核不跑构造函数（没有 crt），所以
+c6os 的内核不跑构造函数（没有 crt），所以
 
 ```c
 static const char *const av[] = { "/bin/sh", "-c", script };
@@ -611,7 +611,7 @@ $ make run-x86-alpine-shell
 / # ls /
 bin  etc  lib  lib64  media  mnt  opt  proc  root  run  sbin  srv  sys  tmp  usr  var
 / # uname -a
-Linux c6los 6.1.0-c6los #1 x86_64 Linux
+Linux c6os 6.1.0-c6os #1 x86_64 Linux
 / # cat /etc/alpine-release
 3.20.0
 ```
